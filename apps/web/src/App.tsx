@@ -144,6 +144,33 @@ const storageOptions: Array<{ value: StorageType; label: string }> = [
   { value: "webdav", label: "WebDAV" },
 ];
 
+const settingsTips = {
+  proxy: (
+    <div className="form-tooltip-copy">
+      <div>支持 http、https、socks5、socks5h，例如 http://127.0.0.1:7890。</div>
+      <div>如需账号密码，可写成 socks5://user:password@127.0.0.1:1080。</div>
+      <div>用户名或密码里的 @、:、/、% 需要 URL 编码；包含账号密码时会随配置保存在本地。</div>
+    </div>
+  ),
+  concurrency: "后台同时运行的下载任务数，过高可能触发站点限流或增加远程存储压力。",
+  maxFilenameLength: "限制保存到磁盘或远程存储的文件名长度，长推文文件名会自动截断。",
+  fileNaming: "影响新下载文件的命名方式，已下载文件不会被重命名。",
+  autoRetryFailed: "批量归档结束后，自动再次处理失败推文队列。",
+  autoFollowProtected: "遇到未关注的保护账号时，使用已配置 Cookie 尝试发起关注后再归档。",
+  authToken: "X / Twitter Cookie 中的 auth_token，用于登录态接口和批量归档。",
+  csrfToken: "X / Twitter Cookie 中的 ct0，需与 auth_token 来自同一账号。",
+  backupCookie: "多组备用 Cookie 会在批量归档时轮换使用，可降低单账号限流影响。",
+  smbHost: "SMB 服务器地址，可填写 IP 或主机名，不要包含 smb:// 前缀。",
+  smbPort: "SMB 默认端口通常为 445。",
+  smbShare: "共享名是服务器上暴露的共享根名称，不是完整路径。",
+  smbPath: "共享名下的保存目录，留空表示保存到共享根目录。",
+  smbDomain: "多数家庭 NAS 可留空；企业域或工作组环境按实际要求填写。",
+  remoteUsername: "远程存储账号用户名，留空时按匿名或服务端默认权限尝试。",
+  savedSecret: "敏感字段读取时可能显示为 ********；保持不变或留空不会覆盖已有值。",
+  webdavUrl: "WebDAV 服务根地址，例如 https://example.com/dav。",
+  webdavPath: "WebDAV 根地址下的保存目录，留空表示保存到根目录。",
+} satisfies Record<string, React.ReactNode>;
+
 const defaultListPageSizeOptions = [5, 10, 20, 50];
 const tablePageSizeOptions = [10, 20, 50, 100];
 const defaultJobPage = 1;
@@ -2154,7 +2181,7 @@ function DownloadSettingsFields({
   return (
     <Row gutter={[16, 0]} className="settings-field-grid">
       <Col xs={24} lg={12}>
-        <Form.Item label="代理">
+        <Form.Item label="代理" tooltip={settingsTips.proxy}>
           <Input
             value={draft.proxyUrl}
             onChange={(event) => onChange((current) => ({ ...current, proxyUrl: event.target.value }))}
@@ -2163,7 +2190,7 @@ function DownloadSettingsFields({
         </Form.Item>
       </Col>
       <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="并发">
+        <Form.Item label="并发" tooltip={settingsTips.concurrency}>
           <InputNumber
             min={1}
             max={64}
@@ -2174,7 +2201,7 @@ function DownloadSettingsFields({
         </Form.Item>
       </Col>
       <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="最大文件名长度">
+        <Form.Item label="最大文件名长度" tooltip={settingsTips.maxFilenameLength}>
           <InputNumber
             min={16}
             max={240}
@@ -2185,7 +2212,7 @@ function DownloadSettingsFields({
         </Form.Item>
       </Col>
       <Col xs={24} lg={12}>
-        <Form.Item label="文件名命名">
+        <Form.Item label="文件名命名" tooltip={settingsTips.fileNaming}>
           <Select
             value={draft.fileNamingMode}
             options={fileNamingOptions}
@@ -2194,7 +2221,7 @@ function DownloadSettingsFields({
         </Form.Item>
       </Col>
       <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="失败重试">
+        <Form.Item label="失败重试" tooltip={settingsTips.autoRetryFailed}>
           <Switch
             checked={draft.autoRetryFailed}
             onChange={(checked) => onChange((current) => ({ ...current, autoRetryFailed: checked }))}
@@ -2202,7 +2229,7 @@ function DownloadSettingsFields({
         </Form.Item>
       </Col>
       <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="保护账号自动关注">
+        <Form.Item label="保护账号自动关注" tooltip={settingsTips.autoFollowProtected}>
           <Switch
             checked={draft.autoFollowProtected}
             onChange={(checked) => onChange((current) => ({ ...current, autoFollowProtected: checked }))}
@@ -2224,7 +2251,7 @@ function CookieSettingsFields({
     <div className="settings-cookie-fields">
       <Row gutter={[16, 0]} className="settings-field-grid">
         <Col xs={24} lg={12}>
-          <Form.Item label="auth_token">
+          <Form.Item label="auth_token" tooltip={settingsTips.authToken}>
             <Input
               prefix={<KeyOutlined />}
               value={draft.authToken ?? ""}
@@ -2233,7 +2260,7 @@ function CookieSettingsFields({
           </Form.Item>
         </Col>
         <Col xs={24} lg={12}>
-          <Form.Item label="ct0">
+          <Form.Item label="ct0" tooltip={settingsTips.csrfToken}>
             <Input
               prefix={<KeyOutlined />}
               value={draft.csrfToken ?? ""}
@@ -2530,7 +2557,7 @@ function SMBStorageFields({
   return (
     <Row gutter={[16, 0]}>
       <Col xs={24} md={12}>
-        <Form.Item label="主机">
+        <Form.Item label="主机" tooltip={settingsTips.smbHost}>
           <Input
             value={draft.smbHost}
             onChange={(event) => onChange((current) => ({ ...current, smbHost: event.target.value }))}
@@ -2539,7 +2566,7 @@ function SMBStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24} md={12}>
-        <Form.Item label="端口">
+        <Form.Item label="端口" tooltip={settingsTips.smbPort}>
           <InputNumber
             min={1}
             max={65535}
@@ -2550,7 +2577,7 @@ function SMBStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24} md={12}>
-        <Form.Item label="共享名">
+        <Form.Item label="共享名" tooltip={settingsTips.smbShare}>
           <Input
             value={draft.smbShare}
             onChange={(event) => onChange((current) => ({ ...current, smbShare: event.target.value }))}
@@ -2559,7 +2586,7 @@ function SMBStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24} md={12}>
-        <Form.Item label="目录">
+        <Form.Item label="目录" tooltip={settingsTips.smbPath}>
           <Input
             value={draft.smbPath}
             onChange={(event) => onChange((current) => ({ ...current, smbPath: event.target.value }))}
@@ -2568,7 +2595,7 @@ function SMBStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24} md={12}>
-        <Form.Item label="域">
+        <Form.Item label="域" tooltip={settingsTips.smbDomain}>
           <Input
             value={draft.smbDomain}
             onChange={(event) => onChange((current) => ({ ...current, smbDomain: event.target.value }))}
@@ -2576,7 +2603,7 @@ function SMBStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24} md={12}>
-        <Form.Item label="用户名">
+        <Form.Item label="用户名" tooltip={settingsTips.remoteUsername}>
           <Input
             value={draft.smbUsername}
             onChange={(event) => onChange((current) => ({ ...current, smbUsername: event.target.value }))}
@@ -2584,7 +2611,7 @@ function SMBStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24}>
-        <Form.Item label="密码">
+        <Form.Item label="密码" tooltip={settingsTips.savedSecret}>
           <Input.Password
             value={draft.smbPassword ?? ""}
             onChange={(event) => onChange((current) => ({ ...current, smbPassword: event.target.value }))}
@@ -2605,7 +2632,7 @@ function WebDAVStorageFields({
   return (
     <Row gutter={[16, 0]}>
       <Col xs={24}>
-        <Form.Item label="地址">
+        <Form.Item label="地址" tooltip={settingsTips.webdavUrl}>
           <Input
             value={draft.webdavUrl}
             onChange={(event) => onChange((current) => ({ ...current, webdavUrl: event.target.value }))}
@@ -2614,7 +2641,7 @@ function WebDAVStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24}>
-        <Form.Item label="目录">
+        <Form.Item label="目录" tooltip={settingsTips.webdavPath}>
           <Input
             value={draft.webdavPath}
             onChange={(event) => onChange((current) => ({ ...current, webdavPath: event.target.value }))}
@@ -2623,7 +2650,7 @@ function WebDAVStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24} md={12}>
-        <Form.Item label="用户名">
+        <Form.Item label="用户名" tooltip={settingsTips.remoteUsername}>
           <Input
             value={draft.webdavUsername}
             onChange={(event) => onChange((current) => ({ ...current, webdavUsername: event.target.value }))}
@@ -2631,7 +2658,7 @@ function WebDAVStorageFields({
         </Form.Item>
       </Col>
       <Col xs={24} md={12}>
-        <Form.Item label="密码">
+        <Form.Item label="密码" tooltip={settingsTips.savedSecret}>
           <Input.Password
             value={draft.webdavPassword ?? ""}
             onChange={(event) => onChange((current) => ({ ...current, webdavPassword: event.target.value }))}
@@ -2691,6 +2718,7 @@ function BackupCookieInputs({ value, onChange }: { value: string; onChange: (val
 
   return (
     <Form.Item
+      tooltip={settingsTips.backupCookie}
       label={
         <Space>
           <span>备用 Cookie</span>

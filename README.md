@@ -1,7 +1,7 @@
 # open-Xdownload
 
 <p align="center">
-  <img src="apps/web/public/icon.svg" width="96" height="96" alt="open-Xdownload icon">
+  <img src="docs/assets/icon.png" width="96" height="96" alt="open-Xdownload icon">
 </p>
 
 open-Xdownload 是一个本地优先的 X / Twitter 下载器。它提供内置 Web 界面、后台任务队列和 SQLite 本地数据库，适合把单条推文、指定用户、列表成员或某个账号的关注对象中的媒体文件下载并归档到本地目录、SMB 共享或 WebDAV。
