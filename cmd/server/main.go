@@ -50,7 +50,17 @@ func main() {
 	eventBus := jobs.NewEventBus()
 	resolver := parser.NewService()
 	manager := jobs.NewManager(store, resolver, eventBus)
+	recoveredCount := 0
+	if recovered, err := store.RequeueInterruptedJobs(ctx); err != nil {
+		log.Printf("recover interrupted jobs: %v", err)
+	} else if len(recovered) > 0 {
+		recoveredCount = len(recovered)
+		log.Printf("requeued %d interrupted jobs", len(recovered))
+	}
 	manager.Start(ctx)
+	if recoveredCount > 0 {
+		manager.Notify()
+	}
 
 	api := httpapi.NewServer(store, resolver, manager, eventBus)
 	handler := withWebApp(api.Routes(), webDir)
@@ -73,6 +83,9 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+	// 等待调度循环与活跃任务退出，再让 defer store.Close() 关闭数据库，
+	// 避免 task goroutine 仍在写库时 DB 被关闭。
+	manager.Stop()
 }
 
 func envOrDefault(key string, fallback string) string {

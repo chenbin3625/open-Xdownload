@@ -11,7 +11,11 @@ export type JobKind =
   | "media_url"
   | "user"
   | "list"
-  | "following";
+  | "following"
+  | "failed_retry";
+
+export type FileNamingMode = "tweet_text" | "user_tweet";
+export type StorageType = "local" | "smb" | "webdav";
 
 export interface AppConfig {
   downloadDir: string;
@@ -19,8 +23,23 @@ export interface AppConfig {
   proxyUrl: string;
   authToken?: string;
   csrfToken?: string;
+  additionalCookies?: string;
   autoRetryFailed: boolean;
-  keepOriginalUrls: boolean;
+  autoFollowProtected: boolean;
+  fileNamingMode: FileNamingMode;
+  maxFilenameLength: number;
+  storageType: StorageType;
+  smbHost: string;
+  smbPort: number;
+  smbShare: string;
+  smbPath: string;
+  smbDomain: string;
+  smbUsername: string;
+  smbPassword?: string;
+  webdavUrl: string;
+  webdavPath: string;
+  webdavUsername: string;
+  webdavPassword?: string;
 }
 
 export interface Job {
@@ -34,6 +53,42 @@ export interface Job {
   error?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface JobRequest {
+  kind: JobKind;
+  input: string;
+  title?: string;
+}
+
+export interface BatchJobRequest {
+  items: JobRequest[];
+}
+
+export interface ArchiveScheduleItem {
+  kind: JobKind;
+  input: string;
+  title?: string;
+}
+
+export interface ArchiveSchedule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  intervalMinutes: number;
+  items: ArchiveScheduleItem[];
+  lastRunAt?: string;
+  nextRunAt: string;
+  lastJobIds: number[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ArchiveScheduleRequest {
+  name: string;
+  enabled: boolean;
+  intervalMinutes: number;
+  items: ArchiveScheduleItem[];
 }
 
 export interface MediaVariant {
@@ -83,11 +138,100 @@ export interface FailedMedia {
   createdAt: string;
 }
 
+export interface RateLimitSnapshot {
+  path: string;
+  limit: number;
+  remaining: number;
+  reset: string;
+  blocked: boolean;
+}
+
+export interface ClientStatus {
+  index: number;
+  primary: boolean;
+  screenName: string;
+  ok: boolean;
+  disabled: boolean;
+  error?: string;
+  requestCount: number;
+  rateLimits: RateLimitSnapshot[];
+}
+
+export interface PoolDiagnostics {
+  total: number;
+  available: number;
+  clients: ClientStatus[];
+}
+
+export interface FailedTweet {
+  id: number;
+  jobId: number;
+  entityId: number;
+  tweetId: string;
+  payload: string;
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+  jobTitle: string;
+  entityName: string;
+  entityParentDir: string;
+  userId: string;
+  userScreenName: string;
+  userName: string;
+}
+
+export interface AuthCheck {
+  configured: boolean;
+  ok: boolean;
+  screenName?: string;
+  message: string;
+  diagnostics?: PoolDiagnostics;
+}
+
+export interface StorageTestResult {
+  ok: boolean;
+  type: StorageType;
+  root: string;
+  message: string;
+  path: string;
+}
+
+export interface LocalDirectoryEntry {
+  name: string;
+  path: string;
+  hasChildren: boolean;
+}
+
+export interface LocalDirectoryListing {
+  path: string;
+  parent: string;
+  entries: LocalDirectoryEntry[];
+}
+
+export interface DashboardPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface DashboardStats {
+  total: number;
+  active: number;
+  completed: number;
+  failed: number;
+}
+
 export interface Dashboard {
   config: AppConfig;
   jobs: Job[];
   downloads: DownloadRecord[];
   failed: FailedMedia[];
+  failedTweets: FailedTweet[];
+  failedTweetCount: number;
+  archiveSchedules: ArchiveSchedule[];
+  pagination: DashboardPagination;
+  stats: DashboardStats;
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -105,7 +249,11 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export const getDashboard = () => api<Dashboard>("/api/dashboard");
+export const getDashboard = ({
+  page = 1,
+  pageSize = 20,
+}: { page?: number; pageSize?: number } = {}) =>
+  api<Dashboard>(`/api/dashboard?page=${page}&pageSize=${pageSize}`);
 
 export const parseTweetLink = (url: string) =>
   api<TweetData>("/api/parse/tweet-link", {
@@ -119,11 +267,29 @@ export const createJob = (kind: JobKind, input: string, title = "") =>
     body: JSON.stringify({ kind, input, title }),
   });
 
-export const createMediaDownload = (url: string) =>
-  api<Job>("/api/download/media", {
+export const createJobsBatch = (request: BatchJobRequest) =>
+  api<Job[]>("/api/jobs/batch", {
     method: "POST",
-    body: JSON.stringify({ url }),
+    body: JSON.stringify(request),
   });
+
+export const createArchiveSchedule = (request: ArchiveScheduleRequest) =>
+  api<ArchiveSchedule>("/api/archive-schedules", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+
+export const updateArchiveSchedule = (id: number, request: ArchiveScheduleRequest) =>
+  api<ArchiveSchedule>(`/api/archive-schedules/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(request),
+  });
+
+export const deleteArchiveSchedule = (id: number) =>
+  api<{ ok: boolean }>(`/api/archive-schedules/${id}`, { method: "DELETE" });
+
+export const runArchiveSchedule = (id: number) =>
+  api<Job[]>(`/api/archive-schedules/${id}/run`, { method: "POST" });
 
 export const retryJob = (id: number) =>
   api<Job>(`/api/jobs/${id}/retry`, { method: "POST" });
@@ -131,10 +297,33 @@ export const retryJob = (id: number) =>
 export const cancelJob = (id: number) =>
   api<Job>(`/api/jobs/${id}/cancel`, { method: "POST" });
 
+export const retryFailedTweets = () =>
+  api<Job>("/api/failed-tweets/retry", { method: "POST" });
+
+export const deleteFailedTweet = (id: number) =>
+  api<{ ok: boolean }>(`/api/failed-tweets/${id}`, { method: "DELETE" });
+
+export const clearFailedTweets = () =>
+  api<{ ok: boolean }>("/api/failed-tweets", { method: "DELETE" });
+
 export const updateConfig = (config: AppConfig) =>
   api<AppConfig>("/api/config", {
     method: "PUT",
     body: JSON.stringify(config),
+  });
+
+export const testStorage = (config: AppConfig) =>
+  api<StorageTestResult>("/api/storage/test", {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
+
+export const listLocalDirectories = (path?: string) =>
+  api<LocalDirectoryListing>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+
+export const checkAuth = () =>
+  api<AuthCheck>("/api/auth/check", {
+    method: "POST",
   });
 
 export function formatBytes(bytes: number) {

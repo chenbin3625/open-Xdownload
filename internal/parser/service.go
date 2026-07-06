@@ -2,11 +2,16 @@ package parser
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
+	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +20,18 @@ import (
 
 var tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?(?:x|twitter)\.com/([^/?#]+)/status/([0-9]+)`)
 
-type Service struct{}
+const syndicationTweetResultURL = "https://cdn.syndication.twimg.com/tweet-result"
+
+type Service struct {
+	client         *http.Client
+	syndicationURL string
+}
 
 func NewService() *Service {
-	return &Service{}
+	return &Service{
+		client:         &http.Client{Timeout: 20 * time.Second},
+		syndicationURL: syndicationTweetResultURL,
+	}
 }
 
 func (s *Service) ParseTweetLink(ctx context.Context, rawURL string) (TweetData, error) {
@@ -29,19 +42,7 @@ func (s *Service) ParseTweetLink(ctx context.Context, rawURL string) (TweetData,
 	if err != nil {
 		return TweetData{}, err
 	}
-
-	// X 的推文详情 GraphQL 接入点会在下一步从 tmd 迁入。当前先返回稳定的结构，
-	// 让 Web 工作台和任务流能围绕同一个契约开发。
-	return TweetData{
-		ID:        tweetID,
-		URL:       canonicalTweetURL(username, tweetID),
-		Text:      "推文详情解析待接入 X GraphQL。当前已识别链接，可直接创建下载任务。",
-		CreatedAt: time.Now().UTC(),
-		Author: Author{
-			ScreenName: username,
-		},
-		Media: []Media{},
-	}, nil
+	return s.parseSyndicationTweet(ctx, rawURL, username, tweetID)
 }
 
 func (s *Service) ParseTweetJSON(rawURL string, payload []byte) (TweetData, error) {
@@ -57,6 +58,10 @@ func (s *Service) ParseTweetJSON(rawURL string, payload []byte) (TweetData, erro
 		return TweetData{}, errors.New("payload 中没有找到 tweet result")
 	}
 	return tweetFromResult(rawURL, username, tweetID, result)
+}
+
+func TweetFromGraphQLResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result) (TweetData, error) {
+	return tweetFromResult(rawURL, fallbackUsername, fallbackID, result)
 }
 
 func ExtractTweetURL(rawURL string) (string, string, error) {
@@ -169,6 +174,210 @@ func parseMedia(media gjson.Result) []Media {
 		items = append(items, parsed)
 	}
 	return items
+}
+
+func (s *Service) parseSyndicationTweet(ctx context.Context, rawURL string, fallbackUsername string, fallbackID string) (TweetData, error) {
+	endpoint, err := url.Parse(s.syndicationURL)
+	if err != nil {
+		return TweetData{}, err
+	}
+	query := endpoint.Query()
+	query.Set("id", fallbackID)
+	query.Set("lang", "zh")
+	query.Set("token", syndicationToken(fallbackID))
+	endpoint.RawQuery = query.Encode()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return TweetData{}, err
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", "Mozilla/5.0 open-Xdownload/0.1")
+
+	client := s.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return TweetData{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 400 {
+		return TweetData{}, fmt.Errorf("X 推文详情请求失败: HTTP %d", response.StatusCode)
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if err != nil {
+		return TweetData{}, err
+	}
+	if !json.Valid(payload) {
+		return TweetData{}, errors.New("X 推文详情返回了非 JSON 内容")
+	}
+	result := gjson.ParseBytes(payload)
+	if !result.Get("id_str").Exists() && !result.Get("__typename").Exists() {
+		return TweetData{}, errors.New("X 推文详情响应中没有推文数据")
+	}
+	return tweetFromSyndication(rawURL, fallbackUsername, fallbackID, result)
+}
+
+func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result) (TweetData, error) {
+	id := result.Get("id_str").String()
+	if id == "" {
+		id = fallbackID
+	}
+	author := Author{
+		ID:         result.Get("user.id_str").String(),
+		Name:       result.Get("user.name").String(),
+		ScreenName: result.Get("user.screen_name").String(),
+	}
+	if author.ScreenName == "" {
+		author.ScreenName = fallbackUsername
+	}
+	createdAt := time.Now().UTC()
+	if raw := result.Get("created_at").String(); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			createdAt = parsed
+		}
+	}
+	return TweetData{
+		ID:        id,
+		URL:       canonicalTweetURL(author.ScreenName, id),
+		Text:      result.Get("text").String(),
+		CreatedAt: createdAt,
+		Author:    author,
+		Media:     parseSyndicationMedia(result),
+	}, nil
+}
+
+func parseSyndicationMedia(result gjson.Result) []Media {
+	seen := map[string]struct{}{}
+	items := []Media{}
+	for _, item := range result.Get("mediaDetails").Array() {
+		media := mediaFromSyndicationDetail(item)
+		key := media.BestURL
+		if key == "" {
+			key = media.URL
+		}
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, media)
+	}
+	if len(items) > 0 {
+		return items
+	}
+	for index, item := range result.Get("photos").Array() {
+		rawURL := item.Get("url").String()
+		if rawURL == "" {
+			continue
+		}
+		if _, ok := seen[rawURL]; ok {
+			continue
+		}
+		seen[rawURL] = struct{}{}
+		items = append(items, Media{
+			ID:         fmt.Sprintf("photo-%d", index+1),
+			Type:       MediaPhoto,
+			URL:        rawURL,
+			PreviewURL: rawURL,
+			BestURL:    rawURL,
+		})
+	}
+	return items
+}
+
+func mediaFromSyndicationDetail(item gjson.Result) Media {
+	kind := MediaType(item.Get("type").String())
+	mediaURL := firstString(item.Get("media_url_https"), item.Get("media_url"))
+	media := Media{
+		ID:         firstString(item.Get("id_str"), item.Get("id")),
+		Type:       kind,
+		URL:        mediaURL,
+		PreviewURL: mediaURL,
+	}
+	if media.ID == "" {
+		media.ID = firstString(item.Get("expanded_url"), item.Get("url"), item.Get("media_url_https"))
+	}
+	if kind == MediaVideo || kind == MediaGIF {
+		for _, variant := range firstResult(item.Get("video_info.variants"), item.Get("videoInfo.variants")).Array() {
+			rawURL := variant.Get("url").String()
+			if rawURL == "" {
+				continue
+			}
+			media.Variants = append(media.Variants, MediaVariant{
+				URL:         rawURL,
+				ContentType: firstString(variant.Get("content_type"), variant.Get("contentType")),
+				Bitrate:     variant.Get("bitrate").Int(),
+				Quality:     qualityFromURL(rawURL),
+			})
+		}
+		best := BestVariant(media.Variants)
+		media.BestURL = best.URL
+	} else {
+		media.Type = MediaPhoto
+		media.BestURL = media.URL
+	}
+	return media
+}
+
+func firstResult(values ...gjson.Result) gjson.Result {
+	for _, value := range values {
+		if value.Exists() {
+			return value
+		}
+	}
+	return gjson.Result{}
+}
+
+func firstString(values ...gjson.Result) string {
+	for _, value := range values {
+		if raw := value.String(); raw != "" {
+			return raw
+		}
+	}
+	return ""
+}
+
+func syndicationToken(tweetID string) string {
+	id, err := strconv.ParseFloat(tweetID, 64)
+	if err != nil {
+		return ""
+	}
+	value := id / 1e15 * math.Pi
+	raw := formatBase36Float(value)
+	return strings.Map(func(ch rune) rune {
+		if ch == '0' || ch == '.' {
+			return -1
+		}
+		return ch
+	}, raw)
+}
+
+func formatBase36Float(value float64) string {
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	integer := math.Floor(value)
+	raw := strconv.FormatInt(int64(integer), 36)
+	fraction := value - integer
+	if fraction == 0 {
+		return raw
+	}
+	var builder strings.Builder
+	builder.WriteString(raw)
+	builder.WriteByte('.')
+	for i := 0; i < 20 && fraction > 0; i++ {
+		fraction *= 36
+		digit := int(fraction)
+		if digit >= 36 {
+			digit = 35
+		}
+		builder.WriteByte(digits[digit])
+		fraction -= float64(digit)
+	}
+	return builder.String()
 }
 
 func qualityFromURL(rawURL string) string {

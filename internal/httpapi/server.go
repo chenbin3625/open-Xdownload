@@ -1,16 +1,23 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
+	"github.com/chenbin3625/open-Xdownload/internal/filestore"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
+	"github.com/chenbin3625/open-Xdownload/internal/xclient"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 )
@@ -30,7 +37,7 @@ func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:*", "http://127.0.0.1:*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
 	}))
@@ -38,10 +45,17 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/health", s.health)
 	r.Get("/api/config", s.getConfig)
 	r.Put("/api/config", s.updateConfig)
+	r.Post("/api/storage/test", s.testStorage)
+	r.Get("/api/local-directories", s.listLocalDirectories)
 	r.Post("/api/auth/check", s.checkAuth)
 	r.Post("/api/parse/tweet-link", s.parseTweetLink)
-	r.Post("/api/download/media", s.createMediaDownload)
 	r.Post("/api/jobs", s.createJob)
+	r.Post("/api/jobs/batch", s.createJobsBatch)
+	r.Get("/api/archive-schedules", s.listArchiveSchedules)
+	r.Post("/api/archive-schedules", s.createArchiveSchedule)
+	r.Put("/api/archive-schedules/{id}", s.updateArchiveSchedule)
+	r.Delete("/api/archive-schedules/{id}", s.deleteArchiveSchedule)
+	r.Post("/api/archive-schedules/{id}/run", s.runArchiveSchedule)
 	r.Get("/api/jobs", s.listJobs)
 	r.Get("/api/jobs/{id}", s.getJob)
 	r.Post("/api/jobs/{id}/cancel", s.cancelJob)
@@ -49,6 +63,10 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/events", s.events)
 	r.Get("/api/library/downloads", s.listDownloads)
 	r.Get("/api/logs", s.listFailedMedia)
+	r.Get("/api/failed-tweets", s.listFailedTweets)
+	r.Post("/api/failed-tweets/retry", s.retryFailedTweets)
+	r.Delete("/api/failed-tweets/{id}", s.deleteFailedTweet)
+	r.Delete("/api/failed-tweets", s.clearFailedTweets)
 	r.Get("/api/dashboard", s.dashboard)
 	return r
 }
@@ -68,7 +86,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 	var cfg config.AppConfig
-	if err := decodeJSON(r, &cfg); err != nil {
+	if err := decodeJSON(w, r, &cfg); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -80,15 +98,134 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated.Redacted())
 }
 
+func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
+	var cfg config.AppConfig
+	if err := decodeJSON(w, r, &cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	current, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	cfg = mergeSecretPlaceholders(cfg, current).Normalized()
+	target, err := filestore.New(cfg)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	probePath, err := target.TestWritable(ctx)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, storageTestResult{
+		OK:      true,
+		Type:    target.Type(),
+		Root:    target.Root(),
+		Message: "存储连接与写入测试通过",
+		Path:    probePath,
+	})
+}
+
+func (s *Server) listLocalDirectories(w http.ResponseWriter, r *http.Request) {
+	targetPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if targetPath == "" {
+		cfg, err := s.store.GetConfig(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		targetPath = cfg.DownloadDir
+	}
+	dir, err := localDirectoryPath(targetPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	items := make([]localDirectoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		child := filepath.Join(dir, entry.Name())
+		items = append(items, localDirectoryEntry{
+			Name:        entry.Name(),
+			Path:        child,
+			HasChildren: hasChildDirectory(child),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	parent := filepath.Dir(dir)
+	if parent == dir {
+		parent = ""
+	}
+	writeJSON(w, http.StatusOK, localDirectoryListing{
+		Path:    dir,
+		Parent:  parent,
+		Entries: items,
+	})
+}
+
 func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.store.GetConfig(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	configured := cfg.AuthToken != "" && cfg.CSRFToken != ""
+	if !configured {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": false,
+			"ok":         false,
+			"message":    "请先配置 auth_token 和 ct0",
+		})
+		return
+	}
+	pool, err := xclient.NewPool(cfg)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": configured,
+			"ok":         false,
+			"message":    err.Error(),
+		})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	diagnostics := pool.CheckAll(ctx)
+	screenName := ""
+	for _, client := range diagnostics.Clients {
+		if client.Primary {
+			screenName = client.ScreenName
+			break
+		}
+	}
+	if diagnostics.Available == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured":  configured,
+			"ok":          false,
+			"message":     "所有 X Cookie 均不可用",
+			"diagnostics": diagnostics,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"configured": cfg.AuthToken != "" && cfg.CSRFToken != "",
-		"message":    "本地已保存 Cookie 字段；真实 X 登录校验将在 xclient 迁移后接入。",
+		"configured":  configured,
+		"ok":          true,
+		"screenName":  screenName,
+		"message":     "X 登录校验通过",
+		"diagnostics": diagnostics,
 	})
 }
 
@@ -96,7 +233,7 @@ func (s *Server) parseTweetLink(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -108,20 +245,18 @@ func (s *Server) parseTweetLink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tweet)
 }
 
-func (s *Server) createMediaDownload(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		URL string `json:"url"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
+func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
+	var req jobRequest
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req.URL = strings.TrimSpace(req.URL)
-	if !jobs.IsHTTPURL(req.URL) {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("请输入有效 HTTP 下载地址"))
+	kind, input, title, err := s.prepareJob(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	job, err := s.store.CreateJob(r.Context(), storage.JobKindMediaURL, req.URL, jobs.MediaTitle(req.URL))
+	job, err := s.store.CreateJob(r.Context(), kind, input, title)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -130,30 +265,224 @@ func (s *Server) createMediaDownload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, job)
 }
 
-func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Kind  storage.JobKind `json:"kind"`
-		Input string          `json:"input"`
-		Title string          `json:"title"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
+func (s *Server) createJobsBatch(w http.ResponseWriter, r *http.Request) {
+	var req batchJobRequest
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if req.Kind == "" {
-		req.Kind = storage.JobKindTweetLink
-	}
-	if strings.TrimSpace(req.Input) == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("任务输入不能为空"))
+	if len(req.Items) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("任务列表不能为空"))
 		return
 	}
-	job, err := s.store.CreateJob(r.Context(), req.Kind, strings.TrimSpace(req.Input), req.Title)
+	if len(req.Items) > 200 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("一次最多创建 200 个任务"))
+		return
+	}
+
+	prepared := make([]storage.JobDraft, 0, len(req.Items))
+	seen := map[string]struct{}{}
+	for _, item := range req.Items {
+		kind, input, title, err := s.prepareJob(r.Context(), item)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		key := string(kind) + "\x00" + strings.ToLower(input)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		prepared = append(prepared, storage.JobDraft{Kind: kind, Input: input, Title: title})
+	}
+	if len(prepared) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("没有可创建的任务"))
+		return
+	}
+
+	created, err := s.store.CreateJobs(r.Context(), prepared)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	s.manager.Notify()
-	writeJSON(w, http.StatusCreated, job)
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) listArchiveSchedules(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListArchiveSchedules(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) createArchiveSchedule(w http.ResponseWriter, r *http.Request) {
+	var req archiveScheduleRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	schedule, err := s.store.CreateArchiveSchedule(r.Context(), archiveScheduleFromRequest(req))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.eventBus.Publish(jobs.Event{Type: "archive_schedule.created", Payload: schedule})
+	writeJSON(w, http.StatusCreated, schedule)
+}
+
+func (s *Server) updateArchiveSchedule(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req archiveScheduleRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	schedule := archiveScheduleFromRequest(req)
+	schedule.ID = id
+	updated, err := s.store.UpdateArchiveSchedule(r.Context(), schedule)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.eventBus.Publish(jobs.Event{Type: "archive_schedule.updated", Payload: updated})
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) deleteArchiveSchedule(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.DeleteArchiveSchedule(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.eventBus.Publish(jobs.Event{Type: "archive_schedule.deleted", Payload: map[string]any{"id": id}})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) runArchiveSchedule(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	created, err := s.manager.RunArchiveScheduleNow(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, created)
+}
+
+type jobRequest struct {
+	Kind  storage.JobKind `json:"kind"`
+	Input string          `json:"input"`
+	Title string          `json:"title"`
+}
+
+type batchJobRequest struct {
+	Items []jobRequest `json:"items"`
+}
+
+type archiveScheduleRequest struct {
+	Name            string                        `json:"name"`
+	Enabled         bool                          `json:"enabled"`
+	IntervalMinutes int                           `json:"intervalMinutes"`
+	Items           []storage.ArchiveScheduleItem `json:"items"`
+}
+
+type storageTestResult struct {
+	OK      bool               `json:"ok"`
+	Type    config.StorageType `json:"type"`
+	Root    string             `json:"root"`
+	Message string             `json:"message"`
+	Path    string             `json:"path"`
+}
+
+func archiveScheduleFromRequest(req archiveScheduleRequest) storage.ArchiveSchedule {
+	return storage.ArchiveSchedule{
+		Name:            strings.TrimSpace(req.Name),
+		Enabled:         req.Enabled,
+		IntervalMinutes: req.IntervalMinutes,
+		Items:           req.Items,
+	}
+}
+
+func mergeSecretPlaceholders(cfg config.AppConfig, current config.AppConfig) config.AppConfig {
+	if cfg.AuthToken == "" || cfg.AuthToken == "********" {
+		cfg.AuthToken = current.AuthToken
+	}
+	if cfg.CSRFToken == "" || cfg.CSRFToken == "********" {
+		cfg.CSRFToken = current.CSRFToken
+	}
+	if cfg.AdditionalCookies == "" || cfg.AdditionalCookies == "********" {
+		cfg.AdditionalCookies = current.AdditionalCookies
+	}
+	if cfg.SMBPassword == "" || cfg.SMBPassword == "********" {
+		cfg.SMBPassword = current.SMBPassword
+	}
+	if cfg.WebDAVPassword == "" || cfg.WebDAVPassword == "********" {
+		cfg.WebDAVPassword = current.WebDAVPassword
+	}
+	return cfg
+}
+
+type localDirectoryListing struct {
+	Path    string                `json:"path"`
+	Parent  string                `json:"parent"`
+	Entries []localDirectoryEntry `json:"entries"`
+}
+
+type localDirectoryEntry struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	HasChildren bool   `json:"hasChildren"`
+}
+
+func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKind, string, string, error) {
+	if req.Kind == "" {
+		req.Kind = storage.JobKindTweetLink
+	}
+	if strings.TrimSpace(req.Input) == "" {
+		return "", "", "", fmt.Errorf("任务输入不能为空")
+	}
+	req.Input = strings.TrimSpace(req.Input)
+	if req.Kind == storage.JobKindTweetLink {
+		tweet, err := s.parser.ParseTweetLink(ctx, req.Input)
+		if err != nil {
+			return "", "", "", err
+		}
+		if len(tweet.BestMediaURLs()) == 0 {
+			return "", "", "", fmt.Errorf("这条推文没有可下载媒体")
+		}
+		if strings.TrimSpace(req.Title) == "" {
+			req.Title = fmt.Sprintf("Tweet %s", tweet.ID)
+		}
+	}
+	if req.Kind == storage.JobKindUser && strings.TrimSpace(req.Title) == "" {
+		req.Title = fmt.Sprintf("用户 %s", displayUserInput(req.Input))
+	}
+	if req.Kind == storage.JobKindList && strings.TrimSpace(req.Title) == "" {
+		req.Title = fmt.Sprintf("列表 %s", req.Input)
+	}
+	if req.Kind == storage.JobKindFollowing && strings.TrimSpace(req.Title) == "" {
+		req.Title = fmt.Sprintf("关注 %s", displayUserInput(req.Input))
+	}
+	switch req.Kind {
+	case storage.JobKindTweetLink, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing:
+	default:
+		return "", "", "", fmt.Errorf("不支持的任务类型: %s", req.Kind)
+	}
+	return req.Kind, req.Input, strings.TrimSpace(req.Title), nil
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -185,12 +514,11 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	job, err := s.store.CancelJob(r.Context(), id)
+	job, err := s.manager.CancelJob(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.eventBus.Publish(jobs.Event{Type: "job.updated", JobID: job.ID, Payload: job})
 	writeJSON(w, http.StatusOK, job)
 }
 
@@ -252,37 +580,124 @@ func (s *Server) listFailedMedia(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+func (s *Server) listFailedTweets(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListFailedTweetViews(r.Context(), parseLimit(r, 200))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) retryFailedTweets(w http.ResponseWriter, r *http.Request) {
+	job, err := s.manager.RetryFailedTweetsNow(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) deleteFailedTweet(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.DeleteFailedTweet(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) clearFailedTweets(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteAllFailedTweets(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.store.GetConfig(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	jobItems, err := s.store.ListJobs(r.Context(), 50)
+	page := parsePositiveInt(r, "page", 1, 1, 1000000)
+	pageSize := parsePositiveInt(r, "pageSize", 20, 1, 100)
+	stats, err := s.store.JobStats(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	downloadItems, err := s.store.ListDownloads(r.Context(), 50)
+	totalPages := 0
+	if stats.Total > 0 {
+		totalPages = (stats.Total + pageSize - 1) / pageSize
+		if page > totalPages {
+			page = totalPages
+		}
+	} else {
+		page = 1
+	}
+	offset := (page - 1) * pageSize
+	jobItems, err := s.store.ListJobsPage(r.Context(), pageSize, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	failedItems, err := s.store.ListFailedMedia(r.Context(), 50)
+	jobIDs := make([]int64, 0, len(jobItems))
+	for _, job := range jobItems {
+		jobIDs = append(jobIDs, job.ID)
+	}
+	downloadItems, err := s.store.ListDownloadsForJobs(r.Context(), jobIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	failedItems, err := s.store.ListFailedMediaForJobs(r.Context(), jobIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	failedTweetItems, err := s.store.ListFailedTweetViews(r.Context(), 50)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	failedTweetCount, err := s.store.CountFailedTweets(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	archiveSchedules, err := s.store.ListArchiveSchedules(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, storage.Dashboard{
-		Config:    cfg.Redacted(),
-		Jobs:      jobItems,
-		Downloads: downloadItems,
-		Failed:    failedItems,
+		Config:           cfg.Redacted(),
+		Jobs:             jobItems,
+		Downloads:        downloadItems,
+		Failed:           failedItems,
+		FailedTweets:     failedTweetItems,
+		FailedTweetCount: failedTweetCount,
+		ArchiveSchedules: archiveSchedules,
+		Pagination: storage.Pagination{
+			Page:       page,
+			PageSize:   pageSize,
+			Total:      stats.Total,
+			TotalPages: totalPages,
+		},
+		Stats: stats,
 	})
 }
 
-func decodeJSON(r *http.Request, target any) error {
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	defer r.Body.Close()
+	// 限制请求体大小，避免超大 body 占用内存（配合无鉴权的本地服务更稳妥）。
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	return json.NewDecoder(r.Body).Decode(target)
 }
 
@@ -310,4 +725,76 @@ func parseLimit(r *http.Request, fallback int) int {
 		return fallback
 	}
 	return limit
+}
+
+func parsePositiveInt(r *http.Request, key string, fallback int, min int, max int) int {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func displayUserInput(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "用户"
+	}
+	if strings.HasPrefix(input, "@") {
+		return input
+	}
+	if _, err := strconv.ParseUint(input, 10, 64); err == nil {
+		return input
+	}
+	return "@" + input
+}
+
+func localDirectoryPath(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			value = home
+		} else {
+			value = "."
+		}
+	}
+	path, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
+				return home, nil
+			}
+		}
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s 不是目录", path)
+	}
+	return path, nil
+}
+
+func hasChildDirectory(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return true
+		}
+	}
+	return false
 }

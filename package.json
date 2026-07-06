@@ -1,9 +1,10 @@
 {
   "name": "open-xdownload",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.2",
   "scripts": {
     "dev": "npm --prefix apps/web run dev",
+    "dev:all": "./scripts/dev-all.sh",
     "build": "npm --prefix apps/web run build",
     "sync:web": "sh scripts/sync-webui.sh",
     "build:embedded": "npm run build && npm run sync:web",
