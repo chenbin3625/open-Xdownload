@@ -1,0 +1,15 @@
+.git
+.github
+.reference
+data
+downloads
+logs
+node_modules
+apps/web/node_modules
+apps/web/dist
+internal/webui/dist
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+.DS_Store
