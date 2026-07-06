@@ -1113,8 +1113,13 @@ func isCancellation(ctx context.Context, err error) bool {
 	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+var (
+	tweetShortLinkPattern = regexp.MustCompile(`(?i)\bhttps?://t\.co/[A-Za-z0-9_-]+`)
+	filenameSpacePattern  = regexp.MustCompile(`\s+`)
+)
+
 func tweetFilename(cfg config.AppConfig, tweet parser.TweetData, index int) string {
-	text := strings.TrimSpace(tweet.Text)
+	text := cleanTweetFilenameText(tweet.Text)
 	base := text
 	switch cfg.FileNamingMode {
 	case config.FileNamingUserTweet:
@@ -1131,6 +1136,12 @@ func tweetFilename(cfg config.AppConfig, tweet parser.TweetData, index int) stri
 		base = fmt.Sprintf("%s-%02d", base, index+1)
 	}
 	return base
+}
+
+func cleanTweetFilenameText(text string) string {
+	text = tweetShortLinkPattern.ReplaceAllString(text, " ")
+	text = filenameSpacePattern.ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
 }
 
 func nonEmptyStrings(values ...string) []string {

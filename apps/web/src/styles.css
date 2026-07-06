@@ -160,6 +160,7 @@ textarea {
 .workbench-main,
 .workbench-rail {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   gap: 14px;
 }
@@ -167,6 +168,7 @@ textarea {
 .workbench-rail {
   position: sticky;
   top: 14px;
+  z-index: 1;
 }
 
 .workbench-panel,

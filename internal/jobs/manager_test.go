@@ -123,6 +123,49 @@ func TestTweetFilenameFallsBackToIDWhenTextIsEmpty(t *testing.T) {
 	}
 }
 
+func TestTweetFilenameRemovesShortLinks(t *testing.T) {
+	tweet := parser.TweetData{
+		ID:   "12345",
+		Text: "hello https://t.co/0ERpJ8OLAP world",
+		Author: parser.Author{
+			ID:         "44196397",
+			ScreenName: "openai",
+		},
+	}
+
+	tests := []struct {
+		name string
+		cfg  config.AppConfig
+		want string
+	}{
+		{
+			name: "tweet only",
+			cfg:  config.AppConfig{FileNamingMode: config.FileNamingTweetText},
+			want: "hello world",
+		},
+		{
+			name: "user and tweet",
+			cfg:  config.AppConfig{FileNamingMode: config.FileNamingUserTweet},
+			want: "openai-44196397-hello world",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tweetFilename(tt.cfg, tweet, 0); got != tt.want {
+				t.Fatalf("tweetFilename() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTweetFilenameFallsBackToIDWhenOnlyShortLinksRemain(t *testing.T) {
+	tweet := parser.TweetData{ID: "12345", Text: "https://t.co/0ERpJ8OLAP"}
+	if got := tweetFilename(config.AppConfig{FileNamingMode: config.FileNamingTweetText}, tweet, 0); got != "12345" {
+		t.Fatalf("tweetFilename() = %q, want 12345", got)
+	}
+}
+
 func TestTweetFilenameSkipsEmptyUserParts(t *testing.T) {
 	tweet := parser.TweetData{
 		ID:   "12345",

@@ -33,6 +33,7 @@ import {
   Card,
   Col,
   Descriptions,
+  Drawer,
   Empty,
   Flex,
   Form,
@@ -104,7 +105,7 @@ const { TextArea } = Input;
 const { DirectoryTree } = Tree;
 const appIconPath = "/icon.svg";
 
-type SectionKey = "overview" | "jobs" | "settings";
+type SectionKey = "overview" | "settings";
 type TextTone = "secondary" | "success" | "warning" | "danger";
 type RouteState = {
   section: SectionKey;
@@ -151,13 +152,12 @@ const cancelableStatuses: Job["status"][] = ["pending", "resolving", "downloadin
 const retryableStatuses: Job["status"][] = ["failed", "canceled", "completed"];
 const sectionRoutes = {
   overview: "/overview",
-  jobs: "/jobs",
   settings: "/settings",
 } satisfies Record<SectionKey, string>;
 const routeSections: Record<string, SectionKey> = {
   "/": "overview",
   "/overview": "overview",
-  "/jobs": "jobs",
+  "/jobs": "overview",
   "/settings": "settings",
 };
 
@@ -178,7 +178,7 @@ function parseJobPageSize(value: string | null) {
 
 function buildRoutePath(section: SectionKey, jobPage = defaultJobPage, jobPageSize = defaultJobPageSize) {
   const params = new URLSearchParams();
-  if (section === "jobs") {
+  if (section === "overview") {
     if (jobPage > defaultJobPage) {
       params.set("page", String(jobPage));
     }
@@ -203,8 +203,8 @@ function readRouteState(): RouteState {
   const pathname = normalizePathname(window.location.pathname);
   const section = routeSections[pathname] ?? "overview";
   const params = new URLSearchParams(window.location.search);
-  const jobPage = section === "jobs" ? parsePositiveInteger(params.get("page"), defaultJobPage) : defaultJobPage;
-  const jobPageSize = section === "jobs" ? parseJobPageSize(params.get("pageSize")) : defaultJobPageSize;
+  const jobPage = section === "overview" ? parsePositiveInteger(params.get("page"), defaultJobPage) : defaultJobPage;
+  const jobPageSize = section === "overview" ? parseJobPageSize(params.get("pageSize")) : defaultJobPageSize;
   const canonicalRoute = buildRoutePath(section, jobPage, jobPageSize);
   const currentRoute = `${window.location.pathname}${window.location.search}`;
 
@@ -270,8 +270,8 @@ export default function App() {
     const page = dashboard.data?.pagination.page;
     if (page && page !== jobPage) {
       setJobPage(page);
-      if (activeSection === "jobs") {
-        updateBrowserRoute("jobs", page, jobPageSize, true);
+      if (activeSection === "overview") {
+        updateBrowserRoute("overview", page, jobPageSize, true);
       }
     }
   }, [activeSection, dashboard.data?.pagination.page, jobPage, jobPageSize]);
@@ -301,28 +301,26 @@ export default function App() {
 
   function handleJobPageChange(page: number) {
     setJobPage(page);
-    if (activeSection === "jobs") {
-      updateBrowserRoute("jobs", page, jobPageSize);
+    if (activeSection === "overview") {
+      updateBrowserRoute("overview", page, jobPageSize);
     }
   }
 
   function handleJobPageSizeChange(pageSize: number) {
     setJobPageSize(pageSize);
     setJobPage(1);
-    if (activeSection === "jobs") {
-      updateBrowserRoute("jobs", defaultJobPage, pageSize);
+    if (activeSection === "overview") {
+      updateBrowserRoute("overview", defaultJobPage, pageSize);
     }
   }
 
   const menuItems: MenuProps["items"] = [
     { key: "overview", icon: <HomeOutlined />, label: "工作台" },
-    { key: "jobs", icon: <UnorderedListOutlined />, label: "任务中心" },
     { key: "settings", icon: <SettingOutlined />, label: "配置" },
   ];
 
   const currentTitle = {
     overview: "工作台",
-    jobs: "任务中心",
     settings: "配置",
   }[activeSection];
 
@@ -406,24 +404,31 @@ function DashboardContent({
   onJobPageChange: (page: number) => void;
   onJobPageSizeChange: (pageSize: number) => void;
 }) {
-  if (section === "jobs") {
-    return (
-      <JobsPage
-        data={data}
-        onJobPageChange={onJobPageChange}
-        onJobPageSizeChange={onJobPageSizeChange}
-      />
-    );
-  }
-
   if (section === "settings") {
     return <SettingsPage config={data.config} />;
   }
 
-  return <OverviewPage data={data} />;
+  return (
+    <OverviewPage
+      data={data}
+      onJobPageChange={onJobPageChange}
+      onJobPageSizeChange={onJobPageSizeChange}
+    />
+  );
 }
 
-function OverviewPage({ data }: { data: Dashboard }) {
+function OverviewPage({
+  data,
+  onJobPageChange,
+  onJobPageSizeChange,
+}: {
+  data: Dashboard;
+  onJobPageChange: (page: number) => void;
+  onJobPageSizeChange: (pageSize: number) => void;
+}) {
+  const screens = Grid.useBreakpoint();
+  const [batchDrawerOpen, setBatchDrawerOpen] = useState(false);
+
   return (
     <div className="workbench-page">
       <StatsStrip data={data} />
@@ -434,17 +439,24 @@ function OverviewPage({ data }: { data: Dashboard }) {
             icon={<DownloadOutlined />}
             title="单条解析"
             description="推文媒体"
+            extra={
+              <Button
+                type="primary"
+                icon={<CloudDownloadOutlined />}
+                onClick={() => setBatchDrawerOpen(true)}
+              >
+                批量归档
+              </Button>
+            }
           >
             <TweetParser />
           </WorkbenchPanel>
 
-          <WorkbenchPanel
-            icon={<CloudDownloadOutlined />}
-            title="批量归档"
-            description="用户、列表、关注关系"
-          >
-            <BatchDownloadLauncher />
-          </WorkbenchPanel>
+          <TaskCenterSections
+            data={data}
+            onJobPageChange={onJobPageChange}
+            onJobPageSizeChange={onJobPageSizeChange}
+          />
         </div>
 
         <aside className="workbench-rail">
@@ -460,11 +472,27 @@ function OverviewPage({ data }: { data: Dashboard }) {
           </WorkbenchPanel>
         </aside>
       </div>
+
+      <Drawer
+        className="batch-archive-drawer"
+        destroyOnHidden
+        open={batchDrawerOpen}
+        title={
+          <Space>
+            <CloudDownloadOutlined />
+            批量归档
+          </Space>
+        }
+        size={screens.md ? 920 : "100%"}
+        onClose={() => setBatchDrawerOpen(false)}
+      >
+        <BatchDownloadLauncher />
+      </Drawer>
     </div>
   );
 }
 
-function JobsPage({
+function TaskCenterSections({
   data,
   onJobPageChange,
   onJobPageSizeChange,
@@ -475,28 +503,23 @@ function JobsPage({
 }) {
   return (
     <Stack>
-      <StatsStrip data={data} />
-      <Row gutter={[12, 12]}>
-        <Col span={24}>
-          <SectionBlock
-            title={
-              <Space>
-                <UnorderedListOutlined />
-                任务列表
-              </Space>
-            }
-          >
-            <JobTable
-              jobs={data.jobs}
-              downloads={data.downloads}
-              failed={data.failed}
-              pagination={data.pagination}
-              onPageChange={onJobPageChange}
-              onPageSizeChange={onJobPageSizeChange}
-            />
-          </SectionBlock>
-        </Col>
-      </Row>
+      <SectionBlock
+        title={
+          <Space>
+            <UnorderedListOutlined />
+            任务列表
+          </Space>
+        }
+      >
+        <JobTable
+          jobs={data.jobs}
+          downloads={data.downloads}
+          failed={data.failed}
+          pagination={data.pagination}
+          onPageChange={onJobPageChange}
+          onPageSizeChange={onJobPageSizeChange}
+        />
+      </SectionBlock>
       <SectionBlock
         title={
           <Space>
@@ -1582,6 +1605,22 @@ function JobTable({
   const [expandedJobIds, setExpandedJobIds] = useState<React.Key[]>([]);
   const downloadsByJob = useMemo(() => groupDownloadsByJob(downloads), [downloads]);
   const failedByJob = useMemo(() => groupFailedMediaByJob(failed), [failed]);
+  const activeJobIds = useMemo(
+    () => jobs.filter((job) => cancelableStatuses.includes(job.status)).map((job) => job.id),
+    [jobs],
+  );
+
+  useEffect(() => {
+    if (activeJobIds.length === 0) return;
+
+    setExpandedJobIds((current) => {
+      const next = new Set(current);
+      for (const id of activeJobIds) {
+        next.add(id);
+      }
+      return next.size === current.length ? current : [...next];
+    });
+  }, [activeJobIds]);
 
   const retry = useMutation({
     mutationFn: retryJob,
