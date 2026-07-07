@@ -280,7 +280,9 @@ func (p *Pool) CheckAll(ctx context.Context) PoolDiagnostics {
 		go func(client *Client) {
 			defer wg.Done()
 			if _, err := client.GetSelfScreenName(ctx); err != nil {
-				client.disable(err)
+				// GetSelfScreenName 内部已在认证失败时 disable；这里只记录瞬时错误用于诊断，
+				// 不再对 429/5xx/网络错误 disable（否则有效 cookie 会被误判不可用）。
+				client.recordError(err)
 			}
 		}(client)
 	}
@@ -386,7 +388,10 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
 		err := fmt.Errorf("X 登录校验失败: HTTP %d", response.StatusCode)
-		c.disable(err)
+		// 仅认证类失败（401/403）才禁用客户端；429/5xx 视为瞬时，禁用会误判有效 cookie 不可用。
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			c.disable(err)
+		}
 		return "", err
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
@@ -514,13 +519,16 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 			if !result.Exists() {
 				continue
 			}
+			// 先判断早停（在 media/parse 跳过之前）：直接从 rest_id 取 ID，使无媒体或解析
+			// 失败的停止推文仍能触发早停，避免切换 IncludeNestedTweetMedia 或停止推文被删
+			// 时全量重翻页、空耗 X API 配额。
+			if options.StopAtTweetID != "" && shouldStopAt(tweetResultID(result), options.StopAtTweetID, page) {
+				// timeline 按时间倒序，已翻到上次归档过的推文，更旧的均已处理过，提前停止。
+				return tweets, nil
+			}
 			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result, options)
 			if err != nil || len(tweet.Media) == 0 {
 				continue
-			}
-			if options.StopAtTweetID != "" && tweet.ID == options.StopAtTweetID {
-				// timeline 按时间倒序，已翻到上次归档过的推文，更旧的均已处理过，提前停止。
-				return tweets, nil
 			}
 			tweets = append(tweets, tweet)
 		}
@@ -534,6 +542,44 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 		cursor = next
 	}
 	return tweets, nil
+}
+
+// shouldStopAt 判断 timeline 翻页是否应在 tweetID 处停止。timeline 按时间倒序：
+// 精确匹配 stopID 总是停止；page>0 时再按数值比较（tweetID <= stopID 表示已翻到不新于
+// 上次归档的推文），以处理 stopID 推文被删除、精确匹配永不命中的情况。首页可能含置顶
+// 推文（时间较旧但排在最前），故首页仅用精确匹配，避免误停而漏归档更新的推文。
+func shouldStopAt(tweetID, stopID string, page int) bool {
+	if tweetID != "" && tweetID == stopID {
+		return true
+	}
+	if page == 0 {
+		return false
+	}
+	t, err1 := strconv.ParseInt(tweetID, 10, 64)
+	s, err2 := strconv.ParseInt(stopID, 10, 64)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return t <= s
+}
+
+func tweetResultID(result gjson.Result) string {
+	const maxDepth = 8
+	for depth := 0; depth < maxDepth && result.Exists(); depth++ {
+		if id := result.Get("rest_id").String(); id != "" {
+			return id
+		}
+		if result.Get("__typename").String() == "TweetWithVisibilityResults" && result.Get("tweet").Exists() {
+			result = result.Get("tweet")
+			continue
+		}
+		if nested := result.Get("result"); nested.Exists() {
+			result = nested
+			continue
+		}
+		return ""
+	}
+	return ""
 }
 
 func (c *Client) GetListMembers(ctx context.Context, list List) ([]User, error) {
@@ -636,6 +682,9 @@ func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]b
 			return payload, nil
 		}
 		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if !client.isDisabled() && !isTransientError(err) {
 			return nil, err
 		}
@@ -710,6 +759,11 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 	c.requestCount.Add(1)
 	response, err := c.http.Do(request)
 	if err != nil {
+		// 请求在收到响应头前就失败：after() 不会被调用，归还 before() 预扣的配额，
+		// 避免失败请求永久消耗本地速率预算。
+		if c.limiter != nil {
+			c.limiter.refund(path)
+		}
 		return nil, err
 	}
 	defer response.Body.Close()
@@ -819,6 +873,11 @@ func isPermanentClientError(err error) bool {
 }
 
 func isTransientError(err error) bool {
+	// 上下文取消/超时不是"可重试的瞬时错误"：重试只会再失败。把它判为非瞬时，
+	// 让 do()/Pool.graphQL 立即返回，避免取消时遍历重试所有客户端并白白消耗速率预算。
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.Code == apiErrDependency || apiErr.Code == apiErrTimeout || apiErr.Code == apiErrOverCapacity

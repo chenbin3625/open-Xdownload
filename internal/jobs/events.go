@@ -18,16 +18,24 @@ type EventBus struct {
 	subscribers map[chan Event]struct{}
 }
 
+// maxEventSubscribers bounds concurrent SSE subscribers so an unauthenticated
+// client cannot exhaust memory/goroutines by opening unlimited long-lived
+// /api/events connections.
+const maxEventSubscribers = 64
+
 func NewEventBus() *EventBus {
 	return &EventBus{subscribers: make(map[chan Event]struct{})}
 }
 
-func (bus *EventBus) Subscribe() chan Event {
-	channel := make(chan Event, 16)
+func (bus *EventBus) Subscribe() (chan Event, bool) {
 	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if len(bus.subscribers) >= maxEventSubscribers {
+		return nil, false
+	}
+	channel := make(chan Event, 16)
 	bus.subscribers[channel] = struct{}{}
-	bus.mu.Unlock()
-	return channel
+	return channel, true
 }
 
 func (bus *EventBus) Unsubscribe(channel chan Event) {

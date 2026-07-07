@@ -58,7 +58,7 @@ func TestTestStorageUsesSubmittedWebDAVConfigAndSavedPassword(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	if _, err := db.UpdateConfig(ctx, config.AppConfig{WebDAVPassword: "saved-secret"}); err != nil {
+	if _, err := db.UpdateConfig(ctx, config.AppConfig{WebDAVURL: webdav.URL + "/dav", WebDAVPassword: "saved-secret"}); err != nil {
 		t.Fatalf("save current config: %v", err)
 	}
 

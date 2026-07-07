@@ -2,9 +2,15 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -110,6 +116,11 @@ func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg = mergeSecretPlaceholders(cfg, current).Normalized()
+	// 阻止对链路本地地址（如云元数据 169.254.169.254）的测试请求，缓解 SSRF。
+	if isBlockedStorageTarget(cfg.SMBHost) || isBlockedStorageTarget(urlHostname(cfg.WebDAVURL)) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("不允许的存储目标地址"))
+		return
+	}
 	target, err := filestore.New(cfg)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -423,22 +434,64 @@ func archiveScheduleFromRequest(req archiveScheduleRequest) storage.ArchiveSched
 }
 
 func mergeSecretPlaceholders(cfg config.AppConfig, current config.AppConfig) config.AppConfig {
-	if cfg.AuthToken == "" || cfg.AuthToken == "********" {
+	if cfg.AuthToken == "" || cfg.AuthToken == config.SecretPlaceholder {
 		cfg.AuthToken = current.AuthToken
 	}
-	if cfg.CSRFToken == "" || cfg.CSRFToken == "********" {
+	if cfg.CSRFToken == "" || cfg.CSRFToken == config.SecretPlaceholder {
 		cfg.CSRFToken = current.CSRFToken
 	}
-	if cfg.AdditionalCookies == "" || cfg.AdditionalCookies == "********" {
+	if cfg.AdditionalCookies == "" || cfg.AdditionalCookies == config.SecretPlaceholder {
 		cfg.AdditionalCookies = current.AdditionalCookies
 	}
-	if cfg.SMBPassword == "" || cfg.SMBPassword == "********" {
-		cfg.SMBPassword = current.SMBPassword
-	}
-	if cfg.WebDAVPassword == "" || cfg.WebDAVPassword == "********" {
-		cfg.WebDAVPassword = current.WebDAVPassword
-	}
+	// 仅当目标主机未变时才继承已存的存储凭据，否则调用方可令服务器用管理员真实的
+	// WebDAV/SMB 密码去认证一个由调用方提供的主机（凭据外泄）。主机变更时清掉占位符，
+	// 避免把字面量 "********" 当作密码发送给新主机。
+	cfg.SMBPassword = mergeStorageSecret(cfg.SMBPassword, current.SMBPassword, sameSMBTarget(cfg, current))
+	cfg.WebDAVPassword = mergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
+	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据。
+	cfg.ProxyURL = config.RestoreURLUserinfo(cfg.ProxyURL, current.ProxyURL)
+	cfg.WebDAVURL = config.RestoreURLUserinfo(cfg.WebDAVURL, current.WebDAVURL)
 	return cfg
+}
+
+// mergeStorageSecret inherits the stored password when the submitted value is
+// empty/placeholder and the target host is unchanged; otherwise it clears a
+// leftover placeholder so it is never sent as a literal credential.
+func mergeStorageSecret(submitted, stored string, hostUnchanged bool) string {
+	if submitted == "" || submitted == config.SecretPlaceholder {
+		if hostUnchanged {
+			return stored
+		}
+		return ""
+	}
+	return submitted
+}
+
+func sameSMBTarget(a, b config.AppConfig) bool {
+	a = a.Normalized()
+	b = b.Normalized()
+	return strings.EqualFold(strings.TrimSpace(a.SMBHost), strings.TrimSpace(b.SMBHost)) && a.SMBPort == b.SMBPort
+}
+
+// urlHostname returns the host (without port) of rawURL, or "" if unparseable.
+func urlHostname(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// isBlockedStorageTarget reports whether host is a link-local IP literal
+// (e.g. 169.254.169.254 cloud-metadata), which the storage test endpoint must
+// not be allowed to reach. Hostnames are allowed (resolved by the dialer); a
+// full egress allowlist is out of scope for the local no-auth service.
+func isBlockedStorageTarget(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 type localDirectoryListing struct {
@@ -515,7 +568,11 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
@@ -557,20 +614,46 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
 		return
 	}
+	channel, ok := s.eventBus.Subscribe()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("事件订阅连接数已达上限"))
+		return
+	}
+	defer s.eventBus.Unsubscribe(channel)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	channel := s.eventBus.Subscribe()
-	defer s.eventBus.Unsubscribe(channel)
-	_, _ = w.Write([]byte(": connected\n\n"))
-	flusher.Flush()
+
+	// ResponseController 让我们对每次写入设置写超时，从而丢弃已断开或读取过慢的
+	// 客户端，避免 goroutine 长期阻塞在 Flush 上；心跳保活并检测半开连接。
+	rc := http.NewResponseController(w)
+	write := func(data []byte) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
+		if _, err := w.Write(data); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !write([]byte(": connected\n\n")) {
+		return
+	}
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-ticker.C:
+			if !write([]byte(": ping\n\n")) {
+				return
+			}
 		case event := <-channel:
-			_, _ = w.Write(event.MarshalSSE())
-			flusher.Flush()
+			if !write(event.MarshalSSE()) {
+				return
+			}
 		}
 	}
 }
@@ -711,6 +794,13 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	defer r.Body.Close()
 	// 限制请求体大小，避免超大 body 占用内存（配合无鉴权的本地服务更稳妥）。
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	// 要求 Content-Type 为 application/json：浏览器对非简单请求会先发 CORS 预检，
+	// 而预检可被 CORS 策略拒绝；若放行 text/plain 等"简单"类型，跨站页面可在无预检的
+	// 情况下 POST JSON body（CSRF），命中各状态变更端点。即便本地部署也受此威胁。
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || media != "application/json" {
+		return fmt.Errorf("Content-Type 必须是 application/json")
+	}
 	return json.NewDecoder(r.Body).Decode(target)
 }
 
@@ -721,6 +811,13 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	// 5xx 多为内部错误（SQL schema/列名、DB 文件路径、OS 错误等），其原文不应回传
+	// 客户端；完整错误记录到服务端日志以便排查。4xx 通常是面向用户的校验信息。
+	log.Printf("httpapi %d: %v", status, err)
+	if status >= http.StatusInternalServerError {
+		writeJSON(w, status, map[string]string{"error": "internal error"})
+		return
+	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
@@ -786,11 +883,7 @@ func localDirectoryPath(value string) (string, error) {
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
-				return home, nil
-			}
-		}
+		// 不存在的路径直接返回错误，避免把家目录路径泄露给探测不存在路径的调用方。
 		return "", err
 	}
 	if !info.IsDir() {
