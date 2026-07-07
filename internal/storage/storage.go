@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
+	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
@@ -171,6 +172,7 @@ CREATE TABLE IF NOT EXISTS downloads (
 		parent_dir TEXT NOT NULL COLLATE NOCASE,
 		latest_release_time DATETIME,
 		media_count INTEGER,
+		last_seen_tweet_id TEXT NOT NULL DEFAULT '',
 		updated_at DATETIME NOT NULL,
 		UNIQUE(user_id, parent_dir),
 		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -218,6 +220,9 @@ CREATE TABLE IF NOT EXISTS downloads (
 	if err := s.addMissingColumns(); err != nil {
 		return err
 	}
+	if err := s.normalizeDownloadsMediaURL(); err != nil {
+		return err
+	}
 	if err := s.deduplicateDownloads(); err != nil {
 		return err
 	}
@@ -255,6 +260,16 @@ func (s *Store) addMissingColumns() error {
 			}
 		}
 	}
+	// user_entities：增量归档早停所需的 last_seen_tweet_id
+	var hasLastSeen int
+	if err := s.db.Get(&hasLastSeen, `SELECT COUNT(*) FROM pragma_table_info('user_entities') WHERE name = 'last_seen_tweet_id'`); err != nil {
+		return err
+	}
+	if hasLastSeen == 0 {
+		if _, err := s.db.Exec(`ALTER TABLE user_entities ADD COLUMN last_seen_tweet_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -269,6 +284,40 @@ func (s *Store) deduplicateDownloads() error {
 		GROUP BY tweet_id, media_url
 	  )`)
 	return err
+}
+
+// normalizeDownloadsMediaURL 规范化历史 downloads 记录中的 media_url（去掉 ?tag= 等易变参数），
+// 使旧记录与规范化后的去重键一致，随后由 deduplicateDownloads 清理因规范化产生的重复行。
+// 幂等：无待规范化的行时直接返回，不动索引。
+func (s *Store) normalizeDownloadsMediaURL() error {
+	type downloadRow struct {
+		ID       int64  `db:"id"`
+		MediaURL string `db:"media_url"`
+	}
+	var rows []downloadRow
+	if err := s.db.Select(&rows, `SELECT id, media_url FROM downloads WHERE tweet_id <> '' AND media_url <> ''`); err != nil {
+		return err
+	}
+	pending := make([]downloadRow, 0)
+	for _, r := range rows {
+		if downloader.NormalizeMediaURL(r.MediaURL) != r.MediaURL {
+			pending = append(pending, r)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	// 临时移除唯一索引，避免 UPDATE 触发 (tweet_id, media_url) 约束冲突；
+	// 随后 deduplicateDownloads 清理重复行，addMissingIndexes 重建索引。
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_downloads_tweet_media_unique`); err != nil {
+		return err
+	}
+	for _, r := range pending {
+		if _, err := s.db.Exec(`UPDATE downloads SET media_url = ? WHERE id = ?`, downloader.NormalizeMediaURL(r.MediaURL), r.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) addMissingIndexes() error {
@@ -1012,6 +1061,13 @@ func (s *Store) UpdateUserEntityMediaCount(ctx context.Context, id int64, mediaC
 	_, err := s.db.ExecContext(ctx, `
 UPDATE user_entities SET media_count = ?, updated_at = ? WHERE id = ?`,
 		mediaCount, time.Now().UTC(), id)
+	return err
+}
+
+func (s *Store) UpdateUserEntityLastSeenTweet(ctx context.Context, id int64, tweetID string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE user_entities SET last_seen_tweet_id = ?, updated_at = ? WHERE id = ?`,
+		tweetID, time.Now().UTC(), id)
 	return err
 }
 
