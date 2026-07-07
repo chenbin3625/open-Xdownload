@@ -13,7 +13,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 )
 
-func TestWebDAVSaveMediaRetriesConflictWithoutDeletingExistingFile(t *testing.T) {
+func TestWebDAVSaveMediaSkipsConflictWithoutDeletingExistingFile(t *testing.T) {
 	var mu sync.Mutex
 	deletes := []string{}
 	puts := []string{}
@@ -42,10 +42,6 @@ func TestWebDAVSaveMediaRetriesConflictWithoutDeletingExistingFile(t *testing.T)
 				w.WriteHeader(http.StatusPreconditionFailed)
 				return
 			}
-			if strings.HasSuffix(r.URL.Path, "/media(1).mp4") {
-				w.WriteHeader(http.StatusCreated)
-				return
-			}
 			http.Error(w, "unexpected PUT path", http.StatusInternalServerError)
 		case http.MethodDelete:
 			mu.Lock()
@@ -67,17 +63,17 @@ func TestWebDAVSaveMediaRetriesConflictWithoutDeletingExistingFile(t *testing.T)
 	if err != nil {
 		t.Fatalf("save media: %v", err)
 	}
-	if !strings.HasSuffix(result.Path, "/media(1).mp4") {
-		t.Fatalf("result path = %q, want suffixed conflict path", result.Path)
+	if !result.Skipped {
+		t.Fatal("skipped = false, want true")
 	}
-	if result.Bytes != 5 {
-		t.Fatalf("bytes = %d, want 5", result.Bytes)
+	if !strings.HasSuffix(result.Path, "/media.mp4") {
+		t.Fatalf("result path = %q, want original conflict path", result.Path)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(puts) != 2 {
-		t.Fatalf("PUT paths = %#v, want two attempts", puts)
+	if len(puts) != 1 {
+		t.Fatalf("PUT paths = %#v, want one attempt", puts)
 	}
 	for _, path := range deletes {
 		if strings.HasSuffix(path, "/media.mp4") {

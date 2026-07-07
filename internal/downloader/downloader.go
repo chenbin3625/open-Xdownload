@@ -17,8 +17,9 @@ import (
 )
 
 type Result struct {
-	Path  string
-	Bytes int64
+	Path    string
+	Bytes   int64
+	Skipped bool
 }
 
 type Downloader struct {
@@ -54,16 +55,35 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Result{}, err
 	}
+	maxFilenameLength := normalizedMaxFilenameLength(options.MaxFilenameLength)
+	if filename, ok := InferredFilename(rawURL, filenameHint, maxFilenameLength); ok {
+		if result, ok, err := existingFileResult(filepath.Join(dir, filename)); err != nil {
+			return Result{}, err
+		} else if ok {
+			return result, nil
+		}
+	}
 	response, err := d.Open(ctx, rawURL, options)
 	if err != nil {
 		return Result{}, err
 	}
 	defer response.Body.Close()
 
-	maxFilenameLength := normalizedMaxFilenameLength(options.MaxFilenameLength)
 	basePath := filepath.Join(dir, Filename(rawURL, filenameHint, response.Header.Get("Content-Type"), maxFilenameLength))
-	file, path, err := createUniqueFile(basePath, maxFilenameLength)
+	if result, ok, err := existingFileResult(basePath); err != nil {
+		return Result{}, err
+	} else if ok {
+		return result, nil
+	}
+	file, err := os.OpenFile(basePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
+		if os.IsExist(err) {
+			if result, ok, statErr := existingFileResult(basePath); statErr != nil {
+				return Result{}, statErr
+			} else if ok {
+				return result, nil
+			}
+		}
 		return Result{}, err
 	}
 
@@ -71,17 +91,17 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 	closeErr := file.Close()
 	if err != nil {
 		// 网络中断等情况下删除半截文件，避免残留垃圾并在重试时被 uniquePath 改名成 (1) 副本。
-		_ = os.Remove(path)
+		_ = os.Remove(basePath)
 		return Result{}, err
 	}
 	if closeErr != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(basePath)
 		return Result{}, closeErr
 	}
 	if !options.ModTime.IsZero() {
-		_ = os.Chtimes(path, time.Now(), options.ModTime)
+		_ = os.Chtimes(basePath, time.Now(), options.ModTime)
 	}
-	return Result{Path: path, Bytes: bytes}, nil
+	return Result{Path: basePath, Bytes: bytes}, nil
 }
 
 func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (*http.Response, error) {
@@ -163,6 +183,13 @@ func Filename(rawURL string, hint string, contentType string, maxFilenameLength 
 
 func filenameFromURL(rawURL string, hint string, contentType string, maxFilenameLength int) string {
 	return Filename(rawURL, hint, contentType, maxFilenameLength)
+}
+
+func InferredFilename(rawURL string, hint string, maxFilenameLength int) (string, bool) {
+	if mediaExtension(rawURL, "") == "" && normalizeMediaExtension(filepath.Ext(sanitizeFilename(hint))) == "" {
+		return "", false
+	}
+	return Filename(rawURL, hint, "", maxFilenameLength), true
 }
 
 func FilenameWithSuffix(filename string, suffix string, maxFilenameLength int) string {
@@ -347,4 +374,18 @@ func createUniqueFile(path string, maxFilenameLength int) (*os.File, string, err
 		}
 		return nil, "", err
 	}
+}
+
+func existingFileResult(path string) (Result, bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return Result{}, false, nil
+	}
+	if err != nil {
+		return Result{}, false, err
+	}
+	if info.IsDir() {
+		return Result{}, false, nil
+	}
+	return Result{Path: path, Bytes: info.Size(), Skipped: true}, true, nil
 }

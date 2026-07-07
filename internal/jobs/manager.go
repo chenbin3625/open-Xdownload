@@ -324,7 +324,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		job.Message = fmt.Sprintf("正在下载 %d/%d", index+1, len(tweet.Media))
 		job.Error = ""
 		m.save(saveCtx, job)
-		if err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
+		if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
 			if isCancellation(ctx, err) {
 				m.cancel(saveCtx, job)
 				return
@@ -525,24 +525,25 @@ func (m *Manager) download(ctx context.Context, saveCtx context.Context, job sto
 	if err != nil {
 		return err
 	}
-	return m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweetID, "", filenameHint, isPhotoURL(mediaURL), time.Time{})
+	_, err = m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweetID, "", filenameHint, isPhotoURL(mediaURL), time.Time{})
+	return err
 }
 
-func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time) error {
+func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time) (bool, error) {
 	target, err := filestore.New(cfg)
 	if err != nil {
-		return err
+		return false, err
 	}
 	release, err := m.lockMedia(ctx, tweetID, mediaURL)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if release != nil {
 		defer release()
 		if already, err := m.existingDownloadExists(ctx, saveCtx, target, tweetID, mediaURL); err != nil {
-			return err
+			return false, err
 		} else if already {
-			return nil
+			return true, nil
 		}
 	}
 	if dir == "" {
@@ -555,7 +556,10 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 		MaxFilenameLength: cfg.MaxFilenameLength,
 	})
 	if err != nil {
-		return err
+		return false, err
+	}
+	if result.Skipped {
+		return true, nil
 	}
 	_, err = m.store.CreateDownload(saveCtx, storage.DownloadRecord{
 		JobID:    job.ID,
@@ -564,7 +568,7 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 		FilePath: result.Path,
 		Bytes:    result.Bytes,
 	})
-	return err
+	return false, err
 }
 
 func (m *Manager) existingDownloadExists(ctx context.Context, saveCtx context.Context, target filestore.Store, tweetID string, mediaURL string) (bool, error) {
@@ -905,7 +909,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 			if updateDownloading != nil {
 				updateDownloading(fmt.Sprintf("下载 @%s 的媒体", fallbackUserName(user)))
 			}
-			err = m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, mediaIndex), media.Type == parser.MediaPhoto, tweet.CreatedAt)
+			skipped, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, mediaIndex), media.Type == parser.MediaPhoto, tweet.CreatedAt)
 			if err != nil {
 				if isCancellation(ctx, err) {
 					return stats, err
@@ -917,7 +921,11 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 				}
 				continue
 			}
-			stats.Downloaded++
+			if skipped {
+				stats.Skipped++
+			} else {
+				stats.Downloaded++
+			}
 		}
 	}
 	_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
@@ -1007,7 +1015,7 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 			if already, err := m.existingDownloadExists(ctx, saveCtx, target, tweet.ID, mediaURL); err == nil && already {
 				continue
 			}
-			if err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
+			if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
 				if !shouldRetryMediaError(err) {
 					continue
 				}

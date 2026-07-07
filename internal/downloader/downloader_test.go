@@ -1,9 +1,13 @@
 package downloader
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -56,5 +60,40 @@ func TestUniquePathKeepsConflictSuffixWithinMaxLength(t *testing.T) {
 	}
 	if filepath.Ext(base) != ".jpg" {
 		t.Fatalf("extension = %q, want .jpg: %q", filepath.Ext(base), base)
+	}
+}
+
+func TestDownloadWithOptionsSkipsExistingLocalFile(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("new media"))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "media.mp4")
+	if err := os.WriteFile(existing, []byte("existing media"), 0o644); err != nil {
+		t.Fatalf("seed existing file: %v", err)
+	}
+
+	result, err := New().DownloadWithOptions(context.Background(), server.URL+"/movie.mp4", dir, "media", Options{})
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if !result.Skipped {
+		t.Fatal("skipped = false, want true")
+	}
+	if result.Path != existing {
+		t.Fatalf("path = %q, want %q", result.Path, existing)
+	}
+	if result.Bytes != int64(len("existing media")) {
+		t.Fatalf("bytes = %d, want existing file size", result.Bytes)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("HTTP requests = %d, want 0", requests.Load())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "media(1).mp4")); !os.IsNotExist(err) {
+		t.Fatalf("duplicate file was created: %v", err)
 	}
 }
