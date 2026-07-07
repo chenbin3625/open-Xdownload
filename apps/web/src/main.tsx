@@ -16,14 +16,26 @@ createRoot(document.getElementById("root")!).render(
       locale={zhCN}
       theme={{
         token: {
-          borderRadius: 6,
-          colorPrimary: "#1677ff",
+          borderRadius: 8,
+          colorBgContainer: "#ffffff",
+          colorBgLayout: "#f4f7fb",
+          colorBorder: "#d9e2ef",
+          colorBorderSecondary: "#e8edf5",
+          colorError: "#d14343",
+          colorInfo: "#2563eb",
+          colorPrimary: "#2563eb",
+          colorSuccess: "#168a4a",
+          colorText: "#18212f",
+          colorTextSecondary: "#64748b",
+          colorWarning: "#b7791f",
+          controlHeight: 34,
+          controlHeightLG: 42,
           fontFamily:
             'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         },
         components: {
           Layout: {
-            bodyBg: "#f5f7fb",
+            bodyBg: "#f4f7fb",
             siderBg: "#ffffff",
           },
         },
