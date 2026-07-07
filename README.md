@@ -58,6 +58,8 @@ services:
       OPEN_XDOWNLOAD_DATA_DIR: /data
       OPEN_XDOWNLOAD_DOWNLOAD_DIR: /downloads
       TZ: Asia/Shanghai
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
     volumes:
       - ./data:/data
       - ./downloads:/downloads
@@ -101,10 +103,21 @@ docker run -d \
   -e OPEN_XDOWNLOAD_DATA_DIR=/data \
   -e OPEN_XDOWNLOAD_DOWNLOAD_DIR=/downloads \
   -e TZ=Asia/Shanghai \
+  -e PUID="$(id -u)" \
+  -e PGID="$(id -g)" \
   -v "$PWD/data:/data" \
   -v "$PWD/downloads:/downloads" \
   chenbin3625/open-xdownload:latest
 ```
+
+Linux 宿主机建议让 `PUID` / `PGID` 与当前用户一致，避免挂载目录里的数据库和下载文件变成无法直接读写的容器用户文件。Compose 示例默认使用 `1000:1000`；如果你的用户不是这个 UID/GID，可以在同目录新建 `.env`：
+
+```env
+PUID=1000
+PGID=1000
+```
+
+如果历史版本已经生成了错误归属的文件，新镜像启动时会在 `/data` 和 `/downloads` 目录所有者不匹配时自动修正；目录所有者已经正确但内部旧文件仍有问题时，可临时增加 `OPEN_XDOWNLOAD_FORCE_CHOWN=1` 启动一次。
 
 ## 二进制运行
 
