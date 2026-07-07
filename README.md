@@ -127,7 +127,7 @@ PGID=1000
 ./open-xdownload
 ```
 
-默认监听 `127.0.0.1:8787`，数据目录为当前目录下的 `data`，下载目录为当前目录下的 `downloads`。
+默认监听 `0.0.0.0:8787`，数据目录为当前目录下的 `data`，下载目录为当前目录下的 `downloads`。
 
 如需指定路径：
 
@@ -141,7 +141,7 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `127.0.0.1:8787` | HTTP 监听地址。Docker 内需要使用 `0.0.0.0:8787` 才能通过端口映射访问。 |
+| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `0.0.0.0:8787` | HTTP 监听地址。如只在本机使用，可设为 `127.0.0.1:8787`。 |
 | `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite 数据库目录，数据库文件为 `open-xdownload.db`。 |
 | `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | 前端静态文件目录；目录不存在时使用二进制内置的 Web UI。 |
 | 无 | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | 当前目录下的 `downloads` | 首次生成配置时使用的默认下载目录。 |
@@ -252,7 +252,7 @@ downloads/
 
 ## 安全说明
 
-open-Xdownload 面向个人本地归档场景，服务本身没有内置用户登录和访问鉴权。建议只绑定本机地址，或放在带鉴权的反向代理后面。
+open-Xdownload 面向个人本地归档场景，服务本身没有内置用户登录和访问鉴权。默认监听所有网卡；如只在本机使用，建议通过 `-addr 127.0.0.1:8787` 或 `OPEN_XDOWNLOAD_ADDR=127.0.0.1:8787` 只绑定本机地址，或放在带鉴权的反向代理后面。
 
 Docker Compose 示例中的端口映射为：
 

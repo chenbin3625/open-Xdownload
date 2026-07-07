@@ -41,11 +41,11 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-echo "Starting backend:  http://127.0.0.1:8787"
+echo "Starting backend:  http://0.0.0.0:8787"
 go run ./cmd/server &
 backend_pid=$!
 
-echo "Starting frontend: http://127.0.0.1:5173"
+echo "Starting frontend: http://0.0.0.0:5173"
 npm --prefix "$WEB_DIR" run dev &
 frontend_pid=$!
 
