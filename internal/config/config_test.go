@@ -23,6 +23,50 @@ func TestRedactedUsesStableMask(t *testing.T) {
 	}
 }
 
+func TestRedactedURLUserinfoRoundTrip(t *testing.T) {
+	redactCases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"proxy with user:pass", "http://alice:s3cret@proxy.local:3128", "http://" + SecretPlaceholder + "@proxy.local:3128"},
+		{"webdav with user:pass and path", "https://alice:s3cret@webdav.example/dav/files", "https://" + SecretPlaceholder + "@webdav.example/dav/files"},
+		{"url without userinfo unchanged", "http://proxy.local:3128", "http://proxy.local:3128"},
+		{"empty url", "", ""},
+	}
+	for _, tc := range redactCases {
+		t.Run("redact/"+tc.name, func(t *testing.T) {
+			got := redactURLUserinfo(tc.url)
+			if got != tc.want {
+				t.Fatalf("redactURLUserinfo(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+
+	restoreCases := []struct {
+		name     string
+		redacted string
+		stored   string
+		want     string
+	}{
+		{"placeholder restores stored creds", "http://" + SecretPlaceholder + "@proxy.local:3128", "http://alice:s3cret@proxy.local:3128", "http://alice:s3cret@proxy.local:3128"},
+		{"placeholder with no stored creds drops userinfo", "http://" + SecretPlaceholder + "@proxy.local:3128", "http://proxy.local:3128", "http://proxy.local:3128"},
+		{"placeholder with changed host drops userinfo", "http://" + SecretPlaceholder + "@evil.local:3128", "http://alice:s3cret@proxy.local:3128", "http://evil.local:3128"},
+		{"placeholder with changed scheme drops userinfo", "https://" + SecretPlaceholder + "@proxy.local:3128", "http://alice:s3cret@proxy.local:3128", "https://proxy.local:3128"},
+		{"edited url with new creds kept", "http://bob:newpass@proxy.local:3128", "http://alice:s3cret@proxy.local:3128", "http://bob:newpass@proxy.local:3128"},
+		{"edited url without creds kept", "http://proxy.local:3128", "http://alice:s3cret@proxy.local:3128", "http://proxy.local:3128"},
+		{"empty", "", "", ""},
+	}
+	for _, tc := range restoreCases {
+		t.Run("restore/"+tc.name, func(t *testing.T) {
+			got := RestoreURLUserinfo(tc.redacted, tc.stored)
+			if got != tc.want {
+				t.Fatalf("RestoreURLUserinfo(%q, %q) = %q, want %q", tc.redacted, tc.stored, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNormalizedFileNamingDefaultsAndLimits(t *testing.T) {
 	cfg := AppConfig{
 		FileNamingMode:    "unknown",

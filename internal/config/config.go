@@ -1,11 +1,18 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 )
+
+// SecretPlaceholder is the sentinel substituted for secret values when
+// redacting a config for display. Callers that round-trip a redacted config
+// back through the API (mergeSecretPlaceholders / RestoreURLUserinfo) restore
+// the real value when a submitted field still equals this placeholder.
+const SecretPlaceholder = "********"
 
 type FileNamingMode string
 type StorageType string
@@ -123,6 +130,8 @@ func (cfg AppConfig) Redacted() AppConfig {
 	cfg.AdditionalCookies = redact(cfg.AdditionalCookies)
 	cfg.SMBPassword = redact(cfg.SMBPassword)
 	cfg.WebDAVPassword = redact(cfg.WebDAVPassword)
+	cfg.ProxyURL = redactURLUserinfo(cfg.ProxyURL)
+	cfg.WebDAVURL = redactURLUserinfo(cfg.WebDAVURL)
 	return cfg
 }
 
@@ -141,7 +150,84 @@ func redact(value string) string {
 	if value == "" {
 		return ""
 	}
-	return "********"
+	return SecretPlaceholder
+}
+
+// redactURLUserinfo strips embedded credentials from a URL for display,
+// replacing the userinfo with SecretPlaceholder while leaving the host and
+// path visible. URLs without userinfo (and unparseable values) are returned
+// unchanged so non-credential URLs are not re-encoded. The placeholder is
+// spliced in manually because url.String() percent-encodes "*" in userinfo,
+// which obscures the host in the UI.
+func redactURLUserinfo(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil || u.Scheme == "" {
+		return rawURL
+	}
+	var b strings.Builder
+	b.WriteString(u.Scheme)
+	b.WriteString("://")
+	b.WriteString(SecretPlaceholder)
+	b.WriteString("@")
+	b.WriteString(u.Host)
+	if p := u.EscapedPath(); p != "" {
+		b.WriteString(p)
+	}
+	if u.RawQuery != "" {
+		b.WriteString("?")
+		b.WriteString(u.RawQuery)
+	}
+	if u.Fragment != "" {
+		b.WriteString("#")
+		b.WriteString(u.EscapedFragment())
+	}
+	return b.String()
+}
+
+// SameURLAuthority reports whether two URLs point at the same scheme/host/port.
+// It intentionally ignores path/query so a user can edit the WebDAV path on the
+// same server without losing saved credentials.
+func SameURLAuthority(a, b string) bool {
+	au, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	bu, err := url.Parse(b)
+	if err != nil {
+		return false
+	}
+	return au.Scheme != "" &&
+		strings.EqualFold(au.Scheme, bu.Scheme) &&
+		strings.EqualFold(au.Host, bu.Host)
+}
+
+// RestoreURLUserinfo reverses redactURLUserinfo when a redacted config is
+// submitted back for saving. If redacted's userinfo is the placeholder and the
+// URL still targets the same scheme/host/port, the stored URL's userinfo is
+// substituted back in; otherwise redacted is returned unchanged (the user edited
+// the URL, possibly with new credentials). A placeholder with no matching stored
+// userinfo is dropped entirely so credentials are never replayed to a new host.
+func RestoreURLUserinfo(redacted, stored string) string {
+	if redacted == "" {
+		return ""
+	}
+	ru, err := url.Parse(redacted)
+	if err != nil || ru.User == nil {
+		return redacted
+	}
+	if ru.User.Username() != SecretPlaceholder {
+		return redacted
+	}
+	su, err := url.Parse(stored)
+	if err != nil || su.User == nil || !SameURLAuthority(redacted, stored) {
+		ru.User = nil
+		return ru.String()
+	}
+	ru.User = su.User
+	return ru.String()
 }
 
 func cleanSlashPath(value string) string {

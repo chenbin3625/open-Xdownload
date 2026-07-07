@@ -20,7 +20,10 @@ import (
 
 var (
 	tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?(?:x|twitter)\.com/([^/?#]+)/status/([0-9]+)`)
-	mediaURLPattern = regexp.MustCompile(`https?://[^\s"'<>\\]*(?:pbs\.twimg\.com|video\.twimg\.com|twimg\.com)[^\s"'<>\\]*`)
+	// 仅匹配主机为 twimg.com（及其子域 pbs./video. 等）的 URL：主机部分必须紧跟 :// 之后，
+	// 避免 `http://攻击者/?pbs.twimg.com=x.mp4` 这类把 twimg.com 放在 query 里的伪造 URL
+	// 被提取并随后由 downloader 拉取（SSRF，如云元数据端点）。
+	mediaURLPattern = regexp.MustCompile(`https?://(?:[a-z0-9-]+\.)*twimg\.com(?:/[^\s"'<>\\]*)?`)
 )
 
 const syndicationTweetResultURL = "https://cdn.syndication.twimg.com/tweet-result"
@@ -210,7 +213,10 @@ func collectTweetResultMedia(result gjson.Result, items *[]Media, seen map[strin
 }
 
 func unwrapTweetResult(result gjson.Result) gjson.Result {
-	for {
+	// 限制下钻深度，防止构造的深层嵌套 {"result":{"result":...}} payload 让循环 O(depth)、
+	// 每轮 Get 再 O(depth)（O(depth^2)）而挂起解析器。与兄弟递归 helper 的深度上限一致。
+	const maxDepth = 8
+	for depth := 0; depth < maxDepth; depth++ {
 		if result.Get("__typename").String() == "TweetWithVisibilityResults" && result.Get("tweet").Exists() {
 			result = result.Get("tweet")
 			continue
@@ -221,6 +227,7 @@ func unwrapTweetResult(result gjson.Result) gjson.Result {
 		}
 		return result
 	}
+	return result
 }
 
 func (s *Service) parseSyndicationTweet(ctx context.Context, rawURL string, fallbackUsername string, fallbackID string, options ParseOptions) (TweetData, error) {
@@ -570,6 +577,15 @@ func parseVariantList(variants gjson.Result) []MediaVariant {
 }
 
 func mediaFromURL(rawURL string) Media {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return Media{}
+	}
+	// 仅接受 twimg.com 域下的媒体 URL，避免经伪造推文 card 内容注入的内网/任意主机 URL
+	// 被提取并由 downloader 拉取（SSRF，如云元数据 169.254.169.254）。
+	if !isTwimgHost(parsed.Host) {
+		return Media{}
+	}
 	lower := strings.ToLower(rawURL)
 	kind := MediaPhoto
 	if strings.Contains(lower, ".mp4") {
@@ -594,13 +610,22 @@ func mediaFromURL(rawURL string) Media {
 	return media
 }
 
+// isTwimgHost 报告 host 是否为 twimg.com 或其子域（pbs.twimg.com / video.twimg.com 等）。
+func isTwimgHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
+}
+
 func isPhotoMediaURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	host := strings.ToLower(parsed.Host)
-	if strings.Contains(host, "pbs.twimg.com") {
+	// 图片媒体同样要求 twimg.com 主机，避免任意主机带图片扩展名的 URL 被当作媒体。
+	if !isTwimgHost(parsed.Host) {
+		return false
+	}
+	if strings.Contains(strings.ToLower(parsed.Host), "pbs.twimg.com") {
 		return true
 	}
 	switch strings.ToLower(pathExtension(parsed.Path)) {

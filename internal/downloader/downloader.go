@@ -56,13 +56,6 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		return Result{}, err
 	}
 	maxFilenameLength := normalizedMaxFilenameLength(options.MaxFilenameLength)
-	if filename, ok := InferredFilename(rawURL, filenameHint, maxFilenameLength); ok {
-		if result, ok, err := existingFileResult(filepath.Join(dir, filename)); err != nil {
-			return Result{}, err
-		} else if ok {
-			return result, nil
-		}
-	}
 	response, err := d.Open(ctx, rawURL, options)
 	if err != nil {
 		return Result{}, err
@@ -70,38 +63,133 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 	defer response.Body.Close()
 
 	basePath := filepath.Join(dir, Filename(rawURL, filenameHint, response.Header.Get("Content-Type"), maxFilenameLength))
-	if result, ok, err := existingFileResult(basePath); err != nil {
-		return Result{}, err
-	} else if ok {
-		return result, nil
-	}
-	file, err := os.OpenFile(basePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	// 已存在且大小与 Content-Length 一致 → 视为完整下载，跳过；大小不一致说明是崩溃/中断
+	// 留下的残缺文件，需要重新下载（覆盖）。Content-Length 未知时保守按已存在跳过。
+	existing, complete, replaceExisting, err := existingFileState(basePath, response.ContentLength)
 	if err != nil {
-		if os.IsExist(err) {
-			if result, ok, statErr := existingFileResult(basePath); statErr != nil {
-				return Result{}, statErr
-			} else if ok {
-				return result, nil
-			}
-		}
 		return Result{}, err
 	}
-
-	bytes, err := io.Copy(file, response.Body)
-	closeErr := file.Close()
+	if complete {
+		return existing, nil
+	}
+	// 原子写入：先写临时文件，fsync 后以不覆盖已有文件的方式发布到最终路径，避免
+	// 崩溃留下被当作完整下载的残缺文件。临时文件名带随机串，避免并发下载互相覆盖。
+	tempFile, err := os.CreateTemp(dir, "."+filepath.Base(basePath)+".*.part")
 	if err != nil {
-		// 网络中断等情况下删除半截文件，避免残留垃圾并在重试时被 uniquePath 改名成 (1) 副本。
-		_ = os.Remove(basePath)
 		return Result{}, err
+	}
+	tempPath := tempFile.Name()
+	if err := tempFile.Chmod(0o644); err != nil {
+		_ = tempFile.Close()
+		_ = os.Remove(tempPath)
+		return Result{}, err
+	}
+	bytes, copyErr := io.Copy(tempFile, response.Body)
+	syncErr := tempFile.Sync()
+	closeErr := tempFile.Close()
+	if copyErr != nil {
+		_ = os.Remove(tempPath)
+		return Result{}, copyErr
+	}
+	if syncErr != nil {
+		_ = os.Remove(tempPath)
+		return Result{}, syncErr
 	}
 	if closeErr != nil {
-		_ = os.Remove(basePath)
+		_ = os.Remove(tempPath)
 		return Result{}, closeErr
 	}
-	if !options.ModTime.IsZero() {
-		_ = os.Chtimes(basePath, time.Now(), options.ModTime)
+	result, skipped, err := publishTempFile(tempPath, basePath, bytes, response.ContentLength, maxFilenameLength, replaceExisting)
+	if err != nil {
+		_ = os.Remove(tempPath)
+		return Result{}, err
 	}
-	return Result{Path: basePath, Bytes: bytes}, nil
+	if !options.ModTime.IsZero() {
+		_ = os.Chtimes(result.Path, time.Now(), options.ModTime)
+	}
+	if skipped {
+		return result, nil
+	}
+	return result, nil
+}
+
+// existingFileState reports whether path already holds a complete download. If
+// path existed before this download and its size mismatches contentLength, the
+// caller may replace it as a stale partial file. Files that appear later during
+// this download are treated as filename conflicts instead of partials.
+func existingFileState(path string, contentLength int64) (Result, bool, bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return Result{}, false, false, nil
+	}
+	if err != nil {
+		return Result{}, false, false, err
+	}
+	if info.IsDir() {
+		return Result{}, false, false, nil
+	}
+	if contentLength >= 0 && info.Size() != contentLength {
+		return Result{}, false, true, nil
+	}
+	return Result{Path: path, Bytes: info.Size(), Skipped: true}, true, false, nil
+}
+
+func existingCompleteResult(path string, contentLength int64) (Result, bool, error) {
+	result, complete, _, err := existingFileState(path, contentLength)
+	return result, complete, err
+}
+
+func publishTempFile(tempPath string, basePath string, bytes int64, contentLength int64, maxFilenameLength int, replaceBase bool) (Result, bool, error) {
+	triedReplaceBase := false
+	for index := 0; ; index++ {
+		candidate := suffixedPath(basePath, index, maxFilenameLength)
+		err := os.Link(tempPath, candidate)
+		if err == nil {
+			if err := os.Remove(tempPath); err != nil {
+				return Result{}, false, err
+			}
+			return Result{Path: candidate, Bytes: bytes}, false, nil
+		}
+		if !os.IsExist(err) {
+			return Result{}, false, err
+		}
+		if index == 0 && replaceBase && !triedReplaceBase {
+			result, complete, removed, err := removeIncompleteLocalTarget(candidate, contentLength)
+			if err != nil {
+				return Result{}, false, err
+			}
+			if complete {
+				_ = os.Remove(tempPath)
+				return result, true, nil
+			}
+			triedReplaceBase = true
+			if removed {
+				index--
+			}
+		}
+	}
+}
+
+func removeIncompleteLocalTarget(path string, contentLength int64) (Result, bool, bool, error) {
+	result, complete, replace, err := existingFileState(path, contentLength)
+	if err != nil || complete || !replace {
+		return result, complete, false, err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return Result{}, false, false, err
+	}
+	return Result{}, false, true, nil
+}
+
+func suffixedPath(path string, index int, maxFilenameLength int) string {
+	if index == 0 {
+		return path
+	}
+	dir := filepath.Dir(path)
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(filepath.Base(path), ext)
+	suffix := fmt.Sprintf("(%d)", index)
+	return filepath.Join(dir, composeFilename(stem, ext, suffix, maxFilenameLength))
 }
 
 func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (*http.Response, error) {
@@ -374,39 +462,4 @@ func uniquePath(path string, maxFilenameLength int) (string, error) {
 			return "", err
 		}
 	}
-}
-
-func createUniqueFile(path string, maxFilenameLength int) (*os.File, string, error) {
-	dir := filepath.Dir(path)
-	ext := filepath.Ext(path)
-	stem := strings.TrimSuffix(filepath.Base(path), ext)
-	for index := 0; ; index++ {
-		candidate := path
-		if index > 0 {
-			suffix := fmt.Sprintf("(%d)", index)
-			candidate = filepath.Join(dir, composeFilename(stem, ext, suffix, maxFilenameLength))
-		}
-		file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err == nil {
-			return file, candidate, nil
-		}
-		if os.IsExist(err) {
-			continue
-		}
-		return nil, "", err
-	}
-}
-
-func existingFileResult(path string) (Result, bool, error) {
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return Result{}, false, nil
-	}
-	if err != nil {
-		return Result{}, false, err
-	}
-	if info.IsDir() {
-		return Result{}, false, nil
-	}
-	return Result{Path: path, Bytes: info.Size(), Skipped: true}, true, nil
 }

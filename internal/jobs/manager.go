@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -44,9 +47,9 @@ type Manager struct {
 	wg         sync.WaitGroup
 	retryMu    sync.Mutex
 	userMu     sync.Mutex
-	userLocks  map[string]chan struct{}
+	userLocks  map[string]*keyLock
 	mediaMu    sync.Mutex
-	mediaLocks map[string]chan struct{}
+	mediaLocks map[string]*keyLock
 	xPoolMu    sync.Mutex
 	xPoolKey   string
 	cachedPool *xclient.Pool
@@ -60,8 +63,8 @@ func NewManager(store *storage.Store, parserService *parser.Service, eventBus *E
 		downloader: downloader.New(),
 		wake:       make(chan struct{}, 1),
 		active:     make(map[int64]context.CancelFunc),
-		userLocks:  make(map[string]chan struct{}),
-		mediaLocks: make(map[string]chan struct{}),
+		userLocks:  make(map[string]*keyLock),
+		mediaLocks: make(map[string]*keyLock),
 	}
 }
 
@@ -86,6 +89,16 @@ func (m *Manager) Stop() {
 	select {
 	case <-done:
 	case <-time.After(15 * time.Second):
+		// 仍有任务未退出（通常是个别不尊重 ctx 的阻塞路径）。记录下来便于排查；
+		// 进程即将退出，残留 goroutine 会随之结束。main 会在 Stop 返回后关闭 DB，
+		// 这些任务的 m.save(Background) 可能写到已关闭的 DB——错误被 m.save 吞掉。
+		m.mu.Lock()
+		ids := make([]int64, 0, len(m.active))
+		for id := range m.active {
+			ids = append(ids, id)
+		}
+		m.mu.Unlock()
+		log.Printf("manager.Stop: %d task(s) did not drain within 15s: %v", len(ids), ids)
 	}
 }
 
@@ -247,7 +260,16 @@ func (m *Manager) startJob(parent context.Context, job storage.Job) {
 
 	go func() {
 		defer m.wg.Done()
+		defer cancel()
 		defer m.finishJob(job.ID)
+		// 处理不可信外部数据（推文/SMB/WebDAV 响应）时第三方库可能 panic；recover 防止
+		// 单个坏 payload 崩溃整个进程并把任务留在 resolving/downloading。
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in job %d: %v\n%s", job.ID, r, debug.Stack())
+				m.fail(context.Background(), job, "", fmt.Errorf("internal panic: %v", r))
+			}
+		}()
 		m.process(jobCtx, context.Background(), job)
 	}()
 }
@@ -260,7 +282,7 @@ func (m *Manager) finishJob(id int64) {
 
 func (m *Manager) process(ctx context.Context, saveCtx context.Context, job storage.Job) {
 	if m.jobCanceled(ctx, saveCtx, job.ID) {
-		m.cancel(saveCtx, job)
+		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
 	m.save(saveCtx, job)
@@ -296,7 +318,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 	tweet, err := m.parser.ParseTweetLinkWithOptions(ctx, job.Input, parserOptionsFromConfig(cfg))
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
@@ -312,7 +334,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 	}
 	for index, media := range tweet.Media {
 		if m.jobCanceled(ctx, saveCtx, job.ID) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		mediaURL := bestMediaURL(media)
@@ -326,7 +348,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		m.save(saveCtx, job)
 		if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
 			if isCancellation(ctx, err) {
-				m.cancel(saveCtx, job)
+				m.handleInterrupt(ctx, saveCtx, job)
 				return
 			}
 			m.fail(saveCtx, job, mediaURL, err)
@@ -334,7 +356,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		}
 	}
 	if m.jobCanceled(ctx, saveCtx, job.ID) {
-		m.cancel(saveCtx, job)
+		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
 	job.Status = storage.JobCompleted
@@ -344,22 +366,35 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 	m.save(saveCtx, job)
 }
 
+// singleURLFilenameHint derives a filename hint from the media URL's last path
+// segment so distinct single-URL downloads get distinct filenames instead of
+// all colliding on "media" (which silently dropped the second distinct media
+// as a "duplicate"). Falls back to "media" when the URL has no usable basename.
+func singleURLFilenameHint(mediaURL string) string {
+	if u, err := url.Parse(mediaURL); err == nil && u.Path != "" {
+		if base := path.Base(u.Path); base != "" && base != "/" && base != "." {
+			return base
+		}
+	}
+	return "media"
+}
+
 func (m *Manager) processMediaURL(ctx context.Context, saveCtx context.Context, job storage.Job, mediaURL string, tweetID string) {
 	job.Status = storage.JobDownloading
 	job.Progress = 0.25
 	job.Message = "正在下载媒体"
 	job.Error = ""
 	m.save(saveCtx, job)
-	if err := m.download(ctx, saveCtx, job, mediaURL, tweetID, "media"); err != nil {
+	if err := m.download(ctx, saveCtx, job, mediaURL, tweetID, singleURLFilenameHint(mediaURL)); err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, mediaURL, err)
 		return
 	}
 	if m.jobCanceled(ctx, saveCtx, job.ID) {
-		m.cancel(saveCtx, job)
+		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
 	job.Status = storage.JobCompleted
@@ -378,7 +413,7 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 	user, err := pool.Primary().GetUserByInput(ctx, job.Input)
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
@@ -387,13 +422,17 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, []xclient.User{user}, nil, 0.12, 0.94)
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
 		return
 	}
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, false)
+	if m.jobCanceled(ctx, saveCtx, job.ID) {
+		m.handleInterrupt(ctx, saveCtx, job)
+		return
+	}
 	m.complete(saveCtx, job, completionMessage(stats, retried))
 }
 
@@ -410,7 +449,7 @@ func (m *Manager) processFailedRetry(ctx context.Context, saveCtx context.Contex
 	m.save(saveCtx, job)
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, true)
 	if m.jobCanceled(ctx, saveCtx, job.ID) {
-		m.cancel(saveCtx, job)
+		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
 	remaining, err := m.store.CountFailedTweets(saveCtx)
@@ -435,7 +474,7 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 	list, err := client.GetListByID(ctx, strings.TrimSpace(job.Input))
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
@@ -456,7 +495,7 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 	members, err := client.GetListMembers(ctx, list)
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
@@ -465,13 +504,17 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, members, &listEntity, 0.18, 0.94)
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
 		return
 	}
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, false)
+	if m.jobCanceled(ctx, saveCtx, job.ID) {
+		m.handleInterrupt(ctx, saveCtx, job)
+		return
+	}
 	m.complete(saveCtx, job, completionMessage(stats, retried))
 }
 
@@ -485,7 +528,7 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 	owner, err := client.GetUserByInput(ctx, job.Input)
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
@@ -501,7 +544,7 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 	members, err := client.GetFollowing(ctx, owner)
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
@@ -510,13 +553,17 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, members, nil, 0.18, 0.94)
 	if err != nil {
 		if isCancellation(ctx, err) {
-			m.cancel(saveCtx, job)
+			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
 		m.fail(saveCtx, job, "", err)
 		return
 	}
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, false)
+	if m.jobCanceled(ctx, saveCtx, job.ID) {
+		m.handleInterrupt(ctx, saveCtx, job)
+		return
+	}
 	m.complete(saveCtx, job, completionMessage(stats, retried))
 }
 
@@ -585,26 +632,58 @@ func (m *Manager) existingDownloadExists(ctx context.Context, saveCtx context.Co
 	return target.Exists(ctx, record.FilePath)
 }
 
+// keyLock 是按 key 串行化的令牌锁，带 waiter 计数（持有者 + 等待者）。在无人持有时从
+// map 中淘汰，避免 mediaLocks/userLocks 随处理过的媒体/用户数无界增长。计数在父 mutex
+// 下增减，确保淘汰时不会有等待者滞留在旧 channel 上。
+type keyLock struct {
+	ch      chan struct{}
+	waiters int
+}
+
 func (m *Manager) lockMedia(ctx context.Context, tweetID string, mediaURL string) (func(), error) {
 	if tweetID == "" || mediaURL == "" {
 		return nil, nil
 	}
 	key := tweetID + "\x00" + mediaURL
 	m.mediaMu.Lock()
-	lock, ok := m.mediaLocks[key]
+	lk, ok := m.mediaLocks[key]
 	if !ok {
-		lock = make(chan struct{}, 1)
-		lock <- struct{}{}
-		m.mediaLocks[key] = lock
+		lk = &keyLock{ch: make(chan struct{}, 1)}
+		lk.ch <- struct{}{}
+		m.mediaLocks[key] = lk
 	}
+	lk.waiters++
 	m.mediaMu.Unlock()
 
 	select {
-	case <-lock:
-		return func() { lock <- struct{}{} }, nil
+	case <-lk.ch:
+		return func() { m.releaseKeyLock(&m.mediaMu, m.mediaLocks, key, lk) }, nil
 	case <-ctx.Done():
+		m.abortKeyLock(&m.mediaMu, m.mediaLocks, key, lk)
 		return nil, ctx.Err()
 	}
+}
+
+// releaseKeyLock 归还令牌；若已无等待者则从 map 淘汰该 key，否则把令牌交给下一个等待者。
+func (m *Manager) releaseKeyLock(mu *sync.Mutex, table map[string]*keyLock, key string, lk *keyLock) {
+	mu.Lock()
+	lk.waiters--
+	if lk.waiters <= 0 {
+		delete(table, key)
+	} else {
+		lk.ch <- struct{}{}
+	}
+	mu.Unlock()
+}
+
+// abortKeyLock 在等待者因 ctx 取消而放弃时递减计数，并在无人持有/等待时淘汰。
+func (m *Manager) abortKeyLock(mu *sync.Mutex, table map[string]*keyLock, key string, lk *keyLock) {
+	mu.Lock()
+	lk.waiters--
+	if lk.waiters <= 0 {
+		delete(table, key)
+	}
+	mu.Unlock()
 }
 
 type archiveStats struct {
@@ -727,6 +806,12 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in archiveUsers worker: %v\n%s", r, debug.Stack())
+					setErr(fmt.Errorf("internal panic: %v", r))
+				}
+			}()
 			for task := range taskCh {
 				if workCtx.Err() != nil {
 					return
@@ -768,6 +853,11 @@ sendLoop:
 	errMu.Unlock()
 	if err != nil {
 		return stats, err
+	}
+	// 取消（用户取消或关停）时 firstErr 可能为 nil（worker 经 workCtx.Err() 快路径退出
+	// 未调 setErr）；返回 workCtx.Err() 让调用方的取消判定正常工作。
+	if workCtx.Err() != nil {
+		return stats, workCtx.Err()
 	}
 	return stats, nil
 }
@@ -934,7 +1024,11 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		}
 	}
 	if len(tweets) > 0 && stats.Failed == failedBefore {
-		_ = m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, tweets[0].ID)
+		// 增量归档早停游标：写入失败需上抛日志（而非静默吞掉），否则下次归档会因游标
+		// 缺失而全量重扫，浪费 X API 配额。
+		if err := m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, tweets[0].ID); err != nil {
+			log.Printf("update user entity %d last_seen_tweet_id: %v", entity.ID, err)
+		}
 	}
 	_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
 	return stats, nil
@@ -945,23 +1039,27 @@ func (m *Manager) lockUser(ctx context.Context, userID string) (func(), bool, er
 		return func() {}, false, nil
 	}
 	m.userMu.Lock()
-	lock, ok := m.userLocks[userID]
+	lk, ok := m.userLocks[userID]
 	if !ok {
-		lock = make(chan struct{}, 1)
-		lock <- struct{}{}
-		m.userLocks[userID] = lock
+		lk = &keyLock{ch: make(chan struct{}, 1)}
+		lk.ch <- struct{}{}
+		m.userLocks[userID] = lk
 	}
+	lk.waiters++
 	m.userMu.Unlock()
 
+	// 非阻塞尝试：立即拿到说明该用户当前未被归档。
 	select {
-	case <-lock:
-		return func() { lock <- struct{}{} }, false, nil
+	case <-lk.ch:
+		return func() { m.releaseKeyLock(&m.userMu, m.userLocks, userID, lk) }, false, nil
 	default:
 	}
+	// 需要等待：该用户正在被归档（"已在运行"）。
 	select {
-	case <-lock:
-		return func() { lock <- struct{}{} }, true, nil
+	case <-lk.ch:
+		return func() { m.releaseKeyLock(&m.userMu, m.userLocks, userID, lk) }, true, nil
 	case <-ctx.Done():
+		m.abortKeyLock(&m.userMu, m.userLocks, userID, lk)
 		return nil, true, ctx.Err()
 	}
 }
@@ -1188,6 +1286,17 @@ func (m *Manager) cancel(ctx context.Context, job storage.Job) {
 	job.Message = "已取消"
 	job.Error = ""
 	m.save(ctx, job)
+}
+
+// handleInterrupt 收尾被取消或因关停中断的任务。仅当 DB 状态为 canceled（用户主动取消）
+// 时持久化 canceled；进程关停（ctx 取消但 DB 未取消）时保留 Downloading/Resolving 中间
+// 状态，由 RequeueInterruptedJobs 在下次启动恢复——避免优雅关停的任务被标记为已取消而
+// 不再重排（反而比硬杀更不可恢复）。
+func (m *Manager) handleInterrupt(ctx context.Context, saveCtx context.Context, job storage.Job) {
+	current, err := m.store.GetJob(saveCtx, job.ID)
+	if err == nil && current.Status == storage.JobCanceled {
+		m.cancel(saveCtx, job)
+	}
 }
 
 func (m *Manager) jobCanceled(ctx context.Context, saveCtx context.Context, id int64) bool {

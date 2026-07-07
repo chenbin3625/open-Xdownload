@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
@@ -190,15 +191,6 @@ func (s smbStore) Rename(ctx context.Context, oldPath string, newPath string) er
 }
 
 func (s smbStore) SaveMedia(ctx context.Context, d *downloader.Downloader, mediaURL string, dir string, filenameHint string, options downloader.Options) (downloader.Result, error) {
-	if filename, ok := downloader.InferredFilename(mediaURL, filenameHint, options.MaxFilenameLength); ok {
-		result, ok, err := s.existingResult(ctx, dir, filename)
-		if err != nil {
-			return downloader.Result{}, err
-		}
-		if ok {
-			return result, nil
-		}
-	}
 	response, err := d.Open(ctx, mediaURL, options)
 	if err != nil {
 		return downloader.Result{}, err
@@ -206,13 +198,14 @@ func (s smbStore) SaveMedia(ctx context.Context, d *downloader.Downloader, media
 	defer response.Body.Close()
 
 	filename := downloader.Filename(mediaURL, filenameHint, response.Header.Get("Content-Type"), options.MaxFilenameLength)
-	existing, ok, err := s.existingResult(ctx, dir, filename)
+	existing, complete, replaceExisting, err := s.existingFileState(ctx, dir, filename, response.ContentLength)
 	if err != nil {
 		return downloader.Result{}, err
 	}
-	if ok {
+	if complete {
 		return existing, nil
 	}
+
 	var result downloader.Result
 	err = s.withShare(ctx, func(share *smb2.Share) error {
 		dirRel := s.relativePath(dir)
@@ -220,37 +213,38 @@ func (s smbStore) SaveMedia(ctx context.Context, d *downloader.Downloader, media
 			return err
 		}
 		fileRel := joinSlash(dirRel, filename)
-		filePath := s.logicalPath(fileRel)
-		_, err := share.Stat(fileRel)
-		if err == nil {
-			result = downloader.Result{Path: filePath, Skipped: true}
-			return nil
-		}
-		if !os.IsNotExist(err) {
-			return err
-		}
-		file, err := share.OpenFile(fileRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		// 原子写入：先写 .part 临时文件，Sync 后 rename 到最终路径，避免崩溃留下被
+		// 当作完整下载的残缺文件。
+		file, tempRel, err := createSMBTempFile(share, fileRel)
 		if err != nil {
-			if os.IsExist(err) {
-				result = downloader.Result{Path: filePath, Skipped: true}
-				return nil
-			}
 			return err
 		}
-		bytes, err := io.Copy(file, response.Body)
+		bytes, copyErr := io.Copy(file, response.Body)
+		syncErr := file.Sync()
 		closeErr := file.Close()
-		if err != nil {
-			_ = share.Remove(fileRel)
-			return err
+		if copyErr != nil {
+			_ = share.Remove(tempRel)
+			return copyErr
+		}
+		if syncErr != nil {
+			_ = share.Remove(tempRel)
+			return syncErr
 		}
 		if closeErr != nil {
-			_ = share.Remove(fileRel)
+			_ = share.Remove(tempRel)
 			return closeErr
 		}
-		if !options.ModTime.IsZero() {
-			_ = share.Chtimes(fileRel, time.Now(), options.ModTime)
+		published, err := s.publishSMBTemp(share, tempRel, dirRel, filename, bytes, response.ContentLength, options.MaxFilenameLength, replaceExisting)
+		if err != nil {
+			return err
 		}
-		result = downloader.Result{Path: filePath, Bytes: bytes}
+		result = published
+		if result.Skipped {
+			return nil
+		}
+		if !options.ModTime.IsZero() {
+			_ = share.Chtimes(s.relativePath(result.Path), time.Now(), options.ModTime)
+		}
 		return nil
 	})
 	if err != nil {
@@ -259,26 +253,119 @@ func (s smbStore) SaveMedia(ctx context.Context, d *downloader.Downloader, media
 	return result, nil
 }
 
-func (s smbStore) existingResult(ctx context.Context, dir string, filename string) (downloader.Result, bool, error) {
+// existingFileState reports whether dir/filename already holds a complete file.
+// If the file existed before this download and its size mismatches
+// contentLength, the caller may replace it as a stale partial. Files that appear
+// later during this download are treated as filename conflicts instead.
+func (s smbStore) existingFileState(ctx context.Context, dir string, filename string, contentLength int64) (downloader.Result, bool, bool, error) {
 	var result downloader.Result
 	var found bool
+	var replace bool
 	err := s.withShare(ctx, func(share *smb2.Share) error {
 		fileRel := joinSlash(s.relativePath(dir), filename)
-		info, err := share.Stat(fileRel)
-		if os.IsNotExist(err) {
-			return nil
-		}
+		state, err := s.smbFileState(share, fileRel, contentLength)
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			return nil
-		}
-		found = true
-		result = downloader.Result{Path: s.logicalPath(fileRel), Bytes: info.Size(), Skipped: true}
+		result = state.result
+		found = state.complete
+		replace = state.replace
 		return nil
 	})
-	return result, found, err
+	return result, found, replace, err
+}
+
+type smbFileState struct {
+	result   downloader.Result
+	complete bool
+	replace  bool
+}
+
+func (s smbStore) smbFileState(share *smb2.Share, fileRel string, contentLength int64) (smbFileState, error) {
+	info, err := share.Stat(fileRel)
+	if os.IsNotExist(err) {
+		return smbFileState{}, nil
+	}
+	if err != nil {
+		return smbFileState{}, err
+	}
+	if info.IsDir() {
+		return smbFileState{}, nil
+	}
+	if contentLength >= 0 && info.Size() != contentLength {
+		return smbFileState{replace: true}, nil
+	}
+	return smbFileState{
+		result:   downloader.Result{Path: s.logicalPath(fileRel), Bytes: info.Size(), Skipped: true},
+		complete: true,
+	}, nil
+}
+
+var smbTempCounter atomic.Uint64
+
+func createSMBTempFile(share *smb2.Share, fileRel string) (*smb2.File, string, error) {
+	for {
+		tempRel := fmt.Sprintf("%s.%d.%d.part", fileRel, time.Now().UnixNano(), smbTempCounter.Add(1))
+		file, err := share.OpenFile(tempRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			return file, tempRel, nil
+		}
+		if os.IsExist(err) {
+			continue
+		}
+		return nil, "", err
+	}
+}
+
+func (s smbStore) publishSMBTemp(share *smb2.Share, tempRel string, dirRel string, filename string, bytes int64, contentLength int64, maxFilenameLength int, replaceBase bool) (downloader.Result, error) {
+	triedReplaceBase := false
+	for index := 0; ; index++ {
+		candidateName := filename
+		if index > 0 {
+			candidateName = downloader.FilenameWithSuffix(filename, fmt.Sprintf("(%d)", index), maxFilenameLength)
+		}
+		candidateRel := joinSlash(dirRel, candidateName)
+		if err := share.Rename(tempRel, candidateRel); err == nil {
+			return downloader.Result{Path: s.logicalPath(candidateRel), Bytes: bytes}, nil
+		} else if !s.smbRenameConflict(share, candidateRel, err) {
+			_ = share.Remove(tempRel)
+			return downloader.Result{}, err
+		}
+		if index == 0 && replaceBase && !triedReplaceBase {
+			result, complete, removed, err := s.removeIncompleteSMBTarget(share, candidateRel, contentLength)
+			if err != nil {
+				_ = share.Remove(tempRel)
+				return downloader.Result{}, err
+			}
+			if complete {
+				_ = share.Remove(tempRel)
+				return result, nil
+			}
+			triedReplaceBase = true
+			if removed {
+				index--
+			}
+		}
+	}
+}
+
+func (s smbStore) smbRenameConflict(share *smb2.Share, candidateRel string, err error) bool {
+	if os.IsExist(err) {
+		return true
+	}
+	_, statErr := share.Stat(candidateRel)
+	return statErr == nil
+}
+
+func (s smbStore) removeIncompleteSMBTarget(share *smb2.Share, fileRel string, contentLength int64) (downloader.Result, bool, bool, error) {
+	state, err := s.smbFileState(share, fileRel, contentLength)
+	if err != nil || state.complete || !state.replace {
+		return state.result, state.complete, false, err
+	}
+	if err := share.Remove(fileRel); err != nil && !os.IsNotExist(err) {
+		return downloader.Result{}, false, false, err
+	}
+	return downloader.Result{}, false, true, nil
 }
 
 func (s smbStore) TestWritable(ctx context.Context) (string, error) {
@@ -347,8 +434,11 @@ func (s smbStore) sharedSession() *smbSharedSession {
 	return entry
 }
 
+// signature 用 \x00 分隔各字段作为共享会话的缓存键。\x00 不会出现在 SMB
+// host/share/用户名/密码等字段中，避免管道符 "|" 分隔时字段内含 "|" 导致两个
+// 不同配置碰撞到同一会话（进而以错误账户认证）。
 func (s smbStore) signature() string {
-	return fmt.Sprintf("%s|%d|%s|%s|%s|%s", s.host, s.port, s.share, s.domain, s.username, s.password)
+	return strings.Join([]string{s.host, strconv.Itoa(s.port), s.share, s.domain, s.username, s.password}, "\x00")
 }
 
 func (e *smbSharedSession) withShare(ctx context.Context, fn func(*smb2.Share) error) error {
@@ -506,6 +596,12 @@ func (s webDAVStore) MkdirAll(ctx context.Context, dir string) error {
 	return nil
 }
 
+// invalidateWebDAVDir 丢弃 dir 的"已存在"缓存，使下次 MkdirAll 重新确认并创建目录。
+// 在 PUT 收到 409（父目录缺失）时调用——目录可能已被服务端删除而本地缓存仍认为存在。
+func (s webDAVStore) invalidateWebDAVDir(dir string) {
+	webdavDirs.Delete(dir)
+}
+
 func (s webDAVStore) Rename(ctx context.Context, oldPath string, newPath string) error {
 	exists, err := s.exists(ctx, oldPath)
 	if err != nil || !exists {
@@ -567,12 +663,29 @@ func (s webDAVStore) SaveMedia(ctx context.Context, d *downloader.Downloader, me
 		}
 		return downloader.Result{Path: filePath, Skipped: true}, nil
 	}
-	result, conflict, err := s.putNewMedia(ctx, response, filePath, options)
-	if conflict {
-		return downloader.Result{Path: filePath, Skipped: true}, nil
+	result, conflictStatus, err := s.putNewMedia(ctx, response, filePath, options)
+	if conflictStatus == http.StatusConflict {
+		// 409=父目录缺失（webdavDirs 缓存陈旧，或目录被服务端删除）。失效缓存、重建目录
+		// 后重新下载并重试一次；仍 409 则视为真正的错误而非"已下载"静默跳过。
+		s.invalidateWebDAVDir(dir)
+		if mkErr := s.MkdirAll(ctx, dir); mkErr != nil {
+			return downloader.Result{}, mkErr
+		}
+		retry, openErr := d.Open(ctx, mediaURL, options)
+		if openErr != nil {
+			return downloader.Result{}, openErr
+		}
+		result, conflictStatus, err = s.putNewMedia(ctx, retry, filePath, options)
+		if conflictStatus == http.StatusConflict {
+			return downloader.Result{}, fmt.Errorf("WebDAV PUT failed: HTTP 409 (parent collection missing after retry)")
+		}
 	}
 	if err != nil {
 		return downloader.Result{}, err
+	}
+	if conflictStatus == http.StatusPreconditionFailed {
+		// 412=文件已存在（真正的去重），跳过且不删除已有文件。
+		return downloader.Result{Path: filePath, Skipped: true}, nil
 	}
 	return result, nil
 }
@@ -606,12 +719,14 @@ func (s webDAVStore) TestWritable(ctx context.Context) (string, error) {
 	return filePath, nil
 }
 
-func (s webDAVStore) putNewMedia(ctx context.Context, response *http.Response, filePath string, options downloader.Options) (downloader.Result, bool, error) {
+// putNewMedia 上传媒体到 filePath。返回的 conflictStatus 为 409/412 时表示未上传成功
+// 但不应删除已有文件：409=父目录缺失（可重试），412=文件已存在（真正去重，跳过）。
+func (s webDAVStore) putNewMedia(ctx context.Context, response *http.Response, filePath string, options downloader.Options) (downloader.Result, int, error) {
 	counter := &countWriter{}
 	request, err := s.newRequest(ctx, http.MethodPut, filePath, io.TeeReader(response.Body, counter))
 	if err != nil {
 		_ = response.Body.Close()
-		return downloader.Result{}, false, err
+		return downloader.Result{}, 0, err
 	}
 	if response.ContentLength >= 0 {
 		request.ContentLength = response.ContentLength
@@ -629,21 +744,21 @@ func (s webDAVStore) putNewMedia(ctx context.Context, response *http.Response, f
 	closeErr := response.Body.Close()
 	if err != nil {
 		_ = s.delete(ctx, filePath)
-		return downloader.Result{}, false, err
+		return downloader.Result{}, 0, err
 	}
 	defer putResponse.Body.Close()
 	if closeErr != nil {
 		_ = s.delete(ctx, filePath)
-		return downloader.Result{}, false, closeErr
+		return downloader.Result{}, 0, closeErr
 	}
 	if putResponse.StatusCode >= 200 && putResponse.StatusCode < 300 {
-		return downloader.Result{Path: filePath, Bytes: counter.n}, false, nil
+		return downloader.Result{Path: filePath, Bytes: counter.n}, 0, nil
 	}
 	if putResponse.StatusCode == http.StatusConflict || putResponse.StatusCode == http.StatusPreconditionFailed {
-		return downloader.Result{}, true, nil
+		return downloader.Result{}, putResponse.StatusCode, nil
 	}
 	_ = s.delete(ctx, filePath)
-	return downloader.Result{}, false, fmt.Errorf("WebDAV PUT failed: HTTP %d", putResponse.StatusCode)
+	return downloader.Result{}, 0, fmt.Errorf("WebDAV PUT failed: HTTP %d", putResponse.StatusCode)
 }
 
 func (s webDAVStore) uniquePath(ctx context.Context, dir string, filename string, maxFilenameLength int) (string, error) {

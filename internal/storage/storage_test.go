@@ -285,6 +285,114 @@ func TestUpdateConfigPreservesRedactedTokens(t *testing.T) {
 	}
 }
 
+func TestUpdateConfigRestoresRedactedURLUserinfo(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{
+		ProxyURL:  "http://alice:s3cret@proxy.local:3128",
+		WebDAVURL: "https://bob:pw@webdav.example/dav",
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	// 模拟前端流程：GET 配置得到 Redacted() 形式（URL 内嵌凭据被替换为占位符），
+	// 改了别的字段后把 Redacted 形式原样 PUT 回去。UpdateConfig 必须还原真实凭据，
+	// 否则会把 "********" 当作真实代理/WebDAV 地址保存，破坏下载。
+	submitted := config.AppConfig{
+		ProxyURL:  "http://" + config.SecretPlaceholder + "@proxy.local:3128",
+		WebDAVURL: "https://" + config.SecretPlaceholder + "@webdav.example/dav",
+	}
+	if _, err := store.UpdateConfig(ctx, submitted); err != nil {
+		t.Fatalf("update redacted config: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if got.ProxyURL != "http://alice:s3cret@proxy.local:3128" {
+		t.Fatalf("ProxyURL = %q, want restored credentials", got.ProxyURL)
+	}
+	if got.WebDAVURL != "https://bob:pw@webdav.example/dav" {
+		t.Fatalf("WebDAVURL = %q, want restored credentials", got.WebDAVURL)
+	}
+}
+
+func TestUpdateConfigDoesNotRestoreSecretsForChangedTargets(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{
+		ProxyURL:       "http://alice:s3cret@proxy.local:3128",
+		StorageType:    config.StorageWebDAV,
+		SMBHost:        "nas.local",
+		SMBPort:        445,
+		SMBPassword:    "smb-secret",
+		WebDAVURL:      "https://webdav.example/dav",
+		WebDAVPassword: "webdav-secret",
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{
+		ProxyURL:       "http://" + config.SecretPlaceholder + "@evil.local:3128",
+		StorageType:    config.StorageWebDAV,
+		SMBHost:        "other-nas.local",
+		SMBPort:        445,
+		SMBPassword:    config.SecretPlaceholder,
+		WebDAVURL:      "https://evil.example/dav",
+		WebDAVPassword: config.SecretPlaceholder,
+	}); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if got.ProxyURL != "http://evil.local:3128" {
+		t.Fatalf("ProxyURL = %q, want placeholder credentials dropped for changed host", got.ProxyURL)
+	}
+	if got.SMBPassword != "" {
+		t.Fatalf("SMBPassword = %q, want cleared for changed host", got.SMBPassword)
+	}
+	if got.WebDAVPassword != "" {
+		t.Fatalf("WebDAVPassword = %q, want cleared for changed host", got.WebDAVPassword)
+	}
+}
+
+func TestCancelJobDoesNotOverrideTerminalStatus(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindTweetLink, "input", "title")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	job.Status = JobCompleted
+	job.Progress = 1
+	if err := store.UpdateJob(ctx, job); err != nil {
+		t.Fatalf("mark completed: %v", err)
+	}
+
+	// 取消一个已完成的任务：条件 UPDATE 不应覆盖终态为 canceled（避免与 worker 的终态保存竞争）。
+	got, err := store.CancelJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("cancel completed job: %v", err)
+	}
+	if got.Status != JobCompleted {
+		t.Fatalf("status = %q, want completed (cancel must not override terminal status)", got.Status)
+	}
+}
+
 func TestUpdateConfigPersistsFilenameSettings(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

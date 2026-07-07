@@ -77,6 +77,61 @@ func TestCancelJobStopsActiveDownload(t *testing.T) {
 	})
 }
 
+func TestShutdownLeavesJobRequeueable(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("test response writer does not support flushing")
+		}
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		close(started)
+		<-r.Context().Done() // 阻塞直到下载被取消
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{
+		DownloadDir:     t.TempDir(),
+		MaxConcurrency:  1,
+		AutoRetryFailed: true,
+	}); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, server.URL+"/media.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	managerCtx, stop := context.WithCancel(context.Background())
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	manager.Start(managerCtx)
+	manager.Notify()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("download did not start")
+	}
+	// 模拟 SIGTERM 关停：取消 manager context（非用户取消任务）。
+	stop()
+	manager.Stop()
+
+	got, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status == storage.JobCanceled {
+		t.Fatalf("status = canceled; graceful shutdown must leave the job requeueable (Downloading/Resolving), not canceled — otherwise graceful stop is less recoverable than a hard kill")
+	}
+}
+
 func TestTweetFilenameUsesConfiguredNamingMode(t *testing.T) {
 	tweet := parser.TweetData{
 		ID:   "12345",

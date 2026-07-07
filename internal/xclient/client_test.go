@@ -3,6 +3,8 @@ package xclient
 import (
 	"strings"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestParseAdditionalCookiesAcceptsCommonFormats(t *testing.T) {
@@ -60,5 +62,21 @@ func TestLimitedErrorPayloadTruncatesLargeResponses(t *testing.T) {
 	}
 	if !strings.Contains(got, "truncated 100 bytes") {
 		t.Fatalf("truncation marker missing from %q", got[len(got)-80:])
+	}
+}
+
+func TestTweetResultIDUnwrapsVisibilityResultForStopAt(t *testing.T) {
+	result := gjson.Parse(`{
+		"__typename": "TweetWithVisibilityResults",
+		"tweet": {
+			"rest_id": "12345",
+			"legacy": {}
+		}
+	}`)
+	if got := tweetResultID(result); got != "12345" {
+		t.Fatalf("tweetResultID() = %q, want 12345", got)
+	}
+	if !shouldStopAt(tweetResultID(result), "12345", 0) {
+		t.Fatal("wrapped stop tweet did not trigger exact-match early stop")
 	}
 }

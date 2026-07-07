@@ -405,27 +405,43 @@ FROM app_config WHERE id = 1`)
 }
 
 func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.AppConfig, error) {
-	current, err := s.GetConfig(ctx)
+	// 单连接 + 事务：把"读取当前值 → 合并占位符/还原 URL 凭据 → 写回"封装在一个事务里，
+	// 避免两个并发 PUT /api/config 各自读到旧值再先后写回，导致其中一方的新凭据被静默覆盖。
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return config.AppConfig{}, err
 	}
+	defer tx.Rollback() // Commit 后为 no-op
+
+	current := config.AppConfig{}
+	if err := tx.GetContext(ctx, &current, `
+SELECT download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
+	additional_cookies, auto_retry_failed, auto_follow_protected,
+	include_nested_tweet_media,
+	file_naming_mode, max_filename_length, storage_type,
+	smb_host, smb_port, smb_share, smb_path, smb_domain, smb_username, smb_password,
+	webdav_url, webdav_path, webdav_username, webdav_password
+FROM app_config WHERE id = 1`); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return config.AppConfig{}, err
+	}
+
 	cfg = cfg.Normalized()
-	if cfg.AuthToken == "" || cfg.AuthToken == "********" {
+	if cfg.AuthToken == "" || cfg.AuthToken == config.SecretPlaceholder {
 		cfg.AuthToken = current.AuthToken
 	}
-	if cfg.CSRFToken == "" || cfg.CSRFToken == "********" {
+	if cfg.CSRFToken == "" || cfg.CSRFToken == config.SecretPlaceholder {
 		cfg.CSRFToken = current.CSRFToken
 	}
-	if cfg.AdditionalCookies == "" || cfg.AdditionalCookies == "********" {
+	if cfg.AdditionalCookies == "" || cfg.AdditionalCookies == config.SecretPlaceholder {
 		cfg.AdditionalCookies = current.AdditionalCookies
 	}
-	if cfg.SMBPassword == "" || cfg.SMBPassword == "********" {
-		cfg.SMBPassword = current.SMBPassword
-	}
-	if cfg.WebDAVPassword == "" || cfg.WebDAVPassword == "********" {
-		cfg.WebDAVPassword = current.WebDAVPassword
-	}
-	_, err = s.db.NamedExecContext(ctx, `
+	cfg.SMBPassword = mergeStorageSecret(cfg.SMBPassword, current.SMBPassword, sameSMBTarget(cfg, current))
+	cfg.WebDAVPassword = mergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
+	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据，避免把占位符当真实代理/WebDAV 地址保存。
+	cfg.ProxyURL = config.RestoreURLUserinfo(cfg.ProxyURL, current.ProxyURL)
+	cfg.WebDAVURL = config.RestoreURLUserinfo(cfg.WebDAVURL, current.WebDAVURL)
+
+	_, err = tx.NamedExecContext(ctx, `
 	UPDATE app_config SET
 		download_dir = :download_dir,
 		max_concurrency = :max_concurrency,
@@ -477,7 +493,27 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 		"webdav_password":            cfg.WebDAVPassword,
 		"updated_at":                 time.Now().UTC(),
 	})
-	return cfg, err
+	if err != nil {
+		return config.AppConfig{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return config.AppConfig{}, err
+	}
+	return cfg, nil
+}
+
+func mergeStorageSecret(submitted, stored string, targetUnchanged bool) string {
+	if submitted == "" || submitted == config.SecretPlaceholder {
+		if targetUnchanged {
+			return stored
+		}
+		return ""
+	}
+	return submitted
+}
+
+func sameSMBTarget(a, b config.AppConfig) bool {
+	return strings.EqualFold(strings.TrimSpace(a.SMBHost), strings.TrimSpace(b.SMBHost)) && a.SMBPort == b.SMBPort
 }
 
 func (s *Store) CreateJob(ctx context.Context, kind JobKind, input string, title string) (Job, error) {
@@ -590,19 +626,16 @@ WHERE id = :id`, job)
 }
 
 func (s *Store) CancelJob(ctx context.Context, id int64) (Job, error) {
-	job, err := s.GetJob(ctx, id)
+	// 单条条件 UPDATE：只把非终态任务改为 canceled，避免 GetJob→UpdateJob 两步之间与
+	// worker 的终态保存竞争（worker 把任务标为 completed 后，这里不会再覆盖为 canceled）。
+	_, err := s.db.ExecContext(ctx, `
+UPDATE jobs SET status = ?, message = ?, progress = 1, error = '', updated_at = ?
+WHERE id = ? AND status NOT IN (?, ?, ?)`,
+		JobCanceled, "已取消", time.Now().UTC(), id, JobCompleted, JobFailed, JobCanceled)
 	if err != nil {
 		return Job{}, err
 	}
-	if job.Status == JobCompleted || job.Status == JobFailed || job.Status == JobCanceled {
-		return job, nil
-	}
-	job.Status = JobCanceled
-	job.Message = "已取消"
-	job.Progress = 1
-	if err := s.UpdateJob(ctx, job); err != nil {
-		return Job{}, err
-	}
+	// 无论是否更新到行（已是终态或不存在），都返回当前状态。
 	return s.GetJob(ctx, id)
 }
 
@@ -990,11 +1023,10 @@ func (s *Store) UpsertUser(ctx context.Context, user User) (User, error) {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return User{}, err
 	}
-	if errors.Is(err, sql.ErrNoRows) || existing.Name != user.Name || existing.ScreenName != user.ScreenName {
-		_, _ = s.db.ExecContext(ctx, `
-INSERT INTO user_previous_names (user_id, screen_name, name, recorded_at)
-VALUES (?, ?, ?, ?)`, user.ID, user.ScreenName, user.Name, now)
-	}
+	// 仅当已存在的用户改名时才记录"旧"用户名。新用户没有旧名可记；且 INSERT 必须在
+	// users UPSERT 之后，否则 user_id 的外键尚未存在（foreign_keys=ON）会触发约束违例。
+	nameChanged := !errors.Is(err, sql.ErrNoRows) && (existing.Name != user.Name || existing.ScreenName != user.ScreenName)
+
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO users (id, screen_name, name, protected, friends_count, media_count, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1008,6 +1040,13 @@ ON CONFLICT(id) DO UPDATE SET
 		user.ID, user.ScreenName, user.Name, user.Protected, user.FriendsCount, user.MediaCount, now)
 	if err != nil {
 		return User{}, err
+	}
+	if nameChanged {
+		if _, err := s.db.ExecContext(ctx, `
+INSERT INTO user_previous_names (user_id, screen_name, name, recorded_at)
+VALUES (?, ?, ?, ?)`, user.ID, existing.ScreenName, existing.Name, now); err != nil {
+			return User{}, err
+		}
 	}
 	return s.GetUser(ctx, user.ID)
 }

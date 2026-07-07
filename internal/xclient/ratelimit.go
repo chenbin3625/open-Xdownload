@@ -59,6 +59,13 @@ func (rl *rateLimiter) after(path string, header http.Header) {
 	remainingRaw := header.Get("X-Rate-Limit-Remaining")
 	resetRaw := header.Get("X-Rate-Limit-Reset")
 	if limitRaw == "" || remainingRaw == "" || resetRaw == "" {
+		// 无 X-Rate-Limit 头时（如 CDN/边缘层 429），若带 Retry-After，据此阻塞相应时长，
+		// 否则 before() 不会阻塞、do() 仅以固定退避重试，对活动 429 形成速射。
+		if ra := parseRetryAfter(header); ra > 0 {
+			rl.mu.Lock()
+			rl.limits[path] = rateLimitState{remaining: 0, limit: 1, reset: time.Now().Add(ra), ready: true}
+			rl.mu.Unlock()
+		}
 		return
 	}
 	limit, err := strconv.Atoi(limitRaw)
@@ -81,6 +88,43 @@ func (rl *rateLimiter) after(path string, header http.Header) {
 		ready:     true,
 	}
 	rl.mu.Unlock()
+}
+
+// refund 归还 before() 预扣的 1 个配额，用于请求在收到响应头前就失败（连接重置/超时等）
+// 的情况——此时 after() 不会被调用，预扣若不归还会永久消耗本地速率预算，累积后触发
+// 不必要的长阻塞。并发场景下与 after() 的覆盖竞态可接受：after() 用响应头（权威值）
+// 覆盖；refund 多还 1 个至多导致一次额外请求被服务端 429 纠正。
+func (rl *rateLimiter) refund(path string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	state, ok := rl.limits[path]
+	if !ok || !state.ready {
+		return
+	}
+	if state.remaining < state.limit {
+		state.remaining++
+		rl.limits[path] = state
+	}
+}
+
+// parseRetryAfter 解析 Retry-After 响应头（秒数或 HTTP-date），无法解析返回 0。
+func parseRetryAfter(header http.Header) time.Duration {
+	raw := header.Get("Retry-After")
+	if raw == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(raw); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func (rl *rateLimiter) wouldBlock(path string) bool {
