@@ -24,19 +24,19 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
   -o /out/open-xdownload ./cmd/server
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates tzdata \
-  && addgroup -S app \
-  && adduser -S app -G app \
-  && mkdir -p /data /downloads \
-  && chown -R app:app /data /downloads
-USER app
+RUN apk add --no-cache ca-certificates su-exec tzdata \
+  && mkdir -p /data /downloads
 WORKDIR /app
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --from=build /out/open-xdownload /usr/local/bin/open-xdownload
 ENV OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787 \
   OPEN_XDOWNLOAD_DATA_DIR=/data \
-  OPEN_XDOWNLOAD_DOWNLOAD_DIR=/downloads
+  OPEN_XDOWNLOAD_DOWNLOAD_DIR=/downloads \
+  PUID=1000 \
+  PGID=1000
 # 服务本身无鉴权。容器内需监听 0.0.0.0 才能被端口映射访问；
 # 如只在本机使用，请用 `docker run -p 127.0.0.1:8787:8787` 限制仅本机可达，
 # 暴露到网络时请前置带鉴权的反向代理。
 EXPOSE 8787
-ENTRYPOINT ["open-xdownload"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["open-xdownload"]
