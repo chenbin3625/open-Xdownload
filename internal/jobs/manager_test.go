@@ -214,9 +214,12 @@ func TestDownloadMediaSkipsExistingTweetMedia(t *testing.T) {
 	}
 
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	err = manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", "", "media", false, time.Time{})
+	skipped, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", "", "media", false, time.Time{})
 	if err != nil {
 		t.Fatalf("download media: %v", err)
+	}
+	if !skipped {
+		t.Fatal("skipped = false, want true")
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("HTTP requests = %d, want 0", requests.Load())
@@ -255,9 +258,12 @@ func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
 	}
 
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	err = manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
+	skipped, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
 	if err != nil {
 		t.Fatalf("download media: %v", err)
+	}
+	if skipped {
+		t.Fatal("skipped = true, want false")
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("HTTP requests = %d, want 1", requests.Load())

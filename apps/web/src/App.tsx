@@ -617,7 +617,6 @@ function OverviewPage({
         </div>
 
         <aside className="workbench-rail">
-          <WorkbenchSummary data={data} />
           <WorkbenchPanel
             compact
             icon={<SyncOutlined />}
@@ -771,81 +770,6 @@ function WorkbenchPanel({
       </Flex>
       {children}
     </section>
-  );
-}
-
-function WorkbenchSummary({ data }: { data: Dashboard }) {
-  const stats = data.stats ?? { total: 0, active: 0, completed: 0, failed: 0 };
-  const enabledSchedules = (data.archiveSchedules ?? []).filter((schedule) => schedule.enabled).length;
-  const failedTweetCount = data.failedTweetCount ?? 0;
-  return (
-    <section className="workbench-summary">
-      <Text strong>运行概览</Text>
-      <div className="workbench-summary-list">
-        <SummaryMetric
-          icon={<SyncOutlined spin={stats.active > 0} />}
-          label="当前运行"
-          value={`${stats.active} 个任务`}
-          meta={stats.active > 0 ? "队列正在处理" : "队列空闲"}
-          tone={stats.active > 0 ? "success" : "secondary"}
-        />
-        <SummaryMetric
-          icon={<CloseCircleOutlined />}
-          label="失败待处理"
-          value={`${stats.failed} 个任务`}
-          meta={failedTweetCount > 0 ? `${failedTweetCount} 条失败推文` : "无失败推文积压"}
-          tone={stats.failed > 0 || failedTweetCount > 0 ? "danger" : "secondary"}
-        />
-        <SummaryMetric
-          icon={<DatabaseOutlined />}
-          label="存储位置"
-          value={storageTypeLabel(data.config.storageType)}
-          meta={storageTargetLabel(data.config)}
-        />
-        <SummaryMetric
-          icon={<SafetyCertificateOutlined />}
-          label="账号 Cookie"
-          value={hasConfiguredPrimaryCookie(data.config) ? "已配置" : "待配置"}
-          meta={data.config.autoFollowProtected ? "保护账号自动关注" : "仅使用现有权限"}
-          tone={hasConfiguredPrimaryCookie(data.config) ? "success" : "warning"}
-        />
-        <SummaryMetric
-          icon={<SyncOutlined />}
-          label="自动归档"
-          value={`${enabledSchedules} 个启用`}
-          meta={`共 ${data.archiveSchedules?.length ?? 0} 个计划`}
-        />
-      </div>
-    </section>
-  );
-}
-
-function SummaryMetric({
-  icon,
-  label,
-  meta,
-  tone,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  meta: string;
-  tone?: TextTone;
-  value: string;
-}) {
-  return (
-    <div className="workbench-summary-item">
-      <span className="workbench-summary-icon">{icon}</span>
-      <span className="workbench-summary-copy">
-        <Text type="secondary">{label}</Text>
-        <Text strong type={tone}>
-          {value}
-        </Text>
-        <EllipsisText type="secondary" title={meta}>
-          {meta}
-        </EllipsisText>
-      </span>
-    </div>
   );
 }
 
@@ -2081,7 +2005,6 @@ function ConfigForm({ config }: { config: AppConfig }) {
   const [authResult, setAuthResult] = useState<AuthCheck | null>(null);
   const pendingSavedConfigKey = useRef("");
   const hasPrimaryCookie = Boolean((draft.authToken ?? "").trim() && (draft.csrfToken ?? "").trim());
-  const backupCookieCount = countConfiguredBackupCookies(draft.additionalCookies ?? "");
 
   useEffect(() => {
     const normalized = normalizeConfig(config);
@@ -2177,15 +2100,6 @@ function ConfigForm({ config }: { config: AppConfig }) {
       </div>
 
       <div className="settings-grid">
-        <aside className="settings-sidebar">
-          <ConfigSummaryRail
-            draft={draft}
-            authResult={authResult}
-            backupCookieCount={backupCookieCount}
-            hasPrimaryCookie={hasPrimaryCookie}
-          />
-        </aside>
-
         <div className="settings-main">
           <ConfigPanel
             icon={<DatabaseOutlined />}
@@ -2251,93 +2165,6 @@ function ConfigPanel({
       </Flex>
       {children}
     </section>
-  );
-}
-
-function ConfigSummaryRail({
-  authResult,
-  backupCookieCount,
-  draft,
-  hasPrimaryCookie,
-}: {
-  authResult: AuthCheck | null;
-  backupCookieCount: number;
-  draft: AppConfig;
-  hasPrimaryCookie: boolean;
-}) {
-  const authTone = authResult ? (authResult.ok ? "success" : "danger") : hasPrimaryCookie ? "warning" : "secondary";
-  const authValue = authResult
-    ? authResult.ok
-      ? authResult.screenName
-        ? `@${authResult.screenName}`
-        : "校验通过"
-      : "校验异常"
-    : hasPrimaryCookie
-      ? "等待校验"
-      : "未配置";
-
-  return (
-    <div className="settings-status-panel">
-      <Text strong>配置概览</Text>
-      <div className="settings-summary-list">
-        <ConfigSummaryItem
-          icon={<DatabaseOutlined />}
-          label="存储方式"
-          value={storageTypeLabel(draft.storageType)}
-          meta={storageTargetLabel(draft)}
-        />
-        <ConfigSummaryItem
-          icon={<RetweetOutlined />}
-          label="下载策略"
-          value={`${draft.maxConcurrency} 并发`}
-          meta={`${draft.autoRetryFailed ? "失败后自动重试" : "失败后保留队列"} · ${
-            draft.includeNestedTweetMedia ? "包含引用/转推" : "仅当前推文"
-          }`}
-        />
-        <ConfigSummaryItem
-          icon={<FileDoneOutlined />}
-          label="文件命名"
-          value={fileNamingModeLabel(draft.fileNamingMode)}
-          meta={`最长 ${draft.maxFilenameLength} 字符`}
-        />
-        <ConfigSummaryItem
-          icon={<KeyOutlined />}
-          label="账号状态"
-          value={authValue}
-          meta={backupCookieCount > 0 ? `${backupCookieCount} 组备用 Cookie` : "无备用 Cookie"}
-          tone={authTone}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ConfigSummaryItem({
-  icon,
-  label,
-  meta,
-  tone,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  meta: string;
-  tone?: TextTone;
-  value: string;
-}) {
-  return (
-    <div className="settings-summary-item">
-      <span className="settings-summary-icon">{icon}</span>
-      <span className="settings-summary-copy">
-        <Text type="secondary">{label}</Text>
-        <Text strong type={tone}>
-          {value}
-        </Text>
-        <EllipsisText type="secondary" title={meta}>
-          {meta}
-        </EllipsisText>
-      </span>
-    </div>
   );
 }
 
@@ -2994,10 +2821,6 @@ function configSyncKey(config: AppConfig) {
   return JSON.stringify(config);
 }
 
-function hasConfiguredPrimaryCookie(config: AppConfig) {
-  return Boolean((config.authToken ?? "").trim() && (config.csrfToken ?? "").trim());
-}
-
 function emptyBackupCookieRow(): BackupCookieRow {
   return { authToken: "", csrfToken: "" };
 }
@@ -3268,10 +3091,6 @@ function progressStatus(job: Job) {
   return "normal";
 }
 
-function storageTypeLabel(type: StorageType) {
-  return storageOptions.find((option) => option.value === type)?.label ?? "本地目录";
-}
-
 function storageTargetLabel(config: AppConfig) {
   if (config.storageType === "smb") {
     return config.smbShare ? `//${config.smbHost || "SMB"}/${config.smbShare}` : config.smbHost || "SMB 未配置";
@@ -3280,14 +3099,6 @@ function storageTargetLabel(config: AppConfig) {
     return config.webdavUrl || "WebDAV 未配置";
   }
   return config.downloadDir || "本地目录未配置";
-}
-
-function fileNamingModeLabel(mode: FileNamingMode) {
-  return fileNamingOptions.find((option) => option.value === mode)?.label ?? "仅推文";
-}
-
-function countConfiguredBackupCookies(value: string) {
-  return parseBackupCookieRows(value).filter((row) => row.authToken || row.csrfToken).length;
 }
 
 function kindLabel(kind: JobKind) {
