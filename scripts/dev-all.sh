@@ -6,7 +6,16 @@ WEB_DIR="$ROOT_DIR/apps/web"
 
 cd "$ROOT_DIR"
 
+needs_install=0
 if [ ! -d "$WEB_DIR/node_modules" ]; then
+  needs_install=1
+elif [ -f "$WEB_DIR/package-lock.json" ] && [ "$WEB_DIR/package-lock.json" -nt "$WEB_DIR/node_modules/.package-lock.json" ]; then
+  needs_install=1
+elif [ ! -f "$WEB_DIR/package-lock.json" ] && [ "$WEB_DIR/package.json" -nt "$WEB_DIR/node_modules" ]; then
+  needs_install=1
+fi
+
+if [ "$needs_install" -eq 1 ]; then
   echo "Installing frontend dependencies..."
   if [ -f "$WEB_DIR/package-lock.json" ]; then
     npm --prefix "$WEB_DIR" ci

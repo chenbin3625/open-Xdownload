@@ -235,6 +235,11 @@ export interface Dashboard {
   stats: DashboardStats;
 }
 
+export interface FailedTweetPage {
+  items: FailedTweet[];
+  pagination: DashboardPagination;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -322,9 +327,16 @@ export const testStorage = (config: AppConfig) =>
 export const listLocalDirectories = (path?: string) =>
   api<LocalDirectoryListing>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ""}`);
 
-export const checkAuth = () =>
+export const getFailedTweets = ({
+  page = 1,
+  pageSize = 20,
+}: { page?: number; pageSize?: number } = {}) =>
+  api<FailedTweetPage>(`/api/failed-tweets?page=${page}&pageSize=${pageSize}`);
+
+export const checkAuth = (config: AppConfig) =>
   api<AuthCheck>("/api/auth/check", {
     method: "POST",
+    body: JSON.stringify(config),
   });
 
 export function formatBytes(bytes: number) {

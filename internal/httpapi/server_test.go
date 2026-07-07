@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -110,5 +111,82 @@ func TestTestStorageUsesSubmittedWebDAVConfigAndSavedPassword(t *testing.T) {
 		if !strings.HasPrefix(paths[index], prefix) {
 			t.Fatalf("paths[%d] = %q, want prefix %q; all paths=%#v", index, paths[index], prefix, paths)
 		}
+	}
+}
+
+func TestRetryActiveJobReturnsBusinessError(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	job, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://example.com/media.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	handler := NewServer(db, nil, nil, nil).Routes()
+	request := httptest.NewRequest(http.MethodPost, "/api/jobs/"+strconv.FormatInt(job.ID, 10)+"/retry", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "internal error") || !strings.Contains(response.Body.String(), "不能重试") {
+		t.Fatalf("body = %s, want business error", response.Body.String())
+	}
+}
+
+func TestListFailedTweetsSupportsPagination(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	job, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://example.com/media.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := db.UpsertUser(ctx, storage.User{ID: "u1", ScreenName: "alice", Name: "Alice"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	entity, err := db.EnsureUserEntity(ctx, "u1", t.TempDir(), "Alice(alice)")
+	if err != nil {
+		t.Fatalf("ensure entity: %v", err)
+	}
+	for _, tweetID := range []string{"1", "2", "3"} {
+		if _, err := db.CreateFailedTweet(ctx, storage.FailedTweet{
+			JobID:    job.ID,
+			EntityID: entity.ID,
+			TweetID:  tweetID,
+			Payload:  `{}`,
+			Error:    "boom " + tweetID,
+		}); err != nil {
+			t.Fatalf("create failed tweet %s: %v", tweetID, err)
+		}
+	}
+
+	handler := NewServer(db, nil, nil, nil).Routes()
+	request := httptest.NewRequest(http.MethodGet, "/api/failed-tweets?page=2&pageSize=2", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var page failedTweetPage
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if page.Pagination.Total != 3 || page.Pagination.Page != 2 || page.Pagination.PageSize != 2 {
+		t.Fatalf("pagination = %+v, want total 3 page 2 pageSize 2", page.Pagination)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(page.Items))
 	}
 }

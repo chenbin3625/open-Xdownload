@@ -27,6 +27,8 @@ const (
 	MaxArchiveScheduleItems           = 200
 )
 
+var ErrArchiveScheduleAlreadyClaimed = errors.New("定时归档计划已被其他运行领取")
+
 func Open(path string) (*Store, error) {
 	db, err := sqlx.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -621,7 +623,8 @@ UPDATE jobs SET
 	message = :message,
 	error = :error,
 	updated_at = :updated_at
-WHERE id = :id`, job)
+WHERE id = :id
+  AND (status NOT IN ('completed', 'failed', 'canceled') OR status = :status)`, job)
 	return err
 }
 
@@ -648,11 +651,16 @@ func (s *Store) RetryJob(ctx context.Context, id int64) (Job, error) {
 	case JobPending, JobResolving, JobDownloading:
 		return Job{}, fmt.Errorf("任务仍在运行或排队中，不能重试")
 	}
-	job.Status = JobPending
-	job.Progress = 0
-	job.Message = "等待重试"
-	job.Error = ""
-	if err := s.UpdateJob(ctx, job); err != nil {
+	_, err = s.db.ExecContext(ctx, `
+UPDATE jobs SET
+	status = ?,
+	progress = 0,
+	message = ?,
+	error = '',
+	updated_at = ?
+WHERE id = ? AND status NOT IN (?, ?, ?)`,
+		JobPending, "等待重试", time.Now().UTC(), id, JobPending, JobResolving, JobDownloading)
+	if err != nil {
 		return Job{}, err
 	}
 	return s.GetJob(ctx, id)
@@ -853,12 +861,32 @@ func (s *Store) CreateJobsForArchiveSchedule(ctx context.Context, schedule Archi
 		return nil, err
 	}
 	runAt = runAt.UTC()
+	claimNextRunAt := schedule.NextRunAt.UTC()
 	nextRunAt := nextArchiveScheduleRun(runAt, schedule.IntervalMinutes)
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	claimResult, err := tx.ExecContext(ctx, `
+UPDATE archive_schedules SET
+	last_run_at = ?,
+	next_run_at = ?,
+	last_job_ids = '[]',
+	updated_at = ?
+WHERE id = ? AND next_run_at = ?`,
+		runAt, nextRunAt, runAt, schedule.ID, claimNextRunAt)
+	if err != nil {
+		return nil, err
+	}
+	claimed, err := claimResult.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if claimed == 0 {
+		return nil, ErrArchiveScheduleAlreadyClaimed
+	}
 
 	jobs := make([]Job, 0, len(schedule.Items))
 	jobIDs := make([]int64, 0, len(schedule.Items))
@@ -891,13 +919,8 @@ VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
 		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `
-UPDATE archive_schedules SET
-	last_run_at = ?,
-	next_run_at = ?,
-	last_job_ids = ?,
-	updated_at = ?
-WHERE id = ?`,
-		runAt, nextRunAt, string(lastJobIDs), runAt, schedule.ID)
+UPDATE archive_schedules SET last_job_ids = ?, updated_at = ? WHERE id = ?`,
+		string(lastJobIDs), runAt, schedule.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1247,6 +1270,16 @@ func (s *Store) ListFailedTweetViews(ctx context.Context, limit int) ([]FailedTw
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
+	return s.ListFailedTweetViewsPage(ctx, limit, 0)
+}
+
+func (s *Store) ListFailedTweetViewsPage(ctx context.Context, limit int, offset int) ([]FailedTweetView, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	items := []FailedTweetView{}
 	err := s.db.SelectContext(ctx, &items, `
 SELECT
@@ -1262,7 +1295,7 @@ LEFT JOIN jobs j ON j.id = ft.job_id
 LEFT JOIN user_entities ue ON ue.id = ft.entity_id
 LEFT JOIN users u ON u.id = ue.user_id
 ORDER BY ft.updated_at ASC
-LIMIT ?`, limit)
+LIMIT ? OFFSET ?`, limit, offset)
 	return items, err
 }
 

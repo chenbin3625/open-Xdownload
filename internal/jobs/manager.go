@@ -218,6 +218,9 @@ func (m *Manager) enqueueDueArchiveSchedules(ctx context.Context) {
 		}
 		jobs, err := m.store.CreateJobsForArchiveSchedule(ctx, schedule, now)
 		if err != nil {
+			if errors.Is(err, storage.ErrArchiveScheduleAlreadyClaimed) {
+				continue
+			}
 			continue
 		}
 		if len(jobs) == 0 {

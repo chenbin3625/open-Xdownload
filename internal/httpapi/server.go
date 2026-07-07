@@ -25,7 +25,6 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/cors"
 )
 
 type Server struct {
@@ -41,13 +40,6 @@ func NewServer(store *storage.Store, parserService *parser.Service, manager *job
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:*", "http://127.0.0.1:*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		AllowCredentials: true,
-	}))
-
 	r.Get("/api/health", s.health)
 	r.Get("/api/config", s.getConfig)
 	r.Put("/api/config", s.updateConfig)
@@ -193,6 +185,14 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if r.ContentLength != 0 {
+		var submitted config.AppConfig
+		if err := decodeJSON(w, r, &submitted); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		cfg = mergeSecretPlaceholders(submitted, cfg).Normalized()
 	}
 	configured := cfg.AuthToken != "" && cfg.CSRFToken != ""
 	if !configured {
@@ -424,6 +424,11 @@ type storageTestResult struct {
 	Path    string             `json:"path"`
 }
 
+type failedTweetPage struct {
+	Items      []storage.FailedTweetView `json:"items"`
+	Pagination storage.Pagination        `json:"pagination"`
+}
+
 func archiveScheduleFromRequest(req archiveScheduleRequest) storage.ArchiveSchedule {
 	return storage.ArchiveSchedule{
 		Name:            strings.TrimSpace(req.Name),
@@ -539,8 +544,17 @@ func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKin
 	if req.Kind == storage.JobKindFollowing && strings.TrimSpace(req.Title) == "" {
 		req.Title = fmt.Sprintf("关注 %s", displayUserInput(req.Input))
 	}
+	if req.Kind == storage.JobKindMediaURL {
+		parsed, err := url.Parse(req.Input)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return "", "", "", fmt.Errorf("请输入有效的媒体 URL")
+		}
+		if strings.TrimSpace(req.Title) == "" {
+			req.Title = "媒体 URL"
+		}
+	}
 	switch req.Kind {
-	case storage.JobKindTweetLink, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing:
+	case storage.JobKindTweetLink, storage.JobKindMediaURL, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing:
 	default:
 		return "", "", "", fmt.Errorf("不支持的任务类型: %s", req.Kind)
 	}
@@ -600,7 +614,7 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := s.store.RetryJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	s.manager.Notify()
@@ -677,6 +691,39 @@ func (s *Server) listFailedMedia(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listFailedTweets(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("page") || r.URL.Query().Has("pageSize") {
+		page := parsePositiveInt(r, "page", 1, 1, 1000000)
+		pageSize := parsePositiveInt(r, "pageSize", 20, 1, 100)
+		total, err := s.store.CountFailedTweets(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		totalPages := 0
+		if total > 0 {
+			totalPages = (total + pageSize - 1) / pageSize
+			if page > totalPages {
+				page = totalPages
+			}
+		} else {
+			page = 1
+		}
+		items, err := s.store.ListFailedTweetViewsPage(r.Context(), pageSize, (page-1)*pageSize)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, failedTweetPage{
+			Items: items,
+			Pagination: storage.Pagination{
+				Page:       page,
+				PageSize:   pageSize,
+				Total:      total,
+				TotalPages: totalPages,
+			},
+		})
+		return
+	}
 	items, err := s.store.ListFailedTweetViews(r.Context(), parseLimit(r, 200))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

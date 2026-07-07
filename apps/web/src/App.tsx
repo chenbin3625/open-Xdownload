@@ -89,6 +89,7 @@ import {
   deleteFailedTweet,
   formatBytes,
   getDashboard,
+  getFailedTweets,
   listLocalDirectories,
   parseTweetLink,
   retryFailedTweets,
@@ -180,11 +181,13 @@ const settingsTips = {
 
 const defaultListPageSizeOptions = [5, 10, 20, 50];
 const tablePageSizeOptions = [10, 20, 50, 100];
+const failedTweetPageSizeOptions = [10, 20, 50];
 const defaultJobPage = 1;
 const defaultJobPageSize = 20;
 const cancelableStatuses: Job["status"][] = ["pending", "resolving", "downloading"];
 const retryableStatuses: Job["status"][] = ["failed", "canceled", "completed"];
 const dashboardQueryRoot = ["dashboard"] as const;
+const failedTweetQueryRoot = ["failed-tweets"] as const;
 const sectionRoutes = {
   overview: "/overview",
   settings: "/settings",
@@ -1544,10 +1547,28 @@ function FailedTweetQueue({
   total: number;
 }) {
   const queryClient = useQueryClient();
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const failedTweetsQuery = useQuery({
+    queryKey: [...failedTweetQueryRoot, page, pageSize],
+    queryFn: () => getFailedTweets({ page, pageSize }),
+  });
+  const fallbackPagination: Dashboard["pagination"] = {
+    page,
+    pageSize,
+    total,
+    totalPages: total > 0 ? Math.ceil(total / pageSize) : 0,
+  };
+  const pageItems = failedTweetsQuery.data?.items ?? (page === 1 ? items.slice(0, pageSize) : []);
+  const pagination = failedTweetsQuery.data?.pagination ?? fallbackPagination;
+  const refreshFailedTweets = () => {
+    queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot });
+    refreshDashboardQueries(queryClient);
+  };
   const retryAll = useMutation({
     mutationFn: retryFailedTweets,
     onSuccess: (job) => {
-      refreshDashboardQueries(queryClient);
+      refreshFailedTweets();
       notification.success({
         message: "失败推文已加入重试",
         description: job.title || "已创建重试任务",
@@ -1563,7 +1584,10 @@ function FailedTweetQueue({
   const removeOne = useMutation({
     mutationFn: deleteFailedTweet,
     onSuccess: () => {
-      refreshDashboardQueries(queryClient);
+      if (page > 1 && pageItems.length <= 1) {
+        setPage(page - 1);
+      }
+      refreshFailedTweets();
       notification.success({ message: "失败记录已删除" });
     },
     onError: (error) => {
@@ -1576,7 +1600,8 @@ function FailedTweetQueue({
   const clearAll = useMutation({
     mutationFn: clearFailedTweets,
     onSuccess: () => {
-      refreshDashboardQueries(queryClient);
+      setPage(1);
+      refreshFailedTweets();
       notification.success({ message: "失败队列已清空" });
     },
     onError: (error) => {
@@ -1590,13 +1615,13 @@ function FailedTweetQueue({
   return (
     <Stack size={10}>
       <Toolbar>
-        <Text type="secondary">{total > 0 ? `共 ${total} 条失败记录` : "暂无失败记录"}</Text>
+        <Text type="secondary">{pagination.total > 0 ? `共 ${pagination.total} 条失败记录` : "暂无失败记录"}</Text>
         <Space size={8} wrap>
           <Button
             size="small"
             icon={<RetweetOutlined />}
             loading={retryAll.isPending}
-            disabled={total === 0}
+            disabled={pagination.total === 0}
             onClick={() => retryAll.mutate()}
           >
             全部重试
@@ -1606,7 +1631,7 @@ function FailedTweetQueue({
             description="确认删除全部失败推文记录？"
             okText="清空"
             cancelText="取消"
-            disabled={total === 0}
+            disabled={pagination.total === 0}
             onConfirm={() => clearAll.mutate()}
           >
             <Button
@@ -1614,7 +1639,7 @@ function FailedTweetQueue({
               danger
               icon={<DeleteOutlined />}
               loading={clearAll.isPending}
-              disabled={total === 0}
+              disabled={pagination.total === 0}
             >
               清空
             </Button>
@@ -1622,58 +1647,75 @@ function FailedTweetQueue({
         </Space>
       </Toolbar>
 
-      <PaginatedList
-        bordered
-        emptyDescription="暂无失败推文"
-        itemName="条记录"
-        items={items}
-        pageSize={6}
-        renderItem={(item) => (
-          <List.Item
-            actions={[
-              <CopyButton key="copy" value={item.tweetId} label="复制推文 ID" />,
-              <Popconfirm
-                key="delete"
-                title="删除失败记录"
-                description="确认删除这条失败记录？"
-                okText="删除"
-                cancelText="取消"
-                onConfirm={() => removeOne.mutate(item.id)}
+      {failedTweetsQuery.isLoading && pageItems.length === 0 ? (
+        <ListSkeleton rows={pageSize} />
+      ) : pageItems.length === 0 ? (
+        <AppEmpty description="暂无失败推文" />
+      ) : (
+        <LoadingSurface loading={failedTweetsQuery.isFetching}>
+          <List
+            bordered
+            dataSource={pageItems}
+            locale={{ emptyText: <AppEmpty description="暂无失败推文" /> }}
+            renderItem={(item) => (
+              <List.Item
+                actions={[
+                  <CopyButton key="copy" value={item.tweetId} label="复制推文 ID" />,
+                  <Popconfirm
+                    key="delete"
+                    title="删除失败记录"
+                    description="确认删除这条失败记录？"
+                    okText="删除"
+                    cancelText="取消"
+                    onConfirm={() => removeOne.mutate(item.id)}
+                  >
+                    <Button
+                      size="small"
+                      danger
+                      type="text"
+                      icon={<DeleteOutlined />}
+                      loading={removeOne.isPending && removeOne.variables === item.id}
+                    />
+                  </Popconfirm>,
+                ]}
               >
-                <Button
-                  size="small"
-                  danger
-                  type="text"
-                  icon={<DeleteOutlined />}
-                  loading={removeOne.isPending && removeOne.variables === item.id}
+                <List.Item.Meta
+                  avatar={<CloseCircleOutlined style={iconStyles.danger} />}
+                  title={
+                    <Space size={8} wrap>
+                      <Text strong>{item.jobTitle || item.tweetId}</Text>
+                      <Tag>{item.userScreenName ? `@${item.userScreenName}` : item.userId || "未知用户"}</Tag>
+                    </Space>
+                  }
+                  description={
+                    <Stack size={4}>
+                      <EllipsisText type="danger" title={item.error}>
+                        {item.error || "未知错误"}
+                      </EllipsisText>
+                      <Space size={10} wrap>
+                        <Text type="secondary">推文 {item.tweetId}</Text>
+                        <Text type="secondary">{formatDateTime(item.updatedAt || item.createdAt)}</Text>
+                        {item.entityName ? <Text type="secondary">{item.entityName}</Text> : null}
+                      </Space>
+                    </Stack>
+                  }
                 />
-              </Popconfirm>,
-            ]}
-          >
-            <List.Item.Meta
-              avatar={<CloseCircleOutlined style={iconStyles.danger} />}
-              title={
-                <Space size={8} wrap>
-                  <Text strong>{item.jobTitle || item.tweetId}</Text>
-                  <Tag>{item.userScreenName ? `@${item.userScreenName}` : item.userId || "未知用户"}</Tag>
-                </Space>
-              }
-              description={
-                <Stack size={4}>
-                  <EllipsisText type="danger" title={item.error}>
-                    {item.error || "未知错误"}
-                  </EllipsisText>
-                  <Space size={10} wrap>
-                    <Text type="secondary">推文 {item.tweetId}</Text>
-                    <Text type="secondary">{formatDateTime(item.updatedAt || item.createdAt)}</Text>
-                    {item.entityName ? <Text type="secondary">{item.entityName}</Text> : null}
-                  </Space>
-                </Stack>
-              }
-            />
-          </List.Item>
-        )}
-        size="small"
+              </List.Item>
+            )}
+            size="small"
+          />
+        </LoadingSurface>
+      )}
+      <AppPagination
+        current={pagination.page}
+        itemName="条记录"
+        pageSize={pagination.pageSize}
+        pageSizeOptions={failedTweetPageSizeOptions}
+        total={pagination.total}
+        onChange={(nextPage, nextPageSize) => {
+          setPage(nextPageSize === pageSize ? nextPage : 1);
+          setPageSize(nextPageSize);
+        }}
       />
     </Stack>
   );
@@ -2084,7 +2126,7 @@ function ConfigForm({ config }: { config: AppConfig }) {
           <Button
             icon={<SafetyCertificateOutlined />}
             loading={authMutation.isPending}
-            onClick={() => authMutation.mutate()}
+            onClick={() => authMutation.mutate(draft)}
           >
             校验登录
           </Button>
