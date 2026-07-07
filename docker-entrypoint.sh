@@ -30,17 +30,18 @@ esac
 
 fix_owner() {
   dir="$1"
+  mode="${2:-auto}"
   [ -n "$dir" ] || return 0
   mkdir -p "$dir"
 
   current="$(stat -c '%u:%g' "$dir" 2>/dev/null || true)"
-  if [ "$current" != "$PUID:$PGID" ] || [ "${OPEN_XDOWNLOAD_FORCE_CHOWN:-0}" = "1" ]; then
+  if [ "$mode" = "always" ] || [ "$current" != "$PUID:$PGID" ] || [ "${OPEN_XDOWNLOAD_FORCE_CHOWN:-0}" = "1" ]; then
     chown -R "$PUID:$PGID" "$dir"
   fi
 }
 
 if [ "$PUID" != "0" ]; then
-  fix_owner "$OPEN_XDOWNLOAD_DATA_DIR"
+  fix_owner "$OPEN_XDOWNLOAD_DATA_DIR" always
   fix_owner "$OPEN_XDOWNLOAD_DOWNLOAD_DIR"
   exec su-exec "$PUID:$PGID" "$@"
 fi
