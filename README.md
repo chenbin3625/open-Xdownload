@@ -44,7 +44,7 @@ open-Xdownload 是一个本地优先的 X / Twitter 下载器。它提供内置 
 ```yaml
 services:
   open-xdownload:
-    image: ghcr.io/chenbin3625/open-xdownload:latest
+    image: chenbin3625/open-xdownload:latest
     container_name: open-xdownload
     restart: unless-stopped
     ports:
@@ -99,7 +99,7 @@ docker run -d \
   -e TZ=Asia/Shanghai \
   -v "$PWD/data:/data" \
   -v "$PWD/downloads:/downloads" \
-  ghcr.io/chenbin3625/open-xdownload:latest
+  chenbin3625/open-xdownload:latest
 ```
 
 ## 二进制运行
