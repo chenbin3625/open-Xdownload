@@ -730,7 +730,7 @@ function StatsStrip({ data }: { data: Dashboard }) {
     <Row gutter={[12, 12]}>
       {items.map((item) => (
         <Col xs={12} lg={6} key={item.key}>
-          <Card className="stats-card" size="small">
+          <Card className={`stats-card stats-card-${item.key}`} size="small">
             <Statistic
               title={item.title}
               value={item.value}
