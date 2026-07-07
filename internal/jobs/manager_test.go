@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
+	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
@@ -194,6 +195,7 @@ func TestDownloadMediaSkipsExistingTweetMedia(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
+	root := t.TempDir()
 	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, server.URL+"/media.mp4", "media")
 	if err != nil {
 		t.Fatalf("create job: %v", err)
@@ -202,19 +204,94 @@ func TestDownloadMediaSkipsExistingTweetMedia(t *testing.T) {
 		JobID:    job.ID,
 		TweetID:  "tweet-1",
 		MediaURL: server.URL + "/media.mp4",
-		FilePath: filepath.Join(t.TempDir(), "existing.mp4"),
+		FilePath: filepath.Join(root, "existing.mp4"),
 		Bytes:    10,
 	}); err != nil {
 		t.Fatalf("seed download: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "existing.mp4"), []byte("existing"), 0o644); err != nil {
+		t.Fatalf("seed existing file: %v", err)
+	}
 
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	err = manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: t.TempDir()}, server.URL+"/media.mp4", "tweet-1", "", "media", false, time.Time{})
+	err = manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", "", "media", false, time.Time{})
 	if err != nil {
 		t.Fatalf("download media: %v", err)
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("HTTP requests = %d, want 0", requests.Load())
+	}
+}
+
+func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, server.URL+"/media.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	stalePath := filepath.Join(root, "missing.mp4")
+	if _, err := store.CreateDownload(ctx, storage.DownloadRecord{
+		JobID:    job.ID,
+		TweetID:  "tweet-1",
+		MediaURL: server.URL + "/media.mp4",
+		FilePath: stalePath,
+		Bytes:    10,
+	}); err != nil {
+		t.Fatalf("seed stale download: %v", err)
+	}
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	err = manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
+	if err != nil {
+		t.Fatalf("download media: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("HTTP requests = %d, want 1", requests.Load())
+	}
+	record, err := store.GetDownloadByTweetMedia(ctx, "tweet-1", server.URL+"/media.mp4")
+	if err != nil {
+		t.Fatalf("get updated download: %v", err)
+	}
+	if record == nil || record.FilePath == stalePath {
+		t.Fatalf("download record was not refreshed: %+v", record)
+	}
+	if _, err := os.Stat(record.FilePath); err != nil {
+		t.Fatalf("updated file does not exist: %v", err)
+	}
+}
+
+func TestShouldRetryMediaErrorSkipsForbiddenAndNotFound(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "forbidden", err: &downloader.HTTPStatusError{StatusCode: http.StatusForbidden}, want: false},
+		{name: "not found", err: &downloader.HTTPStatusError{StatusCode: http.StatusNotFound}, want: false},
+		{name: "too many requests", err: &downloader.HTTPStatusError{StatusCode: http.StatusTooManyRequests}, want: true},
+		{name: "plain error", err: context.DeadlineExceeded, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRetryMediaError(tt.err); got != tt.want {
+				t.Fatalf("shouldRetryMediaError() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -239,6 +316,63 @@ func TestArchiveUserConcurrency(t *testing.T) {
 				t.Fatalf("archiveUserConcurrency() = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestArchiveUserTasksPrioritizesPrimaryOnlyAndMissingMedia(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	cfg := config.AppConfig{DownloadDir: root, StorageType: config.StorageLocal}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+
+	seedUser := xclient.User{ID: "existing", Name: "Existing", ScreenName: "existing"}
+	if _, err := store.UpsertUser(ctx, storageUser(seedUser)); err != nil {
+		t.Fatalf("upsert existing user: %v", err)
+	}
+	entity, _, err := manager.ensureUserEntity(ctx, cfg, seedUser)
+	if err != nil {
+		t.Fatalf("ensure existing entity: %v", err)
+	}
+	if err := store.UpdateUserEntityMediaCount(ctx, entity.ID, 90); err != nil {
+		t.Fatalf("seed existing media count: %v", err)
+	}
+
+	users := []xclient.User{
+		{ID: "public-small", Name: "Small", ScreenName: "small", MediaCount: 3},
+		{ID: "protected", Name: "Protected", ScreenName: "protected", Protected: true, Following: true, MediaCount: 1},
+		{ID: "public-large", Name: "Large", ScreenName: "large", MediaCount: 100},
+		{ID: "existing", Name: "Existing", ScreenName: "existing", MediaCount: 95},
+		{ID: "public-large", Name: "Large", ScreenName: "large", MediaCount: 100},
+	}
+
+	tasks, skipped, err := manager.archiveUserTasks(ctx, cfg, users)
+	if err != nil {
+		t.Fatalf("archive user tasks: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", skipped)
+	}
+	got := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		got = append(got, task.user.ID)
+	}
+	want := []string{"protected", "public-large", "existing", "public-small"}
+	if len(got) != len(want) {
+		t.Fatalf("tasks = %#v, want %#v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("tasks = %#v, want %#v", got, want)
+		}
+	}
+	if tasks[2].missingMedia != 5 {
+		t.Fatalf("existing missing media = %d, want 5", tasks[2].missingMedia)
 	}
 }
 

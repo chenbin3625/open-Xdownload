@@ -67,6 +67,7 @@ func (s *Store) migrate() error {
 			additional_cookies TEXT NOT NULL DEFAULT '',
 			auto_retry_failed BOOLEAN NOT NULL DEFAULT 1,
 			auto_follow_protected BOOLEAN NOT NULL DEFAULT 0,
+			include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0,
 			file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text',
 			max_filename_length INTEGER NOT NULL DEFAULT 120,
 			storage_type TEXT NOT NULL DEFAULT 'local',
@@ -225,22 +226,23 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 func (s *Store) addMissingColumns() error {
 	columns := map[string]string{
-		"additional_cookies":    `ALTER TABLE app_config ADD COLUMN additional_cookies TEXT NOT NULL DEFAULT ''`,
-		"auto_follow_protected": `ALTER TABLE app_config ADD COLUMN auto_follow_protected BOOLEAN NOT NULL DEFAULT 0`,
-		"file_naming_mode":      `ALTER TABLE app_config ADD COLUMN file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text'`,
-		"max_filename_length":   `ALTER TABLE app_config ADD COLUMN max_filename_length INTEGER NOT NULL DEFAULT 120`,
-		"storage_type":          `ALTER TABLE app_config ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'local'`,
-		"smb_host":              `ALTER TABLE app_config ADD COLUMN smb_host TEXT NOT NULL DEFAULT ''`,
-		"smb_port":              `ALTER TABLE app_config ADD COLUMN smb_port INTEGER NOT NULL DEFAULT 445`,
-		"smb_share":             `ALTER TABLE app_config ADD COLUMN smb_share TEXT NOT NULL DEFAULT ''`,
-		"smb_path":              `ALTER TABLE app_config ADD COLUMN smb_path TEXT NOT NULL DEFAULT ''`,
-		"smb_domain":            `ALTER TABLE app_config ADD COLUMN smb_domain TEXT NOT NULL DEFAULT ''`,
-		"smb_username":          `ALTER TABLE app_config ADD COLUMN smb_username TEXT NOT NULL DEFAULT ''`,
-		"smb_password":          `ALTER TABLE app_config ADD COLUMN smb_password TEXT NOT NULL DEFAULT ''`,
-		"webdav_url":            `ALTER TABLE app_config ADD COLUMN webdav_url TEXT NOT NULL DEFAULT ''`,
-		"webdav_path":           `ALTER TABLE app_config ADD COLUMN webdav_path TEXT NOT NULL DEFAULT ''`,
-		"webdav_username":       `ALTER TABLE app_config ADD COLUMN webdav_username TEXT NOT NULL DEFAULT ''`,
-		"webdav_password":       `ALTER TABLE app_config ADD COLUMN webdav_password TEXT NOT NULL DEFAULT ''`,
+		"additional_cookies":         `ALTER TABLE app_config ADD COLUMN additional_cookies TEXT NOT NULL DEFAULT ''`,
+		"auto_follow_protected":      `ALTER TABLE app_config ADD COLUMN auto_follow_protected BOOLEAN NOT NULL DEFAULT 0`,
+		"include_nested_tweet_media": `ALTER TABLE app_config ADD COLUMN include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0`,
+		"file_naming_mode":           `ALTER TABLE app_config ADD COLUMN file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text'`,
+		"max_filename_length":        `ALTER TABLE app_config ADD COLUMN max_filename_length INTEGER NOT NULL DEFAULT 120`,
+		"storage_type":               `ALTER TABLE app_config ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'local'`,
+		"smb_host":                   `ALTER TABLE app_config ADD COLUMN smb_host TEXT NOT NULL DEFAULT ''`,
+		"smb_port":                   `ALTER TABLE app_config ADD COLUMN smb_port INTEGER NOT NULL DEFAULT 445`,
+		"smb_share":                  `ALTER TABLE app_config ADD COLUMN smb_share TEXT NOT NULL DEFAULT ''`,
+		"smb_path":                   `ALTER TABLE app_config ADD COLUMN smb_path TEXT NOT NULL DEFAULT ''`,
+		"smb_domain":                 `ALTER TABLE app_config ADD COLUMN smb_domain TEXT NOT NULL DEFAULT ''`,
+		"smb_username":               `ALTER TABLE app_config ADD COLUMN smb_username TEXT NOT NULL DEFAULT ''`,
+		"smb_password":               `ALTER TABLE app_config ADD COLUMN smb_password TEXT NOT NULL DEFAULT ''`,
+		"webdav_url":                 `ALTER TABLE app_config ADD COLUMN webdav_url TEXT NOT NULL DEFAULT ''`,
+		"webdav_path":                `ALTER TABLE app_config ADD COLUMN webdav_path TEXT NOT NULL DEFAULT ''`,
+		"webdav_username":            `ALTER TABLE app_config ADD COLUMN webdav_username TEXT NOT NULL DEFAULT ''`,
+		"webdav_password":            `ALTER TABLE app_config ADD COLUMN webdav_password TEXT NOT NULL DEFAULT ''`,
 	}
 	for name, statement := range columns {
 		var exists int
@@ -297,39 +299,42 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 		INSERT INTO app_config (
 			id, download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 			additional_cookies, auto_retry_failed, auto_follow_protected,
+			include_nested_tweet_media,
 			file_naming_mode, max_filename_length, storage_type,
 			smb_host, smb_port, smb_share, smb_path, smb_domain, smb_username, smb_password,
 			webdav_url, webdav_path, webdav_username, webdav_password, updated_at
 		) VALUES (
 			1, :download_dir, :max_concurrency, :proxy_url, :auth_token, :csrf_token,
 			:additional_cookies, :auto_retry_failed, :auto_follow_protected,
+			:include_nested_tweet_media,
 			:file_naming_mode, :max_filename_length, :storage_type,
 			:smb_host, :smb_port, :smb_share, :smb_path, :smb_domain, :smb_username, :smb_password,
 			:webdav_url, :webdav_path, :webdav_username, :webdav_password, :updated_at
 		)`, map[string]any{
-		"download_dir":          cfg.DownloadDir,
-		"max_concurrency":       cfg.MaxConcurrency,
-		"proxy_url":             cfg.ProxyURL,
-		"auth_token":            cfg.AuthToken,
-		"csrf_token":            cfg.CSRFToken,
-		"additional_cookies":    cfg.AdditionalCookies,
-		"auto_retry_failed":     cfg.AutoRetryFailed,
-		"auto_follow_protected": cfg.AutoFollowProtected,
-		"file_naming_mode":      cfg.FileNamingMode,
-		"max_filename_length":   cfg.MaxFilenameLength,
-		"storage_type":          cfg.StorageType,
-		"smb_host":              cfg.SMBHost,
-		"smb_port":              cfg.SMBPort,
-		"smb_share":             cfg.SMBShare,
-		"smb_path":              cfg.SMBPath,
-		"smb_domain":            cfg.SMBDomain,
-		"smb_username":          cfg.SMBUsername,
-		"smb_password":          cfg.SMBPassword,
-		"webdav_url":            cfg.WebDAVURL,
-		"webdav_path":           cfg.WebDAVPath,
-		"webdav_username":       cfg.WebDAVUsername,
-		"webdav_password":       cfg.WebDAVPassword,
-		"updated_at":            time.Now().UTC(),
+		"download_dir":               cfg.DownloadDir,
+		"max_concurrency":            cfg.MaxConcurrency,
+		"proxy_url":                  cfg.ProxyURL,
+		"auth_token":                 cfg.AuthToken,
+		"csrf_token":                 cfg.CSRFToken,
+		"additional_cookies":         cfg.AdditionalCookies,
+		"auto_retry_failed":          cfg.AutoRetryFailed,
+		"auto_follow_protected":      cfg.AutoFollowProtected,
+		"include_nested_tweet_media": cfg.IncludeNestedTweetMedia,
+		"file_naming_mode":           cfg.FileNamingMode,
+		"max_filename_length":        cfg.MaxFilenameLength,
+		"storage_type":               cfg.StorageType,
+		"smb_host":                   cfg.SMBHost,
+		"smb_port":                   cfg.SMBPort,
+		"smb_share":                  cfg.SMBShare,
+		"smb_path":                   cfg.SMBPath,
+		"smb_domain":                 cfg.SMBDomain,
+		"smb_username":               cfg.SMBUsername,
+		"smb_password":               cfg.SMBPassword,
+		"webdav_url":                 cfg.WebDAVURL,
+		"webdav_path":                cfg.WebDAVPath,
+		"webdav_username":            cfg.WebDAVUsername,
+		"webdav_password":            cfg.WebDAVPassword,
+		"updated_at":                 time.Now().UTC(),
 	})
 	return err
 }
@@ -339,6 +344,7 @@ func (s *Store) GetConfig(ctx context.Context) (config.AppConfig, error) {
 	err := s.db.GetContext(ctx, &cfg, `
 SELECT download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 	additional_cookies, auto_retry_failed, auto_follow_protected,
+	include_nested_tweet_media,
 	file_naming_mode, max_filename_length, storage_type,
 	smb_host, smb_port, smb_share, smb_path, smb_domain, smb_username, smb_password,
 	webdav_url, webdav_path, webdav_username, webdav_password
@@ -380,6 +386,7 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 			additional_cookies = :additional_cookies,
 			auto_retry_failed = :auto_retry_failed,
 			auto_follow_protected = :auto_follow_protected,
+			include_nested_tweet_media = :include_nested_tweet_media,
 			file_naming_mode = :file_naming_mode,
 			max_filename_length = :max_filename_length,
 			storage_type = :storage_type,
@@ -396,29 +403,30 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 			webdav_password = :webdav_password,
 			updated_at = :updated_at
 		WHERE id = 1`, map[string]any{
-		"download_dir":          cfg.DownloadDir,
-		"max_concurrency":       cfg.MaxConcurrency,
-		"proxy_url":             cfg.ProxyURL,
-		"auth_token":            cfg.AuthToken,
-		"csrf_token":            cfg.CSRFToken,
-		"additional_cookies":    cfg.AdditionalCookies,
-		"auto_retry_failed":     cfg.AutoRetryFailed,
-		"auto_follow_protected": cfg.AutoFollowProtected,
-		"file_naming_mode":      cfg.FileNamingMode,
-		"max_filename_length":   cfg.MaxFilenameLength,
-		"storage_type":          cfg.StorageType,
-		"smb_host":              cfg.SMBHost,
-		"smb_port":              cfg.SMBPort,
-		"smb_share":             cfg.SMBShare,
-		"smb_path":              cfg.SMBPath,
-		"smb_domain":            cfg.SMBDomain,
-		"smb_username":          cfg.SMBUsername,
-		"smb_password":          cfg.SMBPassword,
-		"webdav_url":            cfg.WebDAVURL,
-		"webdav_path":           cfg.WebDAVPath,
-		"webdav_username":       cfg.WebDAVUsername,
-		"webdav_password":       cfg.WebDAVPassword,
-		"updated_at":            time.Now().UTC(),
+		"download_dir":               cfg.DownloadDir,
+		"max_concurrency":            cfg.MaxConcurrency,
+		"proxy_url":                  cfg.ProxyURL,
+		"auth_token":                 cfg.AuthToken,
+		"csrf_token":                 cfg.CSRFToken,
+		"additional_cookies":         cfg.AdditionalCookies,
+		"auto_retry_failed":          cfg.AutoRetryFailed,
+		"auto_follow_protected":      cfg.AutoFollowProtected,
+		"include_nested_tweet_media": cfg.IncludeNestedTweetMedia,
+		"file_naming_mode":           cfg.FileNamingMode,
+		"max_filename_length":        cfg.MaxFilenameLength,
+		"storage_type":               cfg.StorageType,
+		"smb_host":                   cfg.SMBHost,
+		"smb_port":                   cfg.SMBPort,
+		"smb_share":                  cfg.SMBShare,
+		"smb_path":                   cfg.SMBPath,
+		"smb_domain":                 cfg.SMBDomain,
+		"smb_username":               cfg.SMBUsername,
+		"smb_password":               cfg.SMBPassword,
+		"webdav_url":                 cfg.WebDAVURL,
+		"webdav_path":                cfg.WebDAVPath,
+		"webdav_username":            cfg.WebDAVUsername,
+		"webdav_password":            cfg.WebDAVPassword,
+		"updated_at":                 time.Now().UTC(),
 	})
 	return cfg, err
 }
@@ -824,10 +832,10 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	INSERT INTO downloads (job_id, tweet_id, media_url, file_path, bytes, created_at)
 	VALUES (?, ?, ?, ?, ?, ?)
 	ON CONFLICT(tweet_id, media_url) WHERE tweet_id <> '' DO UPDATE SET
-		job_id = downloads.job_id,
-		file_path = downloads.file_path,
-		bytes = downloads.bytes,
-		created_at = downloads.created_at
+		job_id = excluded.job_id,
+		file_path = excluded.file_path,
+		bytes = excluded.bytes,
+		created_at = excluded.created_at
 	RETURNING *`,
 			record.JobID, record.TweetID, record.MediaURL, record.FilePath, record.Bytes, now)
 		return record, err
@@ -870,6 +878,18 @@ ORDER BY job_id DESC, created_at DESC`, jobIDs)
 	items := []DownloadRecord{}
 	err = s.db.SelectContext(ctx, &items, s.db.Rebind(query), args...)
 	return items, err
+}
+
+func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, error) {
+	record := DownloadRecord{}
+	err := s.db.GetContext(ctx, &record, `SELECT * FROM downloads WHERE tweet_id = ? AND media_url = ?`, tweetID, mediaURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
 }
 
 func (s *Store) CreateFailedMedia(ctx context.Context, failed FailedMedia) (FailedMedia, error) {
@@ -986,13 +1006,6 @@ func (s *Store) GetUserEntity(ctx context.Context, id int64) (UserEntity, error)
 	entity := UserEntity{}
 	err := s.db.GetContext(ctx, &entity, `SELECT * FROM user_entities WHERE id = ?`, id)
 	return entity, err
-}
-
-func (s *Store) UpdateUserEntityStats(ctx context.Context, id int64, latest time.Time, mediaCount int) error {
-	_, err := s.db.ExecContext(ctx, `
-UPDATE user_entities SET latest_release_time = ?, media_count = ?, updated_at = ? WHERE id = ?`,
-		latest, mediaCount, time.Now().UTC(), id)
-	return err
 }
 
 func (s *Store) UpdateUserEntityMediaCount(ctx context.Context, id int64, mediaCount int) error {

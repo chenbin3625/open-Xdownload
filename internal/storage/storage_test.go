@@ -196,7 +196,7 @@ func TestListJobsPageAndJobStats(t *testing.T) {
 	}
 }
 
-func TestCreateDownloadDeduplicatesTweetMedia(t *testing.T) {
+func TestCreateDownloadUpdatesDuplicateTweetMediaRecord(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -232,8 +232,8 @@ func TestCreateDownloadDeduplicatesTweetMedia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create duplicate download: %v", err)
 	}
-	if second.ID != first.ID || second.FilePath != first.FilePath || second.Bytes != first.Bytes {
-		t.Fatalf("duplicate record = %+v, want existing %+v", second, first)
+	if second.ID != first.ID || second.FilePath != "/tmp/two.mp4" || second.Bytes != 200 || second.JobID != secondJob.ID {
+		t.Fatalf("duplicate record = %+v, want updated existing ID %d", second, first.ID)
 	}
 	items, err := store.ListDownloads(ctx, 10)
 	if err != nil {
@@ -241,6 +241,9 @@ func TestCreateDownloadDeduplicatesTweetMedia(t *testing.T) {
 	}
 	if len(items) != 1 {
 		t.Fatalf("download count = %d, want 1", len(items))
+	}
+	if items[0].FilePath != "/tmp/two.mp4" {
+		t.Fatalf("stored file path = %q, want updated path", items[0].FilePath)
 	}
 }
 
@@ -310,5 +313,32 @@ func TestUpdateConfigPersistsFilenameSettings(t *testing.T) {
 	}
 	if got.MaxFilenameLength != 96 {
 		t.Fatalf("MaxFilenameLength = %d, want 96", got.MaxFilenameLength)
+	}
+}
+
+func TestUpdateConfigPersistsNestedTweetMediaSetting(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	_, err = store.UpdateConfig(ctx, config.AppConfig{
+		DownloadDir:             t.TempDir(),
+		MaxConcurrency:          4,
+		AutoRetryFailed:         true,
+		IncludeNestedTweetMedia: true,
+	})
+	if err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if !got.IncludeNestedTweetMedia {
+		t.Fatal("IncludeNestedTweetMedia = false, want true")
 	}
 }

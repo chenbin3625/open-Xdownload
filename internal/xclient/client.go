@@ -459,11 +459,34 @@ func (c *Client) GetListByID(ctx context.Context, id string) (List, error) {
 	}, nil
 }
 
-func (p *Pool) GetUserMedia(ctx context.Context, user User, minTime time.Time) ([]parser.TweetData, error) {
-	return p.getUserTimeline(ctx, user, minTime)
+func (p *Pool) GetUserMedia(ctx context.Context, user User) ([]parser.TweetData, error) {
+	return p.GetUserMediaWithOptions(ctx, user, parser.ParseOptions{})
 }
 
-func (p *Pool) getUserTimeline(ctx context.Context, user User, minTime time.Time) ([]parser.TweetData, error) {
+func (p *Pool) GetUserMediaWithOptions(ctx context.Context, user User, options parser.ParseOptions) ([]parser.TweetData, error) {
+	if userMediaNeedsPrimaryClient(user) {
+		client := p.Primary()
+		if client == nil {
+			return nil, errors.New("没有可用 X 客户端")
+		}
+		return getUserTimeline(ctx, client, user, options)
+	}
+	return p.getUserTimeline(ctx, user, options)
+}
+
+func (p *Pool) getUserTimeline(ctx context.Context, user User, options parser.ParseOptions) ([]parser.TweetData, error) {
+	return getUserTimeline(ctx, p, user, options)
+}
+
+func userMediaNeedsPrimaryClient(user User) bool {
+	return user.Protected && user.Following
+}
+
+type timelineRequester interface {
+	graphQL(ctx context.Context, path string, values url.Values) ([]byte, error)
+}
+
+func getUserTimeline(ctx context.Context, requester timelineRequester, user User, options parser.ParseOptions) ([]parser.TweetData, error) {
 	if !user.Visible() {
 		return nil, nil
 	}
@@ -475,7 +498,7 @@ func (p *Pool) getUserTimeline(ctx context.Context, user User, minTime time.Time
 		values.Set("variables", fmt.Sprintf(`{"userId":%q,"count":100,"cursor":%q,"includePromotedContent":false,"withClientEventToken":false,"withBirdwatchNotes":false,"withVoice":true,"withV2Timeline":true}`, user.ID, cursor))
 		values.Set("features", timelineFeatures)
 		values.Set("fieldToggles", `{"withArticlePlainText":false}`)
-		payload, err := p.graphQL(ctx, userMediaPath, values)
+		payload, err := requester.graphQL(ctx, userMediaPath, values)
 		if err != nil {
 			return nil, err
 		}
@@ -486,23 +509,18 @@ func (p *Pool) getUserTimeline(ctx context.Context, user User, minTime time.Time
 		if len(items) == 0 {
 			break
 		}
-		shouldStop := false
 		for _, item := range items {
 			result := item.Get("tweet_results.result")
 			if !result.Exists() {
 				continue
 			}
-			tweet, err := parser.TweetFromGraphQLResult("", user.ScreenName, "", result)
+			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result, options)
 			if err != nil || len(tweet.Media) == 0 {
-				continue
-			}
-			if !minTime.IsZero() && tweet.CreatedAt.Before(minTime) {
-				shouldStop = true
 				continue
 			}
 			tweets = append(tweets, tweet)
 		}
-		if shouldStop || next == "" {
+		if next == "" {
 			break
 		}
 		if _, ok := seenCursor[next]; ok {

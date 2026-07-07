@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestExtractTweetURL(t *testing.T) {
@@ -66,5 +69,85 @@ func TestParseTweetLinkUsesSyndicationMedia(t *testing.T) {
 	urls := tweet.BestMediaURLs()
 	if len(urls) != 1 || urls[0] != "https://pbs.twimg.com/media/example.jpg" {
 		t.Fatalf("unexpected media urls: %#v", urls)
+	}
+}
+
+func TestTweetFromGraphQLResultParsesUnifiedCardVideo(t *testing.T) {
+	unifiedCard := `{
+		"media_entities": {
+			"card-video": {
+				"id_str": "card-video",
+				"type": "video",
+				"media_url_https": "https://pbs.twimg.com/media/card.jpg",
+				"video_info": {
+					"variants": [
+						{"content_type": "application/x-mpegURL", "url": "https://video.twimg.com/ext_tw_video/card/playlist.m3u8"},
+						{"bitrate": 832000, "content_type": "video/mp4", "url": "https://video.twimg.com/ext_tw_video/card/640x360.mp4"},
+						{"bitrate": 2176000, "content_type": "video/mp4", "url": "https://video.twimg.com/ext_tw_video/card/1280x720.mp4"}
+					]
+				}
+			}
+		},
+		"component_objects": {
+			"component-1": {"data": {"media_id": "card-video"}}
+		}
+	}`
+	result := gjson.Parse(`{
+		"__typename": "Tweet",
+		"rest_id": "100",
+		"core": {"user_results": {"result": {"rest_id": "u1", "legacy": {"name": "OpenAI", "screen_name": "openai"}}}},
+		"legacy": {"full_text": "card video", "created_at": "Tue Jan 12 23:02:33 +0000 2021"},
+		"card": {"legacy": {"binding_values": [
+			{"key": "unified_card", "value": {"string_value": ` + strconv.Quote(unifiedCard) + `}}
+		]}}
+	}`)
+
+	tweet, err := TweetFromGraphQLResult("", "openai", "100", result)
+	if err != nil {
+		t.Fatalf("TweetFromGraphQLResult returned error: %v", err)
+	}
+	urls := tweet.BestMediaURLs()
+	if len(urls) != 1 || urls[0] != "https://video.twimg.com/ext_tw_video/card/1280x720.mp4" {
+		t.Fatalf("unexpected media urls: %#v", urls)
+	}
+}
+
+func TestTweetFromGraphQLResultNestedTweetMediaRequiresOption(t *testing.T) {
+	result := gjson.Parse(`{
+		"__typename": "Tweet",
+		"rest_id": "200",
+		"core": {"user_results": {"result": {"legacy": {"name": "Root", "screen_name": "root"}}}},
+		"legacy": {"full_text": "quote", "created_at": "Tue Jan 12 23:02:33 +0000 2021"},
+		"quoted_status_result": {"result": {
+			"__typename": "Tweet",
+			"rest_id": "201",
+			"core": {"user_results": {"result": {"legacy": {"name": "Quoted", "screen_name": "quoted"}}}},
+			"legacy": {
+				"full_text": "nested media",
+				"created_at": "Tue Jan 12 23:03:33 +0000 2021",
+				"extended_entities": {"media": [{
+					"id_str": "nested-photo",
+					"type": "photo",
+					"media_url_https": "https://pbs.twimg.com/media/nested.jpg"
+				}]}
+			}
+		}}
+	}`)
+
+	defaultTweet, err := TweetFromGraphQLResultWithOptions("", "root", "200", result, ParseOptions{})
+	if err != nil {
+		t.Fatalf("default parse returned error: %v", err)
+	}
+	if len(defaultTweet.Media) != 0 {
+		t.Fatalf("default parse should ignore nested media: %#v", defaultTweet.Media)
+	}
+
+	nestedTweet, err := TweetFromGraphQLResultWithOptions("", "root", "200", result, ParseOptions{IncludeNestedTweets: true})
+	if err != nil {
+		t.Fatalf("nested parse returned error: %v", err)
+	}
+	urls := nestedTweet.BestMediaURLs()
+	if len(urls) != 1 || urls[0] != "https://pbs.twimg.com/media/nested.jpg" {
+		t.Fatalf("unexpected nested media urls: %#v", urls)
 	}
 }

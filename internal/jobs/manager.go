@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -286,7 +288,12 @@ func (m *Manager) process(ctx context.Context, saveCtx context.Context, job stor
 }
 
 func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context, job storage.Job) {
-	tweet, err := m.parser.ParseTweetLink(ctx, job.Input)
+	cfg, err := m.store.GetConfig(saveCtx)
+	if err != nil {
+		m.fail(saveCtx, job, "", err)
+		return
+	}
+	tweet, err := m.parser.ParseTweetLinkWithOptions(ctx, job.Input, parserOptionsFromConfig(cfg))
 	if err != nil {
 		if isCancellation(ctx, err) {
 			m.cancel(saveCtx, job)
@@ -301,11 +308,6 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		job.Message = "链接已识别，但还没有解析到媒体 URL"
 		job.Error = "这条推文没有可下载媒体"
 		m.save(saveCtx, job)
-		return
-	}
-	cfg, err := m.store.GetConfig(saveCtx)
-	if err != nil {
-		m.fail(saveCtx, job, "", err)
 		return
 	}
 	for index, media := range tweet.Media {
@@ -527,21 +529,21 @@ func (m *Manager) download(ctx context.Context, saveCtx context.Context, job sto
 }
 
 func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time) error {
+	target, err := filestore.New(cfg)
+	if err != nil {
+		return err
+	}
 	release, err := m.lockMedia(ctx, tweetID, mediaURL)
 	if err != nil {
 		return err
 	}
 	if release != nil {
 		defer release()
-		if already, err := m.store.HasDownload(saveCtx, tweetID, mediaURL); err != nil {
+		if already, err := m.existingDownloadExists(ctx, saveCtx, target, tweetID, mediaURL); err != nil {
 			return err
 		} else if already {
 			return nil
 		}
-	}
-	target, err := filestore.New(cfg)
-	if err != nil {
-		return err
 	}
 	if dir == "" {
 		dir = target.Root()
@@ -563,6 +565,20 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 		Bytes:    result.Bytes,
 	})
 	return err
+}
+
+func (m *Manager) existingDownloadExists(ctx context.Context, saveCtx context.Context, target filestore.Store, tweetID string, mediaURL string) (bool, error) {
+	if strings.TrimSpace(tweetID) == "" || strings.TrimSpace(mediaURL) == "" {
+		return false, nil
+	}
+	record, err := m.store.GetDownloadByTweetMedia(saveCtx, tweetID, mediaURL)
+	if err != nil || record == nil {
+		return false, err
+	}
+	if strings.TrimSpace(record.FilePath) == "" {
+		return false, nil
+	}
+	return target.Exists(ctx, record.FilePath)
 }
 
 func (m *Manager) lockMedia(ctx context.Context, tweetID string, mediaURL string) (func(), error) {
@@ -598,8 +614,11 @@ type archiveStats struct {
 const maxArchiveUserConcurrency = 8
 
 type archiveUserTask struct {
-	index int
-	user  xclient.User
+	index        int
+	order        int
+	missingMedia int
+	primaryOnly  bool
+	user         xclient.User
 }
 
 func (m *Manager) xPool(ctx context.Context) (config.AppConfig, *xclient.Pool, error) {
@@ -636,22 +655,11 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 	if len(users) == 0 {
 		return stats, nil
 	}
-	seen := map[string]struct{}{}
-	tasks := make([]archiveUserTask, 0, len(users))
-	for index, user := range users {
-		if m.jobCanceled(ctx, saveCtx, job.ID) {
-			return stats, context.Canceled
-		}
-		if user.ID == "" || user.Blocking || user.Muting {
-			continue
-		}
-		if _, ok := seen[user.ID]; ok {
-			stats.Skipped++
-			continue
-		}
-		seen[user.ID] = struct{}{}
-		tasks = append(tasks, archiveUserTask{index: index, user: user})
+	tasks, skipped, err := m.archiveUserTasks(ctx, cfg, users)
+	if err != nil {
+		return stats, err
 	}
+	stats.Skipped += skipped
 	if len(tasks) == 0 {
 		return stats, nil
 	}
@@ -725,7 +733,7 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 				}
 				saveProgress(
 					storage.JobResolving,
-					fmt.Sprintf("同步用户 %d/%d @%s", task.index+1, len(users), fallbackUserName(task.user)),
+					fmt.Sprintf("同步用户 %d/%d @%s", task.order+1, len(tasks), fallbackUserName(task.user)),
 				)
 				delta, err := m.archiveUser(workCtx, saveCtx, baseJob, cfg, pool, task.user, listEntity, func(message string) {
 					saveProgress(storage.JobDownloading, message)
@@ -752,12 +760,61 @@ sendLoop:
 	wg.Wait()
 
 	errMu.Lock()
-	err := firstErr
+	err = firstErr
 	errMu.Unlock()
 	if err != nil {
 		return stats, err
 	}
 	return stats, nil
+}
+
+func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, users []xclient.User) ([]archiveUserTask, int, error) {
+	target, err := filestore.New(cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	parent := target.Join(target.Root(), "users")
+	seen := map[string]struct{}{}
+	tasks := make([]archiveUserTask, 0, len(users))
+	skipped := 0
+	for index, user := range users {
+		if err := ctx.Err(); err != nil {
+			return nil, skipped, err
+		}
+		if user.ID == "" || user.Blocking || user.Muting {
+			continue
+		}
+		if _, ok := seen[user.ID]; ok {
+			skipped++
+			continue
+		}
+		seen[user.ID] = struct{}{}
+		missingMedia := user.MediaCount
+		if existing, err := m.store.LocateUserEntity(ctx, user.ID, parent); err != nil {
+			return nil, skipped, err
+		} else if existing != nil && existing.MediaCount.Valid {
+			missingMedia = max(0, user.MediaCount-int(existing.MediaCount.Int64))
+		}
+		tasks = append(tasks, archiveUserTask{
+			index:        index,
+			missingMedia: missingMedia,
+			primaryOnly:  user.Protected && user.Following,
+			user:         user,
+		})
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].primaryOnly != tasks[j].primaryOnly {
+			return tasks[i].primaryOnly
+		}
+		if tasks[i].missingMedia != tasks[j].missingMedia {
+			return tasks[i].missingMedia > tasks[j].missingMedia
+		}
+		return tasks[i].index < tasks[j].index
+	})
+	for index := range tasks {
+		tasks[index].order = index
+	}
+	return tasks, skipped, nil
 }
 
 func archiveUserConcurrency(cfg config.AppConfig, userCount int) int {
@@ -809,11 +866,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		return stats, nil
 	}
 
-	minTime := time.Time{}
-	if entity.LatestReleaseTime.Valid {
-		minTime = entity.LatestReleaseTime.Time
-	}
-	tweets, err := pool.GetUserMedia(ctx, user, minTime)
+	tweets, err := pool.GetUserMediaWithOptions(ctx, user, parserOptionsFromConfig(cfg))
 	if err != nil {
 		if isCancellation(ctx, err) {
 			return stats, err
@@ -825,12 +878,12 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
 		return stats, nil
 	}
+	target, err := filestore.New(cfg)
+	if err != nil {
+		return stats, err
+	}
 	stats.Tweets += len(tweets)
-	latest := tweets[0].CreatedAt
 	for _, tweet := range tweets {
-		if tweet.CreatedAt.After(latest) {
-			latest = tweet.CreatedAt
-		}
 		for mediaIndex, media := range tweet.Media {
 			if m.jobCanceled(ctx, saveCtx, job.ID) {
 				return stats, context.Canceled
@@ -839,8 +892,13 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 			if mediaURL == "" {
 				continue
 			}
-			already, err := m.store.HasDownload(saveCtx, tweet.ID, mediaURL)
-			if err == nil && already {
+			already, err := m.existingDownloadExists(ctx, saveCtx, target, tweet.ID, mediaURL)
+			if err != nil {
+				stats.Failed++
+				_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
+				continue
+			}
+			if already {
 				stats.Skipped++
 				continue
 			}
@@ -854,15 +912,15 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 				}
 				stats.Failed++
 				_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
-				_ = m.rememberFailedTweet(saveCtx, job, entity, tweet, err)
+				if shouldRetryMediaError(err) {
+					_ = m.rememberFailedTweet(saveCtx, job, entity, tweet, err)
+				}
 				continue
 			}
 			stats.Downloaded++
 		}
 	}
-	if !latest.IsZero() {
-		_ = m.store.UpdateUserEntityStats(saveCtx, entity.ID, latest, user.MediaCount)
-	}
+	_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
 	return stats, nil
 }
 
@@ -946,10 +1004,13 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 				continue
 			}
 			// 跳过已下载的媒体，避免重试时把之前已成功的部分再下一遍。
-			if already, err := m.store.HasDownload(saveCtx, tweet.ID, mediaURL); err == nil && already {
+			if already, err := m.existingDownloadExists(ctx, saveCtx, target, tweet.ID, mediaURL); err == nil && already {
 				continue
 			}
 			if err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
+				if !shouldRetryMediaError(err) {
+					continue
+				}
 				failed = true
 				break
 			}
@@ -960,6 +1021,18 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 		}
 	}
 	return retried
+}
+
+func parserOptionsFromConfig(cfg config.AppConfig) parser.ParseOptions {
+	return parser.ParseOptions{IncludeNestedTweets: cfg.IncludeNestedTweetMedia}
+}
+
+func shouldRetryMediaError(err error) bool {
+	var statusErr *downloader.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode != http.StatusForbidden && statusErr.StatusCode != http.StatusNotFound
+	}
+	return true
 }
 
 func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, user xclient.User) (storage.UserEntity, string, error) {

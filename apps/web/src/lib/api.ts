@@ -26,6 +26,7 @@ export interface AppConfig {
   additionalCookies?: string;
   autoRetryFailed: boolean;
   autoFollowProtected: boolean;
+  includeNestedTweetMedia: boolean;
   fileNamingMode: FileNamingMode;
   maxFilenameLength: number;
   storageType: StorageType;

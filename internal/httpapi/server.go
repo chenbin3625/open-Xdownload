@@ -237,7 +237,12 @@ func (s *Server) parseTweetLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	tweet, err := s.parser.ParseTweetLink(r.Context(), req.URL)
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	tweet, err := s.parser.ParseTweetLinkWithOptions(r.Context(), req.URL, parserOptionsFromConfig(cfg))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -457,7 +462,11 @@ func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKin
 	}
 	req.Input = strings.TrimSpace(req.Input)
 	if req.Kind == storage.JobKindTweetLink {
-		tweet, err := s.parser.ParseTweetLink(ctx, req.Input)
+		cfg, err := s.store.GetConfig(ctx)
+		if err != nil {
+			return "", "", "", err
+		}
+		tweet, err := s.parser.ParseTweetLinkWithOptions(ctx, req.Input, parserOptionsFromConfig(cfg))
 		if err != nil {
 			return "", "", "", err
 		}
@@ -483,6 +492,10 @@ func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKin
 		return "", "", "", fmt.Errorf("不支持的任务类型: %s", req.Kind)
 	}
 	return req.Kind, req.Input, strings.TrimSpace(req.Title), nil
+}
+
+func parserOptionsFromConfig(cfg config.AppConfig) parser.ParseOptions {
+	return parser.ParseOptions{IncludeNestedTweets: cfg.IncludeNestedTweetMedia}
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {

@@ -25,6 +25,14 @@ type Downloader struct {
 	client *http.Client
 }
 
+type HTTPStatusError struct {
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("download failed: HTTP %d", e.StatusCode)
+}
+
 type Options struct {
 	ModTime           time.Time
 	LargePhoto        bool
@@ -100,7 +108,7 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 	}
 	if response.StatusCode >= 400 {
 		defer response.Body.Close()
-		return nil, fmt.Errorf("download failed: HTTP %d", response.StatusCode)
+		return nil, &HTTPStatusError{StatusCode: response.StatusCode}
 	}
 	return response, nil
 }

@@ -18,13 +18,20 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-var tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?(?:x|twitter)\.com/([^/?#]+)/status/([0-9]+)`)
+var (
+	tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?(?:x|twitter)\.com/([^/?#]+)/status/([0-9]+)`)
+	mediaURLPattern = regexp.MustCompile(`https?://[^\s"'<>\\]*(?:pbs\.twimg\.com|video\.twimg\.com|twimg\.com)[^\s"'<>\\]*`)
+)
 
 const syndicationTweetResultURL = "https://cdn.syndication.twimg.com/tweet-result"
 
 type Service struct {
 	client         *http.Client
 	syndicationURL string
+}
+
+type ParseOptions struct {
+	IncludeNestedTweets bool
 }
 
 func NewService() *Service {
@@ -35,6 +42,10 @@ func NewService() *Service {
 }
 
 func (s *Service) ParseTweetLink(ctx context.Context, rawURL string) (TweetData, error) {
+	return s.ParseTweetLinkWithOptions(ctx, rawURL, ParseOptions{})
+}
+
+func (s *Service) ParseTweetLinkWithOptions(ctx context.Context, rawURL string, options ParseOptions) (TweetData, error) {
 	if err := ctx.Err(); err != nil {
 		return TweetData{}, err
 	}
@@ -42,10 +53,14 @@ func (s *Service) ParseTweetLink(ctx context.Context, rawURL string) (TweetData,
 	if err != nil {
 		return TweetData{}, err
 	}
-	return s.parseSyndicationTweet(ctx, rawURL, username, tweetID)
+	return s.parseSyndicationTweet(ctx, rawURL, username, tweetID, options)
 }
 
 func (s *Service) ParseTweetJSON(rawURL string, payload []byte) (TweetData, error) {
+	return s.ParseTweetJSONWithOptions(rawURL, payload, ParseOptions{})
+}
+
+func (s *Service) ParseTweetJSONWithOptions(rawURL string, payload []byte, options ParseOptions) (TweetData, error) {
 	username, tweetID, err := ExtractTweetURL(rawURL)
 	if err != nil {
 		return TweetData{}, err
@@ -57,11 +72,15 @@ func (s *Service) ParseTweetJSON(rawURL string, payload []byte) (TweetData, erro
 	if !result.Exists() {
 		return TweetData{}, errors.New("payload 中没有找到 tweet result")
 	}
-	return tweetFromResult(rawURL, username, tweetID, result)
+	return tweetFromResult(rawURL, username, tweetID, result, options)
 }
 
 func TweetFromGraphQLResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result) (TweetData, error) {
-	return tweetFromResult(rawURL, fallbackUsername, fallbackID, result)
+	return TweetFromGraphQLResultWithOptions(rawURL, fallbackUsername, fallbackID, result, ParseOptions{})
+}
+
+func TweetFromGraphQLResultWithOptions(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions) (TweetData, error) {
+	return tweetFromResult(rawURL, fallbackUsername, fallbackID, result, options)
 }
 
 func ExtractTweetURL(rawURL string) (string, string, error) {
@@ -91,14 +110,14 @@ func BestVariant(variants []MediaVariant) MediaVariant {
 		return variants[i].Bitrate > variants[j].Bitrate
 	})
 	for _, variant := range variants {
-		if strings.Contains(variant.ContentType, "mp4") {
+		if isMP4Variant(variant) {
 			return variant
 		}
 	}
 	return variants[0]
 }
 
-func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result) (TweetData, error) {
+func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions) (TweetData, error) {
 	if result.Get("__typename").String() == "TweetWithVisibilityResults" {
 		result = result.Get("tweet")
 	}
@@ -123,7 +142,7 @@ func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, 
 		Text:      legacy.Get("full_text").String(),
 		CreatedAt: createdAt,
 		Author:    author,
-		Media:     parseMedia(legacy.Get("extended_entities.media")),
+		Media:     parseTweetResultMedia(result, options),
 	}, nil
 }
 
@@ -146,37 +165,61 @@ func parseMedia(media gjson.Result) []Media {
 	}
 	items := make([]Media, 0, len(media.Array()))
 	for _, item := range media.Array() {
-		kind := MediaType(item.Get("type").String())
-		parsed := Media{
-			ID:         item.Get("id_str").String(),
-			Type:       kind,
-			URL:        item.Get("media_url_https").String(),
-			PreviewURL: item.Get("media_url_https").String(),
-		}
-		if kind == MediaVideo || kind == MediaGIF {
-			for _, variant := range item.Get("video_info.variants").Array() {
-				u := variant.Get("url").String()
-				if u == "" {
-					continue
-				}
-				parsed.Variants = append(parsed.Variants, MediaVariant{
-					URL:         u,
-					ContentType: variant.Get("content_type").String(),
-					Bitrate:     variant.Get("bitrate").Int(),
-					Quality:     qualityFromURL(u),
-				})
-			}
-			best := BestVariant(parsed.Variants)
-			parsed.BestURL = best.URL
-		} else {
-			parsed.BestURL = parsed.URL
-		}
+		parsed := mediaFromDetail(item)
 		items = append(items, parsed)
 	}
 	return items
 }
 
-func (s *Service) parseSyndicationTweet(ctx context.Context, rawURL string, fallbackUsername string, fallbackID string) (TweetData, error) {
+func parseTweetResultMedia(result gjson.Result, options ParseOptions) []Media {
+	items := []Media{}
+	seen := map[string]struct{}{}
+	collectTweetResultMedia(result, &items, seen, options, 0)
+	return items
+}
+
+func collectTweetResultMedia(result gjson.Result, items *[]Media, seen map[string]struct{}, options ParseOptions, depth int) {
+	if !result.Exists() || depth > 2 {
+		return
+	}
+	result = unwrapTweetResult(result)
+	legacy := result.Get("legacy")
+	if legacy.Exists() {
+		appendUniqueMedia(items, seen, parseMedia(legacy.Get("extended_entities.media")))
+		appendUniqueMedia(items, seen, parseMedia(legacy.Get("entities.media")))
+	}
+	appendUniqueMedia(items, seen, parseCardMedia(result.Get("card")))
+
+	if !options.IncludeNestedTweets {
+		return
+	}
+	for _, path := range []string{
+		"legacy.retweeted_status_result.result",
+		"retweeted_status_result.result",
+		"quoted_status_result.result",
+		"legacy.quoted_status_result.result",
+	} {
+		if nested := result.Get(path); nested.Exists() {
+			collectTweetResultMedia(nested, items, seen, options, depth+1)
+		}
+	}
+}
+
+func unwrapTweetResult(result gjson.Result) gjson.Result {
+	for {
+		if result.Get("__typename").String() == "TweetWithVisibilityResults" && result.Get("tweet").Exists() {
+			result = result.Get("tweet")
+			continue
+		}
+		if result.Get("result").Exists() && result.Get("legacy").Exists() == false {
+			result = result.Get("result")
+			continue
+		}
+		return result
+	}
+}
+
+func (s *Service) parseSyndicationTweet(ctx context.Context, rawURL string, fallbackUsername string, fallbackID string, options ParseOptions) (TweetData, error) {
 	endpoint, err := url.Parse(s.syndicationURL)
 	if err != nil {
 		return TweetData{}, err
@@ -217,10 +260,10 @@ func (s *Service) parseSyndicationTweet(ctx context.Context, rawURL string, fall
 	if !result.Get("id_str").Exists() && !result.Get("__typename").Exists() {
 		return TweetData{}, errors.New("X 推文详情响应中没有推文数据")
 	}
-	return tweetFromSyndication(rawURL, fallbackUsername, fallbackID, result)
+	return tweetFromSyndication(rawURL, fallbackUsername, fallbackID, result, options)
 }
 
-func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result) (TweetData, error) {
+func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions) (TweetData, error) {
 	id := result.Get("id_str").String()
 	if id == "" {
 		id = fallbackID
@@ -245,31 +288,26 @@ func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID str
 		Text:      result.Get("text").String(),
 		CreatedAt: createdAt,
 		Author:    author,
-		Media:     parseSyndicationMedia(result),
+		Media:     parseSyndicationMedia(result, options),
 	}, nil
 }
 
-func parseSyndicationMedia(result gjson.Result) []Media {
+func parseSyndicationMedia(result gjson.Result, options ParseOptions) []Media {
 	seen := map[string]struct{}{}
 	items := []Media{}
+	collectSyndicationMedia(result, &items, seen, options, 0)
+	return items
+}
+
+func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[string]struct{}, options ParseOptions, depth int) {
+	if !result.Exists() || depth > 2 {
+		return
+	}
 	for _, item := range result.Get("mediaDetails").Array() {
 		media := mediaFromSyndicationDetail(item)
-		key := media.BestURL
-		if key == "" {
-			key = media.URL
-		}
-		if key == "" {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		items = append(items, media)
+		appendUniqueMedia(items, seen, []Media{media})
 	}
-	if len(items) > 0 {
-		return items
-	}
+	appendUniqueMedia(items, seen, parseCardMedia(result.Get("card")))
 	for index, item := range result.Get("photos").Array() {
 		rawURL := item.Get("url").String()
 		if rawURL == "" {
@@ -279,7 +317,7 @@ func parseSyndicationMedia(result gjson.Result) []Media {
 			continue
 		}
 		seen[rawURL] = struct{}{}
-		items = append(items, Media{
+		*items = append(*items, Media{
 			ID:         fmt.Sprintf("photo-%d", index+1),
 			Type:       MediaPhoto,
 			URL:        rawURL,
@@ -287,41 +325,302 @@ func parseSyndicationMedia(result gjson.Result) []Media {
 			BestURL:    rawURL,
 		})
 	}
-	return items
+	if !options.IncludeNestedTweets {
+		return
+	}
+	for _, path := range []string{"quoted_tweet", "retweeted_tweet", "quoted_status", "retweeted_status"} {
+		if nested := result.Get(path); nested.Exists() {
+			collectSyndicationMedia(nested, items, seen, options, depth+1)
+		}
+	}
 }
 
 func mediaFromSyndicationDetail(item gjson.Result) Media {
+	media := mediaFromDetail(item)
+	if media.ID == "" {
+		media.ID = firstString(item.Get("expanded_url"), item.Get("url"), item.Get("media_url_https"))
+	}
+	return media
+}
+
+func mediaFromDetail(item gjson.Result) Media {
 	kind := MediaType(item.Get("type").String())
-	mediaURL := firstString(item.Get("media_url_https"), item.Get("media_url"))
+	mediaURL := firstString(item.Get("media_url_https"), item.Get("media_url"), item.Get("url"))
 	media := Media{
 		ID:         firstString(item.Get("id_str"), item.Get("id")),
 		Type:       kind,
 		URL:        mediaURL,
 		PreviewURL: mediaURL,
 	}
-	if media.ID == "" {
-		media.ID = firstString(item.Get("expanded_url"), item.Get("url"), item.Get("media_url_https"))
-	}
 	if kind == MediaVideo || kind == MediaGIF {
-		for _, variant := range firstResult(item.Get("video_info.variants"), item.Get("videoInfo.variants")).Array() {
-			rawURL := variant.Get("url").String()
-			if rawURL == "" {
-				continue
-			}
-			media.Variants = append(media.Variants, MediaVariant{
-				URL:         rawURL,
-				ContentType: firstString(variant.Get("content_type"), variant.Get("contentType")),
-				Bitrate:     variant.Get("bitrate").Int(),
-				Quality:     qualityFromURL(rawURL),
-			})
-		}
+		media.Variants = parseVariantList(firstResult(item.Get("video_info.variants"), item.Get("videoInfo.variants")))
 		best := BestVariant(media.Variants)
 		media.BestURL = best.URL
-	} else {
+		if media.PreviewURL == "" {
+			media.PreviewURL = media.URL
+		}
+		return media
+	}
+	if media.Type == "" {
 		media.Type = MediaPhoto
-		media.BestURL = media.URL
+	}
+	media.BestURL = media.URL
+	return media
+}
+
+func parseCardMedia(card gjson.Result) []Media {
+	if !card.Exists() {
+		return nil
+	}
+	bindings := cardBindings(card)
+	mediaEntities := map[string]gjson.Result{}
+	for _, path := range []string{
+		"legacy.media_entities",
+		"media_entities",
+		"legacy.mediaEntities",
+		"mediaEntities",
+	} {
+		raw := card.Get(path)
+		if !raw.Exists() || !raw.IsObject() {
+			continue
+		}
+		raw.ForEach(func(key, value gjson.Result) bool {
+			mediaEntities[key.String()] = value
+			return true
+		})
+	}
+
+	items := []Media{}
+	for _, binding := range bindings {
+		for _, media := range parseCardBindingMedia(binding, mediaEntities) {
+			items = append(items, media)
+		}
+	}
+	return items
+}
+
+func parseCardBindingMedia(binding string, mediaEntities map[string]gjson.Result) []Media {
+	binding = strings.TrimSpace(binding)
+	if binding == "" {
+		return nil
+	}
+	items := []Media{}
+	if json.Valid([]byte(binding)) {
+		result := gjson.Parse(binding)
+		appendUniqueMedia(&items, map[string]struct{}{}, parseUnifiedCardMedia(result, mediaEntities))
+		if len(items) > 0 {
+			return items
+		}
+	}
+	for _, rawURL := range mediaURLPattern.FindAllString(binding, -1) {
+		if media := mediaFromURL(rawURL); mediaKey(media) != "" {
+			items = append(items, media)
+		}
+	}
+	return items
+}
+
+func parseUnifiedCardMedia(result gjson.Result, mediaEntities map[string]gjson.Result) []Media {
+	items := []Media{}
+	seen := map[string]struct{}{}
+	for _, media := range result.Get("media_entities").Array() {
+		appendUniqueMedia(&items, seen, []Media{mediaFromDetail(media)})
+	}
+	result.Get("media_entities").ForEach(func(_, media gjson.Result) bool {
+		appendUniqueMedia(&items, seen, []Media{mediaFromDetail(media)})
+		return true
+	})
+	for _, mediaID := range result.Get("component_objects.#.data.media_id").Array() {
+		if entity, ok := mediaEntities[mediaID.String()]; ok {
+			appendUniqueMedia(&items, seen, []Media{mediaFromDetail(entity)})
+		}
+	}
+	for _, mediaID := range result.Get("destination_objects.#.data.media_id").Array() {
+		if entity, ok := mediaEntities[mediaID.String()]; ok {
+			appendUniqueMedia(&items, seen, []Media{mediaFromDetail(entity)})
+		}
+	}
+	for _, mediaID := range collectMediaEntityIDs(result) {
+		if entity, ok := mediaEntities[mediaID]; ok {
+			appendUniqueMedia(&items, seen, []Media{mediaFromDetail(entity)})
+		}
+	}
+	if len(items) == 0 {
+		collectMediaURLs(result, &items, seen, 0)
+	}
+	return items
+}
+
+func collectMediaEntityIDs(result gjson.Result) []string {
+	seen := map[string]struct{}{}
+	items := []string{}
+	collectMediaEntityIDsInto(result, seen, &items, 0)
+	return items
+}
+
+func collectMediaEntityIDsInto(result gjson.Result, seen map[string]struct{}, items *[]string, depth int) {
+	if !result.Exists() || result.Type != gjson.JSON || depth > 8 {
+		return
+	}
+	result.ForEach(func(key, value gjson.Result) bool {
+		name := strings.ToLower(key.String())
+		if value.Type == gjson.String && (name == "media_id" || name == "media_key" || name == "id") {
+			raw := value.String()
+			if raw != "" {
+				if _, ok := seen[raw]; !ok {
+					seen[raw] = struct{}{}
+					*items = append(*items, raw)
+				}
+			}
+		}
+		collectMediaEntityIDsInto(value, seen, items, depth+1)
+		return true
+	})
+}
+
+func collectMediaURLs(result gjson.Result, items *[]Media, seen map[string]struct{}, depth int) {
+	if !result.Exists() || depth > 8 {
+		return
+	}
+	if result.Type == gjson.String {
+		for _, rawURL := range mediaURLPattern.FindAllString(result.String(), -1) {
+			if media := mediaFromURL(rawURL); mediaKey(media) != "" {
+				appendUniqueMedia(items, seen, []Media{media})
+			}
+		}
+		return
+	}
+	if result.Type != gjson.JSON {
+		return
+	}
+	for _, rawURL := range mediaURLPattern.FindAllString(result.Raw, -1) {
+		if media := mediaFromURL(rawURL); mediaKey(media) != "" {
+			appendUniqueMedia(items, seen, []Media{media})
+		}
+	}
+	result.ForEach(func(_, value gjson.Result) bool {
+		collectMediaURLs(value, items, seen, depth+1)
+		return true
+	})
+}
+
+func cardBindings(card gjson.Result) map[string]string {
+	bindings := map[string]string{}
+	for _, path := range []string{"legacy.binding_values", "binding_values", "legacy.bindingValues", "bindingValues"} {
+		raw := card.Get(path)
+		if !raw.Exists() {
+			continue
+		}
+		if raw.IsArray() {
+			for _, item := range raw.Array() {
+				key := item.Get("key").String()
+				value := cardBindingValue(item.Get("value"))
+				if key != "" && value != "" {
+					bindings[key] = value
+				}
+			}
+			continue
+		}
+		if raw.IsObject() {
+			raw.ForEach(func(key, value gjson.Result) bool {
+				if binding := cardBindingValue(value); binding != "" {
+					bindings[key.String()] = binding
+				}
+				return true
+			})
+		}
+	}
+	return bindings
+}
+
+func cardBindingValue(value gjson.Result) string {
+	if !value.Exists() {
+		return ""
+	}
+	for _, path := range []string{"string_value", "stringValue", "scribe_key", "url", "value"} {
+		if raw := value.Get(path).String(); raw != "" {
+			return raw
+		}
+	}
+	return value.String()
+}
+
+func parseVariantList(variants gjson.Result) []MediaVariant {
+	if !variants.Exists() || !variants.IsArray() {
+		return nil
+	}
+	items := []MediaVariant{}
+	for _, variant := range variants.Array() {
+		rawURL := variant.Get("url").String()
+		if rawURL == "" {
+			continue
+		}
+		items = append(items, MediaVariant{
+			URL:         rawURL,
+			ContentType: firstString(variant.Get("content_type"), variant.Get("contentType")),
+			Bitrate:     variant.Get("bitrate").Int(),
+			Quality:     qualityFromURL(rawURL),
+		})
+	}
+	return items
+}
+
+func mediaFromURL(rawURL string) Media {
+	if !strings.Contains(strings.ToLower(rawURL), ".mp4") {
+		return Media{}
+	}
+	kind := MediaPhoto
+	if strings.Contains(strings.ToLower(rawURL), ".mp4") {
+		kind = MediaVideo
+	}
+	media := Media{
+		ID:         rawURL,
+		Type:       kind,
+		URL:        rawURL,
+		PreviewURL: rawURL,
+		BestURL:    rawURL,
+	}
+	if kind == MediaVideo {
+		media.Variants = []MediaVariant{{
+			URL:         rawURL,
+			ContentType: "video/mp4",
+			Quality:     qualityFromURL(rawURL),
+		}}
 	}
 	return media
+}
+
+func appendUniqueMedia(items *[]Media, seen map[string]struct{}, mediaItems []Media) {
+	for _, media := range mediaItems {
+		key := mediaKey(media)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		*items = append(*items, media)
+	}
+}
+
+func mediaKey(media Media) string {
+	if media.BestURL != "" {
+		return media.BestURL
+	}
+	if media.URL != "" {
+		return media.URL
+	}
+	for _, variant := range media.Variants {
+		if variant.URL != "" {
+			return variant.URL
+		}
+	}
+	return ""
+}
+
+func isMP4Variant(variant MediaVariant) bool {
+	return strings.Contains(strings.ToLower(variant.ContentType), "mp4") || strings.Contains(strings.ToLower(variant.URL), ".mp4")
 }
 
 func firstResult(values ...gjson.Result) gjson.Result {

@@ -157,6 +157,7 @@ const settingsTips = {
   fileNaming: "影响新下载文件的命名方式，已下载文件不会被重命名。",
   autoRetryFailed: "批量归档结束后，自动再次处理失败推文队列。",
   autoFollowProtected: "遇到未关注的保护账号时，使用已配置 Cookie 尝试发起关注后再归档。",
+  includeNestedTweetMedia: "开启后会把引用或转推中的媒体也纳入单条下载和批量归档；关闭时只处理当前推文本体媒体。",
   authToken: "X / Twitter Cookie 中的 auth_token，用于登录态接口和批量归档。",
   csrfToken: "X / Twitter Cookie 中的 ct0，需与 auth_token 来自同一账号。",
   backupCookie: "多组备用 Cookie 会在批量归档时轮换使用，可降低单账号限流影响。",
@@ -2122,7 +2123,9 @@ function ConfigSummaryRail({
           icon={<RetweetOutlined />}
           label="下载策略"
           value={`${draft.maxConcurrency} 并发`}
-          meta={draft.autoRetryFailed ? "失败后自动重试" : "失败后保留队列"}
+          meta={`${draft.autoRetryFailed ? "失败后自动重试" : "失败后保留队列"} · ${
+            draft.includeNestedTweetMedia ? "包含引用/转推" : "仅当前推文"
+          }`}
         />
         <ConfigSummaryItem
           icon={<FileDoneOutlined />}
@@ -2233,6 +2236,14 @@ function DownloadSettingsFields({
           <Switch
             checked={draft.autoFollowProtected}
             onChange={(checked) => onChange((current) => ({ ...current, autoFollowProtected: checked }))}
+          />
+        </Form.Item>
+      </Col>
+      <Col xs={24} sm={12} lg={6}>
+        <Form.Item label="引用/转推媒体" tooltip={settingsTips.includeNestedTweetMedia}>
+          <Switch
+            checked={draft.includeNestedTweetMedia}
+            onChange={(checked) => onChange((current) => ({ ...current, includeNestedTweetMedia: checked }))}
           />
         </Form.Item>
       </Col>
@@ -2796,6 +2807,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 function normalizeConfig(config: AppConfig): AppConfig {
   return {
     ...config,
+    includeNestedTweetMedia: config.includeNestedTweetMedia ?? false,
     storageType: config.storageType ?? "local",
     smbHost: config.smbHost ?? "",
     smbPort: config.smbPort || 445,

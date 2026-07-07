@@ -30,28 +30,29 @@ const (
 )
 
 type AppConfig struct {
-	DownloadDir         string         `json:"downloadDir" db:"download_dir"`
-	MaxConcurrency      int            `json:"maxConcurrency" db:"max_concurrency"`
-	ProxyURL            string         `json:"proxyUrl" db:"proxy_url"`
-	AuthToken           string         `json:"authToken,omitempty" db:"auth_token"`
-	CSRFToken           string         `json:"csrfToken,omitempty" db:"csrf_token"`
-	AdditionalCookies   string         `json:"additionalCookies,omitempty" db:"additional_cookies"`
-	AutoRetryFailed     bool           `json:"autoRetryFailed" db:"auto_retry_failed"`
-	AutoFollowProtected bool           `json:"autoFollowProtected" db:"auto_follow_protected"`
-	FileNamingMode      FileNamingMode `json:"fileNamingMode" db:"file_naming_mode"`
-	MaxFilenameLength   int            `json:"maxFilenameLength" db:"max_filename_length"`
-	StorageType         StorageType    `json:"storageType" db:"storage_type"`
-	SMBHost             string         `json:"smbHost" db:"smb_host"`
-	SMBPort             int            `json:"smbPort" db:"smb_port"`
-	SMBShare            string         `json:"smbShare" db:"smb_share"`
-	SMBPath             string         `json:"smbPath" db:"smb_path"`
-	SMBDomain           string         `json:"smbDomain" db:"smb_domain"`
-	SMBUsername         string         `json:"smbUsername" db:"smb_username"`
-	SMBPassword         string         `json:"smbPassword,omitempty" db:"smb_password"`
-	WebDAVURL           string         `json:"webdavUrl" db:"webdav_url"`
-	WebDAVPath          string         `json:"webdavPath" db:"webdav_path"`
-	WebDAVUsername      string         `json:"webdavUsername" db:"webdav_username"`
-	WebDAVPassword      string         `json:"webdavPassword,omitempty" db:"webdav_password"`
+	DownloadDir             string         `json:"downloadDir" db:"download_dir"`
+	MaxConcurrency          int            `json:"maxConcurrency" db:"max_concurrency"`
+	ProxyURL                string         `json:"proxyUrl" db:"proxy_url"`
+	AuthToken               string         `json:"authToken,omitempty" db:"auth_token"`
+	CSRFToken               string         `json:"csrfToken,omitempty" db:"csrf_token"`
+	AdditionalCookies       string         `json:"additionalCookies,omitempty" db:"additional_cookies"`
+	AutoRetryFailed         bool           `json:"autoRetryFailed" db:"auto_retry_failed"`
+	AutoFollowProtected     bool           `json:"autoFollowProtected" db:"auto_follow_protected"`
+	IncludeNestedTweetMedia bool           `json:"includeNestedTweetMedia" db:"include_nested_tweet_media"`
+	FileNamingMode          FileNamingMode `json:"fileNamingMode" db:"file_naming_mode"`
+	MaxFilenameLength       int            `json:"maxFilenameLength" db:"max_filename_length"`
+	StorageType             StorageType    `json:"storageType" db:"storage_type"`
+	SMBHost                 string         `json:"smbHost" db:"smb_host"`
+	SMBPort                 int            `json:"smbPort" db:"smb_port"`
+	SMBShare                string         `json:"smbShare" db:"smb_share"`
+	SMBPath                 string         `json:"smbPath" db:"smb_path"`
+	SMBDomain               string         `json:"smbDomain" db:"smb_domain"`
+	SMBUsername             string         `json:"smbUsername" db:"smb_username"`
+	SMBPassword             string         `json:"smbPassword,omitempty" db:"smb_password"`
+	WebDAVURL               string         `json:"webdavUrl" db:"webdav_url"`
+	WebDAVPath              string         `json:"webdavPath" db:"webdav_path"`
+	WebDAVUsername          string         `json:"webdavUsername" db:"webdav_username"`
+	WebDAVPassword          string         `json:"webdavPassword,omitempty" db:"webdav_password"`
 }
 
 type AuthCookie struct {

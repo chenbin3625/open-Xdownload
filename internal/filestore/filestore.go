@@ -26,6 +26,7 @@ type Store interface {
 	Type() config.StorageType
 	Root() string
 	Join(base string, elems ...string) string
+	Exists(ctx context.Context, path string) (bool, error)
 	MkdirAll(ctx context.Context, dir string) error
 	Rename(ctx context.Context, oldPath string, newPath string) error
 	SaveMedia(ctx context.Context, d *downloader.Downloader, mediaURL string, dir string, filenameHint string, options downloader.Options) (downloader.Result, error)
@@ -73,6 +74,14 @@ func (s localStore) SupportsLinks() bool      { return true }
 func (s localStore) Join(base string, elems ...string) string {
 	items := append([]string{base}, elems...)
 	return filepath.Join(items...)
+}
+
+func (s localStore) Exists(_ context.Context, path string) (bool, error) {
+	_, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (s localStore) MkdirAll(_ context.Context, dir string) error {
@@ -143,6 +152,17 @@ func (s smbStore) SupportsLinks() bool      { return false }
 
 func (s smbStore) Join(base string, elems ...string) string {
 	return joinURLPath(base, elems...)
+}
+
+func (s smbStore) Exists(ctx context.Context, path string) (bool, error) {
+	err := s.withShare(ctx, func(share *smb2.Share) error {
+		_, err := share.Stat(s.relativePath(path))
+		return err
+	})
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (s smbStore) MkdirAll(ctx context.Context, dir string) error {
@@ -403,6 +423,10 @@ func (s webDAVStore) SupportsLinks() bool      { return false }
 
 func (s webDAVStore) Join(base string, elems ...string) string {
 	return joinURLPath(base, elems...)
+}
+
+func (s webDAVStore) Exists(ctx context.Context, path string) (bool, error) {
+	return s.exists(ctx, path)
 }
 
 // webdavDirs 缓存已确认存在的 WebDAV 目录，避免每次下载都对同一路径重复发 MKCOL。
