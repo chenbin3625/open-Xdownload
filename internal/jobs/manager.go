@@ -870,7 +870,11 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		return stats, nil
 	}
 
-	tweets, err := pool.GetUserMediaWithOptions(ctx, user, parserOptionsFromConfig(cfg))
+	opts := parserOptionsFromConfig(cfg)
+	if !cfg.IncludeNestedTweetMedia {
+		opts.StopAtTweetID = entity.LastSeenTweetID
+	}
+	tweets, err := pool.GetUserMediaWithOptions(ctx, user, opts)
 	if err != nil {
 		if isCancellation(ctx, err) {
 			return stats, err
@@ -887,6 +891,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		return stats, err
 	}
 	stats.Tweets += len(tweets)
+	failedBefore := stats.Failed
 	for _, tweet := range tweets {
 		for mediaIndex, media := range tweet.Media {
 			if m.jobCanceled(ctx, saveCtx, job.ID) {
@@ -927,6 +932,9 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 				stats.Downloaded++
 			}
 		}
+	}
+	if len(tweets) > 0 && stats.Failed == failedBefore {
+		_ = m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, tweets[0].ID)
 	}
 	_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
 	return stats, nil
@@ -1237,18 +1245,19 @@ func nonEmptyStrings(values ...string) []string {
 }
 
 func bestMediaURL(media parser.Media) string {
-	if media.BestURL != "" {
-		return media.BestURL
+	raw := media.BestURL
+	if raw == "" {
+		raw = media.URL
 	}
-	if media.URL != "" {
-		return media.URL
-	}
-	for _, variant := range media.Variants {
-		if variant.URL != "" {
-			return variant.URL
+	if raw == "" {
+		for _, variant := range media.Variants {
+			if variant.URL != "" {
+				raw = variant.URL
+				break
+			}
 		}
 	}
-	return ""
+	return downloader.NormalizeMediaURL(raw)
 }
 
 func isPhotoURL(raw string) bool {

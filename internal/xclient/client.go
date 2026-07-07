@@ -518,6 +518,10 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 			if err != nil || len(tweet.Media) == 0 {
 				continue
 			}
+			if options.StopAtTweetID != "" && tweet.ID == options.StopAtTweetID {
+				// timeline 按时间倒序，已翻到上次归档过的推文，更旧的均已处理过，提前停止。
+				return tweets, nil
+			}
 			tweets = append(tweets, tweet)
 		}
 		if next == "" {

@@ -269,6 +269,27 @@ func largePhotoURL(rawURL string) string {
 	return parsed.String()
 }
 
+// NormalizeMediaURL 去掉 Twitter 视频 URL 中易变且不影响内容的查询参数（?tag=N，
+// Twitter 重新编码后该值会变），使同一媒体在多次解析中获得稳定的去重键。
+// 仅对 video.twimg.com / twimg.com 生效；其他域名的 URL 原样返回。
+// 保留 format/name 等决定图片格式或尺寸的参数。幂等。
+func NormalizeMediaURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.RawQuery == "" {
+		return rawURL
+	}
+	if !strings.Contains(parsed.Host, "twimg.com") {
+		return rawURL
+	}
+	query := parsed.Query()
+	if !query.Has("tag") {
+		return rawURL
+	}
+	query.Del("tag")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
 func sanitizeFilename(name string) string {
 	name = strings.TrimSpace(name)
 	name = unsupportedFilenameChars.ReplaceAllString(name, "")

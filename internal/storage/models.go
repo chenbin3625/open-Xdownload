@@ -118,6 +118,7 @@ type UserEntity struct {
 	ParentDir         string        `json:"parentDir" db:"parent_dir"`
 	LatestReleaseTime sql.NullTime  `json:"-" db:"latest_release_time"`
 	MediaCount        sql.NullInt64 `json:"-" db:"media_count"`
+	LastSeenTweetID   string        `json:"-" db:"last_seen_tweet_id"`
 	UpdatedAt         time.Time     `json:"updatedAt" db:"updated_at"`
 }
 
