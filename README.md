@@ -6,6 +6,10 @@
 
 open-Xdownload 是一个本地优先的 X / Twitter 下载器。它提供内置 Web 界面、后台任务队列和 SQLite 本地数据库，适合把单条推文、指定用户、列表成员或某个账号的关注对象中的媒体文件下载并归档到本地目录、SMB 共享或 WebDAV。
 
+**English Summary**
+
+open-Xdownload is a local-first X / Twitter media downloader with a built-in Web UI, background task queue, and SQLite database. It can archive media from single posts, users, list members, or followed accounts to local folders, SMB shares, or WebDAV storage.
+
 ## 功能概览
 
 - 单条推文解析与下载：输入 `x.com` 或 `twitter.com` 推文链接，解析正文、作者和媒体列表，下载图片、视频、GIF 的最佳可用版本。
