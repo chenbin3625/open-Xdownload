@@ -140,3 +140,65 @@ func TestWebDAVSaveMediaRetriesOn409MissingParent(t *testing.T) {
 		t.Fatalf("PUT attempts = %d, want 2 (initial 409 + retry)", len(puts))
 	}
 }
+
+func TestWebDAVSaveMediaReplacesIncompleteExistingFile(t *testing.T) {
+	var mu sync.Mutex
+	deletes := []string{}
+	puts := []string{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Length", "10")
+			_, _ = w.Write([]byte("0123456789"))
+		case "MKCOL":
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodHead:
+			if strings.HasSuffix(r.URL.Path, "/media.mp4") {
+				w.Header().Set("Content-Length", "4")
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			mu.Lock()
+			puts = append(puts, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodDelete:
+			mu.Lock()
+			deletes = append(deletes, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	store := newWebDAVStore(config.AppConfig{WebDAVURL: server.URL, WebDAVPath: "remote"}.Normalized(), base)
+	result, err := store.SaveMedia(context.Background(), downloader.New(), server.URL+"/media", store.Join(store.Root(), "downloads"), "media", downloader.Options{})
+	if err != nil {
+		t.Fatalf("save media: %v", err)
+	}
+	if result.Skipped {
+		t.Fatal("skipped = true, want replacement download")
+	}
+	if result.Bytes != 10 {
+		t.Fatalf("bytes = %d, want 10", result.Bytes)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deletes) != 1 || !strings.HasSuffix(deletes[0], "/media.mp4") {
+		t.Fatalf("deletes = %#v, want one delete for stale media.mp4", deletes)
+	}
+	if len(puts) != 1 || !strings.HasSuffix(puts[0], "/media.mp4") {
+		t.Fatalf("puts = %#v, want one replacement PUT for media.mp4", puts)
+	}
+}

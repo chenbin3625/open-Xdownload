@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 )
@@ -390,6 +392,72 @@ func TestCancelJobDoesNotOverrideTerminalStatus(t *testing.T) {
 	}
 	if got.Status != JobCompleted {
 		t.Fatalf("status = %q, want completed (cancel must not override terminal status)", got.Status)
+	}
+}
+
+func TestUpdateJobDoesNotOverrideCanceledStatus(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "input", "title")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	claimed, err := store.ClaimPendingJobs(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if _, err := store.CancelJob(ctx, job.ID); err != nil {
+		t.Fatalf("cancel job: %v", err)
+	}
+	workerCopy := claimed[0]
+	workerCopy.Status = JobCompleted
+	workerCopy.Progress = 1
+	workerCopy.Message = "下载完成"
+	if err := store.UpdateJob(ctx, workerCopy); err != nil {
+		t.Fatalf("worker update job: %v", err)
+	}
+	got, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != JobCanceled {
+		t.Fatalf("status = %q, want canceled", got.Status)
+	}
+}
+
+func TestCreateJobsForArchiveScheduleClaimsOnce(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	schedule, err := store.CreateArchiveSchedule(ctx, ArchiveSchedule{
+		Name:            "daily",
+		Enabled:         true,
+		IntervalMinutes: MinArchiveScheduleIntervalMinutes,
+		Items: []ArchiveScheduleItem{{
+			Kind:  JobKindUser,
+			Input: "openai",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create schedule: %v", err)
+	}
+	runAt := time.Now().UTC()
+	jobs, err := store.CreateJobsForArchiveSchedule(ctx, schedule, runAt)
+	if err != nil {
+		t.Fatalf("first create jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs length = %d, want 1", len(jobs))
+	}
+	if _, err := store.CreateJobsForArchiveSchedule(ctx, schedule, runAt); !errors.Is(err, ErrArchiveScheduleAlreadyClaimed) {
+		t.Fatalf("second create jobs error = %v, want ErrArchiveScheduleAlreadyClaimed", err)
 	}
 }
 

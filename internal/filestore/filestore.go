@@ -631,15 +631,6 @@ func (s webDAVStore) SaveMedia(ctx context.Context, d *downloader.Downloader, me
 	if err := s.MkdirAll(ctx, dir); err != nil {
 		return downloader.Result{}, err
 	}
-	if filename, ok := downloader.InferredFilename(mediaURL, filenameHint, options.MaxFilenameLength); ok {
-		result, ok, err := s.existingResult(ctx, dir, filename)
-		if err != nil {
-			return downloader.Result{}, err
-		}
-		if ok {
-			return result, nil
-		}
-	}
 
 	response, err := d.Open(ctx, mediaURL, options)
 	if err != nil {
@@ -647,21 +638,20 @@ func (s webDAVStore) SaveMedia(ctx context.Context, d *downloader.Downloader, me
 	}
 	filename := downloader.Filename(mediaURL, filenameHint, response.Header.Get("Content-Type"), options.MaxFilenameLength)
 	filePath := s.Join(dir, filename)
-	exists, err := s.exists(ctx, filePath)
+	existing, complete, replaceExisting, err := s.existingFileState(ctx, dir, filename, response.ContentLength)
 	if err != nil {
 		_ = response.Body.Close()
 		return downloader.Result{}, err
 	}
-	if exists {
+	if complete {
 		_ = response.Body.Close()
-		result, ok, err := s.existingResult(ctx, dir, filename)
-		if err != nil {
+		return existing, nil
+	}
+	if replaceExisting {
+		if err := s.delete(ctx, filePath); err != nil {
+			_ = response.Body.Close()
 			return downloader.Result{}, err
 		}
-		if ok {
-			return result, nil
-		}
-		return downloader.Result{Path: filePath, Skipped: true}, nil
 	}
 	result, conflictStatus, err := s.putNewMedia(ctx, response, filePath, options)
 	if conflictStatus == http.StatusConflict {
@@ -685,6 +675,13 @@ func (s webDAVStore) SaveMedia(ctx context.Context, d *downloader.Downloader, me
 	}
 	if conflictStatus == http.StatusPreconditionFailed {
 		// 412=文件已存在（真正的去重），跳过且不删除已有文件。
+		result, complete, _, err := s.existingFileState(ctx, dir, filename, -1)
+		if err != nil {
+			return downloader.Result{}, err
+		}
+		if complete {
+			return result, nil
+		}
 		return downloader.Result{Path: filePath, Skipped: true}, nil
 	}
 	return result, nil
@@ -779,12 +776,20 @@ func (s webDAVStore) uniquePath(ctx context.Context, dir string, filename string
 }
 
 func (s webDAVStore) existingResult(ctx context.Context, dir string, filename string) (downloader.Result, bool, error) {
+	result, complete, _, err := s.existingFileState(ctx, dir, filename, -1)
+	return result, complete, err
+}
+
+func (s webDAVStore) existingFileState(ctx context.Context, dir string, filename string, contentLength int64) (downloader.Result, bool, bool, error) {
 	filePath := s.Join(dir, filename)
 	info, exists, err := s.stat(ctx, filePath)
 	if err != nil || !exists {
-		return downloader.Result{}, exists, err
+		return downloader.Result{}, false, false, err
 	}
-	return downloader.Result{Path: filePath, Bytes: info.Size(), Skipped: true}, true, nil
+	if contentLength >= 0 && info.Size() >= 0 && info.Size() != contentLength {
+		return downloader.Result{}, false, true, nil
+	}
+	return downloader.Result{Path: filePath, Bytes: info.Size(), Skipped: true}, true, false, nil
 }
 
 type webDAVFileInfo struct {

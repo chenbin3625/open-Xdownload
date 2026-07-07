@@ -48,6 +48,10 @@ func webAppHandler(api http.Handler, fsys http.FileSystem) http.Handler {
 			fileServer.ServeHTTP(w, r)
 			return
 		}
+		if strings.HasPrefix(name, "assets/") || path.Ext(name) != "" {
+			http.NotFound(w, r)
+			return
+		}
 
 		serveIndex(w, fsys)
 	})

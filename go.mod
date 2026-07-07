@@ -4,7 +4,6 @@ go 1.26.0
 
 require (
 	github.com/go-chi/chi/v5 v5.2.3
-	github.com/go-chi/cors v1.2.2
 	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/tidwall/gjson v1.18.0
