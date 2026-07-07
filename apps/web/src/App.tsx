@@ -24,7 +24,7 @@ import {
   UserAddOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   Alert,
   Avatar,
@@ -63,7 +63,7 @@ import {
   Typography,
 } from "antd";
 import type { MenuProps, TableColumnsType, TabsProps, TreeDataNode } from "antd";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AuthCheck,
   AppConfig,
@@ -112,6 +112,12 @@ type RouteState = {
   jobPage: number;
   jobPageSize: number;
   shouldReplace: boolean;
+};
+type DashboardEvent = {
+  type?: string;
+  jobId?: number;
+  payload?: unknown;
+  timestamp?: string;
 };
 type BackupCookieRow = {
   authToken: string;
@@ -178,6 +184,7 @@ const defaultJobPage = 1;
 const defaultJobPageSize = 20;
 const cancelableStatuses: Job["status"][] = ["pending", "resolving", "downloading"];
 const retryableStatuses: Job["status"][] = ["failed", "canceled", "completed"];
+const dashboardQueryRoot = ["dashboard"] as const;
 const sectionRoutes = {
   overview: "/overview",
   settings: "/settings",
@@ -216,6 +223,103 @@ function buildRoutePath(section: SectionKey, jobPage = defaultJobPage, jobPageSi
   }
   const query = params.toString();
   return `${sectionRoutes[section]}${query ? `?${query}` : ""}`;
+}
+
+function buildDashboardQueryKey(jobPage: number, jobPageSize: number) {
+  return ["dashboard", jobPage, jobPageSize] as const;
+}
+
+function refreshDashboardQueries(queryClient: QueryClient) {
+  return queryClient.invalidateQueries({ queryKey: dashboardQueryRoot });
+}
+
+function parseDashboardEvent(raw: string): DashboardEvent | null {
+  try {
+    const parsed = JSON.parse(raw) as DashboardEvent;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDashboardJobPayload(payload: unknown): payload is Job {
+  if (!payload || typeof payload !== "object") return false;
+  const job = payload as Partial<Job>;
+  return typeof job.id === "number" && typeof job.status === "string";
+}
+
+function jobStatusBucket(status: Job["status"]) {
+  if (cancelableStatuses.includes(status)) return "active";
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  return "idle";
+}
+
+function isJobTerminal(status: Job["status"]) {
+  return status === "completed" || status === "failed" || status === "canceled";
+}
+
+function dashboardStatsWithJobStatusChange(
+  stats: Dashboard["stats"],
+  previousStatus: Job["status"],
+  nextStatus: Job["status"],
+) {
+  const previousBucket = jobStatusBucket(previousStatus);
+  const nextBucket = jobStatusBucket(nextStatus);
+  if (previousBucket === nextBucket) return stats;
+
+  const nextStats = { ...stats };
+  if (previousBucket === "active") nextStats.active = Math.max(0, nextStats.active - 1);
+  if (previousBucket === "completed") nextStats.completed = Math.max(0, nextStats.completed - 1);
+  if (previousBucket === "failed") nextStats.failed = Math.max(0, nextStats.failed - 1);
+  if (nextBucket === "active") nextStats.active += 1;
+  if (nextBucket === "completed") nextStats.completed += 1;
+  if (nextBucket === "failed") nextStats.failed += 1;
+  return nextStats;
+}
+
+function sameJob(left: Job, right: Job) {
+  return (
+    left.id === right.id &&
+    left.kind === right.kind &&
+    left.status === right.status &&
+    left.input === right.input &&
+    left.title === right.title &&
+    left.progress === right.progress &&
+    left.message === right.message &&
+    left.error === right.error &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Job) {
+  let found = false;
+  let needsFullRefresh = false;
+
+  queryClient.setQueriesData<Dashboard>({ queryKey: dashboardQueryRoot }, (current) => {
+    if (!current) return current;
+
+    const jobIndex = current.jobs.findIndex((job) => job.id === updatedJob.id);
+    if (jobIndex === -1) return current;
+
+    found = true;
+    const previousJob = current.jobs[jobIndex];
+    if (jobStatusBucket(previousJob.status) !== jobStatusBucket(updatedJob.status) || isJobTerminal(updatedJob.status)) {
+      needsFullRefresh = true;
+    }
+    if (sameJob(previousJob, updatedJob)) return current;
+
+    const jobs = [...current.jobs];
+    jobs[jobIndex] = updatedJob;
+    return {
+      ...current,
+      jobs,
+      stats: dashboardStatsWithJobStatusChange(current.stats, previousJob.status, updatedJob.status),
+    };
+  });
+
+  return { found, needsFullRefresh };
 }
 
 function readRouteState(): RouteState {
@@ -271,9 +375,11 @@ export default function App() {
   const [activeSection, setActiveSection] = useState<SectionKey>(initialRoute.section);
   const [jobPage, setJobPage] = useState(initialRoute.jobPage);
   const [jobPageSize, setJobPageSize] = useState(initialRoute.jobPageSize);
+  const [manualRefreshPending, setManualRefreshPending] = useState(false);
+  const refreshDashboard = useCallback(() => refreshDashboardQueries(queryClient), [queryClient]);
 
   const dashboard = useQuery({
-    queryKey: ["dashboard", jobPage, jobPageSize],
+    queryKey: buildDashboardQueryKey(jobPage, jobPageSize),
     queryFn: () => getDashboard({ page: jobPage, pageSize: jobPageSize }),
     placeholderData: (previousData) => previousData,
   });
@@ -281,18 +387,33 @@ export default function App() {
   useEffect(() => {
     const events = new EventSource("/api/events");
     let timer: ReturnType<typeof setTimeout> | null = null;
-    events.onmessage = () => {
+    const scheduleRefresh = () => {
       if (timer) return;
       timer = setTimeout(() => {
         timer = null;
-        queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        refreshDashboard();
       }, 500);
+    };
+    events.onmessage = (message) => {
+      const event = parseDashboardEvent(message.data);
+      if (!event) {
+        scheduleRefresh();
+        return;
+      }
+      if (event.type === "job.updated" && isDashboardJobPayload(event.payload)) {
+        const result = patchDashboardJobCaches(queryClient, event.payload);
+        if (!result.found || result.needsFullRefresh) {
+          scheduleRefresh();
+        }
+        return;
+      }
+      scheduleRefresh();
     };
     return () => {
       events.close();
       if (timer) clearTimeout(timer);
     };
-  }, [queryClient]);
+  }, [queryClient, refreshDashboard]);
 
   useEffect(() => {
     const page = dashboard.data?.pagination.page;
@@ -342,6 +463,11 @@ export default function App() {
     }
   }
 
+  function handleManualRefresh() {
+    setManualRefreshPending(true);
+    void refreshDashboard().finally(() => setManualRefreshPending(false));
+  }
+
   const menuItems: MenuProps["items"] = [
     { key: "overview", icon: <HomeOutlined />, label: "工作台" },
     { key: "settings", icon: <SettingOutlined />, label: "配置" },
@@ -351,6 +477,9 @@ export default function App() {
     overview: "工作台",
     settings: "配置",
   }[activeSection];
+  const dashboardData = dashboard.data;
+  const isInitialDashboardLoading = !dashboardData && dashboard.isLoading;
+  const isInitialDashboardError = !dashboardData && dashboard.isError;
 
   return (
     <Layout className="app-shell">
@@ -385,32 +514,32 @@ export default function App() {
             <Space size={10} wrap>
               <Text strong>{currentTitle}</Text>
               <Badge
-                status={dashboard.isFetching ? "processing" : "success"}
-                text={dashboard.isFetching ? "同步中" : "已连接"}
+                status={dashboardData ? "success" : "processing"}
+                text={dashboardData ? "已连接" : "连接中"}
               />
             </Space>
             <Tooltip title="刷新">
               <Button
                 size="small"
                 icon={<ReloadOutlined />}
-                onClick={() => queryClient.invalidateQueries({ queryKey: ["dashboard"] })}
-                loading={dashboard.isFetching}
+                onClick={handleManualRefresh}
+                loading={manualRefreshPending}
               />
             </Tooltip>
           </div>
-          {dashboard.isLoading ? (
+          {isInitialDashboardLoading ? (
             <DashboardSkeleton />
-          ) : dashboard.isError ? (
+          ) : isInitialDashboardError ? (
             <Alert
               type="error"
               showIcon
               message="加载失败"
               description={dashboard.error.message}
             />
-          ) : dashboard.data ? (
+          ) : dashboardData ? (
             <DashboardContent
               section={activeSection}
-              data={dashboard.data}
+              data={dashboardData}
               onJobPageChange={handleJobPageChange}
               onJobPageSizeChange={handleJobPageSizeChange}
             />
@@ -1003,12 +1132,18 @@ function TweetParser() {
   const queryClient = useQueryClient();
   const [url, setUrl] = useState("");
   const [parsed, setParsed] = useState<Awaited<ReturnType<typeof parseTweetLink>> | null>(null);
+  const [parsedSourceUrl, setParsedSourceUrl] = useState("");
+  const latestParseUrl = useRef("");
   const parsedHasMedia = parsed !== null && parsed.media.length > 0;
 
   const parseMutation = useMutation({
     mutationFn: (targetUrl: string) => parseTweetLink(targetUrl),
-    onSuccess: (data) => {
+    onSuccess: (data, targetUrl) => {
+      if (targetUrl !== latestParseUrl.current) {
+        return;
+      }
       setParsed(data);
+      setParsedSourceUrl(targetUrl);
       notification.success({
         message: "解析完成",
         description: `发现 ${data.media.length} 个媒体`,
@@ -1023,9 +1158,9 @@ function TweetParser() {
   });
 
   const jobMutation = useMutation({
-    mutationFn: () => createJob("tweet_link", url.trim(), parsed?.id ? `Tweet ${parsed.id}` : "推文任务"),
+    mutationFn: () => createJob("tweet_link", parsedSourceUrl, parsed?.id ? `Tweet ${parsed.id}` : "推文任务"),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "下载任务已创建" });
     },
     onError: (error) => {
@@ -1039,7 +1174,10 @@ function TweetParser() {
   function handleParse(targetUrl = url) {
     const trimmed = targetUrl.trim();
     if (!trimmed) return;
+    latestParseUrl.current = trimmed;
     setUrl(trimmed);
+    setParsed(null);
+    setParsedSourceUrl("");
     parseMutation.mutate(trimmed);
   }
 
@@ -1052,8 +1190,11 @@ function TweetParser() {
         enterButton="解析"
         loading={parseMutation.isPending}
         onChange={(event) => {
-          setUrl(event.target.value);
+          const nextUrl = event.target.value;
+          latestParseUrl.current = nextUrl.trim();
+          setUrl(nextUrl);
           setParsed(null);
+          setParsedSourceUrl("");
         }}
         onSearch={handleParse}
       />
@@ -1091,7 +1232,7 @@ function TweetParser() {
               type="primary"
               icon={<DownloadOutlined />}
               loading={jobMutation.isPending}
-              disabled={!parsedHasMedia}
+              disabled={!parsedHasMedia || !parsedSourceUrl}
               onClick={() => jobMutation.mutate()}
             >
               下载媒体
@@ -1147,7 +1288,7 @@ function BatchDownloadLauncher() {
       setUsers("");
       setLists("");
       setFollowing("");
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({
         message: "批量任务已创建",
         description: `已创建 ${data.length} 个任务`,
@@ -1171,7 +1312,7 @@ function BatchDownloadLauncher() {
       }),
     onSuccess: (schedule) => {
       setScheduleName("");
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({
         message: "定时计划已保存",
         description: `${schedule.name} · ${formatIntervalMinutes(schedule.intervalMinutes)}`,
@@ -1328,7 +1469,7 @@ function ArchiveScheduleList({ schedules }: { schedules: ArchiveSchedule[] }) {
   const runSchedule = useMutation({
     mutationFn: runArchiveSchedule,
     onSuccess: (jobs) => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({
         message: "计划已开始运行",
         description: `已创建 ${jobs.length} 个任务`,
@@ -1350,7 +1491,7 @@ function ArchiveScheduleList({ schedules }: { schedules: ArchiveSchedule[] }) {
         items: schedule.items,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "计划已更新" });
     },
     onError: (error) => {
@@ -1363,7 +1504,7 @@ function ArchiveScheduleList({ schedules }: { schedules: ArchiveSchedule[] }) {
   const removeSchedule = useMutation({
     mutationFn: deleteArchiveSchedule,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "计划已删除" });
     },
     onError: (error) => {
@@ -1482,7 +1623,7 @@ function FailedTweetQueue({
   const retryAll = useMutation({
     mutationFn: retryFailedTweets,
     onSuccess: (job) => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({
         message: "失败推文已加入重试",
         description: job.title || "已创建重试任务",
@@ -1498,7 +1639,7 @@ function FailedTweetQueue({
   const removeOne = useMutation({
     mutationFn: deleteFailedTweet,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "失败记录已删除" });
     },
     onError: (error) => {
@@ -1511,7 +1652,7 @@ function FailedTweetQueue({
   const clearAll = useMutation({
     mutationFn: clearFailedTweets,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "失败队列已清空" });
     },
     onError: (error) => {
@@ -1653,7 +1794,7 @@ function JobTable({
   const retry = useMutation({
     mutationFn: retryJob,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "任务已重新执行" });
     },
     onError: (error) => {
@@ -1666,7 +1807,7 @@ function JobTable({
   const cancel = useMutation({
     mutationFn: cancelJob,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "任务已取消" });
     },
     onError: (error) => {
@@ -1936,16 +2077,42 @@ function JobStatusTag({ status }: { status: Job["status"] }) {
 function ConfigForm({ config }: { config: AppConfig }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(() => normalizeConfig(config));
+  const [draftDirty, setDraftDirty] = useState(false);
   const [authResult, setAuthResult] = useState<AuthCheck | null>(null);
+  const pendingSavedConfigKey = useRef("");
   const hasPrimaryCookie = Boolean((draft.authToken ?? "").trim() && (draft.csrfToken ?? "").trim());
   const backupCookieCount = countConfiguredBackupCookies(draft.additionalCookies ?? "");
 
-  useEffect(() => setDraft(normalizeConfig(config)), [config]);
+  useEffect(() => {
+    const normalized = normalizeConfig(config);
+    const configKey = configSyncKey(normalized);
+    if (pendingSavedConfigKey.current) {
+      if (pendingSavedConfigKey.current === configKey) {
+        pendingSavedConfigKey.current = "";
+        setDraft(normalized);
+      }
+      return;
+    }
+    if (!draftDirty) {
+      setDraft(normalized);
+    }
+  }, [config, draftDirty]);
+
+  function updateDraft(action: React.SetStateAction<AppConfig>) {
+    pendingSavedConfigKey.current = "";
+    setDraftDirty(true);
+    setAuthResult(null);
+    setDraft(action);
+  }
 
   const mutation = useMutation({
     mutationFn: updateConfig,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    onSuccess: (updated) => {
+      const normalized = normalizeConfig(updated);
+      pendingSavedConfigKey.current = configSyncKey(normalized);
+      setDraft(normalized);
+      setDraftDirty(false);
+      refreshDashboardQueries(queryClient);
       notification.success({ message: "配置已保存" });
     },
     onError: (error) => {
@@ -2024,14 +2191,14 @@ function ConfigForm({ config }: { config: AppConfig }) {
             icon={<DatabaseOutlined />}
             title="存储"
           >
-            <StorageSettings draft={draft} onChange={setDraft} />
+            <StorageSettings draft={draft} onChange={updateDraft} />
           </ConfigPanel>
 
           <ConfigPanel
             icon={<DownloadOutlined />}
             title="下载"
           >
-            <DownloadSettingsFields draft={draft} onChange={setDraft} />
+            <DownloadSettingsFields draft={draft} onChange={updateDraft} />
           </ConfigPanel>
 
           <ConfigPanel
@@ -2039,7 +2206,7 @@ function ConfigForm({ config }: { config: AppConfig }) {
             title="X Cookie"
             extra={<Tag color={hasPrimaryCookie ? "success" : "warning"}>{hasPrimaryCookie ? "已配置" : "待配置"}</Tag>}
           >
-            <CookieSettingsFields draft={draft} onChange={setDraft} />
+            <CookieSettingsFields draft={draft} onChange={updateDraft} />
             <Stack size={10}>
               {authResult ? (
                 <Alert
@@ -2821,6 +2988,10 @@ function normalizeConfig(config: AppConfig): AppConfig {
     webdavUsername: config.webdavUsername ?? "",
     webdavPassword: config.webdavPassword ?? "",
   };
+}
+
+function configSyncKey(config: AppConfig) {
+  return JSON.stringify(config);
 }
 
 function hasConfiguredPrimaryCookie(config: AppConfig) {

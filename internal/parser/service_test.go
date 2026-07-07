@@ -112,6 +112,35 @@ func TestTweetFromGraphQLResultParsesUnifiedCardVideo(t *testing.T) {
 	}
 }
 
+func TestTweetFromGraphQLResultParsesUnifiedCardImageFallback(t *testing.T) {
+	unifiedCard := `{
+		"component_objects": {
+			"component-1": {"data": {"image_url": "https://pbs.twimg.com/media/card-image.jpg?format=jpg&name=large"}}
+		}
+	}`
+	result := gjson.Parse(`{
+		"__typename": "Tweet",
+		"rest_id": "101",
+		"core": {"user_results": {"result": {"rest_id": "u1", "legacy": {"name": "OpenAI", "screen_name": "openai"}}}},
+		"legacy": {"full_text": "card image", "created_at": "Tue Jan 12 23:02:33 +0000 2021"},
+		"card": {"legacy": {"binding_values": [
+			{"key": "unified_card", "value": {"string_value": ` + strconv.Quote(unifiedCard) + `}}
+		]}}
+	}`)
+
+	tweet, err := TweetFromGraphQLResult("", "openai", "101", result)
+	if err != nil {
+		t.Fatalf("TweetFromGraphQLResult returned error: %v", err)
+	}
+	urls := tweet.BestMediaURLs()
+	if len(urls) != 1 || urls[0] != "https://pbs.twimg.com/media/card-image.jpg?format=jpg&name=large" {
+		t.Fatalf("unexpected media urls: %#v", urls)
+	}
+	if tweet.Media[0].Type != MediaPhoto {
+		t.Fatalf("media type = %s, want %s", tweet.Media[0].Type, MediaPhoto)
+	}
+}
+
 func TestTweetFromGraphQLResultNestedTweetMediaRequiresOption(t *testing.T) {
 	result := gjson.Parse(`{
 		"__typename": "Tweet",

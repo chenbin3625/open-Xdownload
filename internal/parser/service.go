@@ -566,12 +566,12 @@ func parseVariantList(variants gjson.Result) []MediaVariant {
 }
 
 func mediaFromURL(rawURL string) Media {
-	if !strings.Contains(strings.ToLower(rawURL), ".mp4") {
-		return Media{}
-	}
+	lower := strings.ToLower(rawURL)
 	kind := MediaPhoto
-	if strings.Contains(strings.ToLower(rawURL), ".mp4") {
+	if strings.Contains(lower, ".mp4") {
 		kind = MediaVideo
+	} else if !isPhotoMediaURL(rawURL) {
+		return Media{}
 	}
 	media := Media{
 		ID:         rawURL,
@@ -588,6 +588,31 @@ func mediaFromURL(rawURL string) Media {
 		}}
 	}
 	return media
+}
+
+func isPhotoMediaURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Host)
+	if strings.Contains(host, "pbs.twimg.com") {
+		return true
+	}
+	switch strings.ToLower(pathExtension(parsed.Path)) {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif":
+		return true
+	default:
+		return false
+	}
+}
+
+func pathExtension(value string) string {
+	index := strings.LastIndex(value, ".")
+	if index < 0 {
+		return ""
+	}
+	return value[index:]
 }
 
 func appendUniqueMedia(items *[]Media, seen map[string]struct{}, mediaItems []Media) {
