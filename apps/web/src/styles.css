@@ -17,7 +17,6 @@
   --danger-soft: #fff0f0;
   --warning: #b7791f;
   --warning-soft: #fff7e6;
-  --shadow-panel: 0 1px 2px rgb(15 23 42 / 5%), 0 12px 28px rgb(15 23 42 / 7%);
   --shadow-soft: 0 1px 2px rgb(15 23 42 / 4%), 0 6px 18px rgb(15 23 42 / 5%);
   color: var(--text);
   background: var(--app-bg);
@@ -150,7 +149,6 @@ textarea {
 
 .app-content {
   width: 100%;
-  max-width: 1580px;
   margin: 0 auto;
   padding: 18px 22px 28px;
 }
@@ -207,88 +205,6 @@ textarea {
   display: grid;
   gap: 14px;
   min-width: 0;
-}
-
-.stats-card {
-  position: relative;
-  height: 100%;
-  overflow: hidden;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
-  transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease,
-    transform 160ms ease;
-}
-
-.stats-card::before {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  background: #475569;
-  content: "";
-}
-
-.stats-card:hover {
-  border-color: #c8d4e5;
-  box-shadow: var(--shadow-panel);
-  transform: translateY(-1px);
-}
-
-.stats-card .ant-card-body {
-  padding: 15px 16px 14px 18px;
-}
-
-.stats-card .ant-statistic-title {
-  margin-bottom: 8px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.stats-card .ant-statistic-content {
-  color: var(--text);
-  line-height: 1.15;
-}
-
-.stats-card .ant-statistic-content-prefix {
-  margin-inline-end: 8px;
-  color: #475569;
-}
-
-.stats-card-total::before {
-  background: #475569;
-}
-
-.stats-card-total .ant-statistic-content-prefix {
-  color: #475569;
-}
-
-.stats-card-active::before {
-  background: var(--primary);
-}
-
-.stats-card-active .ant-statistic-content-prefix {
-  color: var(--primary);
-}
-
-.stats-card-completed::before {
-  background: var(--success);
-}
-
-.stats-card-completed .ant-statistic-content-prefix {
-  color: var(--success);
-}
-
-.stats-card-failed::before {
-  background: var(--danger);
-}
-
-.stats-card-failed .ant-statistic-content-prefix {
-  color: var(--danger);
 }
 
 .workbench-grid {
@@ -409,12 +325,12 @@ textarea {
   margin-bottom: 10px;
 }
 
-.batch-archive-drawer .ant-drawer-header {
+.app-drawer .ant-drawer-header {
   border-bottom-color: var(--border-soft);
   background: var(--surface-soft);
 }
 
-.batch-archive-drawer .ant-drawer-body {
+.app-drawer .ant-drawer-body {
   background: #fbfdff;
 }
 
@@ -430,10 +346,10 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
-  margin-bottom: 14px;
-  padding: 14px 16px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--surface);
@@ -468,23 +384,27 @@ textarea {
   flex: 0 0 auto;
 }
 
-.settings-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
-  gap: 18px;
-  min-width: 0;
-}
-
 .settings-main {
   display: grid;
   min-width: 0;
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.settings-panel {
+  padding: 14px;
+}
+
+.settings-panel-header {
+  min-height: 32px;
+  margin-bottom: 10px;
+  padding-bottom: 9px;
 }
 
 .settings-field-grid .ant-form-item,
 .settings-cookie-fields .ant-form-item {
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .settings-cookie-fields > .ant-form-item:last-child,
@@ -715,9 +635,23 @@ textarea::placeholder {
   .workbench-rail {
     position: static;
   }
+}
 
-  .settings-grid {
-    grid-template-columns: 1fr;
+@media (min-width: 1200px) {
+  .settings-main {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
+
+  .settings-panel-storage {
+    grid-column: span 5;
+  }
+
+  .settings-panel-download {
+    grid-column: span 7;
+  }
+
+  .settings-panel-cookie {
+    grid-column: 1 / -1;
   }
 }
 
@@ -729,14 +663,6 @@ textarea::placeholder {
 
   .page-toolbar > .ant-space {
     min-width: 0;
-  }
-
-  .stats-card .ant-card-body {
-    padding: 13px 12px 12px 16px;
-  }
-
-  .stats-card .ant-statistic-content {
-    font-size: 22px;
   }
 
   .batch-target-tabs textarea {

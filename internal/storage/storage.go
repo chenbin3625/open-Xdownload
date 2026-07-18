@@ -570,9 +570,9 @@ SELECT
 	COUNT(*) AS total,
 	COALESCE(SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END), 0) AS active,
 	COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS completed,
-	COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS failed
+	COALESCE(SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END), 0) AS failed
 FROM jobs`,
-		JobPending, JobResolving, JobDownloading, JobCompleted, JobFailed)
+		JobPending, JobResolving, JobDownloading, JobCompleted, JobFailed, JobCompletedWithErrors)
 	return stats, err
 }
 
@@ -624,7 +624,7 @@ UPDATE jobs SET
 	error = :error,
 	updated_at = :updated_at
 WHERE id = :id
-  AND (status NOT IN ('completed', 'failed', 'canceled') OR status = :status)`, job)
+  AND (status NOT IN ('completed', 'completed_with_errors', 'failed', 'canceled') OR status = :status)`, job)
 	return err
 }
 
@@ -633,8 +633,8 @@ func (s *Store) CancelJob(ctx context.Context, id int64) (Job, error) {
 	// worker 的终态保存竞争（worker 把任务标为 completed 后，这里不会再覆盖为 canceled）。
 	_, err := s.db.ExecContext(ctx, `
 UPDATE jobs SET status = ?, message = ?, progress = 1, error = '', updated_at = ?
-WHERE id = ? AND status NOT IN (?, ?, ?)`,
-		JobCanceled, "已取消", time.Now().UTC(), id, JobCompleted, JobFailed, JobCanceled)
+WHERE id = ? AND status NOT IN (?, ?, ?, ?)`,
+		JobCanceled, "已取消", time.Now().UTC(), id, JobCompleted, JobCompletedWithErrors, JobFailed, JobCanceled)
 	if err != nil {
 		return Job{}, err
 	}
@@ -651,19 +651,7 @@ func (s *Store) RetryJob(ctx context.Context, id int64) (Job, error) {
 	case JobPending, JobResolving, JobDownloading:
 		return Job{}, fmt.Errorf("任务仍在运行或排队中，不能重试")
 	}
-	_, err = s.db.ExecContext(ctx, `
-UPDATE jobs SET
-	status = ?,
-	progress = 0,
-	message = ?,
-	error = '',
-	updated_at = ?
-WHERE id = ? AND status NOT IN (?, ?, ?)`,
-		JobPending, "等待重试", time.Now().UTC(), id, JobPending, JobResolving, JobDownloading)
-	if err != nil {
-		return Job{}, err
-	}
-	return s.GetJob(ctx, id)
+	return s.CreateJob(ctx, job.Kind, job.Input, job.Title)
 }
 
 func (s *Store) RequeueInterruptedJobs(ctx context.Context) ([]Job, error) {

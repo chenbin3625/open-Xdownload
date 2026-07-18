@@ -3,6 +3,7 @@ export type JobStatus =
   | "resolving"
   | "downloading"
   | "completed"
+  | "completed_with_errors"
   | "failed"
   | "canceled";
 
@@ -326,6 +327,12 @@ export const testStorage = (config: AppConfig) =>
 
 export const listLocalDirectories = (path?: string) =>
   api<LocalDirectoryListing>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+
+export const createLocalDirectory = (path: string) =>
+  api<LocalDirectoryListing>("/api/local-directories", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
 
 export const getFailedTweets = ({
   page = 1,
