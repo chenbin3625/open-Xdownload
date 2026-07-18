@@ -45,6 +45,7 @@ func (s *Server) Routes() http.Handler {
 	r.Put("/api/config", s.updateConfig)
 	r.Post("/api/storage/test", s.testStorage)
 	r.Get("/api/local-directories", s.listLocalDirectories)
+	r.Post("/api/local-directories", s.createLocalDirectory)
 	r.Post("/api/auth/check", s.checkAuth)
 	r.Post("/api/parse/tweet-link", s.parseTweetLink)
 	r.Post("/api/jobs", s.createJob)
@@ -109,7 +110,7 @@ func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg = mergeSecretPlaceholders(cfg, current).Normalized()
 	// 阻止对链路本地地址（如云元数据 169.254.169.254）的测试请求，缓解 SSRF。
-	if isBlockedStorageTarget(cfg.SMBHost) || isBlockedStorageTarget(urlHostname(cfg.WebDAVURL)) {
+	if blockedStorageTarget(r.Context(), cfg.SMBHost) || blockedStorageTarget(r.Context(), urlHostname(cfg.WebDAVURL)) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("不允许的存储目标地址"))
 		return
 	}
@@ -149,10 +150,18 @@ func (s *Server) listLocalDirectories(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	entries, err := os.ReadDir(dir)
+	listing, err := localDirectoryListingForPath(dir)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, listing)
+}
+
+func localDirectoryListingForPath(dir string) (localDirectoryListing, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return localDirectoryListing{}, err
 	}
 	items := make([]localDirectoryEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -173,11 +182,30 @@ func (s *Server) listLocalDirectories(w http.ResponseWriter, r *http.Request) {
 	if parent == dir {
 		parent = ""
 	}
-	writeJSON(w, http.StatusOK, localDirectoryListing{
+	return localDirectoryListing{
 		Path:    dir,
 		Parent:  parent,
 		Entries: items,
-	})
+	}, nil
+}
+
+func (s *Server) createLocalDirectory(w http.ResponseWriter, r *http.Request) {
+	var req localDirectoryRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	dir, err := createLocalDirectoryPath(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	listing, err := localDirectoryListingForPath(dir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, listing)
 }
 
 func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
@@ -499,10 +527,41 @@ func isBlockedStorageTarget(host string) bool {
 	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
+func blockedStorageTarget(ctx context.Context, host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if isBlockedStorageTarget(host) {
+		return true
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	addresses, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return false
+	}
+	for _, address := range addresses {
+		if isBlockedStorageTarget(address.IP.String()) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAllowedDirectMediaURL(parsed *url.URL) bool {
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
+}
+
 type localDirectoryListing struct {
 	Path    string                `json:"path"`
 	Parent  string                `json:"parent"`
 	Entries []localDirectoryEntry `json:"entries"`
+}
+
+type localDirectoryRequest struct {
+	Path string `json:"path"`
 }
 
 type localDirectoryEntry struct {
@@ -520,19 +579,12 @@ func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKin
 	}
 	req.Input = strings.TrimSpace(req.Input)
 	if req.Kind == storage.JobKindTweetLink {
-		cfg, err := s.store.GetConfig(ctx)
+		_, tweetID, err := parser.ExtractTweetURL(req.Input)
 		if err != nil {
 			return "", "", "", err
-		}
-		tweet, err := s.parser.ParseTweetLinkWithOptions(ctx, req.Input, parserOptionsFromConfig(cfg))
-		if err != nil {
-			return "", "", "", err
-		}
-		if len(tweet.BestMediaURLs()) == 0 {
-			return "", "", "", fmt.Errorf("这条推文没有可下载媒体")
 		}
 		if strings.TrimSpace(req.Title) == "" {
-			req.Title = fmt.Sprintf("Tweet %s", tweet.ID)
+			req.Title = fmt.Sprintf("Tweet %s", tweetID)
 		}
 	}
 	if req.Kind == storage.JobKindUser && strings.TrimSpace(req.Title) == "" {
@@ -548,6 +600,9 @@ func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKin
 		parsed, err := url.Parse(req.Input)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return "", "", "", fmt.Errorf("请输入有效的媒体 URL")
+		}
+		if !isAllowedDirectMediaURL(parsed) {
+			return "", "", "", fmt.Errorf("媒体 URL 仅支持 twimg.com 域名")
 		}
 		if strings.TrimSpace(req.Title) == "" {
 			req.Title = "媒体 URL"
@@ -618,7 +673,7 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.manager.Notify()
-	s.eventBus.Publish(jobs.Event{Type: "job.updated", JobID: job.ID, Payload: job})
+	s.eventBus.Publish(jobs.Event{Type: "job.created", JobID: job.ID, Payload: job})
 	writeJSON(w, http.StatusOK, job)
 }
 
@@ -931,6 +986,27 @@ func localDirectoryPath(value string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		// 不存在的路径直接返回错误，避免把家目录路径泄露给探测不存在路径的调用方。
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s 不是目录", path)
+	}
+	return path, nil
+}
+
+func createLocalDirectoryPath(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("目录路径不能为空")
+	}
+	path, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
 		return "", err
 	}
 	if !info.IsDir() {

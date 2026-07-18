@@ -138,8 +138,21 @@ func TestRetryJobRejectsActiveJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry failed job: %v", err)
 	}
-	if retried.Status != JobPending || retried.Error != "" {
-		t.Fatalf("retried job = %+v, want clean pending", retried)
+	if retried.ID == claimed[0].ID {
+		t.Fatalf("retried job ID = %d, want a new job", retried.ID)
+	}
+	if retried.Status != JobPending || retried.Error != "" || retried.Progress != 0 {
+		t.Fatalf("retried job = %+v, want a new clean pending job", retried)
+	}
+	if retried.Kind != claimed[0].Kind || retried.Input != claimed[0].Input || retried.Title != claimed[0].Title {
+		t.Fatalf("retried job = %+v, want source task fields preserved", retried)
+	}
+	original, err := store.GetJob(ctx, claimed[0].ID)
+	if err != nil {
+		t.Fatalf("get original job: %v", err)
+	}
+	if original.Status != JobFailed || original.Error != "boom" {
+		t.Fatalf("original job = %+v, want failed history unchanged", original)
 	}
 }
 
@@ -178,6 +191,15 @@ func TestListJobsPageAndJobStats(t *testing.T) {
 		t.Fatalf("update failed job: %v", err)
 	}
 
+	partial, err := store.GetJob(ctx, ids[2])
+	if err != nil {
+		t.Fatalf("get partial job: %v", err)
+	}
+	partial.Status = JobCompletedWithErrors
+	if err := store.UpdateJob(ctx, partial); err != nil {
+		t.Fatalf("update partial job: %v", err)
+	}
+
 	page, err := store.ListJobsPage(ctx, 2, 2)
 	if err != nil {
 		t.Fatalf("list jobs page: %v", err)
@@ -193,8 +215,8 @@ func TestListJobsPageAndJobStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("job stats: %v", err)
 	}
-	if stats.Total != 5 || stats.Active != 3 || stats.Completed != 1 || stats.Failed != 1 {
-		t.Fatalf("stats = %+v, want total=5 active=3 completed=1 failed=1", stats)
+	if stats.Total != 5 || stats.Active != 2 || stats.Completed != 1 || stats.Failed != 2 {
+		t.Fatalf("stats = %+v, want total=5 active=2 completed=1 failed=2", stats)
 	}
 }
 

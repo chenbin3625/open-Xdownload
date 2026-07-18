@@ -53,7 +53,6 @@ import {
   Skeleton,
   Space,
   Spin,
-  Statistic,
   Switch,
   Table,
   Tabs,
@@ -85,6 +84,7 @@ import {
   createArchiveSchedule,
   createJob,
   createJobsBatch,
+  createLocalDirectory,
   deleteArchiveSchedule,
   deleteFailedTweet,
   formatBytes,
@@ -99,6 +99,14 @@ import {
   updateArchiveSchedule,
   updateConfig,
 } from "./lib/api";
+import {
+  cancelableStatuses,
+  dashboardStatsWithJobStatusChange,
+  isJobTerminal,
+  jobStatusBucket,
+  progressStatus,
+  retryableStatuses,
+} from "./lib/jobStatus";
 
 const { Sider, Content } = Layout;
 const { Text, Paragraph } = Typography;
@@ -184,8 +192,6 @@ const tablePageSizeOptions = [10, 20, 50, 100];
 const failedTweetPageSizeOptions = [10, 20, 50];
 const defaultJobPage = 1;
 const defaultJobPageSize = 20;
-const cancelableStatuses: Job["status"][] = ["pending", "resolving", "downloading"];
-const retryableStatuses: Job["status"][] = ["failed", "canceled", "completed"];
 const dashboardQueryRoot = ["dashboard"] as const;
 const failedTweetQueryRoot = ["failed-tweets"] as const;
 const sectionRoutes = {
@@ -249,36 +255,6 @@ function isDashboardJobPayload(payload: unknown): payload is Job {
   if (!payload || typeof payload !== "object") return false;
   const job = payload as Partial<Job>;
   return typeof job.id === "number" && typeof job.status === "string";
-}
-
-function jobStatusBucket(status: Job["status"]) {
-  if (cancelableStatuses.includes(status)) return "active";
-  if (status === "completed") return "completed";
-  if (status === "failed") return "failed";
-  return "idle";
-}
-
-function isJobTerminal(status: Job["status"]) {
-  return status === "completed" || status === "failed" || status === "canceled";
-}
-
-function dashboardStatsWithJobStatusChange(
-  stats: Dashboard["stats"],
-  previousStatus: Job["status"],
-  nextStatus: Job["status"],
-) {
-  const previousBucket = jobStatusBucket(previousStatus);
-  const nextBucket = jobStatusBucket(nextStatus);
-  if (previousBucket === nextBucket) return stats;
-
-  const nextStats = { ...stats };
-  if (previousBucket === "active") nextStats.active = Math.max(0, nextStats.active - 1);
-  if (previousBucket === "completed") nextStats.completed = Math.max(0, nextStats.completed - 1);
-  if (previousBucket === "failed") nextStats.failed = Math.max(0, nextStats.failed - 1);
-  if (nextBucket === "active") nextStats.active += 1;
-  if (nextBucket === "completed") nextStats.completed += 1;
-  if (nextBucket === "failed") nextStats.failed += 1;
-  return nextStats;
 }
 
 function sameJob(left: Job, right: Job) {
@@ -591,8 +567,6 @@ function OverviewPage({
 
   return (
     <div className="workbench-page">
-      <StatsStrip data={data} />
-
       <div className="workbench-grid">
         <div className="workbench-main">
           <WorkbenchPanel
@@ -633,7 +607,7 @@ function OverviewPage({
       </div>
 
       <Drawer
-        className="batch-archive-drawer"
+        className="app-drawer batch-archive-drawer"
         destroyOnHidden
         open={batchDrawerOpen}
         title={
@@ -660,8 +634,18 @@ function TaskCenterSections({
   onJobPageChange: (page: number) => void;
   onJobPageSizeChange: (pageSize: number) => void;
 }) {
+  const screens = Grid.useBreakpoint();
+  const [failedDrawerOpen, setFailedDrawerOpen] = useState(false);
+  const failedTweetCount = data.failedTweetCount ?? 0;
+
+  useEffect(() => {
+    if (failedTweetCount === 0) {
+      setFailedDrawerOpen(false);
+    }
+  }, [failedTweetCount]);
+
   return (
-    <Stack>
+    <>
       <SectionBlock
         title={
           <Space>
@@ -669,6 +653,18 @@ function TaskCenterSections({
             任务列表
           </Space>
         }
+        extra={failedTweetCount > 0 ? (
+          <Badge count={failedTweetCount} size="small" overflowCount={999}>
+            <Button
+              size="small"
+              danger
+              icon={<CloseCircleOutlined />}
+              onClick={() => setFailedDrawerOpen(true)}
+            >
+              查看失败项
+            </Button>
+          </Badge>
+        ) : null}
       >
         <JobTable
           jobs={data.jobs}
@@ -679,21 +675,26 @@ function TaskCenterSections({
           onPageSizeChange={onJobPageSizeChange}
         />
       </SectionBlock>
-      <SectionBlock
+
+      <Drawer
+        className="app-drawer failed-tweets-drawer"
+        destroyOnHidden
+        open={failedDrawerOpen}
         title={
           <Space>
             <CloseCircleOutlined />
             失败推文队列
           </Space>
         }
-        extra={<Tag color={data.failedTweetCount > 0 ? "error" : "default"}>{data.failedTweetCount}</Tag>}
+        size={screens.md ? 760 : "100%"}
+        onClose={() => setFailedDrawerOpen(false)}
       >
         <FailedTweetQueue
           items={data.failedTweets ?? []}
-          total={data.failedTweetCount ?? 0}
+          total={failedTweetCount}
         />
-      </SectionBlock>
-    </Stack>
+      </Drawer>
+    </>
   );
 }
 
@@ -702,45 +703,6 @@ function SettingsPage({ config }: { config: AppConfig }) {
     <div className="settings-page">
       <ConfigForm config={config} />
     </div>
-  );
-}
-
-function StatsStrip({ data }: { data: Dashboard }) {
-  const stats = data.stats ?? { total: 0, active: 0, completed: 0, failed: 0 };
-  const items = [
-    { key: "total", title: "总任务", value: stats.total, prefix: <DatabaseOutlined /> },
-    { key: "active", title: "进行中", value: stats.active, prefix: <SyncOutlined spin={stats.active > 0} /> },
-    {
-      key: "completed",
-      title: "完成",
-      value: stats.completed,
-      prefix: <CheckCircleOutlined />,
-      valueStyle: { color: "#389e0d" },
-    },
-    {
-      key: "failed",
-      title: "失败",
-      value: stats.failed,
-      prefix: <CloseCircleOutlined />,
-      valueStyle: { color: stats.failed > 0 ? "#cf1322" : undefined },
-    },
-  ];
-
-  return (
-    <Row gutter={[12, 12]}>
-      {items.map((item) => (
-        <Col xs={12} lg={6} key={item.key}>
-          <Card className={`stats-card stats-card-${item.key}`} size="small">
-            <Statistic
-              title={item.title}
-              value={item.value}
-              prefix={item.prefix}
-              valueStyle={item.valueStyle}
-            />
-          </Card>
-        </Col>
-      ))}
-    </Row>
   );
 }
 
@@ -778,32 +740,21 @@ function WorkbenchPanel({
 
 function DashboardSkeleton() {
   return (
-    <Stack>
-      <Row gutter={[12, 12]}>
-        {[0, 1, 2, 3].map((item) => (
-          <Col xs={12} lg={6} key={item}>
-            <Card size="small">
-              <Skeleton active title={{ width: 92 }} paragraph={{ rows: 1, width: 64 }} />
-            </Card>
-          </Col>
-        ))}
-      </Row>
-      <Row gutter={[12, 12]}>
-        <Col xs={24} xl={14}>
-          <div className="skeleton-block">
-            <Skeleton active paragraph={{ rows: 7 }} />
-          </div>
-        </Col>
-        <Col xs={24} xl={10}>
-          <div className="skeleton-block">
-            <Skeleton active paragraph={{ rows: 7 }} />
-          </div>
-        </Col>
-      </Row>
-      <div className="skeleton-block">
-        <ListSkeleton rows={4} />
+    <div className="workbench-grid">
+      <div className="workbench-main">
+        <div className="skeleton-block">
+          <Skeleton active paragraph={{ rows: 4 }} />
+        </div>
+        <div className="skeleton-block">
+          <ListSkeleton rows={4} />
+        </div>
       </div>
-    </Stack>
+      <aside className="workbench-rail">
+        <div className="skeleton-block">
+          <Skeleton active paragraph={{ rows: 6 }} />
+        </div>
+      </aside>
+    </div>
   );
 }
 
@@ -1759,9 +1710,9 @@ function JobTable({
 
   const retry = useMutation({
     mutationFn: retryJob,
-    onSuccess: () => {
+    onSuccess: (job) => {
       refreshDashboardQueries(queryClient);
-      notification.success({ message: "任务已重新执行" });
+      notification.success({ message: `已创建重试任务 #${job.id}` });
     },
     onError: (error) => {
       notification.error({
@@ -1851,7 +1802,7 @@ function JobTable({
                 onClick={() => cancel.mutate(job.id)}
               />
             </Tooltip>
-            <Tooltip title={canRetry ? "重新执行" : "运行中任务不能重试"}>
+            <Tooltip title={canRetry ? "新建重试任务" : "运行中任务不能重试"}>
               <Button
                 size="small"
                 icon={<RetweetOutlined />}
@@ -2030,6 +1981,7 @@ function JobStatusTag({ status }: { status: Job["status"] }) {
     resolving: { color: "processing", icon: <LoadingOutlined spin />, label: "解析" },
     downloading: { color: "blue", icon: <DownloadOutlined />, label: "下载" },
     completed: { color: "success", icon: <CheckCircleOutlined />, label: "完成" },
+    completed_with_errors: { color: "warning", icon: <CloseCircleOutlined />, label: "部分失败" },
     failed: { color: "error", icon: <CloseCircleOutlined />, label: "失败" },
     canceled: { color: "default", icon: <StopOutlined />, label: "取消" },
   }[status];
@@ -2141,40 +2093,33 @@ function ConfigForm({ config }: { config: AppConfig }) {
         </Space>
       </div>
 
-      <div className="settings-grid">
-        <div className="settings-main">
-          <ConfigPanel
-            icon={<DatabaseOutlined />}
-            title="存储"
-          >
-            <StorageSettings draft={draft} onChange={updateDraft} />
-          </ConfigPanel>
+      <div className="settings-main">
+        <ConfigPanel kind="storage" icon={<DatabaseOutlined />} title="存储">
+          <StorageSettings draft={draft} onChange={updateDraft} />
+        </ConfigPanel>
 
-          <ConfigPanel
-            icon={<DownloadOutlined />}
-            title="下载"
-          >
-            <DownloadSettingsFields draft={draft} onChange={updateDraft} />
-          </ConfigPanel>
+        <ConfigPanel kind="download" icon={<DownloadOutlined />} title="下载">
+          <DownloadSettingsFields draft={draft} onChange={updateDraft} />
+        </ConfigPanel>
 
-          <ConfigPanel
-            icon={<SafetyCertificateOutlined />}
-            title="X Cookie"
-            extra={<Tag color={hasPrimaryCookie ? "success" : "warning"}>{hasPrimaryCookie ? "已配置" : "待配置"}</Tag>}
-          >
-            <CookieSettingsFields draft={draft} onChange={updateDraft} />
-            <Stack size={10}>
-              {authResult ? (
-                <Alert
-                  type={authResult.ok ? "success" : "error"}
-                  showIcon
-                  message={authResult.ok && authResult.screenName ? `@${authResult.screenName}` : authResult.message}
-                />
-              ) : null}
-              {authResult?.diagnostics ? <CookieDiagnostics diagnostics={authResult.diagnostics} /> : null}
-            </Stack>
-          </ConfigPanel>
-        </div>
+        <ConfigPanel
+          kind="cookie"
+          icon={<SafetyCertificateOutlined />}
+          title="X Cookie"
+          extra={<Tag color={hasPrimaryCookie ? "success" : "warning"}>{hasPrimaryCookie ? "已配置" : "待配置"}</Tag>}
+        >
+          <CookieSettingsFields draft={draft} onChange={updateDraft} />
+          <Stack size={10}>
+            {authResult ? (
+              <Alert
+                type={authResult.ok ? "success" : "error"}
+                showIcon
+                message={authResult.ok && authResult.screenName ? `@${authResult.screenName}` : authResult.message}
+              />
+            ) : null}
+            {authResult?.diagnostics ? <CookieDiagnostics diagnostics={authResult.diagnostics} /> : null}
+          </Stack>
+        </ConfigPanel>
       </div>
     </Form>
   );
@@ -2185,16 +2130,18 @@ function ConfigPanel({
   description,
   extra,
   icon,
+  kind,
   title,
 }: {
   children: React.ReactNode;
   description?: string;
   extra?: React.ReactNode;
   icon: React.ReactNode;
+  kind: "storage" | "download" | "cookie";
   title: string;
 }) {
   return (
-    <section className="settings-panel">
+    <section className={`settings-panel settings-panel-${kind}`}>
       <Flex align="flex-start" justify="space-between" gap={12} wrap="wrap" className="settings-panel-header">
         <Space align="start" size={10}>
           <span className="settings-panel-icon">{icon}</span>
@@ -2503,6 +2450,24 @@ function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelect: (pat
     queryKey: ["local-directories", rootPath],
     queryFn: () => listLocalDirectories(rootPath),
   });
+  const createDirectory = useMutation({
+    mutationFn: createLocalDirectory,
+    onSuccess: (data) => {
+      setRootPath(data.path);
+      setSelectedPath(data.path);
+      onSelect(data.path);
+      const rootNode = listingToDirectoryTreeRoot(data);
+      setTreeData([rootNode]);
+      setExpandedKeys([rootNode.key]);
+      notification.success({ message: "目录已创建并选择" });
+    },
+    onError: (error) => {
+      notification.error({
+        message: "创建目录失败",
+        description: getErrorMessage(error),
+      });
+    },
+  });
   const resolvedPath = listing.data?.path ?? rootPath;
 
   useEffect(() => {
@@ -2536,11 +2501,34 @@ function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelect: (pat
     }
   }
 
+  function openSelectedPath() {
+    const trimmed = selectedPath.trim();
+    if (!trimmed) return;
+    setRootPath(trimmed);
+  }
+
+  function createSelectedPath() {
+    const trimmed = selectedPath.trim();
+    if (!trimmed) return;
+    createDirectory.mutate(trimmed);
+  }
+
   return (
     <Stack size={10}>
       <Space.Compact style={fullWidthStyle}>
-        <Input readOnly prefix={<FolderOpenOutlined />} value={selectedPath} />
-        <Button type="primary" onClick={() => onSelect(selectedPath)} disabled={!selectedPath}>
+        <Input
+          prefix={<FolderOpenOutlined />}
+          value={selectedPath}
+          onChange={(event) => setSelectedPath(event.target.value)}
+          onPressEnter={openSelectedPath}
+        />
+        <Button onClick={openSelectedPath} disabled={!selectedPath.trim() || listing.isLoading}>
+          打开
+        </Button>
+        <Button onClick={createSelectedPath} loading={createDirectory.isPending} disabled={!selectedPath.trim()}>
+          创建
+        </Button>
+        <Button type="primary" onClick={() => onSelect(selectedPath.trim())} disabled={!selectedPath.trim()}>
           选择此目录
         </Button>
       </Space.Compact>
@@ -3124,13 +3112,6 @@ function clampPercent(value: number) {
     return 0;
   }
   return Math.min(100, Math.max(0, Math.round(value * 100)));
-}
-
-function progressStatus(job: Job) {
-  if (job.status === "failed") return "exception";
-  if (job.status === "completed") return "success";
-  if (job.status === "downloading" || job.status === "resolving") return "active";
-  return "normal";
 }
 
 function storageTargetLabel(config: AppConfig) {

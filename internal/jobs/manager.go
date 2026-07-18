@@ -436,7 +436,7 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
-	m.complete(saveCtx, job, completionMessage(stats, retried))
+	m.completeArchive(saveCtx, job, stats, retried)
 }
 
 func (m *Manager) processFailedRetry(ctx context.Context, saveCtx context.Context, job storage.Job) {
@@ -460,7 +460,11 @@ func (m *Manager) processFailedRetry(ctx context.Context, saveCtx context.Contex
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	job.Status = storage.JobCompleted
+	if remaining > 0 {
+		job.Status = storage.JobCompletedWithErrors
+	} else {
+		job.Status = storage.JobCompleted
+	}
 	job.Progress = 1
 	job.Message = fmt.Sprintf("失败推文重试完成：成功 %d，剩余 %d", retried, remaining)
 	job.Error = ""
@@ -518,7 +522,7 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
-	m.complete(saveCtx, job, completionMessage(stats, retried))
+	m.completeArchive(saveCtx, job, stats, retried)
 }
 
 func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context, job storage.Job) {
@@ -567,7 +571,7 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
-	m.complete(saveCtx, job, completionMessage(stats, retried))
+	m.completeArchive(saveCtx, job, stats, retried)
 }
 
 func (m *Manager) download(ctx context.Context, saveCtx context.Context, job storage.Job, mediaURL string, tweetID string, filenameHint string) error {
@@ -1258,6 +1262,18 @@ func (m *Manager) complete(ctx context.Context, job storage.Job, message string)
 	job.Status = storage.JobCompleted
 	job.Progress = 1
 	job.Message = message
+	job.Error = ""
+	m.save(ctx, job)
+}
+
+func (m *Manager) completeArchive(ctx context.Context, job storage.Job, stats archiveStats, retried int) {
+	if stats.Failed > 0 {
+		job.Status = storage.JobCompletedWithErrors
+	} else {
+		job.Status = storage.JobCompleted
+	}
+	job.Progress = 1
+	job.Message = completionMessage(stats, retried)
 	job.Error = ""
 	m.save(ctx, job)
 }

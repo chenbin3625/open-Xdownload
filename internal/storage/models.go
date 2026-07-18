@@ -10,12 +10,13 @@ import (
 type JobStatus string
 
 const (
-	JobPending     JobStatus = "pending"
-	JobResolving   JobStatus = "resolving"
-	JobDownloading JobStatus = "downloading"
-	JobCompleted   JobStatus = "completed"
-	JobFailed      JobStatus = "failed"
-	JobCanceled    JobStatus = "canceled"
+	JobPending             JobStatus = "pending"
+	JobResolving           JobStatus = "resolving"
+	JobDownloading         JobStatus = "downloading"
+	JobCompleted           JobStatus = "completed"
+	JobCompletedWithErrors JobStatus = "completed_with_errors"
+	JobFailed              JobStatus = "failed"
+	JobCanceled            JobStatus = "canceled"
 )
 
 type JobKind string
