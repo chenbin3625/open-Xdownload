@@ -335,6 +335,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		m.save(saveCtx, job)
 		return
 	}
+	unavailable := 0
 	for index, media := range tweet.Media {
 		if m.jobCanceled(ctx, saveCtx, job.ID) {
 			m.handleInterrupt(ctx, saveCtx, job)
@@ -349,13 +350,17 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		job.Message = fmt.Sprintf("正在下载 %d/%d", index+1, len(tweet.Media))
 		job.Error = ""
 		m.save(saveCtx, job)
-		if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
+		result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt)
+		if err != nil {
 			if isCancellation(ctx, err) {
 				m.handleInterrupt(ctx, saveCtx, job)
 				return
 			}
 			m.fail(saveCtx, job, mediaURL, err)
 			return
+		}
+		if result.unavailable {
+			unavailable++
 		}
 	}
 	if m.jobCanceled(ctx, saveCtx, job.ID) {
@@ -365,6 +370,9 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 	job.Status = storage.JobCompleted
 	job.Progress = 1
 	job.Message = "下载完成"
+	if unavailable > 0 {
+		job.Message = fmt.Sprintf("下载完成：永久不可用 %d 个，已跳过", unavailable)
+	}
 	job.Error = ""
 	m.save(saveCtx, job)
 }
@@ -388,7 +396,8 @@ func (m *Manager) processMediaURL(ctx context.Context, saveCtx context.Context, 
 	job.Message = "正在下载媒体"
 	job.Error = ""
 	m.save(saveCtx, job)
-	if err := m.download(ctx, saveCtx, job, mediaURL, tweetID, singleURLFilenameHint(mediaURL)); err != nil {
+	result, err := m.download(ctx, saveCtx, job, mediaURL, tweetID, singleURLFilenameHint(mediaURL))
+	if err != nil {
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
 			return
@@ -403,6 +412,9 @@ func (m *Manager) processMediaURL(ctx context.Context, saveCtx context.Context, 
 	job.Status = storage.JobCompleted
 	job.Progress = 1
 	job.Message = "下载完成"
+	if result.unavailable {
+		job.Message = "媒体永久不可用，已跳过"
+	}
 	job.Error = ""
 	m.save(saveCtx, job)
 }
@@ -413,7 +425,7 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	user, err := pool.Primary().GetUserByInput(ctx, job.Input)
+	user, err := pool.GetUserByInput(ctx, job.Input)
 	if err != nil {
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
@@ -532,7 +544,7 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 		return
 	}
 	client := pool.Primary()
-	owner, err := client.GetUserByInput(ctx, job.Input)
+	owner, err := pool.GetUserByInput(ctx, job.Input)
 	if err != nil {
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
@@ -574,30 +586,48 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 	m.completeArchive(saveCtx, job, stats, retried)
 }
 
-func (m *Manager) download(ctx context.Context, saveCtx context.Context, job storage.Job, mediaURL string, tweetID string, filenameHint string) error {
+func (m *Manager) download(ctx context.Context, saveCtx context.Context, job storage.Job, mediaURL string, tweetID string, filenameHint string) (mediaDownloadResult, error) {
 	cfg, err := m.store.GetConfig(saveCtx)
 	if err != nil {
-		return err
+		return mediaDownloadResult{}, err
 	}
-	_, err = m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweetID, "", filenameHint, isPhotoURL(mediaURL), time.Time{})
-	return err
+	return m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweetID, "", filenameHint, isPhotoURL(mediaURL), time.Time{})
 }
 
-func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time) (bool, error) {
+type mediaDownloadResult struct {
+	skipped     bool
+	unavailable bool
+}
+
+func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time) (mediaDownloadResult, error) {
+	unavailable, err := m.store.GetUnavailableMedia(saveCtx, mediaURL)
+	if err != nil {
+		return mediaDownloadResult{}, err
+	}
+	if unavailable != nil {
+		return mediaDownloadResult{skipped: true, unavailable: true}, nil
+	}
 	target, err := filestore.New(cfg)
 	if err != nil {
-		return false, err
+		return mediaDownloadResult{}, err
 	}
 	release, err := m.lockMedia(ctx, tweetID, mediaURL)
 	if err != nil {
-		return false, err
+		return mediaDownloadResult{}, err
 	}
 	if release != nil {
 		defer release()
+		unavailable, err := m.store.GetUnavailableMedia(saveCtx, mediaURL)
+		if err != nil {
+			return mediaDownloadResult{}, err
+		}
+		if unavailable != nil {
+			return mediaDownloadResult{skipped: true, unavailable: true}, nil
+		}
 		if already, err := m.existingDownloadExists(ctx, saveCtx, target, tweetID, mediaURL); err != nil {
-			return false, err
+			return mediaDownloadResult{}, err
 		} else if already {
-			return true, nil
+			return mediaDownloadResult{skipped: true}, nil
 		}
 	}
 	if dir == "" {
@@ -610,10 +640,21 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 		MaxFilenameLength: cfg.MaxFilenameLength,
 	})
 	if err != nil {
-		return false, err
+		if isPermanentlyUnavailableMediaError(err) {
+			if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
+				MediaURL: mediaURL,
+				TweetID:  tweetID,
+				Error:    err.Error(),
+			}); markErr != nil {
+				return mediaDownloadResult{}, fmt.Errorf("记录永久不可用媒体失败: %v: %w", markErr, err)
+			}
+			_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
+			return mediaDownloadResult{skipped: true, unavailable: true}, nil
+		}
+		return mediaDownloadResult{}, err
 	}
 	if result.Skipped {
-		return true, nil
+		return mediaDownloadResult{skipped: true}, nil
 	}
 	_, err = m.store.CreateDownload(saveCtx, storage.DownloadRecord{
 		JobID:    job.ID,
@@ -622,7 +663,7 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 		FilePath: result.Path,
 		Bytes:    result.Bytes,
 	})
-	return false, err
+	return mediaDownloadResult{}, err
 }
 
 func (m *Manager) existingDownloadExists(ctx context.Context, saveCtx context.Context, target filestore.Store, tweetID string, mediaURL string) (bool, error) {
@@ -699,6 +740,7 @@ type archiveStats struct {
 	Downloaded int
 	Skipped    int
 	Failed     int
+	Issues     []string
 }
 
 const maxArchiveUserConcurrency = 8
@@ -768,6 +810,7 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		stats.Downloaded += delta.Downloaded
 		stats.Skipped += delta.Skipped
 		stats.Failed += delta.Failed
+		stats.Issues = append(stats.Issues, delta.Issues...)
 		statsMu.Unlock()
 	}
 
@@ -950,6 +993,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 	if listEntity != nil {
 		if err := m.ensureUserLink(saveCtx, cfg, *listEntity, user, dir); err != nil {
 			stats.Failed++
+			stats.Issues = append(stats.Issues, fmt.Sprintf("创建 @%s 的归档链接失败: %v", fallbackUserName(user), err))
 		}
 	}
 	if waited {
@@ -964,6 +1008,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 	}
 	if pool == nil {
 		stats.Failed++
+		stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的媒体时间线失败: 没有可用 X 客户端", fallbackUserName(user)))
 		return stats, nil
 	}
 
@@ -977,6 +1022,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 			return stats, err
 		}
 		stats.Failed++
+		stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的媒体时间线失败: %v", fallbackUserName(user), err))
 		return stats, nil
 	}
 	if len(tweets) == 0 {
@@ -1011,7 +1057,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 			if updateDownloading != nil {
 				updateDownloading(fmt.Sprintf("下载 @%s 的媒体", fallbackUserName(user)))
 			}
-			skipped, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, mediaIndex), media.Type == parser.MediaPhoto, tweet.CreatedAt)
+			result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, mediaIndex), media.Type == parser.MediaPhoto, tweet.CreatedAt)
 			if err != nil {
 				if isCancellation(ctx, err) {
 					return stats, err
@@ -1023,7 +1069,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 				}
 				continue
 			}
-			if skipped {
+			if result.skipped {
 				stats.Skipped++
 			} else {
 				stats.Downloaded++
@@ -1151,9 +1197,20 @@ func parserOptionsFromConfig(cfg config.AppConfig) parser.ParseOptions {
 func shouldRetryMediaError(err error) bool {
 	var statusErr *downloader.HTTPStatusError
 	if errors.As(err, &statusErr) {
-		return statusErr.StatusCode != http.StatusForbidden && statusErr.StatusCode != http.StatusNotFound
+		return statusErr.StatusCode != http.StatusForbidden && statusErr.StatusCode != http.StatusNotFound && statusErr.StatusCode != http.StatusGone
 	}
 	return true
+}
+
+func isPermanentlyUnavailableMediaError(err error) bool {
+	var statusErr *downloader.HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	if statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusGone {
+		return true
+	}
+	return statusErr.StatusCode == http.StatusForbidden && strings.Contains(strings.ToLower(statusErr.Payload), "dmca")
 }
 
 func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, user xclient.User) (storage.UserEntity, string, error) {
@@ -1274,7 +1331,7 @@ func (m *Manager) completeArchive(ctx context.Context, job storage.Job, stats ar
 	}
 	job.Progress = 1
 	job.Message = completionMessage(stats, retried)
-	job.Error = ""
+	job.Error = archiveIssueSummary(stats.Issues)
 	m.save(ctx, job)
 }
 
@@ -1433,6 +1490,19 @@ func completionMessage(stats archiveStats, retried int) string {
 		parts = append(parts, fmt.Sprintf("重试成功 %d", retried))
 	}
 	return "归档完成：" + strings.Join(parts, "，")
+}
+
+func archiveIssueSummary(issues []string) string {
+	const limit = 8
+	if len(issues) == 0 {
+		return ""
+	}
+	visible := min(len(issues), limit)
+	result := strings.Join(issues[:visible], "\n")
+	if len(issues) > visible {
+		result += fmt.Sprintf("\n另有 %d 个错误", len(issues)-visible)
+	}
+	return result
 }
 
 var unsupportedPathChars = regexp.MustCompile(`[/\\:*?"<>\|]`)

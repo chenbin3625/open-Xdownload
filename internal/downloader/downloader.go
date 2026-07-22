@@ -28,9 +28,13 @@ type Downloader struct {
 
 type HTTPStatusError struct {
 	StatusCode int
+	Payload    string
 }
 
 func (e *HTTPStatusError) Error() string {
+	if e.Payload != "" {
+		return fmt.Sprintf("download failed: HTTP %d %s", e.StatusCode, e.Payload)
+	}
 	return fmt.Sprintf("download failed: HTTP %d", e.StatusCode)
 }
 
@@ -216,7 +220,11 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 	}
 	if response.StatusCode >= 400 {
 		defer response.Body.Close()
-		return nil, &HTTPStatusError{StatusCode: response.StatusCode}
+		payload, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+		return nil, &HTTPStatusError{
+			StatusCode: response.StatusCode,
+			Payload:    strings.Join(strings.Fields(string(payload)), " "),
+		}
 	}
 	return response, nil
 }

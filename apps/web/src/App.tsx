@@ -6,6 +6,7 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  ExclamationCircleOutlined,
   FileDoneOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
@@ -132,6 +133,7 @@ type BackupCookieRow = {
   authToken: string;
   csrfToken: string;
 };
+type CookieClientStatus = NonNullable<AuthCheck["diagnostics"]>["clients"][number];
 type DirectoryTreeNode = TreeDataNode & {
   key: string;
   path: string;
@@ -490,13 +492,7 @@ export default function App() {
       <Layout className="app-layout">
         <Content className="app-content">
           <div className="page-toolbar">
-            <Space size={10} wrap>
-              <Text strong>{currentTitle}</Text>
-              <Badge
-                status={dashboardData ? "success" : "processing"}
-                text={dashboardData ? "已连接" : "连接中"}
-              />
-            </Space>
+            <Text strong>{currentTitle}</Text>
             <Tooltip title="刷新">
               <Button
                 size="small"
@@ -1997,8 +1993,14 @@ function ConfigForm({ config }: { config: AppConfig }) {
   const [draft, setDraft] = useState(() => normalizeConfig(config));
   const [draftDirty, setDraftDirty] = useState(false);
   const [authResult, setAuthResult] = useState<AuthCheck | null>(null);
+  const [authError, setAuthError] = useState("");
+  const [authChecking, setAuthChecking] = useState(false);
   const pendingSavedConfigKey = useRef("");
-  const hasPrimaryCookie = Boolean((draft.authToken ?? "").trim() && (draft.csrfToken ?? "").trim());
+  const autoCheckedCookieKey = useRef("");
+  const authCheckSequence = useRef(0);
+  const currentCookieKey = cookieCheckKey(draft);
+  const currentCookieKeyRef = useRef(currentCookieKey);
+  currentCookieKeyRef.current = currentCookieKey;
 
   useEffect(() => {
     const normalized = normalizeConfig(config);
@@ -2018,8 +2020,15 @@ function ConfigForm({ config }: { config: AppConfig }) {
   function updateDraft(action: React.SetStateAction<AppConfig>) {
     pendingSavedConfigKey.current = "";
     setDraftDirty(true);
-    setAuthResult(null);
     setDraft(action);
+  }
+
+  function updateAuthDraft(action: React.SetStateAction<AppConfig>) {
+    authCheckSequence.current += 1;
+    setAuthResult(null);
+    setAuthError("");
+    setAuthChecking(false);
+    updateDraft(action);
   }
 
   const mutation = useMutation({
@@ -2040,29 +2049,61 @@ function ConfigForm({ config }: { config: AppConfig }) {
     },
   });
 
-  const authMutation = useMutation({
-    mutationFn: checkAuth,
-    onSuccess: (result) => {
+  async function runAuthCheck(submitted: AppConfig, notify: boolean) {
+    const sequence = authCheckSequence.current + 1;
+    const cookieKey = cookieCheckKey(submitted);
+    authCheckSequence.current = sequence;
+    setAuthChecking(true);
+    setAuthError("");
+    try {
+      const result = await checkAuth(submitted);
+      if (sequence !== authCheckSequence.current || cookieKey !== currentCookieKeyRef.current) {
+        return;
+      }
       setAuthResult(result);
+      if (!notify) {
+        return;
+      }
       if (result.ok) {
         notification.success({
-          message: "登录校验通过",
+          message: "Cookie 检测通过",
           description: result.screenName ? `@${result.screenName}` : result.message,
         });
         return;
       }
       notification.warning({
-        message: "登录校验未通过",
+        message: "Cookie 检测未通过",
         description: result.message,
       });
-    },
-    onError: (error) => {
-      notification.error({
-        message: "校验失败",
-        description: getErrorMessage(error),
-      });
-    },
-  });
+    } catch (error) {
+      if (sequence !== authCheckSequence.current || cookieKey !== currentCookieKeyRef.current) {
+        return;
+      }
+      const message = getErrorMessage(error);
+      setAuthResult(null);
+      setAuthError(message);
+      if (notify) {
+        notification.error({
+          message: "Cookie 检测失败",
+          description: message,
+        });
+      }
+    } finally {
+      if (sequence === authCheckSequence.current) {
+        setAuthChecking(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    const normalized = normalizeConfig(config);
+    const cookieKey = cookieCheckKey(normalized);
+    if (autoCheckedCookieKey.current === cookieKey) {
+      return;
+    }
+    autoCheckedCookieKey.current = cookieKey;
+    void runAuthCheck(normalized, false);
+  }, [config]);
 
   return (
     <Form layout="vertical" className="config-form">
@@ -2077,10 +2118,10 @@ function ConfigForm({ config }: { config: AppConfig }) {
         <Space wrap className="settings-actions">
           <Button
             icon={<SafetyCertificateOutlined />}
-            loading={authMutation.isPending}
-            onClick={() => authMutation.mutate(draft)}
+            loading={authChecking}
+            onClick={() => void runAuthCheck(draft, true)}
           >
-            校验登录
+            检测 Cookie
           </Button>
           <Button
             type="primary"
@@ -2099,26 +2140,21 @@ function ConfigForm({ config }: { config: AppConfig }) {
         </ConfigPanel>
 
         <ConfigPanel kind="download" icon={<DownloadOutlined />} title="下载">
-          <DownloadSettingsFields draft={draft} onChange={updateDraft} />
+          <DownloadSettingsFields draft={draft} onChange={updateDraft} onAuthChange={updateAuthDraft} />
         </ConfigPanel>
 
         <ConfigPanel
           kind="cookie"
           icon={<SafetyCertificateOutlined />}
           title="X Cookie"
-          extra={<Tag color={hasPrimaryCookie ? "success" : "warning"}>{hasPrimaryCookie ? "已配置" : "待配置"}</Tag>}
         >
-          <CookieSettingsFields draft={draft} onChange={updateDraft} />
-          <Stack size={10}>
-            {authResult ? (
-              <Alert
-                type={authResult.ok ? "success" : "error"}
-                showIcon
-                message={authResult.ok && authResult.screenName ? `@${authResult.screenName}` : authResult.message}
-              />
-            ) : null}
-            {authResult?.diagnostics ? <CookieDiagnostics diagnostics={authResult.diagnostics} /> : null}
-          </Stack>
+          <CookieSettingsFields
+            authError={authError}
+            authResult={authResult}
+            checking={authChecking}
+            draft={draft}
+            onChange={updateAuthDraft}
+          />
         </ConfigPanel>
       </div>
     </Form>
@@ -2160,9 +2196,11 @@ function ConfigPanel({
 function DownloadSettingsFields({
   draft,
   onChange,
+  onAuthChange,
 }: {
   draft: AppConfig;
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
+  onAuthChange: React.Dispatch<React.SetStateAction<AppConfig>>;
 }) {
   return (
     <Row gutter={[16, 0]} className="settings-field-grid">
@@ -2170,7 +2208,7 @@ function DownloadSettingsFields({
         <Form.Item label="代理" tooltip={settingsTips.proxy}>
           <Input
             value={draft.proxyUrl}
-            onChange={(event) => onChange((current) => ({ ...current, proxyUrl: event.target.value }))}
+            onChange={(event) => onAuthChange((current) => ({ ...current, proxyUrl: event.target.value }))}
             placeholder="http://127.0.0.1:7890"
           />
         </Form.Item>
@@ -2235,35 +2273,76 @@ function DownloadSettingsFields({
 }
 
 function CookieSettingsFields({
+  authError,
+  authResult,
+  checking,
   draft,
   onChange,
 }: {
+  authError: string;
+  authResult: AuthCheck | null;
+  checking: boolean;
   draft: AppConfig;
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
 }) {
+  const clients = authResult?.diagnostics?.clients ?? [];
+  const primaryClient = clients.find((client) => client.primary) ?? clients[0];
+  const backupClients = clients.filter((client) => !client.primary);
+  const primaryComplete = Boolean((draft.authToken ?? "").trim() && (draft.csrfToken ?? "").trim());
+  const sharedStatus = {
+    checking,
+    checked: Boolean(authResult),
+    errorMessage: authError || (authResult && !authResult.diagnostics ? authResult.message : ""),
+  };
+
   return (
     <div className="settings-cookie-fields">
-      <Row gutter={[16, 0]} className="settings-field-grid">
-        <Col xs={24} lg={12}>
-          <Form.Item label="auth_token" tooltip={settingsTips.authToken}>
-            <Input
-              prefix={<KeyOutlined />}
-              value={draft.authToken ?? ""}
-              onChange={(event) => onChange((current) => ({ ...current, authToken: event.target.value }))}
-            />
-          </Form.Item>
-        </Col>
-        <Col xs={24} lg={12}>
-          <Form.Item label="ct0" tooltip={settingsTips.csrfToken}>
-            <Input
-              prefix={<KeyOutlined />}
-              value={draft.csrfToken ?? ""}
-              onChange={(event) => onChange((current) => ({ ...current, csrfToken: event.target.value }))}
-            />
-          </Form.Item>
-        </Col>
-      </Row>
+      <div className="cookie-primary-fields">
+        <Text strong className="cookie-group-title">主 Cookie</Text>
+        <Row gutter={[16, 0]} className="settings-field-grid">
+          <Col xs={24} lg={12}>
+            <Form.Item label="auth_token" tooltip={settingsTips.authToken}>
+              <Input
+                aria-label="主 Cookie auth_token"
+                prefix={<KeyOutlined />}
+                suffix={(
+                  <CookieTokenStatus
+                    {...sharedStatus}
+                    client={primaryClient}
+                    hasValue={Boolean((draft.authToken ?? "").trim())}
+                    pairComplete={primaryComplete}
+                  />
+                )}
+                value={draft.authToken ?? ""}
+                onChange={(event) => onChange((current) => ({ ...current, authToken: event.target.value }))}
+                placeholder="输入 auth_token"
+              />
+            </Form.Item>
+          </Col>
+          <Col xs={24} lg={12}>
+            <Form.Item label="ct0" tooltip={settingsTips.csrfToken}>
+              <Input
+                aria-label="主 Cookie ct0"
+                prefix={<KeyOutlined />}
+                suffix={(
+                  <CookieTokenStatus
+                    {...sharedStatus}
+                    client={primaryClient}
+                    hasValue={Boolean((draft.csrfToken ?? "").trim())}
+                    pairComplete={primaryComplete}
+                  />
+                )}
+                value={draft.csrfToken ?? ""}
+                onChange={(event) => onChange((current) => ({ ...current, csrfToken: event.target.value }))}
+                placeholder="输入 ct0"
+              />
+            </Form.Item>
+          </Col>
+        </Row>
+      </div>
       <BackupCookieInputs
+        clients={backupClients}
+        {...sharedStatus}
         value={draft.additionalCookies ?? ""}
         onChange={(additionalCookies) => onChange((current) => ({ ...current, additionalCookies }))}
       />
@@ -2271,65 +2350,100 @@ function CookieSettingsFields({
   );
 }
 
-function CookieDiagnostics({ diagnostics }: { diagnostics: NonNullable<AuthCheck["diagnostics"]> }) {
+function CookieTokenStatus({
+  aggregateClients,
+  checked,
+  checking,
+  client,
+  errorMessage,
+  hasValue,
+  pairComplete,
+}: {
+  aggregateClients?: CookieClientStatus[];
+  checked: boolean;
+  checking: boolean;
+  client?: CookieClientStatus;
+  errorMessage: string;
+  hasValue: boolean;
+  pairComplete: boolean;
+}) {
+  let tone = "neutral";
+  let label = "待检测";
+  let detail = "保存或输入 Cookie 后可进行检测";
+  let icon: React.ReactNode = <PauseCircleOutlined />;
+
+  if (!hasValue) {
+    label = "待配置";
+    detail = "尚未填写此 token";
+  } else if (!pairComplete) {
+    tone = "warning";
+    label = "待补全";
+    detail = "auth_token 与 ct0 需要成对填写";
+    icon = <ExclamationCircleOutlined />;
+  } else if (checking) {
+    tone = "checking";
+    label = "检测中";
+    detail = "正在检查 Cookie 状态";
+    icon = <LoadingOutlined spin />;
+  } else if (aggregateClients?.length) {
+    const available = aggregateClients.filter((item) => item.ok).length;
+    const hasTransientError = aggregateClients.some((item) => item.ok && item.error);
+    tone = available === aggregateClients.length && !hasTransientError
+      ? "success"
+      : available === 0
+        ? "error"
+        : "warning";
+    label = `${available}/${aggregateClients.length} 可用`;
+    detail = aggregateClients
+      .map((item) => cookieClientStatusDetail(item))
+      .join("；");
+    icon = tone === "success"
+      ? <CheckCircleOutlined />
+      : tone === "error"
+        ? <CloseCircleOutlined />
+        : <ExclamationCircleOutlined />;
+  } else if (client) {
+    if (!client.ok || client.disabled) {
+      tone = "error";
+      label = "异常";
+      icon = <CloseCircleOutlined />;
+    } else if (client.error) {
+      tone = "warning";
+      label = "暂时受限";
+      icon = <ExclamationCircleOutlined />;
+    } else {
+      tone = "success";
+      label = "有效";
+      icon = <CheckCircleOutlined />;
+    }
+    detail = cookieClientStatusDetail(client);
+  } else if (errorMessage) {
+    tone = "error";
+    label = "检测失败";
+    detail = errorMessage;
+    icon = <CloseCircleOutlined />;
+  } else if (checked) {
+    tone = "neutral";
+    label = "未检测";
+    detail = "此 Cookie 未进入检测队列，可能未填写完整或与其他 Cookie 重复";
+  }
+
   return (
-    <Stack size={8}>
-      <Descriptions
-        size="small"
-        column={{ xs: 1, sm: 3 }}
-        items={[
-          { key: "total", label: "账号数", children: diagnostics.total },
-          { key: "available", label: "可用", children: diagnostics.available },
-          {
-            key: "blocked",
-            label: "受限",
-            children: diagnostics.clients.filter((client) => client.rateLimits.some((limit) => limit.blocked)).length,
-          },
-        ]}
-      />
-      <PaginatedList
-        bordered
-        emptyDescription="暂无账号诊断"
-        itemName="个账号"
-        items={diagnostics.clients}
-        pageSize={5}
-        renderItem={(client) => (
-          <List.Item>
-            <List.Item.Meta
-              avatar={<Avatar>{client.index + 1}</Avatar>}
-              title={
-                <Space size={8} wrap>
-                  <Text strong>{client.screenName ? `@${client.screenName}` : `账号 ${client.index + 1}`}</Text>
-                  {client.primary ? <Tag color="processing">主账号</Tag> : null}
-                  {client.disabled ? <Tag color="default">禁用</Tag> : null}
-                  <Tag color={client.ok ? "success" : "error"}>{client.ok ? "可用" : "异常"}</Tag>
-                </Space>
-              }
-              description={
-                <Stack size={4}>
-                  {client.error ? (
-                    <EllipsisText type="danger" title={client.error}>
-                      {client.error}
-                    </EllipsisText>
-                  ) : (
-                    <Text type="secondary">请求 {client.requestCount}</Text>
-                  )}
-                  <Space size={6} wrap>
-                    {client.rateLimits.slice(0, 4).map((limit) => (
-                      <Tag key={limit.path} color={limit.blocked ? "error" : "default"}>
-                        {limit.path} {limit.remaining}/{limit.limit}
-                      </Tag>
-                    ))}
-                  </Space>
-                </Stack>
-              }
-            />
-          </List.Item>
-        )}
-        size="small"
-      />
-    </Stack>
+    <Tooltip title={detail}>
+      <span className={`cookie-token-status cookie-token-status-${tone}`} aria-label={detail}>
+        {icon}
+        <span>{label}</span>
+      </span>
+    </Tooltip>
   );
+}
+
+function cookieClientStatusDetail(client: CookieClientStatus) {
+  const account = client.screenName ? `@${client.screenName}` : `账号 ${client.index + 1}`;
+  if (client.error) {
+    return `${account}：${client.error}`;
+  }
+  return `${account}：Cookie 有效`;
 }
 
 function StorageSettings({
@@ -2704,7 +2818,21 @@ function WebDAVStorageFields({
   );
 }
 
-function BackupCookieInputs({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function BackupCookieInputs({
+  checked,
+  checking,
+  clients,
+  errorMessage,
+  value,
+  onChange,
+}: {
+  checked: boolean;
+  checking: boolean;
+  clients: CookieClientStatus[];
+  errorMessage: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
   const redactedCookieValue = "********";
   const [rows, setRows] = useState<BackupCookieRow[]>(() => parseBackupCookieRows(value));
 
@@ -2755,38 +2883,74 @@ function BackupCookieInputs({ value, onChange }: { value: string; onChange: (val
     <Form.Item
       tooltip={settingsTips.backupCookie}
       label={
-        <Space>
-          <span>备用 Cookie</span>
-          <Button size="small" icon={<PlusOutlined />} onClick={addRow} />
-        </Space>
+        <span className="cookie-backup-heading">
+          <Text strong>备用 Cookie</Text>
+          <Tooltip title="添加备用 Cookie">
+            <Button
+              aria-label="添加备用 Cookie"
+              className="cookie-add-button"
+              size="small"
+              type="text"
+              icon={<PlusOutlined />}
+              onClick={addRow}
+            />
+          </Tooltip>
+        </span>
       }
     >
       <Stack size={8}>
-        {rows.map((row, index) => (
-          <Row key={index} gutter={[8, 8]} align="middle">
-            <Col xs={24} md={11}>
-              <Input
-                prefix={<KeyOutlined />}
-                value={row.authToken}
-                onChange={(event) => updateRow(index, "authToken", event.target.value)}
-                placeholder={`备用 ${index + 1} auth_token`}
-              />
-            </Col>
-            <Col xs={24} md={11}>
-              <Input
-                prefix={<KeyOutlined />}
-                value={row.csrfToken}
-                onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
-                placeholder={`备用 ${index + 1} ct0`}
-              />
-            </Col>
-            <Col xs={24} md={2}>
-              <Tooltip title="删除备用 Cookie">
-                <Button icon={<DeleteOutlined />} onClick={() => removeRow(index)} />
-              </Tooltip>
-            </Col>
-          </Row>
-        ))}
+        {rows.map((row, index) => {
+          const pairComplete = Boolean(row.authToken.trim() && row.csrfToken.trim());
+          const aggregateClients = isRedactedBackupCookieRow(row) && clients.length > 1 ? clients : undefined;
+          const client = aggregateClients ? undefined : clients[index];
+          const statusProps = { aggregateClients, checked, checking, client, errorMessage, pairComplete };
+          return (
+            <Row key={index} gutter={[8, 8]} align="middle" className="cookie-backup-row">
+              <Col xs={24} md={11}>
+                <Input
+                  aria-label={`备用 Cookie ${index + 1} auth_token`}
+                  prefix={<KeyOutlined />}
+                  suffix={(
+                    <CookieTokenStatus
+                      {...statusProps}
+                      hasValue={Boolean(row.authToken.trim())}
+                    />
+                  )}
+                  value={row.authToken}
+                  onChange={(event) => updateRow(index, "authToken", event.target.value)}
+                  placeholder={`备用 ${index + 1} auth_token`}
+                />
+              </Col>
+              <Col xs={24} md={11}>
+                <Input
+                  aria-label={`备用 Cookie ${index + 1} ct0`}
+                  prefix={<KeyOutlined />}
+                  suffix={(
+                    <CookieTokenStatus
+                      {...statusProps}
+                      hasValue={Boolean(row.csrfToken.trim())}
+                    />
+                  )}
+                  value={row.csrfToken}
+                  onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
+                  placeholder={`备用 ${index + 1} ct0`}
+                />
+              </Col>
+              <Col xs={24} md={2} className="cookie-row-action">
+                <Tooltip title="删除备用 Cookie">
+                  <Button
+                    aria-label={`删除备用 Cookie ${index + 1}`}
+                    className="cookie-remove-button"
+                    danger
+                    type="text"
+                    icon={<DeleteOutlined />}
+                    onClick={() => removeRow(index)}
+                  />
+                </Tooltip>
+              </Col>
+            </Row>
+          );
+        })}
       </Stack>
     </Form.Item>
   );
@@ -2849,6 +3013,15 @@ function normalizeConfig(config: AppConfig): AppConfig {
 
 function configSyncKey(config: AppConfig) {
   return JSON.stringify(config);
+}
+
+function cookieCheckKey(config: AppConfig) {
+  return JSON.stringify([
+    config.authToken ?? "",
+    config.csrfToken ?? "",
+    config.additionalCookies ?? "",
+    config.proxyUrl ?? "",
+  ]);
 }
 
 function emptyBackupCookieRow(): BackupCookieRow {

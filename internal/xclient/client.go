@@ -31,7 +31,7 @@ const timelineFeatures = `{"rweb_tipjar_consumption_enabled":true,"responsive_we
 
 const (
 	userMediaPath      = "/i/api/graphql/MOLbHrtk8Ovu7DUNOLcXiA/UserMedia"
-	requestMaxAttempts = 3
+	requestMaxAttempts = 5
 )
 
 const (
@@ -51,6 +51,8 @@ type Credentials struct {
 
 type Client struct {
 	http         *http.Client
+	baseURL      string
+	retryBackoff func(attempt int) time.Duration
 	authToken    string
 	csrfToken    string
 	limiter      *rateLimiter
@@ -188,10 +190,12 @@ func NewClient(cred Credentials, proxyURL string) (*Client, error) {
 		transport.Proxy = http.ProxyURL(parsed)
 	}
 	return &Client{
-		http:      &http.Client{Transport: transport, Timeout: 90 * time.Second},
-		authToken: cred.AuthToken,
-		csrfToken: cred.CSRFToken,
-		limiter:   newRateLimiter(),
+		http:         &http.Client{Transport: transport, Timeout: 90 * time.Second},
+		baseURL:      host,
+		retryBackoff: requestRetryDelay,
+		authToken:    cred.AuthToken,
+		csrfToken:    cred.CSRFToken,
+		limiter:      newRateLimiter(),
 	}, nil
 }
 
@@ -374,7 +378,7 @@ func setCredentialValue(current *Credentials, raw string) bool {
 }
 
 func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
-	endpoint := host + "/home"
+	endpoint := c.requestBaseURL() + "/home"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -410,21 +414,33 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 }
 
 func (c *Client) GetUserByInput(ctx context.Context, input string) (User, error) {
+	return getUserByInput(ctx, c, input)
+}
+
+func (p *Pool) GetUserByInput(ctx context.Context, input string) (User, error) {
+	return getUserByInput(ctx, p, input)
+}
+
+func getUserByInput(ctx context.Context, requester timelineRequester, input string) (User, error) {
 	input = strings.TrimSpace(strings.TrimPrefix(input, "@"))
 	if input == "" {
 		return User{}, errors.New("用户不能为空")
 	}
 	if _, err := strconv.ParseUint(input, 10, 64); err == nil {
-		return c.GetUserByID(ctx, input)
+		return getUserByID(ctx, requester, input)
 	}
-	return c.GetUserByScreenName(ctx, input)
+	return getUserByScreenName(ctx, requester, input)
 }
 
 func (c *Client) GetUserByID(ctx context.Context, id string) (User, error) {
+	return getUserByID(ctx, c, id)
+}
+
+func getUserByID(ctx context.Context, requester timelineRequester, id string) (User, error) {
 	values := url.Values{}
 	values.Set("variables", fmt.Sprintf(`{"userId":%q,"withSafetyModeUserFields":true}`, id))
 	values.Set("features", `{"hidden_profile_likes_enabled":true,"hidden_profile_subscriptions_enabled":true,"rweb_tipjar_consumption_enabled":true,"responsive_web_graphql_exclude_directive_enabled":true,"verified_phone_label_enabled":false,"highlights_tweets_tab_ui_enabled":true,"responsive_web_twitter_article_notes_tab_enabled":true,"subscriptions_feature_can_gift_premium":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_skip_user_profile_image_extensions_enabled":false,"responsive_web_graphql_timeline_navigation_enabled":true}`)
-	payload, err := c.graphQL(ctx, "/i/api/graphql/CO4_gU4G_MRREoqfiTh6Hg/UserByRestId", values)
+	payload, err := requester.graphQL(ctx, "/i/api/graphql/CO4_gU4G_MRREoqfiTh6Hg/UserByRestId", values)
 	if err != nil {
 		return User{}, err
 	}
@@ -432,11 +448,15 @@ func (c *Client) GetUserByID(ctx context.Context, id string) (User, error) {
 }
 
 func (c *Client) GetUserByScreenName(ctx context.Context, screenName string) (User, error) {
+	return getUserByScreenName(ctx, c, screenName)
+}
+
+func getUserByScreenName(ctx context.Context, requester timelineRequester, screenName string) (User, error) {
 	values := url.Values{}
 	values.Set("variables", fmt.Sprintf(`{"screen_name":%q,"withSafetyModeUserFields":true}`, screenName))
 	values.Set("features", `{"hidden_profile_subscriptions_enabled":true,"rweb_tipjar_consumption_enabled":true,"responsive_web_graphql_exclude_directive_enabled":true,"verified_phone_label_enabled":false,"subscriptions_verification_info_is_identity_verified_enabled":true,"subscriptions_verification_info_verified_since_enabled":true,"highlights_tweets_tab_ui_enabled":true,"responsive_web_twitter_article_notes_tab_enabled":true,"subscriptions_feature_can_gift_premium":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_skip_user_profile_image_extensions_enabled":false,"responsive_web_graphql_timeline_navigation_enabled":true}`)
 	values.Set("fieldToggles", `{"withAuxiliaryUserLabels":false}`)
-	payload, err := c.graphQL(ctx, "/i/api/graphql/xmU6X_CKVnQ5lSrCbAmJsg/UserByScreenName", values)
+	payload, err := requester.graphQL(ctx, "/i/api/graphql/xmU6X_CKVnQ5lSrCbAmJsg/UserByScreenName", values)
 	if err != nil {
 		return User{}, err
 	}
@@ -712,7 +732,7 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 		if !isTransientError(err) || ctx.Err() != nil || attempt == requestMaxAttempts-1 {
 			return nil, err
 		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 750 * time.Millisecond)
+		timer := time.NewTimer(c.requestRetryDelay(attempt))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -732,7 +752,7 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 			return nil, err
 		}
 	}
-	endpoint, err := url.Parse(host)
+	endpoint, err := url.Parse(c.requestBaseURL())
 	if err != nil {
 		return nil, err
 	}
@@ -781,6 +801,28 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 		return nil, apiErr
 	}
 	return payload, nil
+}
+
+func (c *Client) requestBaseURL() string {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return host
+	}
+	return strings.TrimRight(c.baseURL, "/")
+}
+
+func (c *Client) requestRetryDelay(attempt int) time.Duration {
+	if c.retryBackoff != nil {
+		return c.retryBackoff(attempt)
+	}
+	return requestRetryDelay(attempt)
+}
+
+func requestRetryDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	attempt = min(attempt, 3)
+	return 750 * time.Millisecond * time.Duration(1<<attempt)
 }
 
 func (c *Client) setCookieHeaders(request *http.Request) {

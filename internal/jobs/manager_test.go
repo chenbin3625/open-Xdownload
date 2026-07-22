@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -269,11 +270,11 @@ func TestDownloadMediaSkipsExistingTweetMedia(t *testing.T) {
 	}
 
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	skipped, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", "", "media", false, time.Time{})
+	result, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", "", "media", false, time.Time{})
 	if err != nil {
 		t.Fatalf("download media: %v", err)
 	}
-	if !skipped {
+	if !result.skipped {
 		t.Fatal("skipped = false, want true")
 	}
 	if requests.Load() != 0 {
@@ -313,11 +314,11 @@ func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
 	}
 
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	skipped, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
+	result, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
 	if err != nil {
 		t.Fatalf("download media: %v", err)
 	}
-	if skipped {
+	if result.skipped {
 		t.Fatal("skipped = true, want false")
 	}
 	if requests.Load() != 1 {
@@ -332,6 +333,94 @@ func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(record.FilePath); err != nil {
 		t.Fatalf("updated file does not exist: %v", err)
+	}
+}
+
+func TestDownloadMediaCachesPermanentlyUnavailableMedia(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error_code":2,"error_response":"Dmcaed"}`))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, server.URL+"/media.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root}
+
+	first, err := manager.downloadMedia(ctx, ctx, job, cfg, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
+	if err != nil {
+		t.Fatalf("first download: %v", err)
+	}
+	if !first.skipped || !first.unavailable {
+		t.Fatalf("first result = %+v, want skipped permanently unavailable", first)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("HTTP requests after first download = %d, want 1", requests.Load())
+	}
+
+	second, err := manager.downloadMedia(ctx, ctx, job, cfg, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
+	if err != nil {
+		t.Fatalf("second download: %v", err)
+	}
+	if !second.skipped || !second.unavailable {
+		t.Fatalf("second result = %+v, want cached permanently unavailable", second)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("HTTP requests after cached download = %d, want 1", requests.Load())
+	}
+
+	failed, err := store.ListFailedMediaForJobs(ctx, []int64{job.ID})
+	if err != nil {
+		t.Fatalf("list failed media: %v", err)
+	}
+	if len(failed) != 1 || !strings.Contains(failed[0].Error, "Dmcaed") {
+		t.Fatalf("failed media = %#v, want one DMCA record", failed)
+	}
+}
+
+func TestDownloadMediaDoesNotCacheGenericForbidden(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, server.URL+"/media.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := manager.downloadMedia(ctx, ctx, job, cfg, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{}); err == nil {
+			t.Fatal("generic HTTP 403 was treated as permanently unavailable")
+		}
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("HTTP requests = %d, want 2", requests.Load())
 	}
 }
 
@@ -353,6 +442,59 @@ func TestShouldRetryMediaErrorSkipsForbiddenAndNotFound(t *testing.T) {
 				t.Fatalf("shouldRetryMediaError() = %t, want %t", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPermanentMediaErrorRequiresTerminalStatusOrDMCA(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "dmca", err: &downloader.HTTPStatusError{StatusCode: http.StatusForbidden, Payload: `{"error_response":"Dmcaed"}`}, want: true},
+		{name: "generic forbidden", err: &downloader.HTTPStatusError{StatusCode: http.StatusForbidden, Payload: "Forbidden"}, want: false},
+		{name: "not found", err: &downloader.HTTPStatusError{StatusCode: http.StatusNotFound}, want: true},
+		{name: "gone", err: &downloader.HTTPStatusError{StatusCode: http.StatusGone}, want: true},
+		{name: "server error", err: &downloader.HTTPStatusError{StatusCode: http.StatusServiceUnavailable}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPermanentlyUnavailableMediaError(tt.err); got != tt.want {
+				t.Fatalf("isPermanentlyUnavailableMediaError() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompleteArchivePersistsUserIssueDetails(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, storage.JobKindFollowing, "owner", "following")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	manager.completeArchive(ctx, job, archiveStats{
+		Users:  1,
+		Failed: 1,
+		Issues: []string{"读取 @alice 的媒体时间线失败: timeout"},
+	}, 0)
+
+	got, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != storage.JobCompletedWithErrors {
+		t.Fatalf("status = %s, want %s", got.Status, storage.JobCompletedWithErrors)
+	}
+	if !strings.Contains(got.Error, "@alice") || !strings.Contains(got.Error, "timeout") {
+		t.Fatalf("error = %q, want user-level issue detail", got.Error)
 	}
 }
 

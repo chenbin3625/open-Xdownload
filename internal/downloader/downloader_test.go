@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -203,5 +204,25 @@ func TestDownloadWithOptionsConcurrentSameFilenameCreatesDistinctFiles(t *testin
 	matches, _ := filepath.Glob(filepath.Join(dir, ".*.part"))
 	if len(matches) != 0 {
 		t.Fatalf("leftover temp files: %v", matches)
+	}
+}
+
+func TestOpenIncludesHTTPErrorPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("{\n  \"error_response\": \"Dmcaed\"\n}"))
+	}))
+	defer server.Close()
+
+	_, err := New().Open(context.Background(), server.URL+"/media.mp4", Options{})
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("error = %v, want HTTPStatusError", err)
+	}
+	if statusErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", statusErr.StatusCode, http.StatusForbidden)
+	}
+	if !strings.Contains(statusErr.Payload, "Dmcaed") || !strings.Contains(statusErr.Error(), "Dmcaed") {
+		t.Fatalf("status error did not preserve response payload: %+v", statusErr)
 	}
 }
