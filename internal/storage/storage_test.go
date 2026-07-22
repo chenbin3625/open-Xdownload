@@ -156,6 +156,38 @@ func TestRetryJobRejectsActiveJobs(t *testing.T) {
 	}
 }
 
+func TestUnavailableMediaRoundTrip(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	const mediaURL = "https://video.twimg.com/media.mp4"
+
+	got, err := store.GetUnavailableMedia(ctx, mediaURL)
+	if err != nil {
+		t.Fatalf("get missing unavailable media: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("missing unavailable media = %+v, want nil", got)
+	}
+	if err := store.UpsertUnavailableMedia(ctx, UnavailableMedia{
+		MediaURL: mediaURL,
+		TweetID:  "tweet-1",
+		Error:    "DMCA",
+	}); err != nil {
+		t.Fatalf("upsert unavailable media: %v", err)
+	}
+	got, err = store.GetUnavailableMedia(ctx, mediaURL)
+	if err != nil {
+		t.Fatalf("get unavailable media: %v", err)
+	}
+	if got == nil || got.TweetID != "tweet-1" || got.Error != "DMCA" || got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+		t.Fatalf("unavailable media = %+v, want persisted record", got)
+	}
+}
+
 func TestListJobsPageAndJobStats(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

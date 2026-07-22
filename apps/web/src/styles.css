@@ -412,6 +412,81 @@ textarea {
   margin-bottom: 0;
 }
 
+.cookie-primary-fields {
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.cookie-group-title {
+  display: block;
+  margin-bottom: 10px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.cookie-backup-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cookie-add-button,
+.cookie-remove-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.cookie-backup-row + .cookie-backup-row {
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-soft);
+}
+
+.cookie-row-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.cookie-token-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 52px;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.cookie-token-status-success {
+  color: var(--success);
+}
+
+.cookie-token-status-error {
+  color: var(--danger);
+}
+
+.cookie-token-status-warning {
+  color: var(--warning);
+}
+
+.cookie-token-status-checking {
+  color: var(--primary);
+}
+
+.cookie-token-status-neutral {
+  color: var(--muted);
+}
+
+.settings-cookie-fields .ant-input-affix-wrapper {
+  min-width: 0;
+}
+
+.settings-cookie-fields .ant-input-suffix {
+  margin-inline-start: 8px;
+}
+
 .form-tooltip-copy {
   max-width: 320px;
   line-height: 1.65;
@@ -704,6 +779,7 @@ textarea::placeholder {
   .ant-list .ant-list-item-action {
     margin-inline-start: 8px;
   }
+
 }
 
 @media (max-width: 480px) {

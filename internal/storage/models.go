@@ -88,6 +88,14 @@ type FailedMedia struct {
 	CreatedAt time.Time `json:"createdAt" db:"created_at"`
 }
 
+type UnavailableMedia struct {
+	MediaURL  string    `db:"media_url"`
+	TweetID   string    `db:"tweet_id"`
+	Error     string    `db:"error"`
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
+}
+
 type JobStats struct {
 	Total     int `json:"total" db:"total"`
 	Active    int `json:"active" db:"active"`

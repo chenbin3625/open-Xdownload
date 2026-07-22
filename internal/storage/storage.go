@@ -139,6 +139,14 @@ CREATE TABLE IF NOT EXISTS downloads (
 		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
 	);
 
+	CREATE TABLE IF NOT EXISTS unavailable_media (
+		media_url TEXT PRIMARY KEY,
+		tweet_id TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+
 	CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
 		screen_name TEXT NOT NULL,
@@ -1025,6 +1033,31 @@ ORDER BY job_id DESC, created_at DESC`, jobIDs)
 	items := []FailedMedia{}
 	err = s.db.SelectContext(ctx, &items, s.db.Rebind(query), args...)
 	return items, err
+}
+
+func (s *Store) GetUnavailableMedia(ctx context.Context, mediaURL string) (*UnavailableMedia, error) {
+	item := UnavailableMedia{}
+	err := s.db.GetContext(ctx, &item, `SELECT * FROM unavailable_media WHERE media_url = ?`, mediaURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (s *Store) UpsertUnavailableMedia(ctx context.Context, item UnavailableMedia) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO unavailable_media (media_url, tweet_id, error, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(media_url) DO UPDATE SET
+	tweet_id = CASE WHEN excluded.tweet_id <> '' THEN excluded.tweet_id ELSE unavailable_media.tweet_id END,
+	error = excluded.error,
+	updated_at = excluded.updated_at`,
+		item.MediaURL, item.TweetID, item.Error, now, now)
+	return err
 }
 
 func (s *Store) UpsertUser(ctx context.Context, user User) (User, error) {
