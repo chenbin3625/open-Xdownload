@@ -18,6 +18,17 @@
   --warning: #b7791f;
   --warning-soft: #fff7e6;
   --shadow-soft: 0 1px 2px rgb(15 23 42 / 4%), 0 6px 18px rgb(15 23 42 / 5%);
+  --shadow-raised: 0 2px 4px rgb(15 23 42 / 5%), 0 10px 30px rgb(15 23 42 / 7%);
+  --shadow-primary: 0 10px 22px rgb(37 99 235 / 18%);
+  --ring-primary: rgb(37 99 235 / 20%);
+  --ring-focus: rgb(37 99 235 / 32%);
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+  --transition-fast: 140ms ease;
+  --transition-base: 220ms ease;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   color: var(--text);
   background: var(--app-bg);
   font-family:
@@ -41,7 +52,9 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
+    radial-gradient(1100px 520px at 88% -8%, rgb(37 99 235 / 6%), transparent 60%),
     linear-gradient(180deg, #f7f9fc 0%, var(--app-bg) 38%, var(--app-bg-deep) 100%);
+  background-attachment: fixed;
 }
 
 button,
@@ -49,6 +62,36 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+::selection {
+  background: var(--ring-primary);
+  color: var(--primary);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c9d5e6 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--radius-full);
+  background: #c9d5e6;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: #aabdd6;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .app-shell {
@@ -82,8 +125,8 @@ textarea {
   place-items: center;
   overflow: hidden;
   border: 1px solid rgb(255 255 255 / 72%);
-  border-radius: 8px;
-  box-shadow: 0 10px 22px rgb(37 99 235 / 18%);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-primary);
 }
 
 .brand-mark img {
@@ -125,17 +168,30 @@ textarea {
   height: 40px;
   margin-inline: 0;
   margin-block: 2px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: #334155;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 .app-menu .ant-menu-item .ant-menu-title-content {
   font-weight: 600;
 }
 
+.app-menu .ant-menu-item:hover {
+  background: var(--surface-muted);
+}
+
 .app-menu .ant-menu-item-selected {
   background: var(--primary-soft);
   color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary-muted);
+}
+
+.app-menu .ant-menu-item-selected .ant-menu-title-content {
+  font-weight: 700;
 }
 
 .app-menu .ant-menu-item-selected::after {
@@ -149,6 +205,7 @@ textarea {
 
 .app-content {
   width: 100%;
+  max-width: 1480px;
   margin: 0 auto;
   padding: 18px 22px 28px;
 }
@@ -164,8 +221,23 @@ textarea {
   border-bottom: 1px solid var(--border);
 }
 
-.page-toolbar .ant-typography strong {
-  font-size: 15px;
+.page-toolbar-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.page-toolbar-copy .ant-typography {
+  line-height: 1.35;
+}
+
+.page-toolbar-copy .ant-typography strong {
+  font-size: 16px;
+}
+
+.page-toolbar-copy .ant-typography-secondary {
+  font-size: 12px;
+  letter-spacing: 0.01em;
 }
 
 .page-toolbar .ant-badge-status-text {
@@ -196,7 +268,7 @@ textarea {
   min-width: 0;
   padding: 14px;
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: var(--shadow-soft);
 }
@@ -234,7 +306,7 @@ textarea {
   min-width: 0;
   padding: 16px;
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: var(--shadow-soft);
 }
@@ -262,7 +334,7 @@ textarea {
   height: 32px;
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--primary);
   background: var(--primary-soft);
   box-shadow: inset 0 0 0 1px var(--primary-muted);
@@ -351,7 +423,7 @@ textarea {
   margin-bottom: 12px;
   padding: 10px 14px;
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: var(--shadow-soft);
 }
@@ -365,7 +437,9 @@ textarea {
 
 .settings-heading-icon {
   flex: 0 0 auto;
-  background: #111827;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), #1d4ed8);
+  box-shadow: var(--shadow-primary);
 }
 
 .settings-heading-copy {
@@ -501,7 +575,7 @@ textarea {
 }
 
 .ant-btn-primary {
-  box-shadow: 0 8px 18px rgb(37 99 235 / 18%);
+  box-shadow: var(--shadow-primary);
 }
 
 .ant-input,
@@ -526,6 +600,10 @@ textarea::placeholder {
   color: #94a3b8;
 }
 
+.mono-input {
+  font-family: var(--mono);
+}
+
 .ant-segmented {
   padding: 4px;
   border: 1px solid var(--border-soft);
@@ -534,7 +612,7 @@ textarea::placeholder {
 
 .ant-list-bordered {
   border-color: var(--border-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .ant-list .ant-list-item {
@@ -560,14 +638,14 @@ textarea::placeholder {
 
 .ant-table-wrapper .ant-table {
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface);
   overflow: hidden;
 }
 
 .ant-table-wrapper .ant-table-thead > tr > th {
   border-bottom-color: var(--border-soft);
-  background: var(--surface-soft);
+  background: linear-gradient(180deg, #fbfcfe, var(--surface-soft));
   color: #334155;
   font-weight: 700;
 }
@@ -576,8 +654,12 @@ textarea::placeholder {
   border-bottom-color: var(--border-soft);
 }
 
+.ant-table-wrapper .ant-table-tbody > tr.ant-table-row {
+  transition: background-color var(--transition-base);
+}
+
 .ant-table-wrapper .ant-table-tbody > tr.ant-table-row:hover > td {
-  background: #f7fbff;
+  background: #f2f8ff;
 }
 
 .ant-table-wrapper .ant-table-expanded-row > td {
@@ -602,7 +684,8 @@ textarea::placeholder {
 
 .ant-tag {
   max-width: 100%;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
+  padding-inline: 8px;
   line-height: 20px;
 }
 
@@ -610,9 +693,21 @@ textarea::placeholder {
   min-width: 0;
 }
 
+.ant-progress .ant-progress-inner {
+  background: var(--surface-muted);
+}
+
+.ant-progress .ant-progress-bg {
+  border-radius: var(--radius-full);
+}
+
+.ant-empty .ant-empty-description {
+  color: var(--muted);
+}
+
 .ant-card {
   border-color: var(--border-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .config-form .ant-card {
@@ -620,7 +715,7 @@ textarea::placeholder {
 }
 
 .ant-tree {
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface-soft);
 }
 
