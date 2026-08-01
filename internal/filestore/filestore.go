@@ -317,9 +317,14 @@ func createSMBTempFile(share *smb2.Share, fileRel string) (*smb2.File, string, e
 	}
 }
 
+// maxFilenameConflicts bounds the suffix search in publishSMBTemp: if this many
+// numbered variants already exist, we give up (and clean up the temp file)
+// rather than loop unbounded on a pathologically full share.
+const maxFilenameConflicts = 10000
+
 func (s smbStore) publishSMBTemp(share *smb2.Share, tempRel string, dirRel string, filename string, bytes int64, contentLength int64, maxFilenameLength int, replaceBase bool) (downloader.Result, error) {
 	triedReplaceBase := false
-	for index := 0; ; index++ {
+	for index := 0; index <= maxFilenameConflicts; index++ {
 		candidateName := filename
 		if index > 0 {
 			candidateName = downloader.FilenameWithSuffix(filename, fmt.Sprintf("(%d)", index), maxFilenameLength)
@@ -347,6 +352,8 @@ func (s smbStore) publishSMBTemp(share *smb2.Share, tempRel string, dirRel strin
 			}
 		}
 	}
+	_ = share.Remove(tempRel)
+	return downloader.Result{}, fmt.Errorf("too many filename conflicts publishing %s", filename)
 }
 
 func (s smbStore) smbRenameConflict(share *smb2.Share, candidateRel string, err error) bool {
@@ -417,6 +424,11 @@ type smbSharedSession struct {
 	share   *smb2.Share
 }
 
+// maxSMBSessions bounds the shared-session cache so repeated SMB config changes
+// (different host/share/credentials) don't leak unbounded TCP sessions. Reached
+// only after many distinct configs; eviction then closes one idle session.
+const maxSMBSessions = 8
+
 var (
 	smbSessionsMu sync.Mutex
 	smbSessions   = map[string]*smbSharedSession{}
@@ -426,12 +438,33 @@ func (s smbStore) sharedSession() *smbSharedSession {
 	key := s.signature()
 	smbSessionsMu.Lock()
 	defer smbSessionsMu.Unlock()
-	entry, ok := smbSessions[key]
-	if !ok {
-		entry = &smbSharedSession{cfg: s}
-		smbSessions[key] = entry
+	if entry, ok := smbSessions[key]; ok {
+		return entry
 	}
+	if len(smbSessions) >= maxSMBSessions {
+		smbEvictIdleSession()
+	}
+	entry := &smbSharedSession{cfg: s}
+	smbSessions[key] = entry
 	return entry
+}
+
+// smbEvictIdleSession closes and removes one currently-idle session to make room
+// when the cache is at capacity. Caller must hold smbSessionsMu. Only entries
+// whose mutex is uncontended (TryLock succeeds) are evicted, so in-flight
+// operations are never interrupted. If a caller obtained the entry just before
+// eviction (lookup-then-use race), it will see share==nil and reconnect; withShare
+// then re-registers that reconnected session so it is not orphaned.
+func smbEvictIdleSession() {
+	for k, entry := range smbSessions {
+		if !entry.mu.TryLock() {
+			continue
+		}
+		entry.closeLocked()
+		entry.mu.Unlock()
+		delete(smbSessions, k)
+		return
+	}
 }
 
 // signature 用 \x00 分隔各字段作为共享会话的缓存键。\x00 不会出现在 SMB
@@ -448,16 +481,39 @@ func (e *smbSharedSession) withShare(ctx context.Context, fn func(*smb2.Share) e
 		if err := e.connect(ctx); err != nil {
 			return err
 		}
+		// 重连后该会话可能已在 lookup-then-use 竞态中被逐出缓存；重新登记，避免重连
+		// 出来的会话成为无人引用的孤儿（连接永不关闭）。锁序 e.mu -> smbSessionsMu
+		// 不会死锁：smbSessionsMu 在别处只单独获取，或驱逐时以非阻塞 TryLock 获取 e.mu。
+		e.reregisterLocked()
 	}
 	err := fn(e.share.WithContext(ctx))
 	if isSMBConnectionError(err) {
 		// 连接已失效，丢弃会话，下次调用时自动重连。
-		_ = e.share.Umount()
-		_ = e.session.Logoff()
-		e.share = nil
-		e.session = nil
+		e.closeLocked()
 	}
 	return err
+}
+
+// closeLocked 释放会话与挂载。调用方需持有 e.mu。
+func (e *smbSharedSession) closeLocked() {
+	if e.share != nil {
+		_ = e.share.Umount()
+	}
+	if e.session != nil {
+		_ = e.session.Logoff()
+	}
+	e.share = nil
+	e.session = nil
+}
+
+// reregisterLocked 把本会话重新插入缓存（若不存在同键项）。调用方需持有 e.mu。
+func (e *smbSharedSession) reregisterLocked() {
+	key := e.cfg.signature()
+	smbSessionsMu.Lock()
+	if _, ok := smbSessions[key]; !ok {
+		smbSessions[key] = e
+	}
+	smbSessionsMu.Unlock()
 }
 
 func (e *smbSharedSession) connect(ctx context.Context) error {
@@ -515,23 +571,6 @@ func (s smbStore) logicalPath(rel string) string {
 		rel = cleanSlashPath(rel)
 	}
 	return joinURLPath(s.root, rel)
-}
-
-func (s smbStore) uniquePath(share *smb2.Share, dirRel string, filename string, maxFilenameLength int) (string, string, error) {
-	for index := 0; ; index++ {
-		candidateName := filename
-		if index > 0 {
-			candidateName = downloader.FilenameWithSuffix(filename, fmt.Sprintf("(%d)", index), maxFilenameLength)
-		}
-		candidateRel := joinSlash(dirRel, candidateName)
-		_, err := share.Stat(candidateRel)
-		if os.IsNotExist(err) {
-			return candidateRel, s.logicalPath(candidateRel), nil
-		}
-		if err != nil {
-			return "", "", err
-		}
-	}
 }
 
 type webDAVStore struct {
@@ -756,28 +795,6 @@ func (s webDAVStore) putNewMedia(ctx context.Context, response *http.Response, f
 	}
 	_ = s.delete(ctx, filePath)
 	return downloader.Result{}, 0, fmt.Errorf("WebDAV PUT failed: HTTP %d", putResponse.StatusCode)
-}
-
-func (s webDAVStore) uniquePath(ctx context.Context, dir string, filename string, maxFilenameLength int) (string, error) {
-	for index := 0; ; index++ {
-		candidateName := filename
-		if index > 0 {
-			candidateName = downloader.FilenameWithSuffix(filename, fmt.Sprintf("(%d)", index), maxFilenameLength)
-		}
-		candidate := s.Join(dir, candidateName)
-		exists, err := s.exists(ctx, candidate)
-		if err != nil {
-			return "", err
-		}
-		if !exists {
-			return candidate, nil
-		}
-	}
-}
-
-func (s webDAVStore) existingResult(ctx context.Context, dir string, filename string) (downloader.Result, bool, error) {
-	result, complete, _, err := s.existingFileState(ctx, dir, filename, -1)
-	return result, complete, err
 }
 
 func (s webDAVStore) existingFileState(ctx context.Context, dir string, filename string, contentLength int64) (downloader.Result, bool, bool, error) {

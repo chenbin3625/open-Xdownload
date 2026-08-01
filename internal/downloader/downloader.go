@@ -138,14 +138,14 @@ func existingFileState(path string, contentLength int64) (Result, bool, bool, er
 	return Result{Path: path, Bytes: info.Size(), Skipped: true}, true, false, nil
 }
 
-func existingCompleteResult(path string, contentLength int64) (Result, bool, error) {
-	result, complete, _, err := existingFileState(path, contentLength)
-	return result, complete, err
-}
+// maxFilenameConflicts bounds the suffix search in publishTempFile: if this many
+// numbered variants (basePath, basePath(1), basePath(2), ...) already exist, we
+// give up rather than loop unbounded on a pathologically full directory.
+const maxFilenameConflicts = 10000
 
 func publishTempFile(tempPath string, basePath string, bytes int64, contentLength int64, maxFilenameLength int, replaceBase bool) (Result, bool, error) {
 	triedReplaceBase := false
-	for index := 0; ; index++ {
+	for index := 0; index <= maxFilenameConflicts; index++ {
 		candidate := suffixedPath(basePath, index, maxFilenameLength)
 		err := os.Link(tempPath, candidate)
 		if err == nil {
@@ -172,6 +172,7 @@ func publishTempFile(tempPath string, basePath string, bytes int64, contentLengt
 			}
 		}
 	}
+	return Result{}, false, fmt.Errorf("too many filename conflicts publishing %s", basePath)
 }
 
 func removeIncompleteLocalTarget(path string, contentLength int64) (Result, bool, bool, error) {
@@ -230,7 +231,14 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 }
 
 // proxyTransports 缓存按代理地址复用的 Transport，使代理下载也能复用空闲连接。
-var proxyTransports sync.Map // map[string]*http.Transport
+// 有界：反复变更代理配置时，超出 maxProxyTransports 的旧 Transport 会被驱逐并
+// 关闭其空闲连接（不影响在途请求），避免连接随配置变更无界累积。
+const maxProxyTransports = 8
+
+var (
+	proxyTransportsMu sync.Mutex
+	proxyTransports   = map[string]*http.Transport{}
+)
 
 func transportForProxy(proxyURL string) (*http.Transport, error) {
 	proxyURL = strings.TrimSpace(proxyURL)
@@ -242,8 +250,10 @@ func transportForProxy(proxyURL string) (*http.Transport, error) {
 		return nil, err
 	}
 	key := parsed.String()
-	if v, ok := proxyTransports.Load(key); ok {
-		return v.(*http.Transport), nil
+	proxyTransportsMu.Lock()
+	defer proxyTransportsMu.Unlock()
+	if t, ok := proxyTransports[key]; ok {
+		return t, nil
 	}
 	transport := &http.Transport{
 		Proxy:                 http.ProxyURL(parsed),
@@ -253,8 +263,15 @@ func transportForProxy(proxyURL string) (*http.Transport, error) {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
-	actual, _ := proxyTransports.LoadOrStore(key, transport)
-	return actual.(*http.Transport), nil
+	if len(proxyTransports) >= maxProxyTransports {
+		for k, t := range proxyTransports {
+			t.CloseIdleConnections()
+			delete(proxyTransports, k)
+			break
+		}
+	}
+	proxyTransports[key] = transport
+	return transport, nil
 }
 
 var unsupportedFilenameChars = regexp.MustCompile(`[/\\:*?"<>\|]`)
@@ -275,17 +292,6 @@ func Filename(rawURL string, hint string, contentType string, maxFilenameLength 
 		base = strings.TrimSuffix(base, baseExt)
 	}
 	return composeFilename(base, ext, "", maxFilenameLength)
-}
-
-func filenameFromURL(rawURL string, hint string, contentType string, maxFilenameLength int) string {
-	return Filename(rawURL, hint, contentType, maxFilenameLength)
-}
-
-func InferredFilename(rawURL string, hint string, maxFilenameLength int) (string, bool) {
-	if mediaExtension(rawURL, "") == "" && normalizeMediaExtension(filepath.Ext(sanitizeFilename(hint))) == "" {
-		return "", false
-	}
-	return Filename(rawURL, hint, "", maxFilenameLength), true
 }
 
 func FilenameWithSuffix(filename string, suffix string, maxFilenameLength int) string {
@@ -446,28 +452,4 @@ func truncateUTF8Bytes(value string, maxBytes int) string {
 		builder.WriteRune(ch)
 	}
 	return strings.TrimSpace(builder.String())
-}
-
-func uniquePath(path string, maxFilenameLength int) (string, error) {
-	_, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return path, nil
-	}
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Dir(path)
-	ext := filepath.Ext(path)
-	stem := strings.TrimSuffix(filepath.Base(path), ext)
-	for index := 1; ; index++ {
-		suffix := fmt.Sprintf("(%d)", index)
-		candidate := filepath.Join(dir, composeFilename(stem, ext, suffix, maxFilenameLength))
-		_, err := os.Lstat(candidate)
-		if os.IsNotExist(err) {
-			return candidate, nil
-		}
-		if err != nil {
-			return "", err
-		}
-	}
 }

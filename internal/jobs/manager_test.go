@@ -424,6 +424,26 @@ func TestDownloadMediaDoesNotCacheGenericForbidden(t *testing.T) {
 	}
 }
 
+func TestNewestTweetIDIgnoresPinnedOrdering(t *testing.T) {
+	// timeline 按时间倒序，但置顶推文（ID 较旧）排在 index 0；游标必须取数值最大的，
+	// 否则下次归档会在首页对置顶推文精确命中而早停，漏掉更新的推文。
+	tweets := []parser.TweetData{
+		{ID: "100"}, // 置顶，较旧
+		{ID: "300"}, // 最新
+		{ID: "200"},
+	}
+	if got := newestTweetID(tweets); got != "300" {
+		t.Fatalf("newestTweetID = %q, want 300（不应取置顶的 tweets[0]）", got)
+	}
+}
+
+func TestNewestTweetIDPicksFirstWhenAlreadyDescending(t *testing.T) {
+	tweets := []parser.TweetData{{ID: "300"}, {ID: "200"}, {ID: "100"}}
+	if got := newestTweetID(tweets); got != "300" {
+		t.Fatalf("newestTweetID = %q, want 300", got)
+	}
+}
+
 func TestShouldRetryMediaErrorSkipsForbiddenAndNotFound(t *testing.T) {
 	tests := []struct {
 		name string

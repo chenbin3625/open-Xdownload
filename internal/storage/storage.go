@@ -223,6 +223,11 @@ CREATE TABLE IF NOT EXISTS downloads (
 		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
 		FOREIGN KEY(entity_id) REFERENCES user_entities(id) ON DELETE CASCADE
 	);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+	name TEXT PRIMARY KEY,
+	applied_at DATETIME NOT NULL
+);
 `
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -230,13 +235,36 @@ CREATE TABLE IF NOT EXISTS downloads (
 	if err := s.addMissingColumns(); err != nil {
 		return err
 	}
-	if err := s.normalizeDownloadsMediaURL(); err != nil {
+	// 一次性数据迁移：首次成功执行后记录到 schema_migrations，后续启动直接跳过，
+	// 避免每次冷启动都对 downloads 全表扫描/分组。新写入的 media_url 已在入口规范化，
+	// 不会再产生需要清理的重复，故这些迁移确为一次性。
+	if err := s.runMigrationOnce("normalize_downloads_media_url", s.normalizeDownloadsMediaURL); err != nil {
 		return err
 	}
-	if err := s.deduplicateDownloads(); err != nil {
+	if err := s.runMigrationOnce("deduplicate_downloads", s.deduplicateDownloads); err != nil {
+		return err
+	}
+	if err := s.runMigrationOnce("deduplicate_downloads_media_url_only", s.deduplicateDownloadsMediaURLOnly); err != nil {
 		return err
 	}
 	return s.addMissingIndexes()
+}
+
+// runMigrationOnce 在 name 尚未记录时执行 fn 并登记；已登记则跳过。用于把一次性的
+// downloads 数据规范化/去重限定为只跑一次。
+func (s *Store) runMigrationOnce(name string, fn func() error) error {
+	var count int
+	if err := s.db.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	if err := fn(); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`, name, time.Now().UTC())
+	return err
 }
 
 func (s *Store) addMissingColumns() error {
@@ -296,6 +324,22 @@ func (s *Store) deduplicateDownloads() error {
 	return err
 }
 
+// deduplicateDownloadsMediaURLOnly 清理 tweet_id 为空（直接媒体 URL 任务）的历史重复行，
+// 为随后 addMissingIndexes 创建的 (media_url) WHERE tweet_id = ” 唯一索引扫清障碍。
+func (s *Store) deduplicateDownloadsMediaURLOnly() error {
+	_, err := s.db.Exec(`
+	DELETE FROM downloads
+	WHERE tweet_id = ''
+	  AND media_url <> ''
+	  AND id NOT IN (
+		SELECT MIN(id)
+		FROM downloads
+		WHERE tweet_id = '' AND media_url <> ''
+		GROUP BY media_url
+	  )`)
+	return err
+}
+
 // normalizeDownloadsMediaURL 规范化历史 downloads 记录中的 media_url（去掉 ?tag= 等易变参数），
 // 使旧记录与规范化后的去重键一致，随后由 deduplicateDownloads 清理因规范化产生的重复行。
 // 幂等：无待规范化的行时直接返回，不动索引。
@@ -304,8 +348,10 @@ func (s *Store) normalizeDownloadsMediaURL() error {
 		ID       int64  `db:"id"`
 		MediaURL string `db:"media_url"`
 	}
+	// 仅取可能含 ?tag= 的候选行，避免把整个 downloads 表载入内存。规范化后的 URL 不再含
+	// tag=，故干净库上该查询返回 0 行；Go 侧再用 NormalizeMediaURL 比对确认确需变更。
 	var rows []downloadRow
-	if err := s.db.Select(&rows, `SELECT id, media_url FROM downloads WHERE tweet_id <> '' AND media_url <> ''`); err != nil {
+	if err := s.db.Select(&rows, `SELECT id, media_url FROM downloads WHERE tweet_id <> '' AND media_url <> '' AND media_url LIKE '%tag=%'`); err != nil {
 		return err
 	}
 	pending := make([]downloadRow, 0)
@@ -335,6 +381,9 @@ func (s *Store) addMissingIndexes() error {
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_tweet_media_unique
 	ON downloads (tweet_id, media_url)
 	WHERE tweet_id <> '';
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_media_url_unique
+	ON downloads (media_url)
+	WHERE tweet_id = '' AND media_url <> '';
 	CREATE INDEX IF NOT EXISTS idx_downloads_job_created_at
 	ON downloads (job_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_failed_media_job_created_at
@@ -941,19 +990,18 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 			record.JobID, record.TweetID, record.MediaURL, record.FilePath, record.Bytes, now)
 		return record, err
 	}
-	result, err := s.db.ExecContext(ctx, `
-	INSERT INTO downloads (job_id, tweet_id, media_url, file_path, bytes, created_at)
-	VALUES (?, ?, ?, ?, ?, ?)`, record.JobID, record.TweetID, record.MediaURL, record.FilePath, record.Bytes, now)
-	if err != nil {
-		return DownloadRecord{}, err
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return DownloadRecord{}, err
-	}
-	record.ID = id
-	record.CreatedAt = now
-	return record, nil
+	// tweet_id 为空（直接媒体 URL 任务）：按 media_url 去重，避免同一 URL 重复跑产生重复行。
+	err := s.db.GetContext(ctx, &record, `
+INSERT INTO downloads (job_id, tweet_id, media_url, file_path, bytes, created_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
+	job_id = excluded.job_id,
+	file_path = excluded.file_path,
+	bytes = excluded.bytes,
+	created_at = excluded.created_at
+RETURNING *`,
+		record.JobID, record.TweetID, record.MediaURL, record.FilePath, record.Bytes, now)
+	return record, err
 }
 
 func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord, error) {
