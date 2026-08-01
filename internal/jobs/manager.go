@@ -1077,9 +1077,11 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		}
 	}
 	if len(tweets) > 0 && stats.Failed == failedBefore {
-		// 增量归档早停游标：写入失败需上抛日志（而非静默吞掉），否则下次归档会因游标
-		// 缺失而全量重扫，浪费 X API 配额。
-		if err := m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, tweets[0].ID); err != nil {
+		// 增量归档早停游标：取本轮见到的最新推文 ID（数值最大）。timeline 按时间倒序，
+		// 但首页可能含置顶推文（ID 较旧却排在最前），若用 tweets[0].ID 作游标，下次归档
+		// 会在首页对其精确命中而立即早停，漏掉比置顶更新的推文。写入失败需上抛日志（而非
+		// 静默吞掉），否则下次归档会因游标缺失而全量重扫，浪费 X API 配额。
+		if err := m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, newestTweetID(tweets)); err != nil {
 			log.Printf("update user entity %d last_seen_tweet_id: %v", entity.ID, err)
 		}
 	}
@@ -1443,6 +1445,20 @@ func bestMediaURL(media parser.Media) string {
 		}
 	}
 	return downloader.NormalizeMediaURL(raw)
+}
+
+// newestTweetID 返回 tweets 中数值最大的推文 ID，作为增量归档的早停游标。timeline 按
+// 时间倒序，但首页可能含置顶推文（ID 较旧却排在最前），直接取 tweets[0] 会让下次归档
+// 在首页对该置顶推文精确命中而立即早停，漏掉比它更新的推文。雪花 ID 等长，字符串比较
+// 等价于数值比较。调用方保证 tweets 非空。
+func newestTweetID(tweets []parser.TweetData) string {
+	newest := tweets[0].ID
+	for _, t := range tweets[1:] {
+		if t.ID > newest {
+			newest = t.ID
+		}
+	}
+	return newest
 }
 
 func isPhotoURL(raw string) bool {
