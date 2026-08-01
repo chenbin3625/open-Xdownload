@@ -141,9 +141,6 @@ type DirectoryTreeNode = TreeDataNode & {
 };
 
 const fullWidthStyle: React.CSSProperties = { width: "100%" };
-const monoInputStyle: React.CSSProperties = {
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-};
 const iconStyles = {
   primary: { color: "#1677ff", fontSize: 18 },
   success: { color: "#389e0d", fontSize: 18 },
@@ -458,6 +455,10 @@ export default function App() {
     overview: "工作台",
     settings: "配置",
   }[activeSection];
+  const currentSubtitle = {
+    overview: "任务进度与下载记录一览",
+    settings: "存储、下载与 Cookie 配置",
+  }[activeSection];
   const dashboardData = dashboard.data;
   const isInitialDashboardLoading = !dashboardData && dashboard.isLoading;
   const isInitialDashboardError = !dashboardData && dashboard.isError;
@@ -492,7 +493,10 @@ export default function App() {
       <Layout className="app-layout">
         <Content className="app-content">
           <div className="page-toolbar">
-            <Text strong>{currentTitle}</Text>
+            <div className="page-toolbar-copy">
+              <Text strong>{currentTitle}</Text>
+              <Text type="secondary">{currentSubtitle}</Text>
+            </div>
             <Tooltip title="刷新">
               <Button
                 size="small"
@@ -1481,7 +1485,7 @@ function BatchTargetInput({
       onChange={(event) => onChange(event.target.value)}
       placeholder={placeholder}
       autoSize={{ minRows: 6, maxRows: 12 }}
-      style={monoInputStyle}
+      className="mono-input"
     />
   );
 }
