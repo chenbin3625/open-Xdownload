@@ -40,7 +40,7 @@ open-Xdownload is a local-first X / Twitter media downloader with a built-in Web
 
 ![工作台任务列表](docs/screenshots/workbench.png)
 
-![批量归档抽屉](docs/screenshots/batch-archive-drawer.png)
+![配置页](docs/screenshots/batch-archive-drawer.png)
 
 ## Docker Compose 部署
 
