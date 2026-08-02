@@ -4,11 +4,7 @@
   <img src="docs/assets/icon.png" width="96" height="96" alt="open-Xdownload icon">
 </p>
 
-open-Xdownload 是一个本地优先的 X / Twitter 下载器。它提供内置 Web 界面、后台任务队列和 SQLite 本地数据库，适合把单条推文、指定用户、列表成员或某个账号的关注对象中的媒体文件下载并归档到本地目录、SMB 共享或 WebDAV。
-
-**English Summary**
-
-open-Xdownload is a local-first X / Twitter media downloader with a built-in Web UI, background task queue, and SQLite database. It can archive media from single posts, users, list members, or followed accounts to local folders, SMB shares, or WebDAV storage.
+open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web 界面与后台任务队列，支持单条推文、用户、列表、关注四种任务类型，提供批量任务、定时计划、增量归档、失败重试、Cookie 池与本地 / SMB / WebDAV 多存储后端。
 
 ## 功能概览
 
@@ -266,3 +262,266 @@ ports:
 这表示只有宿主机本机可以访问。如需暴露到局域网或公网，请先配置反向代理、访问控制和 HTTPS。
 
 请确认你有权下载和保存相关内容，并遵守 X / Twitter 的服务条款、目标站点规则以及所在地法律法规。
+
+---
+
+# open-Xdownload
+
+open-Xdownload is a local-first X / Twitter media downloader. It comes with a built-in Web UI and background task queue, supports four task types — single posts, users, lists, and followed accounts — and offers batch tasks, scheduled plans, incremental archiving, failure retry, a cookie pool, and local / SMB / WebDAV storage backends.
+
+## Features
+
+- Single-post parsing & download: Paste an `x.com` or `twitter.com` post link to parse its text, author, and media list, and download the best available version of each image, video, or GIF.
+- User media archiving: Archive media from a user's media timeline by username, `@username`, or user ID.
+- List archiving: Enter an X list ID to automatically fetch its members and archive media posted by them.
+- Followed-account archiving: Enter an account to automatically fetch the accounts it follows and archive media posted by those accounts.
+- Batch tasks: Users, lists, and followed accounts can be entered one per line in a single batch — up to 200 tasks at once, with automatic deduplication.
+- Scheduled plans: Save users, lists, or followed accounts as automatic archiving plans, with support for enable, disable, run now, and delete.
+- Incremental archiving: The first run scans a user's full media timeline; later runs resume from the last successful position. Media already downloaded and still present is skipped automatically.
+- Workbench task list: Task status, progress, errors, and download records are shown directly in the workbench, with support for cancelling tasks, re-running them, and copying file paths or failed media URLs.
+- Partial-failure detection: An archiving task with any failed media download is clearly marked "partial failure" instead of being lumped in with fully successful tasks.
+- Failure retry: Retryable failed posts from a batch archive go into a failure queue that can be retried manually in a dedicated drawer, or automatically when a task finishes; re-running a task creates a new task and keeps the original record.
+- Cookie pool: Supports a primary cookie plus multiple backup cookie groups, used for list / user / followed-account archiving and API rate-limit rotation.
+- Multiple storage backends: Supports local directories, SMB shares, and WebDAV; local directories can be browsed, typed in, or created in the configuration UI.
+
+## Task Types
+
+| Type | Example input | X Cookie required | Description |
+| --- | --- | --- | --- |
+| Single post | `https://x.com/user/status/1234567890` | No | Parses and downloads media from a single post. |
+| User | `openai`, `@openai`, `44196397` | Yes | Archives media from the given user's media timeline. |
+| List | `1234567890` | Yes | Fetches list members and archives media they post. |
+| Followed | `openai`, `@openai`, `44196397` | Yes | Fetches the accounts the target follows and archives media posted by them. |
+
+## Interface Preview
+
+The screenshots below were generated with demo data and contain no real accounts, cookies, download paths, or task records.
+
+![Workbench task list](docs/screenshots/workbench.png)
+
+![Configuration page](docs/screenshots/batch-archive-drawer.png)
+
+## Docker Compose Deployment
+
+Docker Compose is the recommended way to run. Create a `compose.yml`:
+
+```yaml
+services:
+  open-xdownload:
+    image: chenbin3625/open-xdownload:latest
+    container_name: open-xdownload
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      OPEN_XDOWNLOAD_ADDR: 0.0.0.0:8787
+      OPEN_XDOWNLOAD_DATA_DIR: /data
+      OPEN_XDOWNLOAD_DOWNLOAD_DIR: /downloads
+      TZ: Asia/Shanghai
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads
+```
+
+Start:
+
+```bash
+docker compose up -d
+```
+
+Access:
+
+```text
+http://127.0.0.1:8787
+```
+
+Upgrade the image:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Stop the service:
+
+```bash
+docker compose down
+```
+
+## Docker Run
+
+You can also run directly with `docker run`:
+
+```bash
+docker run -d \
+  --name open-xdownload \
+  --restart unless-stopped \
+  -p 127.0.0.1:8787:8787 \
+  -e OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787 \
+  -e OPEN_XDOWNLOAD_DATA_DIR=/data \
+  -e OPEN_XDOWNLOAD_DOWNLOAD_DIR=/downloads \
+  -e TZ=Asia/Shanghai \
+  -e PUID="$(id -u)" \
+  -e PGID="$(id -g)" \
+  -v "$PWD/data:/data" \
+  -v "$PWD/downloads:/downloads" \
+  chenbin3625/open-xdownload:latest
+```
+
+On a Linux host, set `PUID` / `PGID` to match your current user so the database and downloaded files inside the mounted directories don't become container-user files you can't read or write directly. The Compose example defaults to `1000:1000`; if your user isn't that UID/GID, create a `.env` in the same directory:
+
+```env
+PUID=1000
+PGID=1000
+```
+
+If a previous version already created a database file with wrong ownership, the new image recursively fixes `/data` at startup. The `/downloads` directory is only auto-fixed when the top-level directory owner mismatches, so a large directory isn't fully scanned on every startup; if old files or subdirectories inside the download directory still have permission issues, start once with `OPEN_XDOWNLOAD_FORCE_CHOWN=1`.
+
+## Binary Run
+
+Download the `open-xdownload` binary for your platform from the Releases page and run:
+
+```bash
+./open-xdownload
+```
+
+It listens on `0.0.0.0:8787` by default, with the data directory at `data` and the download directory at `downloads` in the current directory.
+
+To specify paths:
+
+```bash
+OPEN_XDOWNLOAD_DATA_DIR=/path/to/data \
+OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
+./open-xdownload -addr 127.0.0.1:8787
+```
+
+Available service flags:
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `0.0.0.0:8787` | HTTP listen address. Set to `127.0.0.1:8787` for local-only use. |
+| `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite database directory; the database file is `open-xdownload.db`. |
+| `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | Frontend static file directory; falls back to the built-in Web UI if the directory doesn't exist. |
+| n/a | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | `downloads` in the current directory | Default download directory used when the config is first generated. |
+
+## First-Time Setup
+
+After starting the service and opening the Web UI, go to the "Configuration" page:
+
+1. Choose a storage type.
+2. For local storage, browse, type in, or create the download directory; for Docker deployments this is usually `/downloads`.
+3. For SMB, enter host, port, share, directory, domain, username, and password.
+4. For WebDAV, enter the service URL, directory, username, and password.
+5. If you need a proxy to reach X or download media, set a proxy address such as `http://127.0.0.1:7890`.
+6. Set the max concurrency, filename pattern, and max filename length.
+7. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0`.
+8. If you have cookies for multiple accounts, enter them as groups under "Backup cookies" for rotation during batch archiving.
+9. Click "Save configuration", then "Verify login" to confirm the cookies work.
+
+Sensitive fields are shown as `********` when read. Leaving them empty or as `********` on a later save won't overwrite the existing keys or passwords.
+
+## Usage Guide
+
+### Download media from a single post
+
+1. Open the workbench.
+2. Paste a post link into "Single post parsing".
+3. Click "Parse" and confirm the recognized media list.
+4. Click "Download media" to create a task.
+5. Track progress in the "Task list" in the workbench; expand a finished task to copy its file path.
+
+Parsing a single post usually doesn't require an X Cookie, but private, deleted, restricted, or otherwise non-publicly-accessible posts may fail to parse.
+
+### Batch archive users, lists, or followed accounts
+
+1. First fill in and verify your X Cookie on the "Configuration" page.
+2. Back in the workbench, open the "Batch archive" drawer.
+3. In the "Users", "Lists", or "Followed" tabs, enter your targets, one per line.
+4. Review the task preview on the right.
+5. Click "Batch download" to create the tasks.
+
+User targets accept usernames, `@username`, and user IDs; list targets use list IDs; a followed target means "archive media posted by the accounts this account follows".
+
+### Create a scheduled archiving plan
+
+1. Enter user, list, or followed targets in the "Batch archive" drawer.
+2. Fill in a plan name.
+3. Set the execution interval, from 5 to 43200 minutes.
+4. Click "Save plan".
+5. Plans can be enabled, disabled, run now, or deleted from the "Scheduled plans" list on the right.
+
+Scheduled plans only support user, list, and followed targets — not single post links. Each plan can contain up to 200 targets. If the task from the previous run is still running, the next execution is deferred.
+
+### Handle failed tasks
+
+- Failed, cancelled, completed, or partially failed tasks can be re-run from the "Task list" in the workbench; the system creates a new task and keeps the original history.
+- Running tasks can be cancelled.
+- An archiving task is shown as "partial failure" whenever it has any failed download.
+- Retryable failed posts from a batch archive go into a "Failed post queue", opened via "View failures" above the task list.
+- In the failure-queue drawer you can retry all entries, delete individual records, or clear the queue.
+- With "Failure retry" enabled in configuration, batch archiving tasks automatically try to retry the failure queue when they finish.
+
+## Storage & Directory Structure
+
+Default local storage layout:
+
+```text
+downloads/
+  users/
+    username-or-display-name/
+      media files
+  lists/
+    list-name(list-id)/
+      link to the user directory
+```
+
+Notes:
+
+- User and followed-account archiving save media to `users/username-or-display-name/`.
+- List archiving creates `lists/list-name(list-id)/` containing links to user directories, so the same user's media isn't copied multiple times.
+- SMB and WebDAV use the same logical paths but don't create local symlinks.
+- Filenames are cleaned of characters the system doesn't support and are limited by the max filename length.
+- Images are downloaded at the largest available size where possible; videos and GIFs pick the highest-bitrate MP4.
+
+## Configuration Options
+
+| Option | Description |
+| --- | --- |
+| Storage type | Local directory, SMB, or WebDAV. |
+| Download directory | Root directory for local storage; can be browsed, entered, or created in the UI. For Docker, map it to a host directory. |
+| Proxy | Used for X API requests and media downloads; leave empty for a direct connection. |
+| Concurrency | Max concurrency for background tasks, range `1-64`. |
+| Filename pattern | Either "post only" or "username + user ID + post". |
+| Max filename length | Range `16-240`. |
+| X Cookie | Primary `auth_token` and `ct0`, used for authenticated APIs. |
+| Backup cookies | Additional `auth_token` / `ct0` groups, rotated during batch archiving. |
+| Failure retry | Automatically retries the failed-post queue when batch archiving finishes. |
+| Auto-follow protected accounts | Tries to auto-follow protected accounts it hasn't followed yet when encountered. |
+
+## Data Backup
+
+Back up periodically:
+
+```text
+data/open-xdownload.db
+downloads/
+```
+
+`open-xdownload.db` stores config, tasks, download records, users, lists, scheduled plans, and the failure queue; `downloads/` holds the actual media files. With SMB or WebDAV, the actual media files live on the corresponding remote storage.
+
+## Security Notes
+
+open-Xdownload targets personal, local archiving; the service itself has no built-in user login or access control. It listens on all interfaces by default. For local-only use, bind to localhost with `-addr 127.0.0.1:8787` or `OPEN_XDOWNLOAD_ADDR=127.0.0.1:8787`, or put it behind a reverse proxy with authentication.
+
+The Docker Compose example maps the port as:
+
+```yaml
+ports:
+  - "127.0.0.1:8787:8787"
+```
+
+This means only the host machine can reach it. To expose it to a LAN or the public internet, configure a reverse proxy, access control, and HTTPS first.
+
+Please make sure you have the right to download and keep the content, and comply with X / Twitter's terms of service, the rules of the target sites, and applicable local laws.
