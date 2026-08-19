@@ -336,6 +336,72 @@ func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
 	}
 }
 
+func TestDownloadMediaSuffixedPathWhenAnotherTweetOwnsFilename(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("identical tweet media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, server.URL+"/one.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	firstURL := server.URL + "/one.mp4"
+	secondURL := server.URL + "/two.mp4"
+
+	// 第一条推文：文件名落到基础路径。
+	first, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, firstURL, "tweet-1", "", "identical text", false, time.Time{})
+	if err != nil {
+		t.Fatalf("download first media: %v", err)
+	}
+	if first.skipped {
+		t.Fatal("first download skipped = true, want false")
+	}
+
+	// 第二条推文文本与第一条完全相同 → 生成同名文件。第二条媒体既不能被跳过（否则静默
+	// 丢失），也不能覆盖第一条的文件（否则破坏第一条推文的下载记录指向的文件），必须写
+	// 入带编号后缀的路径并各自记录一条下载。
+	second, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, secondURL, "tweet-2", "", "identical text", false, time.Time{})
+	if err != nil {
+		t.Fatalf("download second media: %v", err)
+	}
+	if second.skipped {
+		t.Fatal("second download skipped = true, want false for a colliding filename")
+	}
+
+	firstPath := filepath.Join(root, "identical text.mp4")
+	secondPath := filepath.Join(root, "identical text(1).mp4")
+	if got, err := os.ReadFile(firstPath); err != nil || string(got) != "identical tweet media" {
+		t.Fatalf("first tweet media missing or overwritten: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(secondPath); err != nil || string(got) != "identical tweet media" {
+		t.Fatalf("second tweet media not at suffixed path: %q, %v", got, err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("HTTP requests = %d, want 2 (both tweets downloaded)", requests.Load())
+	}
+	firstRecord, err := store.GetDownloadByTweetMedia(ctx, "tweet-1", firstURL)
+	if err != nil || firstRecord == nil || firstRecord.FilePath != firstPath {
+		t.Fatalf("first download record = %+v, err = %v", firstRecord, err)
+	}
+	secondRecord, err := store.GetDownloadByTweetMedia(ctx, "tweet-2", secondURL)
+	if err != nil || secondRecord == nil || secondRecord.FilePath != secondPath {
+		t.Fatalf("second download record = %+v, err = %v", secondRecord, err)
+	}
+}
+
 func TestDownloadMediaCachesPermanentlyUnavailableMedia(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

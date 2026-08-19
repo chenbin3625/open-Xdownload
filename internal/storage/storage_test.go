@@ -288,8 +288,8 @@ func TestCreateDownloadUpdatesDuplicateTweetMediaRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create duplicate download: %v", err)
 	}
-	if second.ID != first.ID || second.FilePath != "/tmp/two.mp4" || second.Bytes != 200 || second.JobID != secondJob.ID {
-		t.Fatalf("duplicate record = %+v, want updated existing ID %d", second, first.ID)
+	if second.ID != first.ID || second.FilePath != "/tmp/two.mp4" || second.Bytes != 200 || second.JobID != firstJob.ID {
+		t.Fatalf("duplicate record = %+v, want existing ID %d with original job_id %d", second, first.ID, firstJob.ID)
 	}
 	items, err := store.ListDownloads(ctx, 10)
 	if err != nil {
@@ -300,6 +300,71 @@ func TestCreateDownloadUpdatesDuplicateTweetMediaRecord(t *testing.T) {
 	}
 	if items[0].FilePath != "/tmp/two.mp4" {
 		t.Fatalf("stored file path = %q, want updated path", items[0].FilePath)
+	}
+	if items[0].JobID != firstJob.ID {
+		t.Fatalf("stored job_id = %d, want original job_id %d", items[0].JobID, firstJob.ID)
+	}
+	// 历史保留：该下载仍属于首次记录的 job，而不是后来重复下载的 job。
+	firstJobItems, err := store.ListDownloadsForJobs(ctx, []int64{firstJob.ID})
+	if err != nil {
+		t.Fatalf("list downloads for first job: %v", err)
+	}
+	if len(firstJobItems) != 1 || firstJobItems[0].ID != first.ID {
+		t.Fatalf("first job downloads = %+v, want 1 record %d", firstJobItems, first.ID)
+	}
+	secondJobItems, err := store.ListDownloadsForJobs(ctx, []int64{secondJob.ID})
+	if err != nil {
+		t.Fatalf("list downloads for second job: %v", err)
+	}
+	if len(secondJobItems) != 0 {
+		t.Fatalf("second job downloads = %+v, want 0 records", secondJobItems)
+	}
+}
+
+func TestCreateDownloadEmptyTweetIDKeepsOriginalJobOnDuplicate(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	firstJob, err := store.CreateJob(ctx, JobKindMediaURL, "one", "one")
+	if err != nil {
+		t.Fatalf("create first job: %v", err)
+	}
+	secondJob, err := store.CreateJob(ctx, JobKindMediaURL, "two", "two")
+	if err != nil {
+		t.Fatalf("create second job: %v", err)
+	}
+	first, err := store.CreateDownload(ctx, DownloadRecord{
+		JobID:    firstJob.ID,
+		MediaURL: "https://example.com/direct.mp4",
+		FilePath: "/tmp/one.mp4",
+		Bytes:    100,
+	})
+	if err != nil {
+		t.Fatalf("create first download: %v", err)
+	}
+	second, err := store.CreateDownload(ctx, DownloadRecord{
+		JobID:    secondJob.ID,
+		MediaURL: "https://example.com/direct.mp4",
+		FilePath: "/tmp/two.mp4",
+		Bytes:    200,
+	})
+	if err != nil {
+		t.Fatalf("create duplicate download: %v", err)
+	}
+	// tweet_id 为空时同样按 media_url 去重，且保留首次记录的 job_id，只更新文件信息。
+	if second.ID != first.ID || second.FilePath != "/tmp/two.mp4" || second.Bytes != 200 || second.JobID != firstJob.ID {
+		t.Fatalf("duplicate record = %+v, want existing ID %d with original job_id %d", second, first.ID, firstJob.ID)
+	}
+	stored, err := store.GetDownloadByTweetMedia(ctx, "", "https://example.com/direct.mp4")
+	if err != nil {
+		t.Fatalf("get download: %v", err)
+	}
+	if stored == nil || stored.JobID != firstJob.ID || stored.FilePath != "/tmp/two.mp4" {
+		t.Fatalf("stored download = %+v, want job_id %d with updated path", stored, firstJob.ID)
 	}
 }
 

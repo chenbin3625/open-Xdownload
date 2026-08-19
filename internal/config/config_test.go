@@ -95,3 +95,39 @@ func TestNormalizedFileNamingDefaultsAndLimits(t *testing.T) {
 		t.Fatalf("legacy FileNamingMode = %q, want %q", cfg.FileNamingMode, FileNamingUserTweet)
 	}
 }
+
+func TestRedactAndRestoreAdditionalCookies(t *testing.T) {
+	raw := "auth_token=tok1; ct0=csrf1\nauth_token=tok2; ct0=csrf2"
+	redacted := RedactAdditionalCookies(raw)
+	wantRedacted := "auth_token=********; ct0=********\nauth_token=********; ct0=********"
+	if redacted != wantRedacted {
+		t.Fatalf("RedactAdditionalCookies() = %q, want %q", redacted, wantRedacted)
+	}
+
+	// Case 1: Unmodified redacted cookies submitted -> restored identically
+	restored := RestoreAdditionalCookies(redacted, raw)
+	if restored != raw {
+		t.Fatalf("RestoreAdditionalCookies(unmodified) = %q, want %q", restored, raw)
+	}
+
+	// Case 2: User added a 3rd cookie
+	added := redacted + "\nauth_token=tok3; ct0=csrf3"
+	restoredAdded := RestoreAdditionalCookies(added, raw)
+	wantAdded := raw + "\nauth_token=tok3; ct0=csrf3"
+	if restoredAdded != wantAdded {
+		t.Fatalf("RestoreAdditionalCookies(added) = %q, want %q", restoredAdded, wantAdded)
+	}
+
+	// Case 3: User edited the 1st cookie and kept 2nd redacted
+	edited := "auth_token=newtok; ct0=newcsrf\nauth_token=********; ct0=********"
+	restoredEdited := RestoreAdditionalCookies(edited, raw)
+	wantEdited := "auth_token=newtok; ct0=newcsrf\nauth_token=tok2; ct0=csrf2"
+	if restoredEdited != wantEdited {
+		t.Fatalf("RestoreAdditionalCookies(edited) = %q, want %q", restoredEdited, wantEdited)
+	}
+
+	// Case 4: User cleared cookies
+	if got := RestoreAdditionalCookies("", raw); got != "" {
+		t.Fatalf("RestoreAdditionalCookies(empty) = %q, want empty", got)
+	}
+}

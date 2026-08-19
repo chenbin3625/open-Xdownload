@@ -633,12 +633,25 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	if dir == "" {
 		dir = target.Root()
 	}
-	result, err := target.SaveMedia(ctx, m.downloader, mediaURL, dir, filenameHint, downloader.Options{
+	options := downloader.Options{
 		ModTime:           modTime,
 		LargePhoto:        largePhoto,
 		ProxyURL:          cfg.ProxyURL,
 		MaxFilenameLength: cfg.MaxFilenameLength,
-	})
+	}
+	if target.Type() == config.StorageLocal {
+		// 磁盘上的同名文件可能来自另一条推文（相同文本命名导致路径冲突）。只有 downloads 表
+		// 中已存在本推文+本媒体且 file_path 与该路径一致的记录，才认定该文件属于本次下载，
+		// 允许跳过/覆盖；否则视为他推文的文件，下载器会写入带编号后缀的路径，绝不复用。
+		options.ExistingFileOwner = func(path string) bool {
+			record, err := m.store.GetDownloadByTweetMedia(saveCtx, tweetID, mediaURL)
+			if err != nil || record == nil {
+				return false
+			}
+			return strings.TrimSpace(record.FilePath) != "" && filepath.Clean(record.FilePath) == filepath.Clean(path)
+		}
+	}
+	result, err := target.SaveMedia(ctx, m.downloader, mediaURL, dir, filenameHint, options)
 	if err != nil {
 		if isPermanentlyUnavailableMediaError(err) {
 			if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
@@ -850,7 +863,7 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		errMu.Unlock()
 	}
 
-	taskCh := make(chan archiveUserTask)
+	taskCh := make(chan archiveUserTask, max(1, workerCount*2))
 	var wg sync.WaitGroup
 	for worker := 0; worker < workerCount; worker++ {
 		wg.Add(1)
@@ -1350,6 +1363,7 @@ func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, er
 
 func (m *Manager) save(ctx context.Context, job storage.Job) {
 	if err := m.store.UpdateJob(ctx, job); err != nil {
+		log.Printf("save job %d: %v", job.ID, err)
 		return
 	}
 	// 直接用内存中的 job 作为事件载荷，省去一次 GetJob 往返；

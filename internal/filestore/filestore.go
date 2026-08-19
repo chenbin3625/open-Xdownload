@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
@@ -86,7 +87,9 @@ func (s localStore) Exists(_ context.Context, path string) (bool, error) {
 }
 
 func (s localStore) MkdirAll(_ context.Context, dir string) error {
-	return os.MkdirAll(dir, 0o755)
+	// 本地目录收紧为 0700，与数据目录加固保持一致：私有账号下载的媒体
+	// 不应被其他本地用户读取/遍历。MkdirAll 仅在创建目录时设置该模式。
+	return os.MkdirAll(dir, 0o700)
 }
 
 func (s localStore) Rename(_ context.Context, oldPath string, newPath string) error {
@@ -101,11 +104,11 @@ func (s localStore) SaveMedia(ctx context.Context, d *downloader.Downloader, med
 }
 
 func (s localStore) TestWritable(_ context.Context) (string, error) {
-	if err := os.MkdirAll(s.root, 0o755); err != nil {
+	if err := os.MkdirAll(s.root, 0o700); err != nil {
 		return "", err
 	}
 	filePath := filepath.Join(s.root, probeFilename())
-	if err := os.WriteFile(filePath, probePayload, 0o644); err != nil {
+	if err := os.WriteFile(filePath, probePayload, 0o600); err != nil {
 		return "", err
 	}
 	if err := os.Remove(filePath); err != nil {
@@ -223,10 +226,12 @@ func (s smbStore) SaveMedia(ctx context.Context, d *downloader.Downloader, media
 		syncErr := file.Sync()
 		closeErr := file.Close()
 		if copyErr != nil {
+			_ = file.Close()
 			_ = share.Remove(tempRel)
 			return copyErr
 		}
 		if syncErr != nil {
+			_ = file.Close()
 			_ = share.Remove(tempRel)
 			return syncErr
 		}
@@ -301,11 +306,30 @@ func (s smbStore) smbFileState(share *smb2.Share, fileRel string, contentLength 
 	}, nil
 }
 
+// smbTempStemMax 限制 SMB 临时文件基名的最大字节数：最终文件名可接近 NAME_MAX（如
+// 240 字节），若把整个基名拼进临时名再加 UnixNano/计数/".part" 后缀，会超过 SMB
+// 服务端的单个文件名上限触发 ENAMETOOLONG。临时名随后经 rename 发布到最终路径，
+// 无需与最终文件名一致，故对基名截断即可。
+const smbTempStemMax = 64
+
 var smbTempCounter atomic.Uint64
+
+// smbTempName 构造 SMB 临时文件相对路径：目录保持原样，基名截断到 smbTempStemMax
+// 字节，再追加 UnixNano + 进程内计数器 + ".part"。UnixNano 提供跨进程唯一性，计数器
+// 保证同进程内互不重复；碰撞（os.IsExist）由调用方循环重试。
+func smbTempName(fileRel string) string {
+	dirRel := path.Dir(fileRel)
+	stem := truncateTempStem(path.Base(fileRel), smbTempStemMax)
+	if stem == "" {
+		stem = "media"
+	}
+	name := fmt.Sprintf("%s.%d.%d.part", stem, time.Now().UnixNano(), smbTempCounter.Add(1))
+	return joinSlash(dirRel, name)
+}
 
 func createSMBTempFile(share *smb2.Share, fileRel string) (*smb2.File, string, error) {
 	for {
-		tempRel := fmt.Sprintf("%s.%d.%d.part", fileRel, time.Now().UnixNano(), smbTempCounter.Add(1))
+		tempRel := smbTempName(fileRel)
 		file, err := share.OpenFile(tempRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err == nil {
 			return file, tempRel, nil
@@ -315,6 +339,17 @@ func createSMBTempFile(share *smb2.Share, fileRel string) (*smb2.File, string, e
 		}
 		return nil, "", err
 	}
+}
+
+// truncateTempStem 把 value 截断到最多 maxBytes 字节，且不截断多字节 UTF-8 字符。
+func truncateTempStem(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	for maxBytes > 0 && !utf8.RuneStart(value[maxBytes]) {
+		maxBytes--
+	}
+	return value[:maxBytes]
 }
 
 // maxFilenameConflicts bounds the suffix search in publishSMBTemp: if this many
@@ -454,7 +489,9 @@ func (s smbStore) sharedSession() *smbSharedSession {
 // whose mutex is uncontended (TryLock succeeds) are evicted, so in-flight
 // operations are never interrupted. If a caller obtained the entry just before
 // eviction (lookup-then-use race), it will see share==nil and reconnect; withShare
-// then re-registers that reconnected session so it is not orphaned.
+// then re-registers that reconnected session. If another goroutine already
+// re-registered a new entry for the same key, the reconnected session is orphaned
+// (used for the current operation, then closed) so it cannot leak.
 func smbEvictIdleSession() {
 	for k, entry := range smbSessions {
 		if !entry.mu.TryLock() {
@@ -477,6 +514,7 @@ func (s smbStore) signature() string {
 func (e *smbSharedSession) withShare(ctx context.Context, fn func(*smb2.Share) error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	orphaned := false
 	if e.share == nil {
 		if err := e.connect(ctx); err != nil {
 			return err
@@ -484,11 +522,14 @@ func (e *smbSharedSession) withShare(ctx context.Context, fn func(*smb2.Share) e
 		// 重连后该会话可能已在 lookup-then-use 竞态中被逐出缓存；重新登记，避免重连
 		// 出来的会话成为无人引用的孤儿（连接永不关闭）。锁序 e.mu -> smbSessionsMu
 		// 不会死锁：smbSessionsMu 在别处只单独获取，或驱逐时以非阻塞 TryLock 获取 e.mu。
-		e.reregisterLocked()
+		// 若同键已被另一 goroutine 抢先登记了新条目，本会话不再被缓存引用（orphaned）：
+		// 本次操作仍可安全使用刚建立的连接，但操作结束后必须关闭它，否则连接泄漏。
+		orphaned = !e.reregisterLocked()
 	}
 	err := fn(e.share.WithContext(ctx))
-	if isSMBConnectionError(err) {
-		// 连接已失效，丢弃会话，下次调用时自动重连。
+	if isSMBConnectionError(err) || orphaned {
+		// 连接已失效，丢弃会话；或本会话已成孤儿（未被缓存引用），操作完成后释放连接，
+		// 避免泄漏 TCP/SMB 连接。两种情况下次调用时都会自动重连。
 		e.closeLocked()
 	}
 	return err
@@ -507,13 +548,18 @@ func (e *smbSharedSession) closeLocked() {
 }
 
 // reregisterLocked 把本会话重新插入缓存（若不存在同键项）。调用方需持有 e.mu。
-func (e *smbSharedSession) reregisterLocked() {
+// 返回 true 表示调用方持有的会话就是缓存中该键的持有者（新插入，或原本即本会话）；
+// 返回 false 表示同键已被另一条目占用，本会话已成为孤儿，调用方应在本轮操作结束后
+// 关闭它，避免重连出来的会话无人引用而泄漏连接。
+func (e *smbSharedSession) reregisterLocked() bool {
 	key := e.cfg.signature()
 	smbSessionsMu.Lock()
-	if _, ok := smbSessions[key]; !ok {
-		smbSessions[key] = e
+	defer smbSessionsMu.Unlock()
+	if existing, ok := smbSessions[key]; ok {
+		return existing == e
 	}
-	smbSessionsMu.Unlock()
+	smbSessions[key] = e
+	return true
 }
 
 func (e *smbSharedSession) connect(ctx context.Context) error {
@@ -606,16 +652,34 @@ func (s webDAVStore) Exists(ctx context.Context, path string) (bool, error) {
 	return s.exists(ctx, path)
 }
 
+// maxWebDAVDirs 限制 WebDAV 目录缓存大小，避免长运行进程中缓存无限增长。
+const maxWebDAVDirs = 4096
+
 // webdavDirs 缓存已确认存在的 WebDAV 目录，避免每次下载都对同一路径重复发 MKCOL。
-var webdavDirs sync.Map // map[string]struct{}
+// 缓存键包含存储身份（s.root），不同 WebDAV 配置之间不共享"已存在"判定。
+var (
+	webdavDirsMu sync.Mutex
+	webdavDirs   = map[string]struct{}{}
+)
+
+// webDAVDirKey 用 \x00 拼接存储根与逻辑目录作为缓存键。\x00 不会出现在 URL 路径中，
+// 确保不同 base URL/rootPath 的 WebDAV 存储即使传入相同目录字符串也不会互相命中缓存
+// （否则切换服务器后 MkdirAll 会跳过 MKCOL，导致首次 PUT 409）。
+func (s webDAVStore) webDAVDirKey(dir string) string {
+	return s.root + "\x00" + dir
+}
 
 func (s webDAVStore) MkdirAll(ctx context.Context, dir string) error {
 	if dir == "" {
 		return nil
 	}
-	if _, ok := webdavDirs.Load(dir); ok {
+	key := s.webDAVDirKey(dir)
+	webdavDirsMu.Lock()
+	if _, ok := webdavDirs[key]; ok {
+		webdavDirsMu.Unlock()
 		return nil
 	}
+	webdavDirsMu.Unlock()
 	rel := s.relativePath(dir)
 	if rel == "" {
 		return nil
@@ -631,14 +695,24 @@ func (s webDAVStore) MkdirAll(ctx context.Context, dir string) error {
 			return err
 		}
 	}
-	webdavDirs.Store(dir, struct{}{})
+	webdavDirsMu.Lock()
+	if len(webdavDirs) >= maxWebDAVDirs {
+		for k := range webdavDirs {
+			delete(webdavDirs, k)
+			break
+		}
+	}
+	webdavDirs[key] = struct{}{}
+	webdavDirsMu.Unlock()
 	return nil
 }
 
 // invalidateWebDAVDir 丢弃 dir 的"已存在"缓存，使下次 MkdirAll 重新确认并创建目录。
 // 在 PUT 收到 409（父目录缺失）时调用——目录可能已被服务端删除而本地缓存仍认为存在。
 func (s webDAVStore) invalidateWebDAVDir(dir string) {
-	webdavDirs.Delete(dir)
+	webdavDirsMu.Lock()
+	delete(webdavDirs, s.webDAVDirKey(dir))
+	webdavDirsMu.Unlock()
 }
 
 func (s webDAVStore) Rename(ctx context.Context, oldPath string, newPath string) error {
