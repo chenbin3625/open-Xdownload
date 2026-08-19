@@ -473,9 +473,7 @@ func mergeSecretPlaceholders(cfg config.AppConfig, current config.AppConfig) con
 	if cfg.CSRFToken == "" || cfg.CSRFToken == config.SecretPlaceholder {
 		cfg.CSRFToken = current.CSRFToken
 	}
-	if cfg.AdditionalCookies == "" || cfg.AdditionalCookies == config.SecretPlaceholder {
-		cfg.AdditionalCookies = current.AdditionalCookies
-	}
+	cfg.AdditionalCookies = config.RestoreAdditionalCookies(cfg.AdditionalCookies, current.AdditionalCookies)
 	// 仅当目标主机未变时才继承已存的存储凭据，否则调用方可令服务器用管理员真实的
 	// WebDAV/SMB 密码去认证一个由调用方提供的主机（凭据外泄）。主机变更时清掉占位符，
 	// 避免把字面量 "********" 当作密码发送给新主机。
@@ -655,7 +653,11 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := s.manager.CancelJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
@@ -669,7 +671,11 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := s.store.RetryJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+		} else {
+			writeError(w, http.StatusBadRequest, err)
+		}
 		return
 	}
 	s.manager.Notify()
@@ -719,7 +725,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if !write([]byte(": ping\n\n")) {
 				return
 			}
-		case event := <-channel:
+		case event, ok := <-channel:
+			if !ok {
+				return
+			}
 			if !write(event.MarshalSSE()) {
 				return
 			}

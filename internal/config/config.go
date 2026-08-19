@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -127,7 +129,7 @@ func (cfg AppConfig) Normalized() AppConfig {
 func (cfg AppConfig) Redacted() AppConfig {
 	cfg.AuthToken = redact(cfg.AuthToken)
 	cfg.CSRFToken = redact(cfg.CSRFToken)
-	cfg.AdditionalCookies = redact(cfg.AdditionalCookies)
+	cfg.AdditionalCookies = RedactAdditionalCookies(cfg.AdditionalCookies)
 	cfg.SMBPassword = redact(cfg.SMBPassword)
 	cfg.WebDAVPassword = redact(cfg.WebDAVPassword)
 	cfg.ProxyURL = redactURLUserinfo(cfg.ProxyURL)
@@ -151,6 +153,150 @@ func redact(value string) string {
 		return ""
 	}
 	return SecretPlaceholder
+}
+
+// RedactAdditionalCookies returns a line-by-line redacted version of additional cookies
+// preserving the count of configured cookie pairs.
+func RedactAdditionalCookies(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if raw == SecretPlaceholder {
+		return SecretPlaceholder
+	}
+	cookies := ParseCookiePairs(raw)
+	if len(cookies) == 0 {
+		return SecretPlaceholder
+	}
+	lines := make([]string, 0, len(cookies))
+	for range cookies {
+		lines = append(lines, fmt.Sprintf("auth_token=%s; ct0=%s", SecretPlaceholder, SecretPlaceholder))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// RestoreAdditionalCookies merges submitted additional cookies with previously stored ones,
+// restoring any SecretPlaceholder values from the corresponding stored cookie pair.
+func RestoreAdditionalCookies(submitted, stored string) string {
+	submitted = strings.TrimSpace(submitted)
+	if submitted == "" {
+		return ""
+	}
+	if submitted == SecretPlaceholder {
+		return stored
+	}
+	subPairs := ParseCookiePairs(submitted)
+	if len(subPairs) == 0 {
+		return submitted
+	}
+	storedPairs := ParseCookiePairs(stored)
+	lines := make([]string, 0, len(subPairs))
+	for i, sub := range subPairs {
+		auth := sub.AuthToken
+		csrf := sub.CSRFToken
+		if (auth == SecretPlaceholder || auth == "") && i < len(storedPairs) {
+			auth = storedPairs[i].AuthToken
+		}
+		if (csrf == SecretPlaceholder || csrf == "") && i < len(storedPairs) {
+			csrf = storedPairs[i].CSRFToken
+		}
+		if auth != "" || csrf != "" {
+			parts := make([]string, 0, 2)
+			if auth != "" {
+				parts = append(parts, "auth_token="+auth)
+			}
+			if csrf != "" {
+				parts = append(parts, "ct0="+csrf)
+			}
+			lines = append(lines, strings.Join(parts, "; "))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ParseCookiePairs parses cookie pairs from JSON or text representations.
+func ParseCookiePairs(raw string) []AuthCookie {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == SecretPlaceholder {
+		return nil
+	}
+	type cookieJSON struct {
+		AuthToken  string `json:"authToken"`
+		CSRFToken  string `json:"csrfToken"`
+		AuthToken2 string `json:"auth_token"`
+		CT0        string `json:"ct0"`
+	}
+	var decoded []cookieJSON
+	if json.Unmarshal([]byte(raw), &decoded) == nil {
+		pairs := make([]AuthCookie, 0, len(decoded))
+		for _, item := range decoded {
+			auth := item.AuthToken
+			if auth == "" {
+				auth = item.AuthToken2
+			}
+			csrf := item.CSRFToken
+			if csrf == "" {
+				csrf = item.CT0
+			}
+			if auth != "" || csrf != "" {
+				pairs = append(pairs, AuthCookie{AuthToken: strings.TrimSpace(auth), CSRFToken: strings.TrimSpace(csrf)})
+			}
+		}
+		if len(pairs) > 0 {
+			return pairs
+		}
+	}
+	blocks := strings.Split(raw, "\n")
+	pairs := make([]AuthCookie, 0, len(blocks))
+	current := AuthCookie{}
+	flush := func() {
+		if current.AuthToken != "" || current.CSRFToken != "" {
+			pairs = append(pairs, current)
+		}
+		current = AuthCookie{}
+	}
+	for _, line := range blocks {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		if line == "" {
+			flush()
+			continue
+		}
+		for _, token := range strings.FieldsFunc(line, func(r rune) bool {
+			return r == ';' || r == ',' || r == ' '
+		}) {
+			setAuthCookieValue(&current, token)
+		}
+		if current.AuthToken != "" && current.CSRFToken != "" {
+			flush()
+		}
+	}
+	flush()
+	return pairs
+}
+
+func setAuthCookieValue(current *AuthCookie, raw string) bool {
+	key, value, ok := strings.Cut(raw, "=")
+	if !ok {
+		key, value, ok = strings.Cut(raw, ":")
+	}
+	if !ok {
+		return false
+	}
+	key = strings.TrimSpace(key)
+	value = strings.Trim(strings.TrimSpace(value), `"'`)
+	if value == "" {
+		return false
+	}
+	switch key {
+	case "auth_token", "authToken":
+		current.AuthToken = value
+	case "ct0", "csrfToken":
+		current.CSRFToken = value
+	default:
+		return false
+	}
+	return true
 }
 
 // redactURLUserinfo strips embedded credentials from a URL for display,

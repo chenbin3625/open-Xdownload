@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -43,6 +45,11 @@ type Options struct {
 	LargePhoto        bool
 	ProxyURL          string
 	MaxFilenameLength int
+	// ExistingFileOwner 判定 path 处的文件是否属于本次下载（同一推文同一媒体）。
+	// 为 nil 时保持原有行为：已存在且完整则跳过，残缺文件则视为崩溃残留并覆盖。
+	// 返回 false 表示该文件属于其他推文（命名冲突）：不得跳过也不得覆盖，应下载并
+	// 发布到带编号后缀的路径，保证两个推文的媒体都保留。
+	ExistingFileOwner func(path string) bool
 }
 
 func New() *Downloader {
@@ -56,7 +63,9 @@ func (d *Downloader) Download(ctx context.Context, rawURL string, dir string, fi
 }
 
 func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir string, filenameHint string, options Options) (Result, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 目录收紧为 0700：与数据目录/SQLite 的加固一致，私有账号下载的媒体
+	// 不应被其他本地用户读取或遍历。MkdirAll 仅在创建目录时设置该模式。
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Result{}, err
 	}
 	maxFilenameLength := normalizedMaxFilenameLength(options.MaxFilenameLength)
@@ -74,16 +83,28 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		return Result{}, err
 	}
 	if complete {
-		return existing, nil
+		// 磁盘上已存在的完整文件可能属于其他推文（同名文本命名导致路径冲突）：此时既不能
+		// 跳过也不能覆盖，需要照常下载并发布到带编号后缀的路径，保证两个推文的媒体都在。
+		if options.ExistingFileOwner == nil || options.ExistingFileOwner(basePath) {
+			return existing, nil
+		}
+		replaceExisting = false
+	} else if replaceExisting && options.ExistingFileOwner != nil && !options.ExistingFileOwner(basePath) {
+		// 残缺文件同样可能属于其他推文（其下载尚未完成）：不覆盖它，改写到编号后缀路径。
+		replaceExisting = false
 	}
 	// 原子写入：先写临时文件，fsync 后以不覆盖已有文件的方式发布到最终路径，避免
-	// 崩溃留下被当作完整下载的残缺文件。临时文件名带随机串，避免并发下载互相覆盖。
-	tempFile, err := os.CreateTemp(dir, "."+filepath.Base(basePath)+".*.part")
+	// 崩溃留下被当作完整下载的残缺文件。临时文件名用短前缀 + 随机串，避免并发下载
+	// 互相覆盖；长度不随最终文件名增长，保证最终文件名接近 NAME_MAX 时也不会触发
+	// ENAMETOOLONG。
+	tempFile, err := os.CreateTemp(dir, ".xdl-*.part")
 	if err != nil {
 		return Result{}, err
 	}
 	tempPath := tempFile.Name()
-	if err := tempFile.Chmod(0o644); err != nil {
+	// 临时文件收紧为 0600：发布走硬链接（os.Link），链接共享同一 inode，故临时文件的
+	// 权限会原样传递到最终文件，确保私有媒体不被其他本地用户读取。
+	if err := tempFile.Chmod(0o600); err != nil {
 		_ = tempFile.Close()
 		_ = os.Remove(tempPath)
 		return Result{}, err
@@ -147,16 +168,15 @@ func publishTempFile(tempPath string, basePath string, bytes int64, contentLengt
 	triedReplaceBase := false
 	for index := 0; index <= maxFilenameConflicts; index++ {
 		candidate := suffixedPath(basePath, index, maxFilenameLength)
-		err := os.Link(tempPath, candidate)
-		if err == nil {
-			if err := os.Remove(tempPath); err != nil {
-				return Result{}, false, err
-			}
-			return Result{Path: candidate, Bytes: bytes}, false, nil
-		}
-		if !os.IsExist(err) {
+		handled, err := publishFile(tempPath, candidate, bytes)
+		if err != nil {
 			return Result{}, false, err
 		}
+		if handled {
+			return Result{Path: candidate, Bytes: bytes}, false, nil
+		}
+		// 冲突分支：candidate 已存在（硬链接报 EEXIST，或退化路径下 Lstat 命中），
+		// 与原有 os.IsExist 分支行为一致：必要时先处理崩溃残留覆盖，再尝试下一编号。
 		if index == 0 && replaceBase && !triedReplaceBase {
 			result, complete, removed, err := removeIncompleteLocalTarget(candidate, contentLength)
 			if err != nil {
@@ -173,6 +193,51 @@ func publishTempFile(tempPath string, basePath string, bytes int64, contentLengt
 		}
 	}
 	return Result{}, false, fmt.Errorf("too many filename conflicts publishing %s", basePath)
+}
+
+// linkFile 是 os.Link 的间接引用，便于测试注入不支持硬链接的错误。
+var linkFile = os.Link
+
+// publishFile 尝试把 tempPath 发布为 candidate：优先走硬链接（原子，且绝不覆盖
+// 已有文件）。在不支持硬链接的文件系统（exFAT/FAT32、部分网络盘/FUSE 挂载）上
+// os.Link 会返回 EPERM/EOPNOTSUPP 等错误，此时退化为"先 Lstat 确认目标不存在、
+// 再 os.Rename"的发布方式，保住不覆盖已有文件的语义。
+// 返回 handled=false 且 err=nil 表示 candidate 已存在（文件名冲突），调用方应继续
+// 尝试下一个编号后缀；返回 err 非 nil 表示发布失败。
+func publishFile(tempPath string, candidate string, bytes int64) (bool, error) {
+	err := linkFile(tempPath, candidate)
+	if err == nil {
+		if err := os.Remove(tempPath); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if os.IsExist(err) {
+		return false, nil
+	}
+	if !hardLinksUnsupported(err) {
+		return false, err
+	}
+	// 不支持硬链接：os.Rename 会覆盖已存在的目标，发布前必须确认目标不存在。
+	if _, statErr := os.Lstat(candidate); statErr == nil {
+		return false, nil
+	} else if !os.IsNotExist(statErr) {
+		return false, statErr
+	}
+	if err := os.Rename(tempPath, candidate); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// hardLinksUnsupported 报告 err 是否表示文件系统不支持硬链接。这些错误不是
+// os.IsExist，原实现会直接失败导致下载全部中断。
+func hardLinksUnsupported(err error) bool {
+	return errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.ENOTSUP) ||
+		errors.Is(err, syscall.ENOSYS) ||
+		errors.Is(err, syscall.EXDEV)
 }
 
 func removeIncompleteLocalTarget(path string, contentLength int64) (Result, bool, bool, error) {
@@ -285,11 +350,14 @@ func Filename(rawURL string, hint string, contentType string, maxFilenameLength 
 	if base == "" {
 		base = "media"
 	}
-	if baseExt := normalizeMediaExtension(filepath.Ext(base)); baseExt != "" {
+	// 按原始拼写去掉提示中的扩展名，避免 `.jpeg` / 大写扩展名（如 `.MP4`）
+	// 与规范化后的扩展名不匹配导致双重扩展名（如 `photo.jpeg.jpg`）。
+	origExt := filepath.Ext(base)
+	if norm := normalizeMediaExtension(origExt); norm != "" {
 		if ext == ".bin" {
-			ext = baseExt
+			ext = norm
 		}
-		base = strings.TrimSuffix(base, baseExt)
+		base = strings.TrimSuffix(base, origExt)
 	}
 	return composeFilename(base, ext, "", maxFilenameLength)
 }

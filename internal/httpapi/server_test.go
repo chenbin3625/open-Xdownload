@@ -187,6 +187,44 @@ func TestRetryTerminalJobCreatesNewJob(t *testing.T) {
 	}
 }
 
+func TestCancelNonexistentJobReturnsNotFound(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	eventBus := jobs.NewEventBus()
+	manager := jobs.NewManager(db, nil, eventBus)
+	handler := NewServer(db, nil, manager, eventBus).Routes()
+	request := httptest.NewRequest(http.MethodPost, "/api/jobs/999999/cancel", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s, want 404", response.Code, response.Body.String())
+	}
+}
+
+func TestRetryNonexistentJobReturnsNotFound(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := NewServer(db, nil, nil, nil).Routes()
+	request := httptest.NewRequest(http.MethodPost, "/api/jobs/999999/retry", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s, want 404", response.Code, response.Body.String())
+	}
+}
+
 func TestCreateTweetJobOnlyValidatesURLShape(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

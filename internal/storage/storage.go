@@ -491,9 +491,7 @@ FROM app_config WHERE id = 1`); err != nil && !errors.Is(err, sql.ErrNoRows) {
 	if cfg.CSRFToken == "" || cfg.CSRFToken == config.SecretPlaceholder {
 		cfg.CSRFToken = current.CSRFToken
 	}
-	if cfg.AdditionalCookies == "" || cfg.AdditionalCookies == config.SecretPlaceholder {
-		cfg.AdditionalCookies = current.AdditionalCookies
-	}
+	cfg.AdditionalCookies = config.RestoreAdditionalCookies(cfg.AdditionalCookies, current.AdditionalCookies)
 	cfg.SMBPassword = mergeStorageSecret(cfg.SMBPassword, current.SMBPassword, sameSMBTarget(cfg, current))
 	cfg.WebDAVPassword = mergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
 	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据，避免把占位符当真实代理/WebDAV 地址保存。
@@ -982,7 +980,6 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	INSERT INTO downloads (job_id, tweet_id, media_url, file_path, bytes, created_at)
 	VALUES (?, ?, ?, ?, ?, ?)
 	ON CONFLICT(tweet_id, media_url) WHERE tweet_id <> '' DO UPDATE SET
-		job_id = excluded.job_id,
 		file_path = excluded.file_path,
 		bytes = excluded.bytes,
 		created_at = excluded.created_at
@@ -995,7 +992,6 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 INSERT INTO downloads (job_id, tweet_id, media_url, file_path, bytes, created_at)
 VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
-	job_id = excluded.job_id,
 	file_path = excluded.file_path,
 	bytes = excluded.bytes,
 	created_at = excluded.created_at

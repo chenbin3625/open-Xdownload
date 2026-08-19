@@ -180,3 +180,88 @@ func TestTweetFromGraphQLResultNestedTweetMediaRequiresOption(t *testing.T) {
 		t.Fatalf("unexpected nested media urls: %#v", urls)
 	}
 }
+
+func TestMediaFromDetailRejectsNonTwimgURL(t *testing.T) {
+	twimg := gjson.Parse(`{
+		"id_str": "p1",
+		"type": "photo",
+		"media_url_https": "https://pbs.twimg.com/media/example.jpg"
+	}`)
+	parsed := mediaFromDetail(twimg)
+	if parsed.URL != "https://pbs.twimg.com/media/example.jpg" || parsed.BestURL != "https://pbs.twimg.com/media/example.jpg" {
+		t.Fatalf("twimg photo not preserved: %#v", parsed)
+	}
+
+	evil := gjson.Parse(`{
+		"id_str": "p2",
+		"type": "photo",
+		"media_url_https": "https://attacker.example/example.jpg"
+	}`)
+	parsed = mediaFromDetail(evil)
+	if parsed.URL != "" || parsed.BestURL != "" || parsed.PreviewURL != "" {
+		t.Fatalf("non-twimg photo not rejected: %#v", parsed)
+	}
+}
+
+func TestMediaFromDetailRejectsNonTwimgVideoVariant(t *testing.T) {
+	item := gjson.Parse(`{
+		"id_str": "v1",
+		"type": "video",
+		"media_url_https": "https://pbs.twimg.com/media/video-poster.jpg",
+		"video_info": {"variants": [
+			{"bitrate": 832000, "content_type": "video/mp4", "url": "https://pbs.twimg.com/media/low.mp4"},
+			{"bitrate": 2176000, "content_type": "video/mp4", "url": "https://attacker.example/high.mp4"}
+		]}
+	}`)
+	parsed := mediaFromDetail(item)
+	if parsed.BestURL != "https://pbs.twimg.com/media/low.mp4" {
+		t.Fatalf("best URL should fall back to twimg variant, got %q (variants %#v)", parsed.BestURL, parsed.Variants)
+	}
+	for _, variant := range parsed.Variants {
+		if !isTwimgMediaURL(variant.URL) {
+			t.Fatalf("non-twimg variant URL leaked into Variants: %#v", parsed.Variants)
+		}
+	}
+
+	allEvil := gjson.Parse(`{
+		"id_str": "v2",
+		"type": "video",
+		"media_url_https": "https://attacker.example/poster.jpg",
+		"video_info": {"variants": [
+			{"bitrate": 2176000, "content_type": "video/mp4", "url": "https://attacker.example/high.mp4"}
+		]}
+	}`)
+	parsed = mediaFromDetail(allEvil)
+	if parsed.BestURL != "" || parsed.URL != "" || len(parsed.Variants) != 0 {
+		t.Fatalf("all-non-twimg video not fully rejected: %#v", parsed)
+	}
+}
+
+func TestBestVariantSkipsNonTwimgHosts(t *testing.T) {
+	got := BestVariant([]MediaVariant{
+		{URL: "https://attacker.example/high.mp4", ContentType: "video/mp4", Bitrate: 99999999},
+		{URL: "https://video.twimg.com/low.mp4", ContentType: "video/mp4", Bitrate: 832000},
+	})
+	if got.URL != "https://video.twimg.com/low.mp4" {
+		t.Fatalf("unexpected best URL: %q", got.URL)
+	}
+	empty := BestVariant([]MediaVariant{
+		{URL: "https://attacker.example/high.mp4", ContentType: "video/mp4", Bitrate: 99999999},
+	})
+	if empty.URL != "" {
+		t.Fatalf("all-non-twimg variants should yield empty best, got %q", empty.URL)
+	}
+}
+
+func TestParseSyndicationMediaRejectsNonTwimgPhotos(t *testing.T) {
+	result := gjson.Parse(`{
+		"photos": [
+			{"url": "https://pbs.twimg.com/media/ok.jpg"},
+			{"url": "https://attacker.example/evil.jpg"}
+		]
+	}`)
+	media := parseSyndicationMedia(result, ParseOptions{})
+	if len(media) != 1 || media[0].BestURL != "https://pbs.twimg.com/media/ok.jpg" {
+		t.Fatalf("unexpected photos media: %#v", media)
+	}
+}

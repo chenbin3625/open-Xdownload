@@ -107,21 +107,29 @@ func ExtractTweetURL(rawURL string) (string, string, error) {
 }
 
 func BestVariant(variants []MediaVariant) MediaVariant {
-	if len(variants) == 0 {
+	// 仅从 twimg.com 主机的变体中挑选最佳版本，拒绝伪造 video_info.variants 注入的
+	// 任意主机 URL（SSRF），与 mediaFromURL 的 isTwimgHost 校验保持一致。
+	allowed := make([]MediaVariant, 0, len(variants))
+	for _, variant := range variants {
+		if isTwimgMediaURL(variant.URL) {
+			allowed = append(allowed, variant)
+		}
+	}
+	if len(allowed) == 0 {
 		return MediaVariant{}
 	}
-	sort.SliceStable(variants, func(i, j int) bool {
-		if variants[i].Bitrate == variants[j].Bitrate {
-			return variants[i].ContentType > variants[j].ContentType
+	sort.SliceStable(allowed, func(i, j int) bool {
+		if allowed[i].Bitrate == allowed[j].Bitrate {
+			return allowed[i].ContentType > allowed[j].ContentType
 		}
-		return variants[i].Bitrate > variants[j].Bitrate
+		return allowed[i].Bitrate > allowed[j].Bitrate
 	})
-	for _, variant := range variants {
+	for _, variant := range allowed {
 		if isMP4Variant(variant) {
 			return variant
 		}
 	}
-	return variants[0]
+	return allowed[0]
 }
 
 func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions) (TweetData, error) {
@@ -324,6 +332,11 @@ func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[strin
 		if rawURL == "" {
 			continue
 		}
+		// 与 mediaFromURL 一致：仅接受 twimg.com 域下的媒体 URL，拒绝伪造 photos
+		// 指向内网/任意主机（SSRF）。
+		if !isTwimgMediaURL(rawURL) {
+			continue
+		}
 		if _, ok := seen[rawURL]; ok {
 			continue
 		}
@@ -357,6 +370,11 @@ func mediaFromSyndicationDetail(item gjson.Result) Media {
 func mediaFromDetail(item gjson.Result) Media {
 	kind := MediaType(item.Get("type").String())
 	mediaURL := firstString(item.Get("media_url_https"), item.Get("media_url"), item.Get("url"))
+	// 与 mediaFromURL 一致：仅接受 twimg.com 域下的媒体 URL，拒绝伪造 media entity
+	// 指向内网/任意主机（SSRF，如云元数据 169.254.169.254）。
+	if !isTwimgMediaURL(mediaURL) {
+		mediaURL = ""
+	}
 	media := Media{
 		ID:         firstString(item.Get("id_str"), item.Get("id")),
 		Type:       kind,
@@ -566,6 +584,11 @@ func parseVariantList(variants gjson.Result) []MediaVariant {
 		if rawURL == "" {
 			continue
 		}
+		// 仅接受 twimg.com 主机的变体 URL，拒绝伪造 video_info.variants 注入的任意主机
+		// URL（SSRF），与 mediaFromURL 的 isTwimgHost 校验保持一致。
+		if !isTwimgMediaURL(rawURL) {
+			continue
+		}
 		items = append(items, MediaVariant{
 			URL:         rawURL,
 			ContentType: firstString(variant.Get("content_type"), variant.Get("contentType")),
@@ -614,6 +637,16 @@ func mediaFromURL(rawURL string) Media {
 func isTwimgHost(host string) bool {
 	host = strings.ToLower(host)
 	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
+}
+
+// isTwimgMediaURL 报告 rawURL 是否可解析且主机为 twimg.com（或其子域），供从 JSON 中
+// 提取媒体 URL 的路径复用，与 mediaFromURL 的拒绝规则保持一致。
+func isTwimgMediaURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return isTwimgHost(parsed.Host)
 }
 
 func isPhotoMediaURL(rawURL string) bool {
