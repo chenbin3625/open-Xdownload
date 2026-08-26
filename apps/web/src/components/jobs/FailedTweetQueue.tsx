@@ -1,25 +1,51 @@
+import {
+  CloseCircleOutlined,
+  DeleteOutlined,
+  RetweetOutlined,
+} from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Button,
+  List,
+  Popconfirm,
+  Space,
+  Tag,
+  Typography,
+  notification,
+} from "antd";
 import React, { useState } from "react";
 import {
   clearFailedTweets,
-  dashboardMetaQueryRoot,
   deleteFailedTweet,
-  failedTweetQueryRoot,
   getFailedTweets,
   retryFailedTweets,
-  type DashboardMeta,
-  type DashboardPagination,
-  type FailedTweetPage,
+  type Dashboard,
+  type FailedTweet,
 } from "../../lib/api";
-import { formatDateTime, getErrorMessage } from "../../lib/format";
-import { failedTweetPageSizeOptions } from "../../lib/pagination";
-import { toast } from "../../lib/toast";
-import { prependJobsToCaches } from "../../lib/useDashboardEvents";
-import { CopyTextButton, ShellPagination } from "../common/ShellUI";
+import {
+  AppEmpty,
+  AppPagination,
+  CopyButton,
+  EllipsisText,
+  ListSkeleton,
+  LoadingSurface,
+  Stack,
+  Toolbar,
+  failedTweetPageSizeOptions,
+  formatDateTime,
+  getErrorMessage,
+  iconStyles,
+} from "../common/CommonUI";
+import { dashboardMetaQueryRoot, jobsQueryRoot } from "../../lib/api";
+
+const { Text } = Typography;
+const failedTweetQueryRoot = ["failed-tweets"] as const;
 
 export function FailedTweetQueue({
+  items,
   total,
 }: {
+  items: FailedTweet[];
   total: number;
 }) {
   const queryClient = useQueryClient();
@@ -28,184 +54,162 @@ export function FailedTweetQueue({
   const failedTweetsQuery = useQuery({
     queryKey: [...failedTweetQueryRoot, page, pageSize],
     queryFn: ({ signal }) => getFailedTweets({ page, pageSize, signal }),
-    staleTime: 8_000,
   });
-  const fallbackPagination: DashboardPagination = {
+  const fallbackPagination: Dashboard["pagination"] = {
     page,
     pageSize,
     total,
     totalPages: total > 0 ? Math.ceil(total / pageSize) : 0,
   };
-  const pageItems = failedTweetsQuery.data?.items ?? [];
+  const pageItems = failedTweetsQuery.data?.items ?? (page === 1 ? items.slice(0, pageSize) : []);
   const pagination = failedTweetsQuery.data?.pagination ?? fallbackPagination;
   const refreshFailedTweets = () => {
     queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot });
     queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot });
+    queryClient.invalidateQueries({ queryKey: jobsQueryRoot });
   };
   const retryAll = useMutation({
     mutationFn: retryFailedTweets,
     onSuccess: (job) => {
-      prependJobsToCaches(queryClient, [job]);
       refreshFailedTweets();
-      toast("失败推文已加入重试", { description: job.title || "已创建重试任务" });
+      notification.success({
+        message: "失败推文已加入重试",
+        description: job.title || "已创建重试任务",
+      });
     },
     onError: (error) => {
-      toast("重试失败", { description: getErrorMessage(error), tone: "err" });
+      notification.error({
+        message: "重试失败",
+        description: getErrorMessage(error),
+      });
     },
   });
   const removeOne = useMutation({
     mutationFn: deleteFailedTweet,
-    onMutate: async (id) => {
-      await queryClient.cancelQueries({ queryKey: failedTweetQueryRoot });
-      const pages = queryClient.getQueriesData<FailedTweetPage>({ queryKey: failedTweetQueryRoot });
-      const meta = queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot);
-      queryClient.setQueriesData<FailedTweetPage>({ queryKey: failedTweetQueryRoot }, (current) => {
-        if (!current) return current;
-        const items = current.items.filter((item) => item.id !== id);
-        if (items.length === current.items.length) return current;
-        const total = Math.max(0, current.pagination.total - 1);
-        return {
-          ...current,
-          items,
-          pagination: {
-            ...current.pagination,
-            total,
-            totalPages: total > 0 ? Math.ceil(total / current.pagination.pageSize) : 0,
-          },
-        };
-      });
-      queryClient.setQueryData<DashboardMeta>(dashboardMetaQueryRoot, (current) => {
-        if (!current) return current;
-        return { ...current, failedTweetCount: Math.max(0, current.failedTweetCount - 1) };
-      });
-      return { pages, meta };
-    },
     onSuccess: () => {
-      const remaining = queryClient.getQueryData<FailedTweetPage>([...failedTweetQueryRoot, page, pageSize]);
-      if (page > 1 && (remaining?.items.length ?? 0) === 0) {
+      if (page > 1 && pageItems.length <= 1) {
         setPage(page - 1);
       }
-      toast("失败记录已删除");
+      refreshFailedTweets();
+      notification.success({ message: "失败记录已删除" });
     },
-    onError: (error, _id, context) => {
-      for (const [key, data] of context?.pages ?? []) {
-        queryClient.setQueryData(key, data);
-      }
-      if (context?.meta) {
-        queryClient.setQueryData(dashboardMetaQueryRoot, context.meta);
-      }
-      toast("删除失败", { description: getErrorMessage(error), tone: "err" });
+    onError: (error) => {
+      notification.error({
+        message: "删除失败",
+        description: getErrorMessage(error),
+      });
     },
   });
   const clearAll = useMutation({
     mutationFn: clearFailedTweets,
-    onMutate: async () => {
-      await queryClient.cancelQueries({ queryKey: failedTweetQueryRoot });
-      const pages = queryClient.getQueriesData<FailedTweetPage>({ queryKey: failedTweetQueryRoot });
-      const meta = queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot);
-      queryClient.setQueriesData<FailedTweetPage>({ queryKey: failedTweetQueryRoot }, (current) => {
-        if (!current) return current;
-        return {
-          items: [],
-          pagination: { ...current.pagination, page: 1, total: 0, totalPages: 0 },
-        };
-      });
-      queryClient.setQueryData<DashboardMeta>(dashboardMetaQueryRoot, (current) => {
-        if (!current) return current;
-        return { ...current, failedTweetCount: 0 };
-      });
-      return { pages, meta, page };
-    },
     onSuccess: () => {
       setPage(1);
-      toast("失败队列已清空");
+      refreshFailedTweets();
+      notification.success({ message: "失败队列已清空" });
     },
-    onError: (error, _id, context) => {
-      for (const [key, data] of context?.pages ?? []) {
-        queryClient.setQueryData(key, data);
-      }
-      if (context?.meta) {
-        queryClient.setQueryData(dashboardMetaQueryRoot, context.meta);
-      }
-      if (context?.page) {
-        setPage(context.page);
-      }
-      toast("清空失败", { description: getErrorMessage(error), tone: "err" });
+    onError: (error) => {
+      notification.error({
+        message: "清空失败",
+        description: getErrorMessage(error),
+      });
     },
   });
-  const busy = retryAll.isPending || clearAll.isPending;
 
   return (
-    <div className="failed-stack">
-      <div className="failed-toolbar">
-        <span>{pagination.total > 0 ? `共 ${pagination.total} 条失败记录` : "暂无失败记录"}</span>
-        <div className="failed-actions">
-          <button
-            type="button"
-            className="job-text-btn"
-            disabled={pagination.total === 0 || busy}
+    <Stack size={10}>
+      <Toolbar>
+        <Text type="secondary">{pagination.total > 0 ? `共 ${pagination.total} 条失败记录` : "暂无失败记录"}</Text>
+        <Space size={8} wrap>
+          <Button
+            size="small"
+            icon={<RetweetOutlined />}
+            loading={retryAll.isPending}
+            disabled={pagination.total === 0}
             onClick={() => retryAll.mutate()}
           >
-            {retryAll.isPending ? "重试中…" : "全部重试"}
-          </button>
-          <button
-            type="button"
-            className="job-text-btn is-danger"
-            disabled={pagination.total === 0 || busy}
-            onClick={() => {
-              if (window.confirm("确认删除全部失败推文记录？")) {
-                clearAll.mutate();
-              }
-            }}
+            全部重试
+          </Button>
+          <Popconfirm
+            title="清空失败队列"
+            description="确认删除全部失败推文记录？"
+            okText="清空"
+            cancelText="取消"
+            disabled={pagination.total === 0}
+            onConfirm={() => clearAll.mutate()}
           >
-            {clearAll.isPending ? "清空中…" : "清空"}
-          </button>
-        </div>
-      </div>
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              loading={clearAll.isPending}
+              disabled={pagination.total === 0}
+            >
+              清空
+            </Button>
+          </Popconfirm>
+        </Space>
+      </Toolbar>
 
       {failedTweetsQuery.isLoading && pageItems.length === 0 ? (
-        <div className="shell-skeleton-block shell-skeleton-block-tall" />
+        <ListSkeleton rows={pageSize} />
       ) : pageItems.length === 0 ? (
-        <p className="job-empty">暂无失败推文</p>
+        <AppEmpty description="暂无失败推文" />
       ) : (
-        <ul className={failedTweetsQuery.isFetching ? "failed-list is-fetching" : "failed-list"}>
-          {pageItems.map((item) => (
-            <li key={item.id} className="failed-item">
-              <div className="failed-copy">
-                <div className="job-title-cell">
-                  <strong>{item.jobTitle || item.tweetId}</strong>
-                  <span className="job-kind-tag">
-                    {item.userScreenName ? `@${item.userScreenName}` : item.userId || "未知用户"}
-                  </span>
-                </div>
-                <p className="failed-error" title={item.error}>{item.error || "未知错误"}</p>
-                <div className="schedule-meta">
-                  <span>推文 {item.tweetId}</span>
-                  <span>{formatDateTime(item.updatedAt || item.createdAt)}</span>
-                  {item.entityName ? <span>{item.entityName}</span> : null}
-                </div>
-              </div>
-              <div className="schedule-actions">
-                <CopyTextButton label="复制推文 ID" value={item.tweetId} />
-                <button
-                  type="button"
-                  className="job-text-btn is-danger"
-                  disabled={removeOne.isPending && removeOne.variables === item.id}
-                  onClick={() => {
-                    if (window.confirm("确认删除这条失败记录？")) {
-                      removeOne.mutate(item.id);
-                    }
-                  }}
-                >
-                  删除
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <LoadingSurface loading={failedTweetsQuery.isFetching}>
+          <List
+            bordered
+            dataSource={pageItems}
+            locale={{ emptyText: <AppEmpty description="暂无失败推文" /> }}
+            renderItem={(item) => (
+              <List.Item
+                actions={[
+                  <CopyButton key="copy" value={item.tweetId} label="复制推文 ID" />,
+                  <Popconfirm
+                    key="delete"
+                    title="删除失败记录"
+                    description="确认删除这条失败记录？"
+                    okText="删除"
+                    cancelText="取消"
+                    onConfirm={() => removeOne.mutate(item.id)}
+                  >
+                    <Button
+                      size="small"
+                      danger
+                      type="text"
+                      icon={<DeleteOutlined />}
+                      loading={removeOne.isPending && removeOne.variables === item.id}
+                    />
+                  </Popconfirm>,
+                ]}
+              >
+                <List.Item.Meta
+                  avatar={<CloseCircleOutlined style={iconStyles.danger} />}
+                  title={
+                    <Space size={8} wrap>
+                      <Text strong>{item.jobTitle || item.tweetId}</Text>
+                      <Tag>{item.userScreenName ? `@${item.userScreenName}` : item.userId || "未知用户"}</Tag>
+                    </Space>
+                  }
+                  description={
+                    <Stack size={4}>
+                      <EllipsisText type="danger" title={item.error}>
+                        {item.error || "未知错误"}
+                      </EllipsisText>
+                      <Space size={10} wrap>
+                        <Text type="secondary">推文 {item.tweetId}</Text>
+                        <Text type="secondary">{formatDateTime(item.updatedAt || item.createdAt)}</Text>
+                        {item.entityName ? <Text type="secondary">{item.entityName}</Text> : null}
+                      </Space>
+                    </Stack>
+                  }
+                />
+              </List.Item>
+            )}
+            size="small"
+          />
+        </LoadingSurface>
       )}
-
-      <ShellPagination
+      <AppPagination
         current={pagination.page}
         itemName="条记录"
         pageSize={pagination.pageSize}
@@ -216,6 +220,6 @@ export function FailedTweetQueue({
           setPageSize(nextPageSize);
         }}
       />
-    </div>
+    </Stack>
   );
 }
