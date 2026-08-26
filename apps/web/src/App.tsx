@@ -228,7 +228,7 @@ export default function App() {
                 ? config.error instanceof Error ? config.error.message : "请稍后重试"
                 : jobs.error instanceof Error ? jobs.error.message : "请稍后重试"}
             />
-          ) : dashboardData ? (
+          ) : activeSection === "overview" && dashboardData ? (
             <DashboardContent
               data={dashboardData}
               onJobPageChange={handleJobPageChange}
