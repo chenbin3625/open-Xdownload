@@ -154,7 +154,7 @@ export function BatchDownloadLauncher() {
       <Toolbar>
         <Space size={8} wrap>
           <Text type="secondary">待创建</Text>
-          <Badge count={items.length} showZero color="#1677ff" />
+          <Badge count={items.length} showZero color="blue" />
         </Space>
         <Space size={8} wrap>
           <Input
@@ -192,15 +192,13 @@ export function BatchDownloadLauncher() {
         </Space>
       </Toolbar>
 
-      <Row gutter={[16, 16]} align="stretch" className="batch-launcher-grid">
+      <Row gutter={[16, 16]} align="stretch">
         <Col xs={24} lg={14}>
-          <div className="batch-input-pane">
-            <Tabs className="batch-target-tabs" items={tabs} />
-          </div>
+          <Tabs items={tabs} />
         </Col>
         <Col xs={24} lg={10}>
-          <div className="batch-preview-pane">
-            <Flex align="center" justify="space-between" gap={10} wrap="wrap" className="batch-preview-heading">
+          <Stack size={8}>
+            <Flex align="center" justify="space-between" gap={10} wrap="wrap">
               <Text strong>任务预览</Text>
               <Text type="secondary">{previewSummary}</Text>
             </Flex>
@@ -226,7 +224,7 @@ export function BatchDownloadLauncher() {
               )}
               size="small"
             />
-          </div>
+          </Stack>
         </Col>
       </Row>
     </Stack>
@@ -248,7 +246,6 @@ export function BatchTargetInput({
       onChange={(event) => onChange(event.target.value)}
       placeholder={placeholder}
       autoSize={{ minRows: 6, maxRows: 12 }}
-      className="mono-input"
     />
   );
 }

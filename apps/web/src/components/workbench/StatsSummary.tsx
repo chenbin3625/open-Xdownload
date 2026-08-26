@@ -4,7 +4,7 @@ import {
   SyncOutlined,
   UnorderedListOutlined,
 } from "@ant-design/icons";
-import { Card, Col, Row, Statistic, Typography } from "antd";
+import { Button, Card, Col, Flex, Row, Statistic, Typography } from "antd";
 import React from "react";
 import type { DashboardStats } from "../../lib/api";
 
@@ -25,7 +25,6 @@ export function StatsSummary({
       label: "任务总数",
       value: stats.total,
       icon: <UnorderedListOutlined />,
-      tone: "primary",
       hint: "历史全部下载任务",
     },
     {
@@ -33,7 +32,6 @@ export function StatsSummary({
       label: "正在进行",
       value: stats.active,
       icon: <SyncOutlined spin={stats.active > 0} />,
-      tone: "processing",
       hint: stats.active > 0 ? "正在并发下载与解析中" : "暂无活跃任务",
     },
     {
@@ -41,7 +39,6 @@ export function StatsSummary({
       label: "已完成",
       value: stats.completed,
       icon: <CheckCircleOutlined />,
-      tone: "success",
       hint: "所有媒体均已保存完毕",
     },
     {
@@ -49,7 +46,6 @@ export function StatsSummary({
       label: "异常 / 失败",
       value: stats.failed + failedTweetCount,
       icon: <CloseCircleOutlined />,
-      tone: "danger",
       hint: failedTweetCount > 0 ? `含 ${failedTweetCount} 条推文待重试` : "无待处理失败项",
       clickable: failedTweetCount > 0 && !!onOpenFailedDrawer,
       onClick: onOpenFailedDrawer,
@@ -57,20 +53,23 @@ export function StatsSummary({
   ];
 
   return (
-    <Row gutter={[12, 12]} className="stats-summary-grid">
-      {cards.map((card) => (
-        <Col xs={12} sm={12} lg={6} key={card.key}>
-          <Card
-            size="small"
-            hoverable={card.clickable}
-            className="stat-card"
-            onClick={card.onClick}
-          >
-            <Statistic title={card.label} value={card.value} prefix={card.icon} />
-            <Text type="secondary">{card.hint}</Text>
-          </Card>
-        </Col>
-      ))}
-    </Row>
+    <Card>
+      <Row gutter={[24, 20]}>
+        {cards.map((item) => (
+          <Col xs={12} lg={6} key={item.key}>
+            <Flex vertical gap={4}>
+              <Statistic title={item.label} value={item.value} prefix={item.icon} />
+              {item.clickable ? (
+                <Button type="link" onClick={item.onClick}>
+                  {item.hint}
+                </Button>
+              ) : (
+                <Text type="secondary">{item.hint}</Text>
+              )}
+            </Flex>
+          </Col>
+        ))}
+      </Row>
+    </Card>
   );
 }

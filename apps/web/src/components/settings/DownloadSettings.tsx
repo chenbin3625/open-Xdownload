@@ -1,4 +1,4 @@
-import { Col, Form, Input, InputNumber, Row, Select, Switch } from "antd";
+import { Col, Form, Input, InputNumber, Row, Select, Space, Switch, Typography } from "antd";
 import React from "react";
 import type { AppConfig, FileNamingMode } from "../../lib/api";
 import { fullWidthStyle } from "../common/CommonUI";
@@ -10,11 +10,11 @@ export const fileNamingOptions: Array<{ value: FileNamingMode; label: string }> 
 
 export const downloadSettingsTips = {
   proxy: (
-    <div className="form-tooltip-copy">
-      <div>支持 http、https、socks5、socks5h，例如 http://127.0.0.1:7890。</div>
-      <div>如需账号密码，可写成 socks5://user:password@127.0.0.1:1080。</div>
-      <div>用户名或密码里的 @、:、/、% 需要 URL 编码；包含账号密码时会随配置保存在本地。</div>
-    </div>
+    <Space orientation="vertical" size={2}>
+      <Typography.Text>支持 http、https、socks5、socks5h，例如 http://127.0.0.1:7890。</Typography.Text>
+      <Typography.Text>如需账号密码，可写成 socks5://user:password@127.0.0.1:1080。</Typography.Text>
+      <Typography.Text>用户名或密码里的 @、:、/、% 需要 URL 编码；包含账号密码时会随配置保存在本地。</Typography.Text>
+    </Space>
   ),
   concurrency: "后台同时运行的下载任务数，过高可能触发站点限流或增加远程存储压力。",
   maxFilenameLength: "限制保存到磁盘或远程存储的文件名长度，长推文文件名会自动截断。",
@@ -34,7 +34,7 @@ export function DownloadSettingsFields({
   onAuthChange: React.Dispatch<React.SetStateAction<AppConfig>>;
 }) {
   return (
-    <Row gutter={[16, 0]} className="settings-field-grid">
+    <Row gutter={[16, 0]}>
       <Col xs={24} lg={12}>
         <Form.Item label="代理" tooltip={downloadSettingsTips.proxy}>
           <Input

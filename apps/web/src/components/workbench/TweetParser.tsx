@@ -22,7 +22,6 @@ import {
   PaginatedList,
   Stack,
   getErrorMessage,
-  iconStyles,
   mediaTypeLabel,
 } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
@@ -159,7 +158,7 @@ export function MediaList({ media }: { media: TweetData["media"] }) {
         return (
           <List.Item actions={[<CopyButton key="copy" value={mediaUrl} label="复制媒体地址" />]}>
             <List.Item.Meta
-              avatar={<FileTextOutlined style={iconStyles.primary} />}
+              avatar={<FileTextOutlined />}
               title={<Tag>{mediaTypeLabel(item.type)}</Tag>}
               description={
                 <EllipsisText code title={mediaUrl}>

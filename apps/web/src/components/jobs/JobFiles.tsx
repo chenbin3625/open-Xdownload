@@ -10,7 +10,6 @@ import {
   CopyButton,
   EllipsisText,
   PaginatedList,
-  iconStyles,
 } from "../common/CommonUI";
 
 const { Text } = Typography;
@@ -43,7 +42,7 @@ export function JobFiles({ downloads, failed }: { downloads: DownloadRecord[]; f
           renderItem={(item) => (
             <List.Item actions={[<CopyButton key="copy" value={item.filePath} label="复制文件路径" />]}>
               <List.Item.Meta
-                avatar={<FileDoneOutlined style={iconStyles.success} />}
+                avatar={<Text type="success"><FileDoneOutlined /></Text>}
                 title={
                   <EllipsisText title={item.filePath}>
                     {item.filePath}
@@ -80,7 +79,7 @@ export function JobFiles({ downloads, failed }: { downloads: DownloadRecord[]; f
           renderItem={(item) => (
             <List.Item actions={[<CopyButton key="copy" value={item.mediaUrl} label="复制媒体地址" />]}>
               <List.Item.Meta
-                avatar={<CloseCircleOutlined style={iconStyles.danger} />}
+                avatar={<Text type="danger"><CloseCircleOutlined /></Text>}
                 title={
                   <EllipsisText type="danger" title={item.error}>
                     {item.error}

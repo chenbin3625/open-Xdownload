@@ -1,7 +1,6 @@
 import {
   CloseCircleOutlined,
   CloudDownloadOutlined,
-  DownloadOutlined,
   ExclamationCircleOutlined,
   HomeOutlined,
   ReloadOutlined,
@@ -12,14 +11,17 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
+  Avatar,
   Badge,
   Button,
   Card,
+  Col,
   Drawer,
   Flex,
   Grid,
   Layout,
   Menu,
+  Row,
   Skeleton,
   Space,
   Tag,
@@ -57,8 +59,8 @@ import { JobTable } from "./components/jobs/JobTable";
 import { FailedTweetQueue } from "./components/jobs/FailedTweetQueue";
 import { ConfigForm } from "./components/settings/ConfigForm";
 
-const { Sider, Content } = Layout;
-const { Text } = Typography;
+const { Sider, Content, Header } = Layout;
+const { Text, Title } = Typography;
 const appIconPath = "/icon.svg";
 
 export default function App() {
@@ -132,14 +134,6 @@ export default function App() {
     { key: "settings", icon: <SettingOutlined />, label: "配置" },
   ];
 
-  const currentTitle = {
-    overview: "工作台",
-    settings: "配置",
-  }[activeSection];
-  const currentSubtitle = {
-    overview: "任务进度与下载记录一览",
-    settings: "存储、下载与 Cookie 配置",
-  }[activeSection];
   const jobsData = jobs.data;
   const dashboardData: Dashboard | undefined = jobsData
     ? {
@@ -167,76 +161,76 @@ export default function App() {
     ? !config.data && config.isError
     : !dashboardData && jobs.isError;
 
-  return (
-    <Layout className="app-shell">
-      <Sider
-        className="app-sider"
-        width={192}
-        theme="light"
-        collapsible={false}
-        breakpoint="lg"
-      >
-        <div className="brand-block">
-          <div className="brand-mark" aria-hidden="true">
-            <img src={appIconPath} alt="" />
-          </div>
-          <div className="brand-copy">
-            <strong>open-Xdownload</strong>
-            <span>X / Twitter 下载器</span>
-          </div>
-        </div>
-        <Menu
-          className="app-menu"
-          mode={isCompact ? "horizontal" : "inline"}
-          selectedKeys={[activeSection]}
-          items={menuItems}
-          onClick={({ key }) => handleSectionChange(key as SectionKey)}
-        />
-      </Sider>
+  const navigation = (
+    <Menu
+      mode={isCompact ? "horizontal" : "inline"}
+      selectedKeys={[activeSection]}
+      items={menuItems}
+      onClick={({ key }) => handleSectionChange(key as SectionKey)}
+    />
+  );
 
-      <Layout className="app-layout">
-        <Content className="app-content">
-          <div className="page-toolbar">
-            <div className="page-toolbar-copy">
-              <Text strong>{currentTitle}</Text>
-              <Text type="secondary">{currentSubtitle}</Text>
-            </div>
-            <Space size={8} wrap>
-              {!sseConnected ? (
-                <Tag icon={<ExclamationCircleOutlined />} color="warning">
-                  连接已断开，正在重连
-                </Tag>
-              ) : null}
-              <Tooltip title="刷新">
-                <Button
-                  size="small"
-                  icon={<ReloadOutlined />}
-                  onClick={handleManualRefresh}
-                  loading={manualRefreshPending}
-                />
-              </Tooltip>
+  return (
+    <Layout style={{ minHeight: "100vh" }}>
+      {!isCompact ? (
+        <Sider width={200} theme="light">
+          <Card variant="borderless" size="small">
+            <Space size={10}>
+              <Avatar shape="square" size={32} src={appIconPath} />
+              <Flex vertical>
+                <Text strong>open-Xdownload</Text>
+                <Text type="secondary">X / Twitter 下载器</Text>
+              </Flex>
             </Space>
-          </div>
-          {isInitialDashboardLoading ? (
-            <DashboardSkeleton />
-          ) : isInitialDashboardError ? (
-            <Alert
-              type="error"
-              showIcon
-              message="加载失败"
-              description={activeSection === "settings"
-                ? config.error instanceof Error ? config.error.message : "请稍后重试"
-                : jobs.error instanceof Error ? jobs.error.message : "请稍后重试"}
-            />
-          ) : activeSection === "overview" && dashboardData ? (
-            <DashboardContent
-              data={dashboardData}
-              onJobPageChange={handleJobPageChange}
-              onJobPageSizeChange={handleJobPageSizeChange}
-            />
-          ) : activeSection === "settings" && config.data ? (
-            <SettingsPage config={config.data} />
-          ) : null}
+          </Card>
+          {navigation}
+        </Sider>
+      ) : null}
+
+      <Layout>
+        {isCompact ? (
+          <Header style={{ height: "auto", padding: 0 }}>
+            <Card variant="borderless" size="small">
+              <Flex align="center" gap={8} wrap="wrap">
+                <Avatar shape="square" size={28} src={appIconPath} />
+                <Text strong>open-Xdownload</Text>
+                {navigation}
+              </Flex>
+            </Card>
+          </Header>
+        ) : null}
+        <Content>
+          <Flex justify="center" style={{ padding: isCompact ? 12 : 24 }}>
+            <Flex vertical gap={16} style={{ width: "100%", maxWidth: 1440 }}>
+              {isInitialDashboardLoading ? (
+                <DashboardSkeleton />
+              ) : isInitialDashboardError ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="加载失败"
+                  description={activeSection === "settings"
+                    ? config.error instanceof Error ? config.error.message : "请稍后重试"
+                    : jobs.error instanceof Error ? jobs.error.message : "请稍后重试"}
+                />
+              ) : activeSection === "overview" && dashboardData ? (
+                <DashboardContent
+                  data={dashboardData}
+                  sseConnected={sseConnected}
+                  refreshPending={manualRefreshPending}
+                  onRefresh={handleManualRefresh}
+                  onJobPageChange={handleJobPageChange}
+                  onJobPageSizeChange={handleJobPageSizeChange}
+                />
+              ) : activeSection === "settings" && config.data ? (
+                <SettingsPage
+                  config={config.data}
+                  refreshPending={manualRefreshPending}
+                  onRefresh={handleManualRefresh}
+                />
+              ) : null}
+            </Flex>
+          </Flex>
         </Content>
       </Layout>
     </Layout>
@@ -245,16 +239,25 @@ export default function App() {
 
 function DashboardContent({
   data,
+  onRefresh,
+  refreshPending,
+  sseConnected,
   onJobPageChange,
   onJobPageSizeChange,
 }: {
   data: Dashboard;
+  onRefresh: () => void;
+  refreshPending: boolean;
+  sseConnected: boolean;
   onJobPageChange: (page: number) => void;
   onJobPageSizeChange: (pageSize: number) => void;
 }) {
   return (
     <OverviewPage
       data={data}
+      onRefresh={onRefresh}
+      refreshPending={refreshPending}
+      sseConnected={sseConnected}
       onJobPageChange={onJobPageChange}
       onJobPageSizeChange={onJobPageSizeChange}
     />
@@ -263,10 +266,16 @@ function DashboardContent({
 
 function OverviewPage({
   data,
+  onRefresh,
+  refreshPending,
+  sseConnected,
   onJobPageChange,
   onJobPageSizeChange,
 }: {
   data: Dashboard;
+  onRefresh: () => void;
+  refreshPending: boolean;
+  sseConnected: boolean;
   onJobPageChange: (page: number) => void;
   onJobPageSizeChange: (pageSize: number) => void;
 }) {
@@ -282,7 +291,31 @@ function OverviewPage({
   }, [failedTweetCount]);
 
   return (
-    <div className="workbench-page">
+    <Flex vertical gap={16}>
+      <PageHeading
+        title="工作台"
+        description="管理下载任务与归档计划"
+        extra={(
+          <Space size={8} wrap>
+            {!sseConnected ? (
+              <Tag icon={<ExclamationCircleOutlined />} color="warning">
+                连接已断开，正在重连
+              </Tag>
+            ) : null}
+            <Tooltip title="刷新">
+              <Button icon={<ReloadOutlined />} loading={refreshPending} onClick={onRefresh} />
+            </Tooltip>
+            <Button
+              type="primary"
+              icon={<CloudDownloadOutlined />}
+              onClick={() => setBatchDrawerOpen(true)}
+            >
+              批量归档
+            </Button>
+          </Space>
+        )}
+      />
+
       {data.stats ? (
         <StatsSummary
           stats={data.stats}
@@ -291,25 +324,12 @@ function OverviewPage({
         />
       ) : null}
 
-      <div className="workbench-grid">
-        <div className="workbench-main">
-          <WorkbenchPanel
-            icon={<DownloadOutlined />}
-            title="单条解析"
-            description="推文媒体"
-            extra={
-              <Button
-                type="primary"
-                icon={<CloudDownloadOutlined />}
-                onClick={() => setBatchDrawerOpen(true)}
-              >
-                批量归档
-              </Button>
-            }
-          >
-            <TweetParser />
-          </WorkbenchPanel>
+      <Card title="新建下载" extra={<Text type="secondary">粘贴推文链接并解析媒体</Text>}>
+        <TweetParser />
+      </Card>
 
+      <Row gutter={[16, 16]} align="top">
+        <Col xs={24} xl={18}>
           <TaskCenterSections
             data={data}
             failedDrawerOpen={failedDrawerOpen}
@@ -318,23 +338,18 @@ function OverviewPage({
             onJobPageChange={onJobPageChange}
             onJobPageSizeChange={onJobPageSizeChange}
           />
-        </div>
-
-        <aside className="workbench-rail">
-          <WorkbenchPanel
-            compact
-            icon={<SyncOutlined />}
-            title="定时计划"
-            description="自动归档"
-            extra={<Badge count={data.archiveSchedules?.length ?? 0} showZero color="#1677ff" />}
+        </Col>
+        <Col xs={24} xl={6}>
+          <Card
+            title={<Space><SyncOutlined />定时计划</Space>}
+            extra={<Badge count={data.archiveSchedules?.length ?? 0} showZero color="blue" />}
           >
             <ArchiveScheduleList schedules={data.archiveSchedules ?? []} />
-          </WorkbenchPanel>
-        </aside>
-      </div>
+          </Card>
+        </Col>
+      </Row>
 
       <Drawer
-        className="app-drawer batch-archive-drawer"
         destroyOnHidden
         open={batchDrawerOpen}
         title={
@@ -348,7 +363,7 @@ function OverviewPage({
       >
         <BatchDownloadLauncher />
       </Drawer>
-    </div>
+    </Flex>
   );
 }
 
@@ -371,15 +386,9 @@ function TaskCenterSections({
   const failedTweetCount = data.failedTweetCount ?? 0;
 
   return (
-    <>
-      <SectionBlock
-        title={
-          <Space>
-            <UnorderedListOutlined />
-            任务列表
-          </Space>
-        }
-        extra={failedTweetCount > 0 ? (
+    <Card
+      title={<Space><UnorderedListOutlined />任务列表</Space>}
+      extra={failedTweetCount > 0 ? (
           <Badge count={failedTweetCount} size="small" overflowCount={999}>
             <Button
               size="small"
@@ -391,19 +400,17 @@ function TaskCenterSections({
             </Button>
           </Badge>
         ) : null}
-      >
-        <JobTable
+    >
+      <JobTable
           jobs={data.jobs}
           downloads={data.downloads ?? []}
           failed={data.failed ?? []}
           pagination={data.pagination}
           onPageChange={onJobPageChange}
           onPageSizeChange={onJobPageSizeChange}
-        />
-      </SectionBlock>
+      />
 
       <Drawer
-        className="app-drawer failed-tweets-drawer"
         destroyOnHidden
         open={failedDrawerOpen}
         title={
@@ -420,89 +427,62 @@ function TaskCenterSections({
           total={failedTweetCount}
         />
       </Drawer>
-    </>
+    </Card>
   );
 }
 
-function SettingsPage({ config }: { config: AppConfig }) {
-  return (
-    <div className="settings-page">
-      <ConfigForm config={config} />
-    </div>
-  );
-}
-
-function WorkbenchPanel({
-  children,
-  compact,
-  description,
-  extra,
-  icon,
-  title,
+function SettingsPage({
+  config,
+  onRefresh,
+  refreshPending,
 }: {
-  children: React.ReactNode;
-  compact?: boolean;
-  description: string;
-  extra?: React.ReactNode;
-  icon: React.ReactNode;
-  title: string;
+  config: AppConfig;
+  onRefresh: () => void;
+  refreshPending: boolean;
 }) {
   return (
-    <Card
-      size="small"
-      className={compact ? "workbench-panel workbench-panel-compact" : "workbench-panel"}
-      title={(
-        <Space size={10}>
-          {icon}
-          <span className="workbench-panel-title">
-            <Text strong>{title}</Text>
-            <Text type="secondary">{description}</Text>
-          </span>
-        </Space>
-      )}
-      extra={extra}
-    >
-      {children}
-    </Card>
+    <ConfigForm config={config} onRefresh={onRefresh} refreshPending={refreshPending} />
   );
 }
 
 function DashboardSkeleton() {
   return (
-    <div className="workbench-grid">
-      <div className="workbench-main">
-        <div className="skeleton-block">
-          <Skeleton active paragraph={{ rows: 4 }} />
-        </div>
-        <div className="skeleton-block">
-          <ListSkeleton rows={4} />
-        </div>
-      </div>
-      <aside className="workbench-rail">
-        <div className="skeleton-block">
+    <Row gutter={[16, 16]}>
+      <Col xs={24} xl={18}>
+        <Flex vertical gap={16}>
+          <Card>
+            <Skeleton active paragraph={{ rows: 4 }} />
+          </Card>
+          <Card>
+            <ListSkeleton rows={4} />
+          </Card>
+        </Flex>
+      </Col>
+      <Col xs={24} xl={6}>
+        <Card>
           <Skeleton active paragraph={{ rows: 6 }} />
-        </div>
-      </aside>
-    </div>
+        </Card>
+      </Col>
+    </Row>
   );
 }
 
-function SectionBlock({
-  children,
+function PageHeading({
+  description,
   extra,
   title,
 }: {
-  children: React.ReactNode;
+  description: string;
   extra?: React.ReactNode;
-  title: React.ReactNode;
+  title: string;
 }) {
   return (
-    <section className="section-block">
-      <Flex align="center" justify="space-between" gap={10} className="section-heading">
-        <Text strong>{title}</Text>
-        {extra}
+    <Flex align="center" justify="space-between" gap={16} wrap="wrap">
+      <Flex vertical>
+        <Title level={3}>{title}</Title>
+        <Text type="secondary">{description}</Text>
       </Flex>
-      {children}
-    </section>
+      {extra}
+    </Flex>
   );
 }
