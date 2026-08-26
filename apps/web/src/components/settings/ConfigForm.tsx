@@ -2,17 +2,20 @@ import {
   CheckCircleOutlined,
   DatabaseOutlined,
   DownloadOutlined,
+  ReloadOutlined,
   SafetyCertificateOutlined,
-  SettingOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Avatar,
   Button,
   Card,
+  Divider,
   Flex,
   Form,
+  Grid,
   Space,
+  Tabs,
+  Tooltip,
   Typography,
   notification,
 } from "antd";
@@ -29,15 +32,18 @@ import { CookieSettingsFields } from "./CookieSettings";
 import { DownloadSettingsFields } from "./DownloadSettings";
 import { StorageSettings } from "./StorageSettings";
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 
 export function ConfigForm({
   config,
   onRefresh,
+  refreshPending = false,
 }: {
   config: AppConfig;
   onRefresh?: () => void;
+  refreshPending?: boolean;
 }) {
+  const screens = Grid.useBreakpoint();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(() => normalizeConfig(config));
   const [draftDirty, setDraftDirty] = useState(false);
@@ -155,49 +161,30 @@ export function ConfigForm({
     void runAuthCheck(normalized, false);
   }, [config]);
 
-  return (
-    <Form layout="vertical" className="config-form">
-      <div className="settings-command-bar">
-        <div className="settings-heading">
-          <Avatar className="settings-heading-icon" icon={<SettingOutlined />} />
-          <div className="settings-heading-copy">
-            <Text strong>下载配置</Text>
-            <Text type="secondary">当前运行参数</Text>
-          </div>
-        </div>
-        <Space wrap className="settings-actions">
-          <Button
-            icon={<SafetyCertificateOutlined />}
-            loading={authChecking}
-            onClick={() => void runAuthCheck(draft, true)}
-          >
-            检测 Cookie
-          </Button>
-          <Button
-            type="primary"
-            icon={<CheckCircleOutlined />}
-            loading={mutation.isPending}
-            onClick={() => mutation.mutate(draft)}
-          >
-            保存配置
-          </Button>
-        </Space>
-      </div>
-
-      <div className="settings-main">
-        <ConfigPanel kind="storage" icon={<DatabaseOutlined />} title="存储">
+  const sections = [
+    {
+      key: "storage",
+      label: <Space><DatabaseOutlined />存储</Space>,
+      children: (
+        <ConfigPanel title="存储" description="选择下载文件的保存方式与目标目录">
           <StorageSettings draft={draft} onChange={updateDraft} />
         </ConfigPanel>
-
-        <ConfigPanel kind="download" icon={<DownloadOutlined />} title="下载">
+      ),
+    },
+    {
+      key: "download",
+      label: <Space><DownloadOutlined />下载</Space>,
+      children: (
+        <ConfigPanel title="下载" description="控制网络请求、任务并发和文件命名">
           <DownloadSettingsFields draft={draft} onChange={updateDraft} onAuthChange={updateAuthDraft} />
         </ConfigPanel>
-
-        <ConfigPanel
-          kind="cookie"
-          icon={<SafetyCertificateOutlined />}
-          title="X Cookie"
-        >
+      ),
+    },
+    {
+      key: "cookie",
+      label: <Space><SafetyCertificateOutlined />X Cookie</Space>,
+      children: (
+        <ConfigPanel title="X Cookie" description="配置用于访问 X / Twitter 的账号认证信息">
           <CookieSettingsFields
             authError={authError}
             authResult={authResult}
@@ -206,7 +193,51 @@ export function ConfigForm({
             onChange={updateAuthDraft}
           />
         </ConfigPanel>
-      </div>
+      ),
+    },
+  ];
+
+  return (
+    <Form layout="vertical">
+      <Flex vertical gap={16}>
+        <Flex align="center" justify="space-between" gap={16} wrap="wrap">
+          <Flex vertical>
+            <Title level={3}>配置</Title>
+            <Text type="secondary">设置存储、下载规则与 X Cookie</Text>
+          </Flex>
+          <Space wrap>
+            <Tooltip title="重新加载配置">
+              <Button
+                icon={<ReloadOutlined />}
+                loading={refreshPending}
+                onClick={onRefresh}
+              />
+            </Tooltip>
+            <Button
+              icon={<SafetyCertificateOutlined />}
+              loading={authChecking}
+              onClick={() => void runAuthCheck(draft, true)}
+            >
+              检测 Cookie
+            </Button>
+            <Button
+              type="primary"
+              icon={<CheckCircleOutlined />}
+              loading={mutation.isPending}
+              onClick={() => mutation.mutate(draft)}
+            >
+              保存配置
+            </Button>
+          </Space>
+        </Flex>
+
+        <Card>
+          <Tabs
+            items={sections}
+            tabPlacement={screens.md ? "start" : "top"}
+          />
+        </Card>
+      </Flex>
     </Form>
   );
 }
@@ -214,35 +245,19 @@ export function ConfigForm({
 export function ConfigPanel({
   children,
   description,
-  extra,
-  icon,
-  kind,
   title,
 }: {
   children: React.ReactNode;
   description?: string;
-  extra?: React.ReactNode;
-  icon: React.ReactNode;
-  kind: "storage" | "download" | "cookie";
   title: string;
 }) {
   return (
-    <Card
-      size="small"
-      className={`settings-panel settings-panel-${kind}`}
-      title={(
-        <Space align="start" size={10}>
-          {icon}
-          <span className="settings-panel-title">
-            <Text strong>{title}</Text>
-            {description ? <Text type="secondary">{description}</Text> : null}
-          </span>
-        </Space>
-      )}
-      extra={extra}
-    >
+    <Flex vertical>
+      <Title level={4}>{title}</Title>
+      {description ? <Text type="secondary">{description}</Text> : null}
+      <Divider />
       {children}
-    </Card>
+    </Flex>
   );
 }
 

@@ -30,7 +30,6 @@ import {
   formatDateTime,
   formatIntervalMinutes,
   getErrorMessage,
-  iconStyles,
   kindLabel,
 } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
@@ -99,6 +98,7 @@ export function ArchiveScheduleList({ schedules }: { schedules: ArchiveSchedule[
         itemName="个计划"
         items={schedules}
         pageSize={5}
+        simplePagination
         renderItem={(schedule) => (
           <List.Item
             actions={[
@@ -137,7 +137,7 @@ export function ArchiveScheduleList({ schedules }: { schedules: ArchiveSchedule[
             ]}
           >
             <List.Item.Meta
-              avatar={<SyncOutlined spin={schedule.enabled} style={iconStyles.primary} />}
+              avatar={<SyncOutlined spin={schedule.enabled} />}
               title={
                 <Space size={8} wrap>
                   <Text strong>{schedule.name}</Text>

@@ -23,12 +23,6 @@ export type TextTone = "secondary" | "success" | "warning" | "danger";
 
 export const fullWidthStyle: React.CSSProperties = { width: "100%" };
 
-export const iconStyles = {
-  primary: { color: "#1677ff", fontSize: 18 },
-  success: { color: "#389e0d", fontSize: 18 },
-  danger: { color: "#cf1322", fontSize: 18 },
-} satisfies Record<string, React.CSSProperties>;
-
 export const defaultListPageSizeOptions = [5, 10, 20, 50];
 export const tablePageSizeOptions = [10, 20, 50, 100];
 export const failedTweetPageSizeOptions = [10, 20, 50];
@@ -39,7 +33,7 @@ export function AppEmpty({ description }: { description: string }) {
 
 export function ListSkeleton({ rows = 4 }: { rows?: number }) {
   return (
-    <Space direction="vertical" size={10} style={fullWidthStyle}>
+    <Space orientation="vertical" size={10} style={fullWidthStyle}>
       {Array.from({ length: rows }, (_, index) => (
         <Skeleton
           active
@@ -79,7 +73,7 @@ export function Stack({
   style?: React.CSSProperties;
 }) {
   return (
-    <Space direction="vertical" size={size} style={{ ...fullWidthStyle, ...style }}>
+    <Space orientation="vertical" size={size} style={{ ...fullWidthStyle, ...style }}>
       {children}
     </Space>
   );
@@ -163,6 +157,7 @@ export function AppPagination({
   onChange,
   pageSize,
   pageSizeOptions = defaultListPageSizeOptions,
+  simple = false,
   total,
 }: {
   current: number;
@@ -170,6 +165,7 @@ export function AppPagination({
   onChange: (page: number, pageSize: number) => void;
   pageSize: number;
   pageSizeOptions?: number[];
+  simple?: boolean;
   total: number;
 }) {
   return (
@@ -179,12 +175,12 @@ export function AppPagination({
         disabled={total === 0}
         pageSize={pageSize}
         pageSizeOptions={pageSizeOptions.map(String)}
-        showSizeChanger
-        showTotal={(totalCount, range) =>
+        showSizeChanger={!simple}
+        showTotal={simple ? undefined : (totalCount, range) =>
           totalCount > 0
             ? `共 ${totalCount} ${itemName}，当前 ${range[0]}-${range[1]}`
-            : `共 0 ${itemName}`
-        }
+            : `共 0 ${itemName}`}
+        simple={simple}
         size="small"
         total={total}
         onChange={onChange}
@@ -202,6 +198,7 @@ export function PaginatedList<TItem>({
   maxHeight,
   pageSize = 5,
   renderItem,
+  simplePagination = false,
   skeletonRows = pageSize,
   size = "default",
 }: {
@@ -213,6 +210,7 @@ export function PaginatedList<TItem>({
   maxHeight?: number;
   pageSize?: number;
   renderItem: (item: TItem) => React.ReactNode;
+  simplePagination?: boolean;
   skeletonRows?: number;
   size?: "small" | "default" | "large";
 }) {
@@ -231,6 +229,7 @@ export function PaginatedList<TItem>({
           current={pagination.page}
           itemName={itemName}
           pageSize={pagination.pageSize}
+          simple={simplePagination}
           total={pagination.total}
           onChange={pagination.onChange}
         />
@@ -253,6 +252,7 @@ export function PaginatedList<TItem>({
           current={pagination.page}
           itemName={itemName}
           pageSize={pagination.pageSize}
+          simple={simplePagination}
           total={pagination.total}
           onChange={pagination.onChange}
         />

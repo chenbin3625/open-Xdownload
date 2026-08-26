@@ -34,7 +34,6 @@ import {
   failedTweetPageSizeOptions,
   formatDateTime,
   getErrorMessage,
-  iconStyles,
 } from "../common/CommonUI";
 import { dashboardMetaQueryRoot, jobsQueryRoot } from "../../lib/api";
 
@@ -183,7 +182,7 @@ export function FailedTweetQueue({
                 ]}
               >
                 <List.Item.Meta
-                  avatar={<CloseCircleOutlined style={iconStyles.danger} />}
+                  avatar={<Text type="danger"><CloseCircleOutlined /></Text>}
                   title={
                     <Space size={8} wrap>
                       <Text strong>{item.jobTitle || item.tweetId}</Text>

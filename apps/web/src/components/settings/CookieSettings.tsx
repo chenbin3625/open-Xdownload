@@ -14,6 +14,8 @@ import {
   Form,
   Input,
   Row,
+  Space,
+  Tag,
   Tooltip,
   Typography,
 } from "antd";
@@ -29,11 +31,11 @@ export const cookieSettingsTips = {
   authToken: "X/Twitter 登录 Cookie 中的 auth_token，用于鉴权。",
   csrfToken: "X/Twitter 登录 Cookie 中的 ct0（CSRF Token），与 auth_token 对应。",
   backupCookie: (
-    <div className="form-tooltip-copy">
-      <div>用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。</div>
-      <div>支持每行一个账号，格式为 auth_token=xxx; ct0=yyy。</div>
-      <div>已保存的 Cookie 在此界面会以 ******** 脱敏显示，新增或修改不受影响。</div>
-    </div>
+    <Space orientation="vertical" size={2}>
+      <Text>用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。</Text>
+      <Text>支持每行一个账号，格式为 auth_token=xxx; ct0=yyy。</Text>
+      <Text>已保存的 Cookie 在此界面会以 ******** 脱敏显示，新增或修改不受影响。</Text>
+    </Space>
   ),
 };
 
@@ -66,10 +68,10 @@ export function CookieSettingsFields({
   };
 
   return (
-    <div className="settings-cookie-fields">
-      <div className="cookie-primary-fields">
-        <Text strong className="cookie-group-title">主 Cookie</Text>
-        <Row gutter={[16, 0]} className="settings-field-grid">
+    <Stack size={16}>
+      <Stack size={8}>
+        <Text strong>主 Cookie</Text>
+        <Row gutter={[16, 0]}>
           <Col xs={24} lg={12}>
             <Form.Item label="auth_token" tooltip={cookieSettingsTips.authToken}>
               <Input
@@ -109,14 +111,14 @@ export function CookieSettingsFields({
             </Form.Item>
           </Col>
         </Row>
-      </div>
+      </Stack>
       <BackupCookieInputs
         clients={backupClients}
         {...sharedStatus}
         value={draft.additionalCookies ?? ""}
         onChange={(additionalCookies) => onChange((current) => ({ ...current, additionalCookies }))}
       />
-    </div>
+    </Stack>
   );
 }
 
@@ -198,12 +200,16 @@ export function CookieTokenStatus({
     detail = "此 Cookie 未进入检测队列，可能未填写完整或与其他 Cookie 重复";
   }
 
+  const color = {
+    checking: "processing",
+    error: "error",
+    success: "success",
+    warning: "warning",
+  }[tone];
+
   return (
     <Tooltip title={detail}>
-      <span className={`cookie-token-status cookie-token-status-${tone}`} aria-label={detail}>
-        {icon}
-        <span>{label}</span>
-      </span>
+      <Tag color={color} icon={icon} aria-label={detail}>{label}</Tag>
     </Tooltip>
   );
 }
@@ -279,19 +285,18 @@ export function BackupCookieInputs({
     <Form.Item
       tooltip={cookieSettingsTips.backupCookie}
       label={
-        <span className="cookie-backup-heading">
+        <Space>
           <Text strong>备用 Cookie</Text>
           <Tooltip title="添加备用 Cookie">
             <Button
               aria-label="添加备用 Cookie"
-              className="cookie-add-button"
               size="small"
               type="text"
               icon={<PlusOutlined />}
               onClick={addRow}
             />
           </Tooltip>
-        </span>
+        </Space>
       }
     >
       <Stack size={8}>
@@ -301,7 +306,7 @@ export function BackupCookieInputs({
           const client = aggregateClients ? undefined : clients[index];
           const statusProps = { aggregateClients, checked, checking, client, errorMessage, pairComplete };
           return (
-            <Row key={index} gutter={[8, 8]} align="middle" className="cookie-backup-row">
+            <Row key={index} gutter={[8, 8]} align="middle">
               <Col xs={24} md={11}>
                 <Input
                   aria-label={`备用 Cookie ${index + 1} auth_token`}
@@ -332,11 +337,10 @@ export function BackupCookieInputs({
                   placeholder={`备用 ${index + 1} ct0`}
                 />
               </Col>
-              <Col xs={24} md={2} className="cookie-row-action">
+              <Col xs={24} md={2}>
                 <Tooltip title="删除备用 Cookie">
                   <Button
                     aria-label={`删除备用 Cookie ${index + 1}`}
-                    className="cookie-remove-button"
                     danger
                     type="text"
                     icon={<DeleteOutlined />}
