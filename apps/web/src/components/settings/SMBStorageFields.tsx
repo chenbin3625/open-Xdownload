@@ -1,7 +1,6 @@
-import { Col, Form, Input, InputNumber, Row } from "antd";
 import React from "react";
 import type { AppConfig } from "../../lib/api";
-import { fullWidthStyle } from "../common/CommonUI";
+import { SettingsField } from "./SettingsFields";
 
 export const smbTips = {
   smbHost: "SMB 服务器地址，可填写 IP 或主机名，不要包含 smb:// 前缀。",
@@ -21,69 +20,63 @@ export function SMBStorageFields({
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
 }) {
   return (
-    <Row gutter={[16, 0]}>
-      <Col xs={24} md={12}>
-        <Form.Item label="主机" tooltip={smbTips.smbHost}>
-          <Input
-            value={draft.smbHost}
-            onChange={(event) => onChange((current) => ({ ...current, smbHost: event.target.value }))}
-            placeholder="192.168.1.10"
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} md={12}>
-        <Form.Item label="端口" tooltip={smbTips.smbPort}>
-          <InputNumber
-            min={1}
-            max={65535}
-            value={draft.smbPort}
-            onChange={(value) => onChange((current) => ({ ...current, smbPort: value ?? 445 }))}
-            style={fullWidthStyle}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} md={12}>
-        <Form.Item label="共享名" tooltip={smbTips.smbShare}>
-          <Input
-            value={draft.smbShare}
-            onChange={(event) => onChange((current) => ({ ...current, smbShare: event.target.value }))}
-            placeholder="downloads"
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} md={12}>
-        <Form.Item label="目录" tooltip={smbTips.smbPath}>
-          <Input
-            value={draft.smbPath}
-            onChange={(event) => onChange((current) => ({ ...current, smbPath: event.target.value }))}
-            placeholder="x-media"
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} md={12}>
-        <Form.Item label="域" tooltip={smbTips.smbDomain}>
-          <Input
-            value={draft.smbDomain}
-            onChange={(event) => onChange((current) => ({ ...current, smbDomain: event.target.value }))}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} md={12}>
-        <Form.Item label="用户名" tooltip={smbTips.remoteUsername}>
-          <Input
-            value={draft.smbUsername}
-            onChange={(event) => onChange((current) => ({ ...current, smbUsername: event.target.value }))}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24}>
-        <Form.Item label="密码" tooltip={smbTips.savedSecret}>
-          <Input.Password
-            value={draft.smbPassword ?? ""}
-            onChange={(event) => onChange((current) => ({ ...current, smbPassword: event.target.value }))}
-          />
-        </Form.Item>
-      </Col>
-    </Row>
+    <div className="settings-field-grid">
+      <SettingsField label="主机" hint={smbTips.smbHost}>
+        <input
+          className="parser-input"
+          value={draft.smbHost}
+          placeholder="192.168.1.10"
+          onChange={(event) => onChange((current) => ({ ...current, smbHost: event.target.value }))}
+        />
+      </SettingsField>
+      <SettingsField label="端口" hint={smbTips.smbPort}>
+        <input
+          className="parser-input"
+          type="number"
+          min={1}
+          max={65535}
+          value={draft.smbPort}
+          onChange={(event) => onChange((current) => ({ ...current, smbPort: Number(event.target.value) || 445 }))}
+        />
+      </SettingsField>
+      <SettingsField label="共享名" hint={smbTips.smbShare}>
+        <input
+          className="parser-input"
+          value={draft.smbShare}
+          placeholder="downloads"
+          onChange={(event) => onChange((current) => ({ ...current, smbShare: event.target.value }))}
+        />
+      </SettingsField>
+      <SettingsField label="目录" hint={smbTips.smbPath}>
+        <input
+          className="parser-input"
+          value={draft.smbPath}
+          placeholder="x-media"
+          onChange={(event) => onChange((current) => ({ ...current, smbPath: event.target.value }))}
+        />
+      </SettingsField>
+      <SettingsField label="域" hint={smbTips.smbDomain}>
+        <input
+          className="parser-input"
+          value={draft.smbDomain}
+          onChange={(event) => onChange((current) => ({ ...current, smbDomain: event.target.value }))}
+        />
+      </SettingsField>
+      <SettingsField label="用户名" hint={smbTips.remoteUsername}>
+        <input
+          className="parser-input"
+          value={draft.smbUsername}
+          onChange={(event) => onChange((current) => ({ ...current, smbUsername: event.target.value }))}
+        />
+      </SettingsField>
+      <SettingsField label="密码" hint={smbTips.savedSecret}>
+        <input
+          className="parser-input"
+          type="password"
+          value={draft.smbPassword ?? ""}
+          onChange={(event) => onChange((current) => ({ ...current, smbPassword: event.target.value }))}
+        />
+      </SettingsField>
+    </div>
   );
 }

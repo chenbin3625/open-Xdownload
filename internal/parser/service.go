@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/tidwall/gjson"
 )
 
@@ -43,7 +44,7 @@ type ParseOptions struct {
 
 func NewService() *Service {
 	return &Service{
-		client:         &http.Client{Timeout: 20 * time.Second},
+		client:         httpx.Client("", 20*time.Second),
 		syndicationURL: syndicationTweetResultURL,
 	}
 }
@@ -61,6 +62,19 @@ func (s *Service) ParseTweetLinkWithOptions(ctx context.Context, rawURL string, 
 		return TweetData{}, err
 	}
 	return s.parseSyndicationTweet(ctx, rawURL, username, tweetID, options)
+}
+
+// ParseTweetLinkWithClient 使用调用方提供的 http.Client 解析推文。httpapi 用它把配置的
+// 代理注入本次请求（M1），使单推解析链路与 timeline/下载一致地走代理。
+func (s *Service) ParseTweetLinkWithClient(ctx context.Context, rawURL string, client *http.Client, options ParseOptions) (TweetData, error) {
+	if err := ctx.Err(); err != nil {
+		return TweetData{}, err
+	}
+	username, tweetID, err := ExtractTweetURL(rawURL)
+	if err != nil {
+		return TweetData{}, err
+	}
+	return s.parseSyndicationTweetWithClient(ctx, rawURL, username, tweetID, options, client)
 }
 
 func (s *Service) ParseTweetJSON(rawURL string, payload []byte) (TweetData, error) {
@@ -239,6 +253,10 @@ func unwrapTweetResult(result gjson.Result) gjson.Result {
 }
 
 func (s *Service) parseSyndicationTweet(ctx context.Context, rawURL string, fallbackUsername string, fallbackID string, options ParseOptions) (TweetData, error) {
+	return s.parseSyndicationTweetWithClient(ctx, rawURL, fallbackUsername, fallbackID, options, s.client)
+}
+
+func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL string, fallbackUsername string, fallbackID string, options ParseOptions, client *http.Client) (TweetData, error) {
 	endpoint, err := url.Parse(s.syndicationURL)
 	if err != nil {
 		return TweetData{}, err
@@ -256,9 +274,11 @@ func (s *Service) parseSyndicationTweet(ctx context.Context, rawURL string, fall
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Mozilla/5.0 open-Xdownload/0.1")
 
-	client := s.client
 	if client == nil {
-		client = http.DefaultClient
+		client = s.client
+		if client == nil {
+			client = httpx.Client("", 20*time.Second)
+		}
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -606,7 +626,7 @@ func mediaFromURL(rawURL string) Media {
 	}
 	// 仅接受 twimg.com 域下的媒体 URL，避免经伪造推文 card 内容注入的内网/任意主机 URL
 	// 被提取并由 downloader 拉取（SSRF，如云元数据 169.254.169.254）。
-	if !isTwimgHost(parsed.Host) {
+	if parsed.Scheme != "http" && parsed.Scheme != "https" || !isTwimgHost(parsed.Hostname()) {
 		return Media{}
 	}
 	lower := strings.ToLower(rawURL)
@@ -635,7 +655,7 @@ func mediaFromURL(rawURL string) Media {
 
 // isTwimgHost 报告 host 是否为 twimg.com 或其子域（pbs.twimg.com / video.twimg.com 等）。
 func isTwimgHost(host string) bool {
-	host = strings.ToLower(host)
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
 }
 
@@ -646,7 +666,10 @@ func isTwimgMediaURL(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	return isTwimgHost(parsed.Host)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	return isTwimgHost(parsed.Hostname())
 }
 
 func isPhotoMediaURL(rawURL string) bool {
@@ -655,10 +678,11 @@ func isPhotoMediaURL(rawURL string) bool {
 		return false
 	}
 	// 图片媒体同样要求 twimg.com 主机，避免任意主机带图片扩展名的 URL 被当作媒体。
-	if !isTwimgHost(parsed.Host) {
+	if !isTwimgHost(parsed.Hostname()) {
 		return false
 	}
-	if strings.Contains(strings.ToLower(parsed.Host), "pbs.twimg.com") {
+	host := strings.ToLower(parsed.Hostname())
+	if host == "pbs.twimg.com" || strings.HasSuffix(host, ".pbs.twimg.com") {
 		return true
 	}
 	switch strings.ToLower(pathExtension(parsed.Path)) {

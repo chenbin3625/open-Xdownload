@@ -1,33 +1,17 @@
-import {
-  CheckCircleOutlined,
-  DatabaseOutlined,
-  DownloadOutlined,
-  SafetyCertificateOutlined,
-  SettingOutlined,
-} from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  Avatar,
-  Button,
-  Flex,
-  Form,
-  Space,
-  Typography,
-  notification,
-} from "antd";
 import React, { useEffect, useRef, useState } from "react";
 import {
   checkAuth,
+  configQueryRoot,
   updateConfig,
   type AppConfig,
   type AuthCheck,
 } from "../../lib/api";
-import { getErrorMessage } from "../common/CommonUI";
+import { getErrorMessage } from "../../lib/format";
+import { toast } from "../../lib/toast";
 import { CookieSettingsFields } from "./CookieSettings";
 import { DownloadSettingsFields } from "./DownloadSettings";
 import { StorageSettings } from "./StorageSettings";
-
-const { Text } = Typography;
 
 export function ConfigForm({
   config,
@@ -43,12 +27,18 @@ export function ConfigForm({
   const [authError, setAuthError] = useState("");
   const [authChecking, setAuthChecking] = useState(false);
   const pendingSavedConfigKey = useRef("");
+  const pendingSavedConfigTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoCheckedCookieKey = useRef("");
   const authCheckSequence = useRef(0);
   const currentCookieKey = cookieCheckKey(draft);
   const currentCookieKeyRef = useRef(currentCookieKey);
   currentCookieKeyRef.current = currentCookieKey;
 
+  // draft 与远端 config 的同步策略（F1）：
+  //  - draftDirty=true 表示用户在编辑中，外部 config 更新（如 SSE 兜底刷新）不应覆盖表单；
+  //  - 保存成功后，onSuccess 设置 pendingSavedConfigKey 记录本次保存的归一化键，等下一个
+  //    config 批次到达时如果匹配该键，则用服务器返回值替换 draft 并清除标记；
+  //  - 其余情况（未在编辑、无待处理保存）config 变化时直接跟随。
   useEffect(() => {
     const normalized = normalizeConfig(config);
     const configKey = configSyncKey(normalized);
@@ -64,8 +54,18 @@ export function ConfigForm({
     }
   }, [config, draftDirty]);
 
+  useEffect(() => () => {
+    if (pendingSavedConfigTimer.current) {
+      clearTimeout(pendingSavedConfigTimer.current);
+    }
+  }, []);
+
   function updateDraft(action: React.SetStateAction<AppConfig>) {
     pendingSavedConfigKey.current = "";
+    if (pendingSavedConfigTimer.current) {
+      clearTimeout(pendingSavedConfigTimer.current);
+      pendingSavedConfigTimer.current = null;
+    }
     setDraftDirty(true);
     setDraft(action);
   }
@@ -83,17 +83,21 @@ export function ConfigForm({
     onSuccess: (updated) => {
       const normalized = normalizeConfig(updated);
       pendingSavedConfigKey.current = configSyncKey(normalized);
+      if (pendingSavedConfigTimer.current) {
+        clearTimeout(pendingSavedConfigTimer.current);
+      }
+      pendingSavedConfigTimer.current = setTimeout(() => {
+        pendingSavedConfigKey.current = "";
+        pendingSavedConfigTimer.current = null;
+      }, 5000);
       setDraft(normalized);
       setDraftDirty(false);
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.setQueryData(configQueryRoot, updated);
       onRefresh?.();
-      notification.success({ message: "配置已保存" });
+      toast("配置已保存");
     },
     onError: (error) => {
-      notification.error({
-        message: "保存失败",
-        description: getErrorMessage(error),
-      });
+      toast("保存失败", { description: getErrorMessage(error), tone: "err" });
     },
   });
 
@@ -113,16 +117,10 @@ export function ConfigForm({
         return;
       }
       if (result.ok) {
-        notification.success({
-          message: "Cookie 检测通过",
-          description: result.screenName ? `@${result.screenName}` : result.message,
-        });
+        toast("Cookie 检测通过", { description: result.screenName ? `@${result.screenName}` : result.message });
         return;
       }
-      notification.warning({
-        message: "Cookie 检测未通过",
-        description: result.message,
-      });
+      toast("Cookie 检测未通过", { description: result.message, tone: "err" });
     } catch (error) {
       if (sequence !== authCheckSequence.current || cookieKey !== currentCookieKeyRef.current) {
         return;
@@ -131,10 +129,7 @@ export function ConfigForm({
       setAuthResult(null);
       setAuthError(message);
       if (notify) {
-        notification.error({
-          message: "Cookie 检测失败",
-          description: message,
-        });
+        toast("Cookie 检测失败", { description: message, tone: "err" });
       }
     } finally {
       if (sequence === authCheckSequence.current) {
@@ -154,48 +149,44 @@ export function ConfigForm({
   }, [config]);
 
   return (
-    <Form layout="vertical" className="config-form">
+    <form
+      className="config-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        mutation.mutate(draft);
+      }}
+    >
       <div className="settings-command-bar">
         <div className="settings-heading">
-          <Avatar className="settings-heading-icon" icon={<SettingOutlined />} />
+          <span className="settings-heading-icon" aria-hidden="true">⚙</span>
           <div className="settings-heading-copy">
-            <Text strong>下载配置</Text>
-            <Text type="secondary">当前运行参数</Text>
+            <strong>下载配置</strong>
+            <span>当前运行参数</span>
           </div>
         </div>
-        <Space wrap className="settings-actions">
-          <Button
-            icon={<SafetyCertificateOutlined />}
-            loading={authChecking}
+        <div className="settings-actions">
+          <button
+            type="button"
+            className="job-text-btn"
+            disabled={authChecking}
             onClick={() => void runAuthCheck(draft, true)}
           >
-            检测 Cookie
-          </Button>
-          <Button
-            type="primary"
-            icon={<CheckCircleOutlined />}
-            loading={mutation.isPending}
-            onClick={() => mutation.mutate(draft)}
-          >
-            保存配置
-          </Button>
-        </Space>
+            {authChecking ? "检测中…" : "检测 Cookie"}
+          </button>
+          <button type="submit" className="shell-primary-btn" disabled={mutation.isPending}>
+            {mutation.isPending ? "保存中…" : "保存配置"}
+          </button>
+        </div>
       </div>
 
       <div className="settings-main">
-        <ConfigPanel kind="storage" icon={<DatabaseOutlined />} title="存储">
+        <ConfigPanel kind="storage" title="存储">
           <StorageSettings draft={draft} onChange={updateDraft} />
         </ConfigPanel>
-
-        <ConfigPanel kind="download" icon={<DownloadOutlined />} title="下载">
+        <ConfigPanel kind="download" title="下载">
           <DownloadSettingsFields draft={draft} onChange={updateDraft} onAuthChange={updateAuthDraft} />
         </ConfigPanel>
-
-        <ConfigPanel
-          kind="cookie"
-          icon={<SafetyCertificateOutlined />}
-          title="X Cookie"
-        >
+        <ConfigPanel kind="cookie" title="X Cookie">
           <CookieSettingsFields
             authError={authError}
             authResult={authResult}
@@ -205,37 +196,36 @@ export function ConfigForm({
           />
         </ConfigPanel>
       </div>
-    </Form>
+    </form>
   );
 }
-
 export function ConfigPanel({
   children,
   description,
   extra,
-  icon,
   kind,
   title,
 }: {
   children: React.ReactNode;
   description?: string;
   extra?: React.ReactNode;
-  icon: React.ReactNode;
   kind: "storage" | "download" | "cookie";
   title: string;
 }) {
   return (
     <section className={`settings-panel settings-panel-${kind}`}>
-      <Flex align="flex-start" justify="space-between" gap={12} wrap="wrap" className="settings-panel-header">
-        <Space align="start" size={10}>
-          <span className="settings-panel-icon">{icon}</span>
-          <span className="settings-panel-title">
-            <Text strong>{title}</Text>
-            {description ? <Text type="secondary">{description}</Text> : null}
+      <div className="settings-panel-header">
+        <div className="settings-panel-heading">
+          <span className="settings-panel-icon" aria-hidden="true">
+            {kind === "storage" ? "▣" : kind === "download" ? "↓" : "⌘"}
           </span>
-        </Space>
+          <span className="settings-panel-title">
+            <strong>{title}</strong>
+            {description ? <span>{description}</span> : null}
+          </span>
+        </div>
         {extra}
-      </Flex>
+      </div>
       {children}
     </section>
   );

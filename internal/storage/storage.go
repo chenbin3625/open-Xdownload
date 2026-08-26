@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
@@ -19,7 +21,12 @@ import (
 
 type Store struct {
 	db *sqlx.DB
+
+	configMu     sync.RWMutex
+	cachedStored *config.AppConfig
 }
+
+const sqliteOpenOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
 
 const (
 	MinArchiveScheduleIntervalMinutes = 5
@@ -30,14 +37,15 @@ const (
 var ErrArchiveScheduleAlreadyClaimed = errors.New("定时归档计划已被其他运行领取")
 
 func Open(path string) (*Store, error) {
-	db, err := sqlx.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
+	db, err := sqlx.Open("sqlite", path+sqliteOpenOptions)
 	if err != nil {
 		return nil, err
 	}
-	// SQLite 只允许单个写事务。限制为单连接可让 database/sql 在 Go 层串行化
-	// 读写，彻底避免高并发下 "database is locked"；配合 WAL 让写入更快且不阻塞读快照。
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// WAL 允许并发读者 + 单写者。保留少量连接，让 HTTP 读（任务列表/仪表盘）
+	// 与 worker 进度写入重叠；busy_timeout(5000) 在写锁冲突时等待而不是 SQLITE_BUSY。
+	// 连接数不宜过大：每条连接都会占一份 mmap 窗口。
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -48,6 +56,10 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := store.EnsureConfig(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := store.GetStoredConfig(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -228,6 +240,14 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	name TEXT PRIMARY KEY,
 	applied_at DATETIME NOT NULL
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_users_name_history
+AFTER UPDATE OF screen_name, name ON users
+WHEN OLD.screen_name <> NEW.screen_name OR OLD.name <> NEW.name
+BEGIN
+	INSERT INTO user_previous_names (user_id, screen_name, name, recorded_at)
+	VALUES (OLD.id, OLD.screen_name, OLD.name, NEW.updated_at);
+END;
 `
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -247,24 +267,43 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	if err := s.runMigrationOnce("deduplicate_downloads_media_url_only", s.deduplicateDownloadsMediaURLOnly); err != nil {
 		return err
 	}
+	if err := s.ensureDashboardCounters(); err != nil {
+		return err
+	}
 	return s.addMissingIndexes()
 }
 
-// runMigrationOnce 在 name 尚未记录时执行 fn 并登记；已登记则跳过。用于把一次性的
-// downloads 数据规范化/去重限定为只跑一次。
-func (s *Store) runMigrationOnce(name string, fn func() error) error {
-	var count int
-	if err := s.db.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name); err != nil {
+type migrationExecutor interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Get(dest any, query string, args ...any) error
+	Select(dest any, query string, args ...any) error
+}
+
+// runMigrationOnce 在事务中执行一次性迁移并登记。进程如果在迁移中途崩溃，
+// 数据变更和 schema_migrations 记录会一起回滚，避免下次启动误以为迁移已完成。
+func (s *Store) runMigrationOnce(name string, fn func(migrationExecutor) error) error {
+	tx, err := s.db.Beginx()
+	if err != nil {
 		return err
+	}
+	rollback := func(err error) error {
+		_ = tx.Rollback()
+		return err
+	}
+	var count int
+	if err := tx.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name); err != nil {
+		return rollback(err)
 	}
 	if count > 0 {
-		return nil
+		return tx.Commit()
 	}
-	if err := fn(); err != nil {
-		return err
+	if err := fn(tx); err != nil {
+		return rollback(err)
 	}
-	_, err := s.db.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`, name, time.Now().UTC())
-	return err
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`, name, time.Now().UTC()); err != nil {
+		return rollback(err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) addMissingColumns() error {
@@ -311,8 +350,8 @@ func (s *Store) addMissingColumns() error {
 	return nil
 }
 
-func (s *Store) deduplicateDownloads() error {
-	_, err := s.db.Exec(`
+func (s *Store) deduplicateDownloads(exec migrationExecutor) error {
+	_, err := exec.Exec(`
 	DELETE FROM downloads
 	WHERE tweet_id <> ''
 	  AND id NOT IN (
@@ -326,8 +365,8 @@ func (s *Store) deduplicateDownloads() error {
 
 // deduplicateDownloadsMediaURLOnly 清理 tweet_id 为空（直接媒体 URL 任务）的历史重复行，
 // 为随后 addMissingIndexes 创建的 (media_url) WHERE tweet_id = ” 唯一索引扫清障碍。
-func (s *Store) deduplicateDownloadsMediaURLOnly() error {
-	_, err := s.db.Exec(`
+func (s *Store) deduplicateDownloadsMediaURLOnly(exec migrationExecutor) error {
+	_, err := exec.Exec(`
 	DELETE FROM downloads
 	WHERE tweet_id = ''
 	  AND media_url <> ''
@@ -343,7 +382,7 @@ func (s *Store) deduplicateDownloadsMediaURLOnly() error {
 // normalizeDownloadsMediaURL 规范化历史 downloads 记录中的 media_url（去掉 ?tag= 等易变参数），
 // 使旧记录与规范化后的去重键一致，随后由 deduplicateDownloads 清理因规范化产生的重复行。
 // 幂等：无待规范化的行时直接返回，不动索引。
-func (s *Store) normalizeDownloadsMediaURL() error {
+func (s *Store) normalizeDownloadsMediaURL(exec migrationExecutor) error {
 	type downloadRow struct {
 		ID       int64  `db:"id"`
 		MediaURL string `db:"media_url"`
@@ -351,7 +390,7 @@ func (s *Store) normalizeDownloadsMediaURL() error {
 	// 仅取可能含 ?tag= 的候选行，避免把整个 downloads 表载入内存。规范化后的 URL 不再含
 	// tag=，故干净库上该查询返回 0 行；Go 侧再用 NormalizeMediaURL 比对确认确需变更。
 	var rows []downloadRow
-	if err := s.db.Select(&rows, `SELECT id, media_url FROM downloads WHERE tweet_id <> '' AND media_url <> '' AND media_url LIKE '%tag=%'`); err != nil {
+	if err := exec.Select(&rows, `SELECT id, media_url FROM downloads WHERE tweet_id <> '' AND media_url <> '' AND media_url LIKE '%tag=%'`); err != nil {
 		return err
 	}
 	pending := make([]downloadRow, 0)
@@ -365,11 +404,11 @@ func (s *Store) normalizeDownloadsMediaURL() error {
 	}
 	// 临时移除唯一索引，避免 UPDATE 触发 (tweet_id, media_url) 约束冲突；
 	// 随后 deduplicateDownloads 清理重复行，addMissingIndexes 重建索引。
-	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_downloads_tweet_media_unique`); err != nil {
+	if _, err := exec.Exec(`DROP INDEX IF EXISTS idx_downloads_tweet_media_unique`); err != nil {
 		return err
 	}
 	for _, r := range pending {
-		if _, err := s.db.Exec(`UPDATE downloads SET media_url = ? WHERE id = ?`, downloader.NormalizeMediaURL(r.MediaURL), r.ID); err != nil {
+		if _, err := exec.Exec(`UPDATE downloads SET media_url = ? WHERE id = ?`, downloader.NormalizeMediaURL(r.MediaURL), r.ID); err != nil {
 			return err
 		}
 	}
@@ -390,6 +429,8 @@ func (s *Store) addMissingIndexes() error {
 	ON failed_media (job_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_failed_tweets_updated_at
 	ON failed_tweets (updated_at);
+	CREATE INDEX IF NOT EXISTS idx_user_entities_parent_user
+	ON user_entities (parent_dir, user_id);
 	`)
 	return err
 }
@@ -447,20 +488,53 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 	return err
 }
 
-func (s *Store) GetConfig(ctx context.Context) (config.AppConfig, error) {
-	cfg := config.AppConfig{}
-	err := s.db.GetContext(ctx, &cfg, `
+const storedConfigQuery = `
 SELECT download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 	additional_cookies, auto_retry_failed, auto_follow_protected,
 	include_nested_tweet_media,
 	file_naming_mode, max_filename_length, storage_type,
 	smb_host, smb_port, smb_share, smb_path, smb_domain, smb_username, smb_password,
 	webdav_url, webdav_path, webdav_username, webdav_password
-FROM app_config WHERE id = 1`)
-	if errors.Is(err, sql.ErrNoRows) {
-		return config.Default(), nil
+FROM app_config WHERE id = 1`
+
+func (s *Store) rememberStoredConfig(cfg config.AppConfig) {
+	copied := cfg
+	s.configMu.Lock()
+	s.cachedStored = &copied
+	s.configMu.Unlock()
+}
+
+// GetStoredConfig 返回数据库中的配置，不套用环境变量。供占位符合并与 UpdateConfig 写库使用。
+func (s *Store) GetStoredConfig(ctx context.Context) (config.AppConfig, error) {
+	s.configMu.RLock()
+	if s.cachedStored != nil {
+		cfg := *s.cachedStored
+		s.configMu.RUnlock()
+		return cfg, nil
 	}
-	return cfg.Normalized(), err
+	s.configMu.RUnlock()
+
+	cfg := config.AppConfig{}
+	err := s.db.GetContext(ctx, &cfg, storedConfigQuery)
+	if errors.Is(err, sql.ErrNoRows) {
+		cfg = config.Default()
+		s.rememberStoredConfig(cfg)
+		return cfg, nil
+	}
+	if err != nil {
+		return config.AppConfig{}, err
+	}
+	cfg = cfg.Normalized()
+	s.rememberStoredConfig(cfg)
+	return cfg, nil
+}
+
+func (s *Store) GetConfig(ctx context.Context) (config.AppConfig, error) {
+	cfg, err := s.GetStoredConfig(ctx)
+	if err != nil {
+		return config.AppConfig{}, err
+	}
+	return config.ApplyEnvOverrides(cfg), nil
 }
 
 func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.AppConfig, error) {
@@ -473,16 +547,10 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 	defer tx.Rollback() // Commit 后为 no-op
 
 	current := config.AppConfig{}
-	if err := tx.GetContext(ctx, &current, `
-SELECT download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
-	additional_cookies, auto_retry_failed, auto_follow_protected,
-	include_nested_tweet_media,
-	file_naming_mode, max_filename_length, storage_type,
-	smb_host, smb_port, smb_share, smb_path, smb_domain, smb_username, smb_password,
-	webdav_url, webdav_path, webdav_username, webdav_password
-FROM app_config WHERE id = 1`); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := tx.GetContext(ctx, &current, storedConfigQuery); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return config.AppConfig{}, err
 	}
+	current = current.Normalized()
 
 	cfg = cfg.Normalized()
 	if cfg.AuthToken == "" || cfg.AuthToken == config.SecretPlaceholder {
@@ -492,11 +560,17 @@ FROM app_config WHERE id = 1`); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		cfg.CSRFToken = current.CSRFToken
 	}
 	cfg.AdditionalCookies = config.RestoreAdditionalCookies(cfg.AdditionalCookies, current.AdditionalCookies)
-	cfg.SMBPassword = mergeStorageSecret(cfg.SMBPassword, current.SMBPassword, sameSMBTarget(cfg, current))
-	cfg.WebDAVPassword = mergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
+	cfg.SMBPassword = config.MergeStorageSecret(cfg.SMBPassword, current.SMBPassword, config.SameSMBTarget(cfg, current))
+	cfg.WebDAVPassword = config.MergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
 	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据，避免把占位符当真实代理/WebDAV 地址保存。
 	cfg.ProxyURL = config.RestoreURLUserinfo(cfg.ProxyURL, current.ProxyURL)
 	cfg.WebDAVURL = config.RestoreURLUserinfo(cfg.WebDAVURL, current.WebDAVURL)
+	cfg.AuthToken = config.RevertEnvOnlyEcho(cfg.AuthToken, current.AuthToken, config.EnvAuthToken)
+	cfg.CSRFToken = config.RevertEnvOnlyEcho(cfg.CSRFToken, current.CSRFToken, config.EnvCSRFToken)
+	cfg.ProxyURL = config.RevertEnvOnlyEcho(cfg.ProxyURL, current.ProxyURL, config.EnvProxyURL)
+	cfg.AdditionalCookies = config.RevertEnvOnlyEcho(cfg.AdditionalCookies, current.AdditionalCookies, config.EnvAdditionalCookies)
+	cfg.SMBPassword = config.RevertEnvOnlyEcho(cfg.SMBPassword, current.SMBPassword, config.EnvSMBPassword)
+	cfg.WebDAVPassword = config.RevertEnvOnlyEcho(cfg.WebDAVPassword, current.WebDAVPassword, config.EnvWebDAVPassword)
 
 	_, err = tx.NamedExecContext(ctx, `
 	UPDATE app_config SET
@@ -556,36 +630,18 @@ FROM app_config WHERE id = 1`); err != nil && !errors.Is(err, sql.ErrNoRows) {
 	if err := tx.Commit(); err != nil {
 		return config.AppConfig{}, err
 	}
+	s.rememberStoredConfig(cfg)
 	return cfg, nil
-}
-
-func mergeStorageSecret(submitted, stored string, targetUnchanged bool) string {
-	if submitted == "" || submitted == config.SecretPlaceholder {
-		if targetUnchanged {
-			return stored
-		}
-		return ""
-	}
-	return submitted
-}
-
-func sameSMBTarget(a, b config.AppConfig) bool {
-	return strings.EqualFold(strings.TrimSpace(a.SMBHost), strings.TrimSpace(b.SMBHost)) && a.SMBPort == b.SMBPort
 }
 
 func (s *Store) CreateJob(ctx context.Context, kind JobKind, input string, title string) (Job, error) {
 	now := time.Now().UTC()
-	result, err := s.db.ExecContext(ctx, `
+	job := Job{}
+	err := s.db.GetContext(ctx, &job, `
 INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
-VALUES (?, ?, ?, ?, 0, ?, ?, ?)`, kind, JobPending, input, title, "排队中", now, now)
-	if err != nil {
-		return Job{}, err
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return Job{}, err
-	}
-	return s.GetJob(ctx, id)
+VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+RETURNING *`, kind, JobPending, input, title, "排队中", now, now)
+	return job, err
 }
 
 func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
@@ -619,15 +675,7 @@ LIMIT ? OFFSET ?`, limit, offset)
 }
 
 func (s *Store) JobStats(ctx context.Context) (JobStats, error) {
-	stats := JobStats{}
-	err := s.db.GetContext(ctx, &stats, `
-SELECT
-	COUNT(*) AS total,
-	COALESCE(SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END), 0) AS active,
-	COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0) AS completed,
-	COALESCE(SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END), 0) AS failed
-FROM jobs`,
-		JobPending, JobResolving, JobDownloading, JobCompleted, JobFailed, JobCompletedWithErrors)
+	stats, _, err := s.DashboardMeta(ctx)
 	return stats, err
 }
 
@@ -686,14 +734,19 @@ WHERE id = :id
 func (s *Store) CancelJob(ctx context.Context, id int64) (Job, error) {
 	// 单条条件 UPDATE：只把非终态任务改为 canceled，避免 GetJob→UpdateJob 两步之间与
 	// worker 的终态保存竞争（worker 把任务标为 completed 后，这里不会再覆盖为 canceled）。
-	_, err := s.db.ExecContext(ctx, `
+	job := Job{}
+	err := s.db.GetContext(ctx, &job, `
 UPDATE jobs SET status = ?, message = ?, progress = 1, error = '', updated_at = ?
-WHERE id = ? AND status NOT IN (?, ?, ?, ?)`,
+	WHERE id = ? AND status NOT IN (?, ?, ?, ?)
+	RETURNING *`,
 		JobCanceled, "已取消", time.Now().UTC(), id, JobCompleted, JobCompletedWithErrors, JobFailed, JobCanceled)
-	if err != nil {
+	if err == nil {
+		return job, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
 		return Job{}, err
 	}
-	// 无论是否更新到行（已是终态或不存在），都返回当前状态。
+	// 已是终态或任务不存在时，返回当前状态以保留原有语义。
 	return s.GetJob(ctx, id)
 }
 
@@ -747,33 +800,39 @@ func (s *Store) CreateJobs(ctx context.Context, drafts []JobDraft) ([]Job, error
 	}
 	defer tx.Rollback()
 
-	jobs := make([]Job, 0, len(drafts))
-	for _, draft := range drafts {
-		result, err := tx.ExecContext(ctx, `
-	INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
-	VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
-			draft.Kind, JobPending, draft.Input, draft.Title, "排队中", now, now)
-		if err != nil {
-			return nil, err
-		}
-		id, err := result.LastInsertId()
-		if err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, Job{
-			ID:        id,
-			Kind:      draft.Kind,
-			Status:    JobPending,
-			Input:     draft.Input,
-			Title:     draft.Title,
-			Message:   "排队中",
-			CreatedAt: now,
-			UpdatedAt: now,
-		})
+	jobs, err := s.insertJobs(ctx, tx, drafts, "排队中", now)
+	if err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	return jobs, nil
+}
+
+func (s *Store) insertJobs(ctx context.Context, tx *sqlx.Tx, drafts []JobDraft, message string, now time.Time) ([]Job, error) {
+	if len(drafts) == 0 {
+		return []Job{}, nil
+	}
+	var query strings.Builder
+	query.WriteString(`
+INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
+VALUES `)
+	args := make([]any, 0, len(drafts)*7)
+	for index, draft := range drafts {
+		if index > 0 {
+			query.WriteString(",")
+		}
+		query.WriteString("(?, ?, ?, ?, 0, ?, ?, ?)")
+		args = append(args, draft.Kind, JobPending, draft.Input, draft.Title, message, now, now)
+	}
+	query.WriteString(" RETURNING *")
+
+	jobs := make([]Job, 0, len(drafts))
+	if err := tx.SelectContext(ctx, &jobs, query.String(), args...); err != nil {
+		return nil, err
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID })
 	return jobs, nil
 }
 
@@ -784,20 +843,17 @@ func (s *Store) CreateArchiveSchedule(ctx context.Context, schedule ArchiveSched
 		return ArchiveSchedule{}, err
 	}
 	schedule.NextRunAt = nextArchiveScheduleRun(now, schedule.IntervalMinutes)
-	result, err := s.db.ExecContext(ctx, `
+	err = s.db.GetContext(ctx, &schedule, `
 INSERT INTO archive_schedules (
 	name, enabled, interval_minutes, items_json, next_run_at, last_job_ids, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING *`,
 		schedule.Name, schedule.Enabled, schedule.IntervalMinutes, schedule.ItemsJSON,
 		schedule.NextRunAt, "[]", now, now)
 	if err != nil {
 		return ArchiveSchedule{}, err
 	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return ArchiveSchedule{}, err
-	}
-	return s.GetArchiveSchedule(ctx, id)
+	return hydrateArchiveSchedule(schedule)
 }
 
 func (s *Store) UpdateArchiveSchedule(ctx context.Context, schedule ArchiveSchedule) (ArchiveSchedule, error) {
@@ -817,7 +873,7 @@ func (s *Store) UpdateArchiveSchedule(ctx context.Context, schedule ArchiveSched
 	if nextRunAt.IsZero() {
 		nextRunAt = nextArchiveScheduleRun(now, schedule.IntervalMinutes)
 	}
-	_, err = s.db.ExecContext(ctx, `
+	err = s.db.GetContext(ctx, &schedule, `
 UPDATE archive_schedules SET
 	name = ?,
 	enabled = ?,
@@ -825,13 +881,14 @@ UPDATE archive_schedules SET
 	items_json = ?,
 	next_run_at = ?,
 	updated_at = ?
-WHERE id = ?`,
+WHERE id = ?
+RETURNING *`,
 		schedule.Name, schedule.Enabled, schedule.IntervalMinutes, schedule.ItemsJSON,
 		nextRunAt, now, schedule.ID)
 	if err != nil {
 		return ArchiveSchedule{}, err
 	}
-	return s.GetArchiveSchedule(ctx, schedule.ID)
+	return hydrateArchiveSchedule(schedule)
 }
 
 func (s *Store) GetArchiveSchedule(ctx context.Context, id int64) (ArchiveSchedule, error) {
@@ -874,13 +931,14 @@ func (s *Store) DeleteArchiveSchedule(ctx context.Context, id int64) error {
 }
 
 func (s *Store) RescheduleArchiveSchedule(ctx context.Context, id int64, nextRunAt time.Time) (ArchiveSchedule, error) {
-	_, err := s.db.ExecContext(ctx, `
-UPDATE archive_schedules SET next_run_at = ?, updated_at = ? WHERE id = ?`,
-		nextRunAt.UTC(), time.Now().UTC(), id)
+	schedule := ArchiveSchedule{}
+	err := s.db.GetContext(ctx, &schedule, `
+UPDATE archive_schedules SET next_run_at = ?, updated_at = ? WHERE id = ?
+RETURNING *`, nextRunAt.UTC(), time.Now().UTC(), id)
 	if err != nil {
 		return ArchiveSchedule{}, err
 	}
-	return s.GetArchiveSchedule(ctx, id)
+	return hydrateArchiveSchedule(schedule)
 }
 
 func (s *Store) HasActiveJobs(ctx context.Context, ids []int64) (bool, error) {
@@ -931,31 +989,17 @@ WHERE id = ? AND next_run_at = ?`,
 		return nil, ErrArchiveScheduleAlreadyClaimed
 	}
 
-	jobs := make([]Job, 0, len(schedule.Items))
-	jobIDs := make([]int64, 0, len(schedule.Items))
+	drafts := make([]JobDraft, 0, len(schedule.Items))
 	for _, item := range schedule.Items {
-		result, err := tx.ExecContext(ctx, `
-INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
-VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
-			item.Kind, JobPending, item.Input, item.Title, "定时归档排队中", runAt, runAt)
-		if err != nil {
-			return nil, err
-		}
-		id, err := result.LastInsertId()
-		if err != nil {
-			return nil, err
-		}
-		jobIDs = append(jobIDs, id)
-		jobs = append(jobs, Job{
-			ID:        id,
-			Kind:      item.Kind,
-			Status:    JobPending,
-			Input:     item.Input,
-			Title:     item.Title,
-			Message:   "定时归档排队中",
-			CreatedAt: runAt,
-			UpdatedAt: runAt,
-		})
+		drafts = append(drafts, JobDraft{Kind: item.Kind, Input: item.Input, Title: item.Title})
+	}
+	jobs, err := s.insertJobs(ctx, tx, drafts, "定时归档排队中", runAt)
+	if err != nil {
+		return nil, err
+	}
+	jobIDs := make([]int64, 0, len(schedule.Items))
+	for _, job := range jobs {
+		jobIDs = append(jobIDs, job.ID)
 	}
 	lastJobIDs, err := json.Marshal(jobIDs)
 	if err != nil {
@@ -1009,6 +1053,75 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 	return items, err
 }
 
+func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []FailedMedia, error) {
+	type jobFileRow struct {
+		SortOrder  int            `db:"sort_order"`
+		RecordKind string         `db:"record_kind"`
+		ID         int64          `db:"id"`
+		JobID      int64          `db:"job_id"`
+		TweetID    sql.NullString `db:"tweet_id"`
+		MediaURL   sql.NullString `db:"media_url"`
+		FilePath   sql.NullString `db:"file_path"`
+		Bytes      sql.NullInt64  `db:"bytes"`
+		Error      sql.NullString `db:"error"`
+		CreatedAt  sql.NullTime   `db:"created_at"`
+	}
+	rows := []jobFileRow{}
+	err := s.db.SelectContext(ctx, &rows, `
+SELECT 1 AS sort_order, 'download' AS record_kind, id, job_id,
+	tweet_id, media_url, file_path, bytes, NULL AS error, created_at
+FROM downloads
+WHERE job_id = ?
+UNION ALL
+SELECT 2 AS sort_order, 'failed' AS record_kind, id, job_id,
+	NULL AS tweet_id, media_url, NULL AS file_path, NULL AS bytes, error, created_at
+FROM failed_media
+WHERE job_id = ?
+UNION ALL
+SELECT 0 AS sort_order, 'job' AS record_kind, id, id AS job_id,
+	NULL AS tweet_id, NULL AS media_url, NULL AS file_path, NULL AS bytes,
+	NULL AS error, NULL AS created_at
+FROM jobs
+WHERE id = ?
+ORDER BY sort_order, created_at DESC`, jobID, jobID, jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil, sql.ErrNoRows
+	}
+
+	downloads := make([]DownloadRecord, 0, len(rows))
+	failed := make([]FailedMedia, 0, len(rows))
+	for _, row := range rows {
+		switch row.RecordKind {
+		case "job":
+			continue
+		case "download":
+			downloads = append(downloads, DownloadRecord{
+				ID:        row.ID,
+				JobID:     row.JobID,
+				TweetID:   row.TweetID.String,
+				MediaURL:  row.MediaURL.String,
+				FilePath:  row.FilePath.String,
+				Bytes:     row.Bytes.Int64,
+				CreatedAt: row.CreatedAt.Time,
+			})
+		case "failed":
+			failed = append(failed, FailedMedia{
+				ID:        row.ID,
+				JobID:     row.JobID,
+				MediaURL:  row.MediaURL.String,
+				Error:     row.Error.String,
+				CreatedAt: row.CreatedAt.Time,
+			})
+		default:
+			return nil, nil, fmt.Errorf("unknown job file record kind %q", row.RecordKind)
+		}
+	}
+	return downloads, failed, nil
+}
+
 func (s *Store) ListDownloadsForJobs(ctx context.Context, jobIDs []int64) ([]DownloadRecord, error) {
 	if len(jobIDs) == 0 {
 		return []DownloadRecord{}, nil
@@ -1035,6 +1148,43 @@ func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, med
 		return nil, err
 	}
 	return &record, nil
+}
+
+type mediaDownloadStateRow struct {
+	Unavailable int            `db:"unavailable"`
+	ID          sql.NullInt64  `db:"id"`
+	JobID       sql.NullInt64  `db:"job_id"`
+	TweetID     sql.NullString `db:"tweet_id"`
+	MediaURL    sql.NullString `db:"media_url"`
+	FilePath    sql.NullString `db:"file_path"`
+	Bytes       sql.NullInt64  `db:"bytes"`
+	CreatedAt   sql.NullTime   `db:"created_at"`
+}
+
+func (s *Store) GetMediaDownloadState(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, bool, error) {
+	row := mediaDownloadStateRow{}
+	err := s.db.GetContext(ctx, &row, `
+SELECT
+	CASE WHEN um.media_url IS NOT NULL THEN 1 ELSE 0 END AS unavailable,
+	d.id, d.job_id, d.tweet_id, d.media_url, d.file_path, d.bytes, d.created_at
+FROM (SELECT ? AS tweet_id, ? AS media_url) request
+LEFT JOIN unavailable_media um ON um.media_url = request.media_url
+LEFT JOIN downloads d ON d.tweet_id = request.tweet_id AND d.media_url = request.media_url`, tweetID, mediaURL)
+	if err != nil {
+		return nil, false, err
+	}
+	if !row.ID.Valid {
+		return nil, row.Unavailable != 0, nil
+	}
+	return &DownloadRecord{
+		ID:        row.ID.Int64,
+		JobID:     row.JobID.Int64,
+		TweetID:   row.TweetID.String,
+		MediaURL:  row.MediaURL.String,
+		FilePath:  row.FilePath.String,
+		Bytes:     row.Bytes.Int64,
+		CreatedAt: row.CreatedAt.Time,
+	}, row.Unavailable != 0, nil
 }
 
 func (s *Store) CreateFailedMedia(ctx context.Context, failed FailedMedia) (FailedMedia, error) {
@@ -1106,16 +1256,7 @@ ON CONFLICT(media_url) DO UPDATE SET
 
 func (s *Store) UpsertUser(ctx context.Context, user User) (User, error) {
 	now := time.Now().UTC()
-	var existing User
-	err := s.db.GetContext(ctx, &existing, `SELECT * FROM users WHERE id = ?`, user.ID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return User{}, err
-	}
-	// 仅当已存在的用户改名时才记录"旧"用户名。新用户没有旧名可记；且 INSERT 必须在
-	// users UPSERT 之后，否则 user_id 的外键尚未存在（foreign_keys=ON）会触发约束违例。
-	nameChanged := !errors.Is(err, sql.ErrNoRows) && (existing.Name != user.Name || existing.ScreenName != user.ScreenName)
-
-	_, err = s.db.ExecContext(ctx, `
+	err := s.db.GetContext(ctx, &user, `
 INSERT INTO users (id, screen_name, name, protected, friends_count, media_count, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
@@ -1124,19 +1265,13 @@ ON CONFLICT(id) DO UPDATE SET
 	protected = excluded.protected,
 	friends_count = excluded.friends_count,
 	media_count = excluded.media_count,
-	updated_at = excluded.updated_at`,
+	updated_at = excluded.updated_at
+RETURNING *`,
 		user.ID, user.ScreenName, user.Name, user.Protected, user.FriendsCount, user.MediaCount, now)
 	if err != nil {
 		return User{}, err
 	}
-	if nameChanged {
-		if _, err := s.db.ExecContext(ctx, `
-INSERT INTO user_previous_names (user_id, screen_name, name, recorded_at)
-VALUES (?, ?, ?, ?)`, user.ID, existing.ScreenName, existing.Name, now); err != nil {
-			return User{}, err
-		}
-	}
-	return s.GetUser(ctx, user.ID)
+	return user, nil
 }
 
 func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
@@ -1159,6 +1294,51 @@ func (s *Store) LocateUserEntity(ctx context.Context, userID string, parentDir s
 		return nil, err
 	}
 	return &entity, nil
+}
+
+// LocateUserEntities loads all existing entities for one archive root in a
+// bounded number of queries. Archive jobs commonly process hundreds of users;
+// doing one SELECT per user needlessly serializes SQLite round trips.
+func (s *Store) LocateUserEntities(ctx context.Context, userIDs []string, parentDir string) (map[string]UserEntity, error) {
+	parentDir, err := normalizeParentDir(parentDir)
+	if err != nil {
+		return nil, err
+	}
+	entities := make(map[string]UserEntity, len(userIDs))
+	uniqueIDs := make([]string, 0, len(userIDs))
+	seen := make(map[string]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == "" {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, userID)
+	}
+	if len(uniqueIDs) == 0 {
+		return entities, nil
+	}
+
+	const batchSize = 500
+	for start := 0; start < len(uniqueIDs); start += batchSize {
+		end := min(start+batchSize, len(uniqueIDs))
+		query, args, err := sqlx.In(`
+SELECT * FROM user_entities
+WHERE parent_dir = ? AND user_id IN (?)`, parentDir, uniqueIDs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		items := []UserEntity{}
+		if err := s.db.SelectContext(ctx, &items, s.db.Rebind(query), args...); err != nil {
+			return nil, err
+		}
+		for _, entity := range items {
+			entities[entity.UserID] = entity
+		}
+	}
+	return entities, nil
 }
 
 func (s *Store) EnsureUserEntity(ctx context.Context, userID string, parentDir string, name string) (UserEntity, error) {
@@ -1200,18 +1380,19 @@ UPDATE user_entities SET last_seen_tweet_id = ?, updated_at = ? WHERE id = ?`,
 
 func (s *Store) UpsertList(ctx context.Context, list List) (List, error) {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	err := s.db.GetContext(ctx, &list, `
 INSERT INTO twitter_lists (id, name, owner_user_id, updated_at)
 VALUES (?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	name = excluded.name,
 	owner_user_id = excluded.owner_user_id,
-	updated_at = excluded.updated_at`,
+	updated_at = excluded.updated_at
+RETURNING *`,
 		list.ID, list.Name, list.OwnerUserID, now)
 	if err != nil {
 		return List{}, err
 	}
-	return s.GetList(ctx, list.ID)
+	return list, nil
 }
 
 func (s *Store) GetList(ctx context.Context, id string) (List, error) {
@@ -1261,19 +1442,19 @@ func (s *Store) GetListEntity(ctx context.Context, id int64) (ListEntity, error)
 
 func (s *Store) EnsureUserLink(ctx context.Context, userID string, listEntityID int64, name string) (UserLink, error) {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	link := UserLink{}
+	err := s.db.GetContext(ctx, &link, `
 INSERT INTO user_links (user_id, name, list_entity_id, updated_at)
 VALUES (?, ?, ?, ?)
 ON CONFLICT(user_id, list_entity_id) DO UPDATE SET
 	name = excluded.name,
-	updated_at = excluded.updated_at`,
+	updated_at = excluded.updated_at
+RETURNING *`,
 		userID, name, listEntityID, now)
 	if err != nil {
 		return UserLink{}, err
 	}
-	link := UserLink{}
-	err = s.db.GetContext(ctx, &link, `SELECT * FROM user_links WHERE user_id = ? AND list_entity_id = ?`, userID, listEntityID)
-	return link, err
+	return link, nil
 }
 
 func (s *Store) GetUserLinks(ctx context.Context, userID string) ([]UserLink, error) {
@@ -1305,20 +1486,16 @@ func (s *Store) HasDownload(ctx context.Context, tweetID string, mediaURL string
 
 func (s *Store) CreateFailedTweet(ctx context.Context, failed FailedTweet) (FailedTweet, error) {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	err := s.db.GetContext(ctx, &failed, `
 INSERT INTO failed_tweets (job_id, entity_id, tweet_id, payload, error, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(entity_id, tweet_id) DO UPDATE SET
 	job_id = excluded.job_id,
 	payload = excluded.payload,
 	error = excluded.error,
-	updated_at = excluded.updated_at`,
+	updated_at = excluded.updated_at
+RETURNING *`,
 		failed.JobID, failed.EntityID, failed.TweetID, failed.Payload, failed.Error, now, now)
-	if err != nil {
-		return FailedTweet{}, err
-	}
-	err = s.db.GetContext(ctx, &failed, `
-SELECT * FROM failed_tweets WHERE entity_id = ? AND tweet_id = ?`, failed.EntityID, failed.TweetID)
 	return failed, err
 }
 
@@ -1332,41 +1509,59 @@ func (s *Store) ListFailedTweets(ctx context.Context, limit int) ([]FailedTweet,
 }
 
 func (s *Store) ListFailedTweetViews(ctx context.Context, limit int) ([]FailedTweetView, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 200
-	}
-	return s.ListFailedTweetViewsPage(ctx, limit, 0)
+	items, _, err := s.ListFailedTweetViewsPage(ctx, limit, 0)
+	return items, err
 }
 
-func (s *Store) ListFailedTweetViewsPage(ctx context.Context, limit int, offset int) ([]FailedTweetView, error) {
+type failedTweetViewPageRow struct {
+	FailedTweetView
+	Total int `db:"total_count"`
+}
+
+func (s *Store) ListFailedTweetViewsPage(ctx context.Context, limit int, offset int) ([]FailedTweetView, int, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	items := []FailedTweetView{}
-	err := s.db.SelectContext(ctx, &items, `
+	rows := []failedTweetViewPageRow{}
+	err := s.db.SelectContext(ctx, &rows, `
 SELECT
-	ft.id, ft.job_id, ft.entity_id, ft.tweet_id, ft.payload, ft.error, ft.created_at, ft.updated_at,
+	ft.id, ft.job_id, ft.entity_id, ft.tweet_id, ft.error, ft.created_at, ft.updated_at,
 	COALESCE(j.title, '') AS job_title,
 	COALESCE(ue.name, '') AS entity_name,
 	COALESCE(ue.parent_dir, '') AS entity_parent_dir,
 	COALESCE(u.id, '') AS user_id,
 	COALESCE(u.screen_name, '') AS user_screen_name,
-	COALESCE(u.name, '') AS user_name
+	COALESCE(u.name, '') AS user_name,
+	COUNT(*) OVER() AS total_count
 FROM failed_tweets ft
 LEFT JOIN jobs j ON j.id = ft.job_id
 LEFT JOIN user_entities ue ON ue.id = ft.entity_id
 LEFT JOIN users u ON u.id = ue.user_id
 ORDER BY ft.updated_at ASC
 LIMIT ? OFFSET ?`, limit, offset)
-	return items, err
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(rows) == 0 {
+		total, err := s.CountFailedTweets(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []FailedTweetView{}, total, nil
+	}
+	items := make([]FailedTweetView, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, row.FailedTweetView)
+	}
+	total := rows[0].Total
+	return items, total, nil
 }
 
 func (s *Store) CountFailedTweets(ctx context.Context) (int, error) {
-	var count int
-	err := s.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM failed_tweets`)
+	_, count, err := s.DashboardMeta(ctx)
 	return count, err
 }
 
@@ -1378,6 +1573,30 @@ func (s *Store) DeleteFailedTweet(ctx context.Context, id int64) error {
 func (s *Store) DeleteAllFailedTweets(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM failed_tweets`)
 	return err
+}
+
+// PruneFailedRecords 清理早于 olderThan 的失败推文 / 失败媒体记录（M7 保留策略）。
+// downloads 历史保留：任务文件列表依赖它，不做自动删除。
+func (s *Store) PruneFailedRecords(ctx context.Context, olderThan time.Time) (int, error) {
+	olderThan = olderThan.UTC()
+	var pruned int64
+	// 分语句执行：database/sql 的 Exec 对多语句 SQL 只执行第一条（SQLite 下 RowsAffected
+	// 仅反映首个 DELETE），必须逐个执行。
+	for _, statement := range []string{
+		`DELETE FROM failed_tweets WHERE updated_at < ?`,
+		`DELETE FROM failed_media WHERE created_at < ?`,
+	} {
+		result, err := s.db.ExecContext(ctx, statement, olderThan)
+		if err != nil {
+			return int(pruned), err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return int(pruned), err
+		}
+		pruned += affected
+	}
+	return int(pruned), nil
 }
 
 func prepareArchiveScheduleForSave(schedule ArchiveSchedule) (ArchiveSchedule, error) {

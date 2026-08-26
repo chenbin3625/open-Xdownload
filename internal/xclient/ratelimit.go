@@ -138,6 +138,29 @@ func (rl *rateLimiter) wouldBlock(path string) bool {
 	return state.remaining <= threshold
 }
 
+// blockedReset 返回本限流器所有（任一路径）受限状态中最快结束限流的时间（reset+5s 裕量），
+// 供 Pool.Select 在全部客户端受限时据此等待；无受限返回 false。
+func (rl *rateLimiter) blockedReset() (time.Time, bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	var earliest time.Time
+	found := false
+	for _, state := range rl.limits {
+		if !state.ready || time.Now().After(state.reset) {
+			continue
+		}
+		if state.remaining > max(1, state.limit/50) {
+			continue
+		}
+		reset := state.reset.Add(5 * time.Second)
+		if !found || reset.Before(earliest) {
+			earliest = reset
+			found = true
+		}
+	}
+	return earliest, found
+}
+
 type RateLimitSnapshot struct {
 	Path      string    `json:"path"`
 	Limit     int       `json:"limit"`

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { tablePageSizeOptions } from "../components/common/CommonUI";
+import { tablePageSizeOptions } from "./pagination";
 
 export type SectionKey = "overview" | "settings";
 
@@ -29,7 +29,6 @@ export function normalizePathname(pathname: string) {
   const normalized = pathname.replace(/\/+$/, "");
   return normalized === "" ? "/" : normalized;
 }
-
 export function parsePositiveInteger(value: string | null, fallback: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;

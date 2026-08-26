@@ -20,6 +20,7 @@ import (
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/filestore"
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
@@ -36,6 +37,25 @@ type Server struct {
 
 func NewServer(store *storage.Store, parserService *parser.Service, manager *jobs.Manager, eventBus *jobs.EventBus) *Server {
 	return &Server{store: store, parser: parserService, manager: manager, eventBus: eventBus}
+}
+
+func (s *Server) publish(event jobs.Event) {
+	if s == nil || s.eventBus == nil {
+		return
+	}
+	s.eventBus.Publish(event)
+}
+
+func (s *Server) withMeta(ctx context.Context, event jobs.Event) jobs.Event {
+	if s == nil || s.store == nil {
+		return event
+	}
+	stats, count, err := s.store.DashboardMeta(ctx)
+	if err != nil {
+		return event
+	}
+	event.Meta = storage.DashboardMetaView{Stats: stats, FailedTweetCount: count}
+	return event
 }
 
 func (s *Server) Routes() http.Handler {
@@ -57,6 +77,7 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/archive-schedules/{id}/run", s.runArchiveSchedule)
 	r.Get("/api/jobs", s.listJobs)
 	r.Get("/api/jobs/{id}", s.getJob)
+	r.Get("/api/jobs/{id}/files", s.getJobFiles)
 	r.Post("/api/jobs/{id}/cancel", s.cancelJob)
 	r.Post("/api/jobs/{id}/retry", s.retryJob)
 	r.Get("/api/events", s.events)
@@ -67,7 +88,9 @@ func (s *Server) Routes() http.Handler {
 	r.Delete("/api/failed-tweets/{id}", s.deleteFailedTweet)
 	r.Delete("/api/failed-tweets", s.clearFailedTweets)
 	r.Get("/api/dashboard", s.dashboard)
-	return r
+	r.Get("/api/dashboard/meta", s.dashboardMeta)
+	// JSON 按 Accept-Encoding 协商 br/gzip；SSE 与过小 payload 保持 identity。
+	return compressJSON(r)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +112,16 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	stored, err := s.store.GetStoredConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	validationCfg := mergeSecretPlaceholders(cfg, stored).Normalized()
+	if err := httpx.ValidateProxyURL(validationCfg.ProxyURL); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	updated, err := s.store.UpdateConfig(r.Context(), cfg)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -103,12 +136,13 @@ func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	current, err := s.store.GetConfig(r.Context())
+	stored, err := s.store.GetStoredConfig(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	cfg = mergeSecretPlaceholders(cfg, current).Normalized()
+	cfg = mergeSecretPlaceholders(cfg, stored).Normalized()
+	cfg = config.ApplyEnvOverrides(cfg)
 	// 阻止对链路本地地址（如云元数据 169.254.169.254）的测试请求，缓解 SSRF。
 	if blockedStorageTarget(r.Context(), cfg.SMBHost) || blockedStorageTarget(r.Context(), urlHostname(cfg.WebDAVURL)) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("不允许的存储目标地址"))
@@ -136,16 +170,16 @@ func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listLocalDirectories(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	targetPath := strings.TrimSpace(r.URL.Query().Get("path"))
 	if targetPath == "" {
-		cfg, err := s.store.GetConfig(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
 		targetPath = cfg.DownloadDir
 	}
-	dir, err := localDirectoryPath(targetPath)
+	dir, err := localDirectoryPath(targetPath, localDirectoryAllowedRoots(cfg))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -170,9 +204,10 @@ func localDirectoryListingForPath(dir string) (localDirectoryListing, error) {
 		}
 		child := filepath.Join(dir, entry.Name())
 		items = append(items, localDirectoryEntry{
-			Name:        entry.Name(),
-			Path:        child,
-			HasChildren: hasChildDirectory(child),
+			Name: entry.Name(),
+			Path: child,
+			// 子目录是否还有孙目录放到展开时再读，避免每个子项一次 ReadDir。
+			HasChildren: true,
 		})
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -195,7 +230,12 @@ func (s *Server) createLocalDirectory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	dir, err := createLocalDirectoryPath(req.Path)
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	dir, err := createLocalDirectoryPath(req.Path, localDirectoryAllowedRoots(cfg))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -220,7 +260,12 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		cfg = mergeSecretPlaceholders(submitted, cfg).Normalized()
+		stored, err := s.store.GetStoredConfig(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		cfg = config.ApplyEnvOverrides(mergeSecretPlaceholders(submitted, stored).Normalized())
 	}
 	configured := cfg.AuthToken != "" && cfg.CSRFToken != ""
 	if !configured {
@@ -281,7 +326,9 @@ func (s *Server) parseTweetLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	tweet, err := s.parser.ParseTweetLinkWithOptions(r.Context(), req.URL, parserOptionsFromConfig(cfg))
+	// 单推解析请求把配置的代理注入本次请求用客户端（M1），使解析链路与 timeline/下载
+	// 一致地走代理（httpx.Client 空代理时尊重环境变量）。
+	tweet, err := s.parser.ParseTweetLinkWithClient(r.Context(), req.URL, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -306,6 +353,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.manager.Notify()
+	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "job.created", JobID: job.ID, Payload: job}))
 	writeJSON(w, http.StatusCreated, job)
 }
 
@@ -350,6 +398,7 @@ func (s *Server) createJobsBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.manager.Notify()
+	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "jobs.created", Payload: created}))
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -373,7 +422,7 @@ func (s *Server) createArchiveSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.eventBus.Publish(jobs.Event{Type: "archive_schedule.created", Payload: schedule})
+	s.publish(jobs.Event{Type: "archive_schedule.created", Payload: schedule})
 	writeJSON(w, http.StatusCreated, schedule)
 }
 
@@ -395,7 +444,7 @@ func (s *Server) updateArchiveSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.eventBus.Publish(jobs.Event{Type: "archive_schedule.updated", Payload: updated})
+	s.publish(jobs.Event{Type: "archive_schedule.updated", Payload: updated})
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -409,7 +458,7 @@ func (s *Server) deleteArchiveSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.eventBus.Publish(jobs.Event{Type: "archive_schedule.deleted", Payload: map[string]any{"id": id}})
+	s.publish(jobs.Event{Type: "archive_schedule.deleted", Payload: map[string]any{"id": id}})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -457,6 +506,16 @@ type failedTweetPage struct {
 	Pagination storage.Pagination        `json:"pagination"`
 }
 
+type jobFilesResponse struct {
+	Downloads []storage.DownloadRecord `json:"downloads,omitempty"`
+	Failed    []storage.FailedMedia    `json:"failed,omitempty"`
+}
+
+type dashboardMeta struct {
+	Stats            storage.JobStats `json:"stats"`
+	FailedTweetCount int              `json:"failedTweetCount"`
+}
+
 func archiveScheduleFromRequest(req archiveScheduleRequest) storage.ArchiveSchedule {
 	return storage.ArchiveSchedule{
 		Name:            strings.TrimSpace(req.Name),
@@ -477,31 +536,12 @@ func mergeSecretPlaceholders(cfg config.AppConfig, current config.AppConfig) con
 	// 仅当目标主机未变时才继承已存的存储凭据，否则调用方可令服务器用管理员真实的
 	// WebDAV/SMB 密码去认证一个由调用方提供的主机（凭据外泄）。主机变更时清掉占位符，
 	// 避免把字面量 "********" 当作密码发送给新主机。
-	cfg.SMBPassword = mergeStorageSecret(cfg.SMBPassword, current.SMBPassword, sameSMBTarget(cfg, current))
-	cfg.WebDAVPassword = mergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
+	cfg.SMBPassword = config.MergeStorageSecret(cfg.SMBPassword, current.SMBPassword, config.SameSMBTarget(cfg, current))
+	cfg.WebDAVPassword = config.MergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
 	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据。
 	cfg.ProxyURL = config.RestoreURLUserinfo(cfg.ProxyURL, current.ProxyURL)
 	cfg.WebDAVURL = config.RestoreURLUserinfo(cfg.WebDAVURL, current.WebDAVURL)
 	return cfg
-}
-
-// mergeStorageSecret inherits the stored password when the submitted value is
-// empty/placeholder and the target host is unchanged; otherwise it clears a
-// leftover placeholder so it is never sent as a literal credential.
-func mergeStorageSecret(submitted, stored string, hostUnchanged bool) string {
-	if submitted == "" || submitted == config.SecretPlaceholder {
-		if hostUnchanged {
-			return stored
-		}
-		return ""
-	}
-	return submitted
-}
-
-func sameSMBTarget(a, b config.AppConfig) bool {
-	a = a.Normalized()
-	b = b.Normalized()
-	return strings.EqualFold(strings.TrimSpace(a.SMBHost), strings.TrimSpace(b.SMBHost)) && a.SMBPort == b.SMBPort
 }
 
 // urlHostname returns the host (without port) of rawURL, or "" if unparseable.
@@ -618,13 +658,29 @@ func parserOptionsFromConfig(cfg config.AppConfig) parser.ParseOptions {
 	return parser.ParseOptions{IncludeNestedTweets: cfg.IncludeNestedTweetMedia}
 }
 
+type jobListPage struct {
+	Items    []storage.Job `json:"items"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"pageSize"`
+}
+
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListJobs(r.Context(), parseLimit(r, 100))
+	page := parsePositiveInt(r, "page", 1, 1, 1000000)
+	pageSize := parsePositiveInt(r, "pageSize", 20, 1, 100)
+	offset := (page - 1) * pageSize
+	items, err := s.store.ListJobsPage(r.Context(), pageSize, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	if items == nil {
+		items = []storage.Job{}
+	}
+	writeJSON(w, http.StatusOK, jobListPage{
+		Items:    items,
+		Page:     page,
+		PageSize: pageSize,
+	})
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
@@ -643,6 +699,24 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) getJobFiles(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	downloads, failed, err := s.store.JobFiles(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("job not found"))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, jobFilesResponse{Downloads: downloads, Failed: failed})
 }
 
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
@@ -679,14 +753,13 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.manager.Notify()
-	s.eventBus.Publish(jobs.Event{Type: "job.created", JobID: job.ID, Payload: job})
+	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "job.created", JobID: job.ID, Payload: job}))
 	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
+	if s.eventBus == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("事件总线不可用"))
 		return
 	}
 	channel, ok := s.eventBus.Subscribe()
@@ -699,9 +772,11 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// 提示 nginx 等反向代理不要缓冲事件流，保证前端实时收到消息（M8）。
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	// ResponseController 让我们对每次写入设置写超时，从而丢弃已断开或读取过慢的
-	// 客户端，避免 goroutine 长期阻塞在 Flush 上；心跳保活并检测半开连接。
+	// ResponseController 兼容 HTTP/1.1、HTTP/2 与 HTTP/3：不依赖 http.Flusher
+	// 类型断言（quic-go / 中间件包装的 ResponseWriter 常常没有该接口）。
 	rc := http.NewResponseController(w)
 	write := func(data []byte) bool {
 		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -709,7 +784,9 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write(data); err != nil {
 			return false
 		}
-		flusher.Flush()
+		if err := rc.Flush(); err != nil {
+			return false
+		}
 		return true
 	}
 	if !write([]byte(": connected\n\n")) {
@@ -758,7 +835,7 @@ func (s *Server) listFailedTweets(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Has("page") || r.URL.Query().Has("pageSize") {
 		page := parsePositiveInt(r, "page", 1, 1, 1000000)
 		pageSize := parsePositiveInt(r, "pageSize", 20, 1, 100)
-		total, err := s.store.CountFailedTweets(r.Context())
+		items, total, err := s.store.ListFailedTweetViewsPage(r.Context(), pageSize, (page-1)*pageSize)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -768,14 +845,14 @@ func (s *Server) listFailedTweets(w http.ResponseWriter, r *http.Request) {
 			totalPages = (total + pageSize - 1) / pageSize
 			if page > totalPages {
 				page = totalPages
+				items, total, err = s.store.ListFailedTweetViewsPage(r.Context(), pageSize, (page-1)*pageSize)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
 			}
 		} else {
 			page = 1
-		}
-		items, err := s.store.ListFailedTweetViewsPage(r.Context(), pageSize, (page-1)*pageSize)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
 		}
 		writeJSON(w, http.StatusOK, failedTweetPage{
 			Items: items,
@@ -815,6 +892,7 @@ func (s *Server) deleteFailedTweet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "failed_tweet.deleted", Payload: map[string]any{"id": id}}))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -823,18 +901,14 @@ func (s *Server) clearFailedTweets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "failed_tweets.cleared"}))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.store.GetConfig(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 	page := parsePositiveInt(r, "page", 1, 1, 1000000)
 	pageSize := parsePositiveInt(r, "pageSize", 20, 1, 100)
-	stats, err := s.store.JobStats(r.Context())
+	stats, failedTweetCount, err := s.store.DashboardMeta(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -854,43 +928,9 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	jobIDs := make([]int64, 0, len(jobItems))
-	for _, job := range jobItems {
-		jobIDs = append(jobIDs, job.ID)
-	}
-	downloadItems, err := s.store.ListDownloadsForJobs(r.Context(), jobIDs)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	failedItems, err := s.store.ListFailedMediaForJobs(r.Context(), jobIDs)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	failedTweetItems, err := s.store.ListFailedTweetViews(r.Context(), 50)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	failedTweetCount, err := s.store.CountFailedTweets(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	archiveSchedules, err := s.store.ListArchiveSchedules(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 	writeJSON(w, http.StatusOK, storage.Dashboard{
-		Config:           cfg.Redacted(),
 		Jobs:             jobItems,
-		Downloads:        downloadItems,
-		Failed:           failedItems,
-		FailedTweets:     failedTweetItems,
 		FailedTweetCount: failedTweetCount,
-		ArchiveSchedules: archiveSchedules,
 		Pagination: storage.Pagination{
 			Page:       page,
 			PageSize:   pageSize,
@@ -898,6 +938,18 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 			TotalPages: totalPages,
 		},
 		Stats: stats,
+	})
+}
+
+func (s *Server) dashboardMeta(w http.ResponseWriter, r *http.Request) {
+	stats, failedTweetCount, err := s.store.DashboardMeta(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, dashboardMeta{
+		Stats:            stats,
+		FailedTweetCount: failedTweetCount,
 	})
 }
 
@@ -980,7 +1032,83 @@ func displayUserInput(input string) string {
 	return "@" + input
 }
 
-func localDirectoryPath(value string) (string, error) {
+// localDirectoryAllowedRoots 返回本地目录浏览/创建允许的根集合：用户家目录、进程工作目录、
+// 以及配置的下载目录。无鉴权本地服务下，限制任意路径枚举/创建（S5）。
+func localDirectoryAllowedRoots(cfg config.AppConfig) []string {
+	roots := []string{}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		roots = append(roots, home)
+	}
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		roots = append(roots, cwd)
+	}
+	if cfg.DownloadDir != "" {
+		if abs, err := filepath.Abs(cfg.DownloadDir); err == nil {
+			roots = append(roots, abs)
+		}
+	}
+	return roots
+}
+
+// withinAllowedRoot 判断 path 的真实路径是否位于任一允许根之下（或等于该根）。
+// 真实路径解析会跟随已有符号链接，避免通过允许目录中的 symlink 逃逸到根目录之外。
+func withinAllowedRoot(path string, roots []string) bool {
+	cleaned, err := resolvePathForCheck(path)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		rootAbs, err := resolvePathForCheck(root)
+		if err != nil {
+			continue
+		}
+		if cleaned == rootAbs {
+			return true
+		}
+		rel, err := filepath.Rel(rootAbs, cleaned)
+		if err != nil {
+			continue
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvePathForCheck 解析 path 中已有部分的符号链接，并把尚不存在的尾部拼回去。
+// 这样既能校验已有路径，也能在 MkdirAll 前校验待创建路径不会穿过指向允许根之外的 symlink。
+func resolvePathForCheck(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	current := abs
+	missing := make([]string, 0)
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("无法解析路径: %s", path)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func localDirectoryPath(value string, allowedRoots []string) (string, error) {
 	if strings.TrimSpace(value) == "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			value = home
@@ -991,6 +1119,9 @@ func localDirectoryPath(value string) (string, error) {
 	path, err := filepath.Abs(value)
 	if err != nil {
 		return "", err
+	}
+	if !withinAllowedRoot(path, allowedRoots) {
+		return "", fmt.Errorf("不允许访问此目录（仅限家目录与下载目录范围）")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -1003,13 +1134,16 @@ func localDirectoryPath(value string) (string, error) {
 	return path, nil
 }
 
-func createLocalDirectoryPath(value string) (string, error) {
+func createLocalDirectoryPath(value string, allowedRoots []string) (string, error) {
 	if strings.TrimSpace(value) == "" {
 		return "", fmt.Errorf("目录路径不能为空")
 	}
 	path, err := filepath.Abs(value)
 	if err != nil {
 		return "", err
+	}
+	if !withinAllowedRoot(path, allowedRoots) {
+		return "", fmt.Errorf("不允许创建此位置的目录（仅限家目录与下载目录范围）")
 	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return "", err
@@ -1022,17 +1156,4 @@ func createLocalDirectoryPath(value string) (string, error) {
 		return "", fmt.Errorf("%s 不是目录", path)
 	}
 	return path, nil
-}
-
-func hasChildDirectory(path string) bool {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return true
-		}
-	}
-	return false
 }

@@ -1,7 +1,6 @@
-import { Col, Form, Input, InputNumber, Row, Select, Switch } from "antd";
 import React from "react";
 import type { AppConfig, FileNamingMode } from "../../lib/api";
-import { fullWidthStyle } from "../common/CommonUI";
+import { SettingsField, SettingsSwitch } from "./SettingsFields";
 
 export const fileNamingOptions: Array<{ value: FileNamingMode; label: string }> = [
   { value: "user_tweet", label: "用户名 + 用户 ID + 推文" },
@@ -9,13 +8,7 @@ export const fileNamingOptions: Array<{ value: FileNamingMode; label: string }> 
 ];
 
 export const downloadSettingsTips = {
-  proxy: (
-    <div className="form-tooltip-copy">
-      <div>支持 http、https、socks5、socks5h，例如 http://127.0.0.1:7890。</div>
-      <div>如需账号密码，可写成 socks5://user:password@127.0.0.1:1080。</div>
-      <div>用户名或密码里的 @、:、/、% 需要 URL 编码；包含账号密码时会随配置保存在本地。</div>
-    </div>
-  ),
+  proxy: "支持 http、https、socks5、socks5h，例如 http://127.0.0.1:7890。如需账号密码，可写成 socks5://user:password@127.0.0.1:1080。用户名或密码里的 @、:、/、% 需要 URL 编码；包含账号密码时会随配置保存在本地。",
   concurrency: "后台同时运行的下载任务数，过高可能触发站点限流或增加远程存储压力。",
   maxFilenameLength: "限制保存到磁盘或远程存储的文件名长度，长推文文件名会自动截断。",
   fileNaming: "影响新下载文件的命名方式，已下载文件不会被重命名。",
@@ -34,71 +27,68 @@ export function DownloadSettingsFields({
   onAuthChange: React.Dispatch<React.SetStateAction<AppConfig>>;
 }) {
   return (
-    <Row gutter={[16, 0]} className="settings-field-grid">
-      <Col xs={24} lg={12}>
-        <Form.Item label="代理" tooltip={downloadSettingsTips.proxy}>
-          <Input
-            value={draft.proxyUrl}
-            onChange={(event) => onAuthChange((current) => ({ ...current, proxyUrl: event.target.value }))}
-            placeholder="http://127.0.0.1:7890"
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="并发" tooltip={downloadSettingsTips.concurrency}>
-          <InputNumber
-            min={1}
-            max={64}
-            value={draft.maxConcurrency}
-            onChange={(value) => onChange((current) => ({ ...current, maxConcurrency: value ?? 1 }))}
-            style={fullWidthStyle}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="最大文件名长度" tooltip={downloadSettingsTips.maxFilenameLength}>
-          <InputNumber
-            min={16}
-            max={240}
-            value={draft.maxFilenameLength}
-            onChange={(value) => onChange((current) => ({ ...current, maxFilenameLength: value ?? 120 }))}
-            style={fullWidthStyle}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} lg={12}>
-        <Form.Item label="文件名命名" tooltip={downloadSettingsTips.fileNaming}>
-          <Select
-            value={draft.fileNamingMode}
-            options={fileNamingOptions}
-            onChange={(value) => onChange((current) => ({ ...current, fileNamingMode: value }))}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="失败重试" tooltip={downloadSettingsTips.autoRetryFailed}>
-          <Switch
-            checked={draft.autoRetryFailed}
-            onChange={(checked) => onChange((current) => ({ ...current, autoRetryFailed: checked }))}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="保护账号自动关注" tooltip={downloadSettingsTips.autoFollowProtected}>
-          <Switch
-            checked={draft.autoFollowProtected}
-            onChange={(checked) => onChange((current) => ({ ...current, autoFollowProtected: checked }))}
-          />
-        </Form.Item>
-      </Col>
-      <Col xs={24} sm={12} lg={6}>
-        <Form.Item label="引用/转推媒体" tooltip={downloadSettingsTips.includeNestedTweetMedia}>
-          <Switch
-            checked={draft.includeNestedTweetMedia}
-            onChange={(checked) => onChange((current) => ({ ...current, includeNestedTweetMedia: checked }))}
-          />
-        </Form.Item>
-      </Col>
-    </Row>
+    <div className="settings-field-grid">
+      <SettingsField label="代理" hint={downloadSettingsTips.proxy}>
+        <input
+          className="parser-input"
+          value={draft.proxyUrl}
+          placeholder="http://127.0.0.1:7890"
+          onChange={(event) => onAuthChange((current) => ({ ...current, proxyUrl: event.target.value }))}
+        />
+      </SettingsField>
+      <SettingsField label="并发" hint={downloadSettingsTips.concurrency}>
+        <input
+          className="parser-input"
+          type="number"
+          min={1}
+          max={64}
+          value={draft.maxConcurrency}
+          onChange={(event) => onChange((current) => ({ ...current, maxConcurrency: Number(event.target.value) || 1 }))}
+        />
+      </SettingsField>
+      <SettingsField label="最大文件名长度" hint={downloadSettingsTips.maxFilenameLength}>
+        <input
+          className="parser-input"
+          type="number"
+          min={16}
+          max={240}
+          value={draft.maxFilenameLength}
+          onChange={(event) =>
+            onChange((current) => ({ ...current, maxFilenameLength: Number(event.target.value) || 120 }))
+          }
+        />
+      </SettingsField>
+      <SettingsField label="文件名命名" hint={downloadSettingsTips.fileNaming}>
+        <select
+          className="parser-input"
+          value={draft.fileNamingMode}
+          onChange={(event) => onChange((current) => ({ ...current, fileNamingMode: event.target.value as FileNamingMode }))}
+        >
+          {fileNamingOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </SettingsField>
+      <SettingsSwitch
+        label="失败重试"
+        hint={downloadSettingsTips.autoRetryFailed}
+        checked={draft.autoRetryFailed}
+        onChange={(autoRetryFailed) => onChange((current) => ({ ...current, autoRetryFailed }))}
+      />
+      <SettingsSwitch
+        label="保护账号自动关注"
+        hint={downloadSettingsTips.autoFollowProtected}
+        checked={draft.autoFollowProtected}
+        onChange={(autoFollowProtected) => onChange((current) => ({ ...current, autoFollowProtected }))}
+      />
+      <SettingsSwitch
+        label="引用/转推媒体"
+        hint={downloadSettingsTips.includeNestedTweetMedia}
+        checked={draft.includeNestedTweetMedia}
+        onChange={(includeNestedTweetMedia) => onChange((current) => ({ ...current, includeNestedTweetMedia }))}
+      />
+    </div>
   );
 }

@@ -103,6 +103,13 @@ type JobStats struct {
 	Failed    int `json:"failed" db:"failed"`
 }
 
+// DashboardMetaView is the compact stats payload piggybacked on SSE and
+// returned by GET /api/dashboard/meta. Keep JSON keys stable with the SPA.
+type DashboardMetaView struct {
+	Stats            JobStats `json:"stats"`
+	FailedTweetCount int      `json:"failedTweetCount"`
+}
+
 type Pagination struct {
 	Page       int `json:"page"`
 	PageSize   int `json:"pageSize"`
@@ -177,7 +184,6 @@ type FailedTweetView struct {
 	JobID           int64     `json:"jobId" db:"job_id"`
 	EntityID        int64     `json:"entityId" db:"entity_id"`
 	TweetID         string    `json:"tweetId" db:"tweet_id"`
-	Payload         string    `json:"payload" db:"payload"`
 	Error           string    `json:"error" db:"error"`
 	CreatedAt       time.Time `json:"createdAt" db:"created_at"`
 	UpdatedAt       time.Time `json:"updatedAt" db:"updated_at"`
@@ -190,13 +196,13 @@ type FailedTweetView struct {
 }
 
 type Dashboard struct {
-	Config           config.AppConfig  `json:"config"`
+	Config           *config.AppConfig `json:"config,omitempty"`
 	Jobs             []Job             `json:"jobs"`
-	Downloads        []DownloadRecord  `json:"downloads"`
-	Failed           []FailedMedia     `json:"failed"`
-	FailedTweets     []FailedTweetView `json:"failedTweets"`
+	Downloads        []DownloadRecord  `json:"downloads,omitempty"`
+	Failed           []FailedMedia     `json:"failed,omitempty"`
+	FailedTweets     []FailedTweetView `json:"failedTweets,omitempty"`
 	FailedTweetCount int               `json:"failedTweetCount"`
-	ArchiveSchedules []ArchiveSchedule `json:"archiveSchedules"`
+	ArchiveSchedules []ArchiveSchedule `json:"archiveSchedules,omitempty"`
 	Pagination       Pagination        `json:"pagination"`
 	Stats            JobStats          `json:"stats"`
 }

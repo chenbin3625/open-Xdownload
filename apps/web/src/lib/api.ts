@@ -170,7 +170,7 @@ export interface FailedTweet {
   jobId: number;
   entityId: number;
   tweetId: string;
-  payload: string;
+  payload?: string;
   error: string;
   createdAt: string;
   updatedAt: string;
@@ -225,16 +225,39 @@ export interface DashboardStats {
 }
 
 export interface Dashboard {
-  config: AppConfig;
+  config?: AppConfig;
   jobs: Job[];
-  downloads: DownloadRecord[];
-  failed: FailedMedia[];
-  failedTweets: FailedTweet[];
+  downloads?: DownloadRecord[];
+  failed?: FailedMedia[];
+  failedTweets?: FailedTweet[];
   failedTweetCount: number;
-  archiveSchedules: ArchiveSchedule[];
+  archiveSchedules?: ArchiveSchedule[];
   pagination: DashboardPagination;
   stats: DashboardStats;
 }
+
+export interface DashboardMeta {
+  stats: DashboardStats;
+  failedTweetCount: number;
+}
+
+export interface JobsPage {
+  items: Job[];
+  page: number;
+  pageSize: number;
+}
+
+export interface JobFiles {
+  downloads: DownloadRecord[];
+  failed: FailedMedia[];
+}
+
+export const jobFilesQueryRoot = ["job-files"] as const;
+export const jobsQueryRoot = ["jobs"] as const;
+export const dashboardMetaQueryRoot = ["dashboard-meta"] as const;
+export const configQueryRoot = ["config"] as const;
+export const archiveScheduleQueryRoot = ["archive-schedules"] as const;
+export const failedTweetQueryRoot = ["failed-tweets"] as const;
 
 export interface FailedTweetPage {
   items: FailedTweet[];
@@ -242,10 +265,11 @@ export interface FailedTweetPage {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
   const response = await fetch(path, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(method !== "GET" && method !== "HEAD" ? { "Content-Type": "application/json" } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -256,11 +280,20 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export const getDashboard = ({
+export const getJobsPage = ({
   page = 1,
   pageSize = 20,
-}: { page?: number; pageSize?: number } = {}) =>
-  api<Dashboard>(`/api/dashboard?page=${page}&pageSize=${pageSize}`);
+  signal,
+}: { page?: number; pageSize?: number; signal?: AbortSignal } = {}) =>
+  api<JobsPage>(`/api/jobs?page=${page}&pageSize=${pageSize}`, { signal });
+
+export const getConfig = (signal?: AbortSignal) => api<AppConfig>("/api/config", { signal });
+
+export const getJobFiles = (id: number, signal?: AbortSignal) => api<JobFiles>(`/api/jobs/${id}/files`, { signal });
+
+export const getDashboardMeta = (signal?: AbortSignal) => api<DashboardMeta>("/api/dashboard/meta", { signal });
+
+export const getArchiveSchedules = (signal?: AbortSignal) => api<ArchiveSchedule[]>("/api/archive-schedules", { signal });
 
 export const parseTweetLink = (url: string) =>
   api<TweetData>("/api/parse/tweet-link", {
@@ -325,8 +358,8 @@ export const testStorage = (config: AppConfig) =>
     body: JSON.stringify(config),
   });
 
-export const listLocalDirectories = (path?: string) =>
-  api<LocalDirectoryListing>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+export const listLocalDirectories = (path?: string, signal?: AbortSignal) =>
+  api<LocalDirectoryListing>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ""}`, { signal });
 
 export const createLocalDirectory = (path: string) =>
   api<LocalDirectoryListing>("/api/local-directories", {
@@ -337,8 +370,9 @@ export const createLocalDirectory = (path: string) =>
 export const getFailedTweets = ({
   page = 1,
   pageSize = 20,
-}: { page?: number; pageSize?: number } = {}) =>
-  api<FailedTweetPage>(`/api/failed-tweets?page=${page}&pageSize=${pageSize}`);
+  signal,
+}: { page?: number; pageSize?: number; signal?: AbortSignal } = {}) =>
+  api<FailedTweetPage>(`/api/failed-tweets?page=${page}&pageSize=${pageSize}`, { signal });
 
 export const checkAuth = (config: AppConfig) =>
   api<AuthCheck>("/api/auth/check", {

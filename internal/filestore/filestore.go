@@ -21,6 +21,7 @@ import (
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/hirochachacha/go-smb2"
 )
 
@@ -38,6 +39,9 @@ type Store interface {
 
 func New(cfg config.AppConfig) (Store, error) {
 	cfg = cfg.Normalized()
+	if err := httpx.ValidateProxyURL(cfg.ProxyURL); err != nil {
+		return nil, err
+	}
 	switch cfg.StorageType {
 	case config.StorageSMB:
 		if cfg.SMBHost == "" {
@@ -52,7 +56,7 @@ func New(cfg config.AppConfig) (Store, error) {
 			return nil, fmt.Errorf("WebDAV 地址不能为空")
 		}
 		parsed, err := url.Parse(cfg.WebDAVURL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 			return nil, fmt.Errorf("WebDAV 地址无效")
 		}
 		return newWebDAVStore(cfg, parsed), nil
@@ -564,8 +568,8 @@ func (e *smbSharedSession) reregisterLocked() bool {
 
 func (e *smbSharedSession) connect(ctx context.Context) error {
 	address := net.JoinHostPort(e.cfg.host, strconv.Itoa(e.cfg.port))
-	dialer := net.Dialer{Timeout: 15 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	// 带链路本地地址拨号防护（S2）：SMB 写入路径同样拒绝云元数据等地址。
+	conn, err := httpx.DialGuarded(ctx, "tcp", address, 15*time.Second)
 	if err != nil {
 		return err
 	}
@@ -636,7 +640,8 @@ func newWebDAVStore(cfg config.AppConfig, base *url.URL) webDAVStore {
 		root:     webDAVURL(base, rootPath),
 		username: cfg.WebDAVUsername,
 		password: cfg.WebDAVPassword,
-		client:   &http.Client{Timeout: 10 * time.Minute},
+		// 复用共享 Transport：注入配置的代理（M1），并带链路本地地址拨号防护（S2）。
+		client: httpx.Client(cfg.ProxyURL, 10*time.Minute),
 	}
 }
 
@@ -723,12 +728,18 @@ func (s webDAVStore) Rename(ctx context.Context, oldPath string, newPath string)
 	if err := s.MkdirAll(ctx, logicalDir(newPath)); err != nil {
 		return err
 	}
+	// 目标已存在时不覆盖（M4）：重命名沿用 Overwrite=F，避免静默覆盖同名目录/文件。
+	if destExists, destErr := s.exists(ctx, newPath); destErr != nil {
+		return destErr
+	} else if destExists {
+		return fmt.Errorf("WebDAV 重命名目标已存在: %s", newPath)
+	}
 	request, err := s.newRequest(ctx, "MOVE", oldPath, nil)
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Destination", s.fullURLForLogical(newPath))
-	request.Header.Set("Overwrite", "T")
+	request.Header.Set("Overwrite", "F")
 	response, err := s.client.Do(request)
 	if err != nil {
 		return err
@@ -879,6 +890,14 @@ func (s webDAVStore) existingFileState(ctx context.Context, dir string, filename
 	}
 	if contentLength >= 0 && info.Size() >= 0 && info.Size() != contentLength {
 		return downloader.Result{}, false, true, nil
+	}
+	// HEAD 未返回 Content-Length 时无法判断残缺；跳过删除，由 PUT 的 If-None-Match 去重。
+	if contentLength < 0 || info.Size() < 0 {
+		bytes := info.Size()
+		if bytes < 0 {
+			bytes = 0
+		}
+		return downloader.Result{Path: filePath, Bytes: bytes, Skipped: true}, true, false, nil
 	}
 	return downloader.Result{Path: filePath, Bytes: info.Size(), Skipped: true}, true, false, nil
 }
