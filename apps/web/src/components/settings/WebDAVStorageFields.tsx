@@ -1,6 +1,6 @@
+import { Col, Form, Input, Row } from "antd";
 import React from "react";
 import type { AppConfig } from "../../lib/api";
-import { SettingsField } from "./SettingsFields";
 
 export const webdavTips = {
   webdavUrl: "WebDAV 服务根地址，例如 https://example.com/dav。",
@@ -17,38 +17,41 @@ export function WebDAVStorageFields({
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
 }) {
   return (
-    <div className="settings-field-grid">
-      <SettingsField label="地址" hint={webdavTips.webdavUrl}>
-        <input
-          className="parser-input"
-          value={draft.webdavUrl}
-          placeholder="https://example.com/dav"
-          onChange={(event) => onChange((current) => ({ ...current, webdavUrl: event.target.value }))}
-        />
-      </SettingsField>
-      <SettingsField label="目录" hint={webdavTips.webdavPath}>
-        <input
-          className="parser-input"
-          value={draft.webdavPath}
-          placeholder="x-media"
-          onChange={(event) => onChange((current) => ({ ...current, webdavPath: event.target.value }))}
-        />
-      </SettingsField>
-      <SettingsField label="用户名" hint={webdavTips.remoteUsername}>
-        <input
-          className="parser-input"
-          value={draft.webdavUsername}
-          onChange={(event) => onChange((current) => ({ ...current, webdavUsername: event.target.value }))}
-        />
-      </SettingsField>
-      <SettingsField label="密码" hint={webdavTips.savedSecret}>
-        <input
-          className="parser-input"
-          type="password"
-          value={draft.webdavPassword ?? ""}
-          onChange={(event) => onChange((current) => ({ ...current, webdavPassword: event.target.value }))}
-        />
-      </SettingsField>
-    </div>
+    <Row gutter={[16, 0]}>
+      <Col xs={24}>
+        <Form.Item label="地址" tooltip={webdavTips.webdavUrl}>
+          <Input
+            value={draft.webdavUrl}
+            onChange={(event) => onChange((current) => ({ ...current, webdavUrl: event.target.value }))}
+            placeholder="https://example.com/dav"
+          />
+        </Form.Item>
+      </Col>
+      <Col xs={24}>
+        <Form.Item label="目录" tooltip={webdavTips.webdavPath}>
+          <Input
+            value={draft.webdavPath}
+            onChange={(event) => onChange((current) => ({ ...current, webdavPath: event.target.value }))}
+            placeholder="x-media"
+          />
+        </Form.Item>
+      </Col>
+      <Col xs={24} md={12}>
+        <Form.Item label="用户名" tooltip={webdavTips.remoteUsername}>
+          <Input
+            value={draft.webdavUsername}
+            onChange={(event) => onChange((current) => ({ ...current, webdavUsername: event.target.value }))}
+          />
+        </Form.Item>
+      </Col>
+      <Col xs={24} md={12}>
+        <Form.Item label="密码" tooltip={webdavTips.savedSecret}>
+          <Input.Password
+            value={draft.webdavPassword ?? ""}
+            onChange={(event) => onChange((current) => ({ ...current, webdavPassword: event.target.value }))}
+          />
+        </Form.Item>
+      </Col>
+    </Row>
   );
 }

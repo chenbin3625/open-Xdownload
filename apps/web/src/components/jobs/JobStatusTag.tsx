@@ -1,21 +1,28 @@
+import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  DownloadOutlined,
+  LoadingOutlined,
+  PauseCircleOutlined,
+  StopOutlined,
+} from "@ant-design/icons";
+import { Tag } from "antd";
 import React from "react";
 import type { Job } from "../../lib/api";
 
-const statusCopy: Record<Job["status"], { label: string; tone: string }> = {
-  pending: { label: "排队", tone: "muted" },
-  resolving: { label: "解析", tone: "processing" },
-  downloading: { label: "下载", tone: "processing" },
-  completed: { label: "完成", tone: "success" },
-  completed_with_errors: { label: "部分失败", tone: "warning" },
-  failed: { label: "失败", tone: "danger" },
-  canceled: { label: "取消", tone: "muted" },
-};
-
-export const JobStatusTag = React.memo(function JobStatusTag({
-  status,
-}: {
-  status: Job["status"];
-}) {
-  const config = statusCopy[status];
-  return <span className={`job-status job-status-${config.tone}`}>{config.label}</span>;
-});
+export function JobStatusTag({ status }: { status: Job["status"] }) {
+  const config = {
+    pending: { color: "default", icon: <PauseCircleOutlined />, label: "排队" },
+    resolving: { color: "processing", icon: <LoadingOutlined spin />, label: "解析" },
+    downloading: { color: "blue", icon: <DownloadOutlined />, label: "下载" },
+    completed: { color: "success", icon: <CheckCircleOutlined />, label: "完成" },
+    completed_with_errors: { color: "warning", icon: <CloseCircleOutlined />, label: "部分失败" },
+    failed: { color: "error", icon: <CloseCircleOutlined />, label: "失败" },
+    canceled: { color: "default", icon: <StopOutlined />, label: "取消" },
+  }[status];
+  return (
+    <Tag color={config.color} icon={config.icon}>
+      {config.label}
+    </Tag>
+  );
+}

@@ -75,6 +75,9 @@ export default defineConfig({
           if (!id.includes("node_modules")) return undefined;
           if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react";
           if (id.includes("/@tanstack/")) return "query";
+          if (id.includes("/@ant-design/icons/")) return "icons";
+          if (id.includes("/antd/")) return "antd";
+          return "vendor";
         },
       },
     },

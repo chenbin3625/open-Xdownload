@@ -1,9 +1,16 @@
+import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  SyncOutlined,
+  UnorderedListOutlined,
+} from "@ant-design/icons";
+import { Card, Col, Row, Statistic, Typography } from "antd";
 import React from "react";
 import type { DashboardStats } from "../../lib/api";
 
-const numberFormatter = new Intl.NumberFormat("zh-CN");
+const { Text } = Typography;
 
-export const StatsSummary = React.memo(function StatsSummary({
+export function StatsSummary({
   stats,
   failedTweetCount = 0,
   onOpenFailedDrawer,
@@ -17,6 +24,7 @@ export const StatsSummary = React.memo(function StatsSummary({
       key: "total",
       label: "任务总数",
       value: stats.total,
+      icon: <UnorderedListOutlined />,
       tone: "primary",
       hint: "历史全部下载任务",
     },
@@ -24,6 +32,7 @@ export const StatsSummary = React.memo(function StatsSummary({
       key: "active",
       label: "正在进行",
       value: stats.active,
+      icon: <SyncOutlined spin={stats.active > 0} />,
       tone: "processing",
       hint: stats.active > 0 ? "正在并发下载与解析中" : "暂无活跃任务",
     },
@@ -31,6 +40,7 @@ export const StatsSummary = React.memo(function StatsSummary({
       key: "completed",
       label: "已完成",
       value: stats.completed,
+      icon: <CheckCircleOutlined />,
       tone: "success",
       hint: "所有媒体均已保存完毕",
     },
@@ -38,6 +48,7 @@ export const StatsSummary = React.memo(function StatsSummary({
       key: "failed",
       label: "异常 / 失败",
       value: stats.failed + failedTweetCount,
+      icon: <CloseCircleOutlined />,
       tone: "danger",
       hint: failedTweetCount > 0 ? `含 ${failedTweetCount} 条推文待重试` : "无待处理失败项",
       clickable: failedTweetCount > 0 && !!onOpenFailedDrawer,
@@ -46,28 +57,20 @@ export const StatsSummary = React.memo(function StatsSummary({
   ];
 
   return (
-    <div className="stats-summary-grid">
+    <Row gutter={[12, 12]} className="stats-summary-grid">
       {cards.map((card) => (
-        <div
-          key={card.key}
-          className={`stat-card stat-card-${card.tone} ${card.clickable ? "stat-card-clickable" : ""}`}
-          onClick={card.onClick}
-          role={card.clickable ? "button" : undefined}
-          tabIndex={card.clickable ? 0 : undefined}
-          onKeyDown={(event) => {
-            if (card.clickable && (event.key === "Enter" || event.key === " ")) {
-              event.preventDefault();
-              card.onClick?.();
-            }
-          }}
-        >
-          <div className="stat-card-header">
-            <span className="stat-card-label">{card.label}</span>
-          </div>
-          <div className="stat-card-value">{numberFormatter.format(card.value)}</div>
-          <div className="stat-card-hint">{card.hint}</div>
-        </div>
+        <Col xs={12} sm={12} lg={6} key={card.key}>
+          <Card
+            size="small"
+            hoverable={card.clickable}
+            className="stat-card"
+            onClick={card.onClick}
+          >
+            <Statistic title={card.label} value={card.value} prefix={card.icon} />
+            <Text type="secondary">{card.hint}</Text>
+          </Card>
+        </Col>
       ))}
-    </div>
+    </Row>
   );
-});
+}

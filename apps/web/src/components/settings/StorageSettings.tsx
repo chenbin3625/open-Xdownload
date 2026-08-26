@@ -1,4 +1,6 @@
+import { SafetyCertificateOutlined } from "@ant-design/icons";
 import { useMutation } from "@tanstack/react-query";
+import { Alert, Button, Segmented, notification } from "antd";
 import React, { useEffect, useState } from "react";
 import {
   testStorage,
@@ -6,8 +8,12 @@ import {
   type StorageTestResult,
   type StorageType,
 } from "../../lib/api";
-import { getErrorMessage } from "../../lib/format";
-import { toast } from "../../lib/toast";
+import {
+  EllipsisText,
+  Stack,
+  Toolbar,
+  getErrorMessage,
+} from "../common/CommonUI";
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
 import { SMBStorageFields } from "./SMBStorageFields";
 import { WebDAVStorageFields } from "./WebDAVStorageFields";
@@ -27,6 +33,7 @@ export function storageTargetLabel(config: AppConfig) {
   }
   return config.downloadDir || "本地目录未配置";
 }
+
 export function StorageSettings({
   draft,
   onChange,
@@ -42,13 +49,19 @@ export function StorageSettings({
     onSuccess: (result) => {
       setTestResult(result);
       setTestError("");
-      toast("存储测试通过", { description: result.root });
+      notification.success({
+        message: "存储测试通过",
+        description: result.root,
+      });
     },
     onError: (error) => {
       const message = getErrorMessage(error);
       setTestResult(null);
       setTestError(message);
-      toast("存储测试失败", { description: message, tone: "err" });
+      notification.error({
+        message: "存储测试失败",
+        description: message,
+      });
     },
   });
 
@@ -58,21 +71,13 @@ export function StorageSettings({
   }, [draft.storageType]);
 
   return (
-    <div className="settings-stack">
-      <div className="batch-tabs" role="tablist" aria-label="存储类型">
-        {storageOptions.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            role="tab"
-            aria-selected={draft.storageType === option.value}
-            className={draft.storageType === option.value ? "batch-tab is-active" : "batch-tab"}
-            onClick={() => onChange((current) => ({ ...current, storageType: option.value }))}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
+    <Stack size={16}>
+      <Segmented
+        block
+        value={draft.storageType}
+        options={storageOptions.map((option) => ({ value: option.value, label: option.label }))}
+        onChange={(value) => onChange((current) => ({ ...current, storageType: value as StorageType }))}
+      />
 
       {draft.storageType === "local" ? (
         <LocalDirectoryPicker
@@ -91,7 +96,7 @@ export function StorageSettings({
           onTest={() => storageTestMutation.mutate(draft)}
         />
       ) : null}
-    </div>
+    </Stack>
   );
 }
 
@@ -108,28 +113,32 @@ export function RemoteStorageTestPanel({
   result: StorageTestResult | null;
   onTest: () => void;
 }) {
-  const target = storageTargetLabel(draft);
   return (
-    <div className="settings-stack">
-      <div className="failed-toolbar">
-        <span className="job-ellipsis" title={target}>{target}</span>
-        <button type="button" className="job-text-btn" disabled={loading} onClick={onTest}>
-          {loading ? "测试中…" : "测试连接"}
-        </button>
-      </div>
+    <Stack size={8} style={{ marginTop: -6 }}>
+      <Toolbar>
+        <EllipsisText type="secondary" title={storageTargetLabel(draft)} style={{ flex: "1 1 220px", minWidth: 0 }}>
+          {storageTargetLabel(draft)}
+        </EllipsisText>
+        <Button icon={<SafetyCertificateOutlined />} loading={loading} onClick={onTest}>
+          测试连接
+        </Button>
+      </Toolbar>
       {result ? (
-        <div className="settings-note is-ok">
-          <strong>{result.message}</strong>
-          <span className="job-ellipsis" title={result.root}>{result.root}</span>
-          <span className="job-ellipsis" title={result.path}>{result.path}</span>
-        </div>
+        <Alert
+          type="success"
+          showIcon
+          message={result.message}
+          description={
+            <Stack size={2}>
+              <EllipsisText title={result.root}>{result.root}</EllipsisText>
+              <EllipsisText type="secondary" title={result.path}>
+                {result.path}
+              </EllipsisText>
+            </Stack>
+          }
+        />
       ) : null}
-      {error ? (
-        <div className="settings-note is-err">
-          <strong>存储测试失败</strong>
-          <span>{error}</span>
-        </div>
-      ) : null}
-    </div>
+      {error ? <Alert type="error" showIcon message="存储测试失败" description={error} /> : null}
+    </Stack>
   );
 }
