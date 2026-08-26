@@ -40,10 +40,10 @@ func TestMigrateNormalizesAndDeduplicatesDownloadsMediaURL(t *testing.T) {
 		}
 	}
 
-	if err := store.normalizeDownloadsMediaURL(); err != nil {
+	if err := store.normalizeDownloadsMediaURL(store.db); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	if err := store.deduplicateDownloads(); err != nil {
+	if err := store.deduplicateDownloads(store.db); err != nil {
 		t.Fatalf("dedup: %v", err)
 	}
 	if err := store.addMissingIndexes(); err != nil {
@@ -72,7 +72,7 @@ func TestMigrationsRunOnceAfterOpen(t *testing.T) {
 	}
 	defer store.Close()
 
-	for _, name := range []string{"normalize_downloads_media_url", "deduplicate_downloads", "deduplicate_downloads_media_url_only"} {
+	for _, name := range []string{"normalize_downloads_media_url", "deduplicate_downloads", "deduplicate_downloads_media_url_only", "dashboard_counters_v1"} {
 		var count int
 		if err := store.db.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name); err != nil {
 			t.Fatalf("check %s: %v", name, err)
@@ -84,7 +84,7 @@ func TestMigrationsRunOnceAfterOpen(t *testing.T) {
 
 	// 再次调用 runMigrationOnce 应直接跳过（不重复执行 fn）。
 	before := time.Now()
-	if err := store.runMigrationOnce("deduplicate_downloads", func() error {
+	if err := store.runMigrationOnce("deduplicate_downloads", func(migrationExecutor) error {
 		t.Fatal("already-applied migration must not re-run")
 		return nil
 	}); err != nil {

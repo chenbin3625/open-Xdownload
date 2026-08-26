@@ -10,7 +10,9 @@ type Event struct {
 	Type      string `json:"type"`
 	JobID     int64  `json:"jobId,omitempty"`
 	Payload   any    `json:"payload,omitempty"`
+	Meta      any    `json:"meta,omitempty"`
 	Timestamp string `json:"timestamp"`
+	sse       []byte
 }
 
 type EventBus struct {
@@ -46,9 +48,13 @@ func (bus *EventBus) Unsubscribe(channel chan Event) {
 }
 
 func (bus *EventBus) Publish(event Event) {
+	if bus == nil {
+		return
+	}
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	event.sse = marshalSSE(event)
 	bus.mu.Lock()
 	defer bus.mu.Unlock()
 	for channel := range bus.subscribers {
@@ -60,6 +66,20 @@ func (bus *EventBus) Publish(event Event) {
 }
 
 func (event Event) MarshalSSE() []byte {
-	payload, _ := json.Marshal(event)
-	return append([]byte("data: "), append(payload, []byte("\n\n")...)...)
+	if len(event.sse) > 0 {
+		return event.sse
+	}
+	return marshalSSE(event)
+}
+
+func marshalSSE(event Event) []byte {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return []byte(": encode-error\n\n")
+	}
+	out := make([]byte, 0, 8+len(payload))
+	out = append(out, "data: "...)
+	out = append(out, payload...)
+	out = append(out, '\n', '\n')
+	return out
 }

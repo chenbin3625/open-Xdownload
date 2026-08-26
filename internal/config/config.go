@@ -10,6 +10,70 @@ import (
 	"strings"
 )
 
+// 环境变量覆盖项（S3）：允许部署方用环境变量注入密钥，避免凭据必须明文存库 / 经 HTTP
+// 回传。仅在读取配置（GetConfig / 使用点）覆盖显示与使用值；UpdateConfig 的合并基准依然
+// 是数据库中已存值，因此 UI 保存不会把环境变量持久化进 SQLite。
+const (
+	EnvAuthToken         = "OPEN_XDOWNLOAD_AUTH_TOKEN"
+	EnvCSRFToken         = "OPEN_XDOWNLOAD_CT0"
+	EnvProxyURL          = "OPEN_XDOWNLOAD_PROXY_URL"
+	EnvAdditionalCookies = "OPEN_XDOWNLOAD_ADDITIONAL_COOKIES"
+	EnvSMBPassword       = "OPEN_XDOWNLOAD_SMB_PASSWORD"
+	EnvWebDAVPassword    = "OPEN_XDOWNLOAD_WEBDAV_PASSWORD"
+)
+
+// ApplyEnvOverrides 用环境变量覆盖敏感配置字段。环境变量为空时保持原值。
+func ApplyEnvOverrides(cfg AppConfig) AppConfig {
+	if value := os.Getenv(EnvAuthToken); value != "" {
+		cfg.AuthToken = strings.TrimSpace(value)
+	}
+	if value := os.Getenv(EnvCSRFToken); value != "" {
+		cfg.CSRFToken = strings.TrimSpace(value)
+	}
+	if value := os.Getenv(EnvProxyURL); value != "" {
+		cfg.ProxyURL = strings.TrimSpace(value)
+	}
+	if value := os.Getenv(EnvAdditionalCookies); value != "" {
+		cfg.AdditionalCookies = value
+	}
+	if value := os.Getenv(EnvSMBPassword); value != "" {
+		cfg.SMBPassword = value
+	}
+	if value := os.Getenv(EnvWebDAVPassword); value != "" {
+		cfg.WebDAVPassword = value
+	}
+	return cfg.Normalized()
+}
+
+// RevertEnvOnlyEcho 阻止 UI 把仅由环境变量注入、未落库的值原样 POST 回写进 SQLite。
+// 提交值与 env 完全一致且库内另有存值（含空串）时，保留库内值。
+func RevertEnvOnlyEcho(submitted, stored, envKey string) string {
+	envValue := strings.TrimSpace(os.Getenv(envKey))
+	if envValue == "" || submitted != envValue {
+		return submitted
+	}
+	return stored
+}
+
+// MergeStorageSecret 依据目标是否未变（same target）决定是否继承已存密码：提交值为空或
+// 占位符且目标未变时返回已存值；目标已变时清空（绝不把字面量 "********" 当密码发给新主机）。
+func MergeStorageSecret(submitted, stored string, targetUnchanged bool) string {
+	if submitted == "" || submitted == SecretPlaceholder {
+		if targetUnchanged {
+			return stored
+		}
+		return ""
+	}
+	return submitted
+}
+
+// SameSMBTarget 报告两个配置的 SMB 主机/端口是否一致（决定密码是否可继承）。
+func SameSMBTarget(a, b AppConfig) bool {
+	a = a.Normalized()
+	b = b.Normalized()
+	return strings.EqualFold(strings.TrimSpace(a.SMBHost), strings.TrimSpace(b.SMBHost)) && a.SMBPort == b.SMBPort
+}
+
 // SecretPlaceholder is the sentinel substituted for secret values when
 // redacting a config for display. Callers that round-trip a redacted config
 // back through the API (mergeSecretPlaceholders / RestoreURLUserinfo) restore
@@ -65,6 +129,7 @@ type AppConfig struct {
 }
 
 type AuthCookie struct {
+	ID        string `json:"id,omitempty"`
 	AuthToken string `json:"authToken"`
 	CSRFToken string `json:"csrfToken"`
 }
@@ -155,8 +220,8 @@ func redact(value string) string {
 	return SecretPlaceholder
 }
 
-// RedactAdditionalCookies returns a line-by-line redacted version of additional cookies
-// preserving the count of configured cookie pairs.
+// RedactAdditionalCookies returns a JSON redacted version of additional cookies,
+// preserving a stable id for each configured pair so row deletion cannot shift credentials.
 func RedactAdditionalCookies(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -165,15 +230,19 @@ func RedactAdditionalCookies(raw string) string {
 	if raw == SecretPlaceholder {
 		return SecretPlaceholder
 	}
-	cookies := ParseCookiePairs(raw)
+	cookies := withCookieIDs(ParseCookiePairs(raw))
 	if len(cookies) == 0 {
 		return SecretPlaceholder
 	}
-	lines := make([]string, 0, len(cookies))
-	for range cookies {
-		lines = append(lines, fmt.Sprintf("auth_token=%s; ct0=%s", SecretPlaceholder, SecretPlaceholder))
+	redacted := make([]AuthCookie, 0, len(cookies))
+	for _, cookie := range cookies {
+		redacted = append(redacted, AuthCookie{ID: cookie.ID, AuthToken: SecretPlaceholder, CSRFToken: SecretPlaceholder})
 	}
-	return strings.Join(lines, "\n")
+	payload, err := json.Marshal(redacted)
+	if err != nil {
+		return SecretPlaceholder
+	}
+	return string(payload)
 }
 
 // RestoreAdditionalCookies merges submitted additional cookies with previously stored ones,
@@ -186,33 +255,41 @@ func RestoreAdditionalCookies(submitted, stored string) string {
 	if submitted == SecretPlaceholder {
 		return stored
 	}
-	subPairs := ParseCookiePairs(submitted)
+	subPairs := withCookieIDs(ParseCookiePairs(submitted))
 	if len(subPairs) == 0 {
 		return submitted
 	}
-	storedPairs := ParseCookiePairs(stored)
-	lines := make([]string, 0, len(subPairs))
+	storedPairs := withCookieIDs(ParseCookiePairs(stored))
+	storedByID := make(map[string]AuthCookie, len(storedPairs))
+	for _, pair := range storedPairs {
+		storedByID[pair.ID] = pair
+	}
+	merged := make([]AuthCookie, 0, len(subPairs))
 	for i, sub := range subPairs {
 		auth := sub.AuthToken
 		csrf := sub.CSRFToken
-		if (auth == SecretPlaceholder || auth == "") && i < len(storedPairs) {
-			auth = storedPairs[i].AuthToken
+		storedPair, hasStored := storedByID[sub.ID]
+		if !hasStored && i < len(storedPairs) && sub.ID == fmt.Sprintf("cookie-%d", i) {
+			storedPair = storedPairs[i]
+			hasStored = true
 		}
-		if (csrf == SecretPlaceholder || csrf == "") && i < len(storedPairs) {
-			csrf = storedPairs[i].CSRFToken
+		if hasStored {
+			if auth == SecretPlaceholder || auth == "" {
+				auth = storedPair.AuthToken
+			}
+			if csrf == SecretPlaceholder || csrf == "" {
+				csrf = storedPair.CSRFToken
+			}
 		}
 		if auth != "" || csrf != "" {
-			parts := make([]string, 0, 2)
-			if auth != "" {
-				parts = append(parts, "auth_token="+auth)
-			}
-			if csrf != "" {
-				parts = append(parts, "ct0="+csrf)
-			}
-			lines = append(lines, strings.Join(parts, "; "))
+			merged = append(merged, AuthCookie{ID: sub.ID, AuthToken: auth, CSRFToken: csrf})
 		}
 	}
-	return strings.Join(lines, "\n")
+	payload, err := json.Marshal(merged)
+	if err != nil {
+		return submitted
+	}
+	return string(payload)
 }
 
 // ParseCookiePairs parses cookie pairs from JSON or text representations.
@@ -222,6 +299,7 @@ func ParseCookiePairs(raw string) []AuthCookie {
 		return nil
 	}
 	type cookieJSON struct {
+		ID         string `json:"id"`
 		AuthToken  string `json:"authToken"`
 		CSRFToken  string `json:"csrfToken"`
 		AuthToken2 string `json:"auth_token"`
@@ -240,7 +318,7 @@ func ParseCookiePairs(raw string) []AuthCookie {
 				csrf = item.CT0
 			}
 			if auth != "" || csrf != "" {
-				pairs = append(pairs, AuthCookie{AuthToken: strings.TrimSpace(auth), CSRFToken: strings.TrimSpace(csrf)})
+				pairs = append(pairs, AuthCookie{ID: strings.TrimSpace(item.ID), AuthToken: strings.TrimSpace(auth), CSRFToken: strings.TrimSpace(csrf)})
 			}
 		}
 		if len(pairs) > 0 {
@@ -262,6 +340,16 @@ func ParseCookiePairs(raw string) []AuthCookie {
 			flush()
 			continue
 		}
+		// 形如 "auth_token: xxx" 的 YAML/冒号行：整行按 key: value 解析；行内含 ;/, 时
+		// 落入下面的 token 分解，避免把 "auth_token=a; ct0=b" 里的 ":" 误当分隔符。
+		if strings.Contains(line, ":") && !strings.ContainsAny(line, ";,") {
+			if setAuthCookieValue(&current, line) {
+				if current.AuthToken != "" && current.CSRFToken != "" {
+					flush()
+				}
+				continue
+			}
+		}
 		for _, token := range strings.FieldsFunc(line, func(r rune) bool {
 			return r == ';' || r == ',' || r == ' '
 		}) {
@@ -272,6 +360,15 @@ func ParseCookiePairs(raw string) []AuthCookie {
 		}
 	}
 	flush()
+	return pairs
+}
+
+func withCookieIDs(pairs []AuthCookie) []AuthCookie {
+	for index := range pairs {
+		if strings.TrimSpace(pairs[index].ID) == "" {
+			pairs[index].ID = fmt.Sprintf("cookie-%d", index)
+		}
+	}
 	return pairs
 }
 

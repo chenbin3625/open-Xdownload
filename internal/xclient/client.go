@@ -2,12 +2,12 @@ package xclient
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,15 +17,32 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/tidwall/gjson"
 )
 
 const (
 	host      = "https://x.com"
-	bearer    = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+// defaultGuestBearerValue 是 X 的公开 guest token（公开已知常量）。
+const defaultGuestBearerValue = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+
+// guestBearer 每次进程启动读取一次；可用环境变量 OPEN_XDOWNLOAD_GUEST_BEARER 覆盖，
+// 以便官方 token 变更时无需改代码即可轮换（S4）。
+var guestBearer = defaultGuestBearer()
+
+func defaultGuestBearer() string {
+	if value := strings.TrimSpace(os.Getenv("OPEN_XDOWNLOAD_GUEST_BEARER")); value != "" {
+		return value
+	}
+	return defaultGuestBearerValue
+}
+
+// screenNamePattern 用于从首页识别登录账号；包级编译，避免每次调用重复编译正则（M3）。
+var screenNamePattern = regexp.MustCompile(`"screen_name":"(\S+?)"`)
 
 const timelineFeatures = `{"rweb_tipjar_consumption_enabled":true,"responsive_web_graphql_exclude_directive_enabled":true,"verified_phone_label_enabled":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true,"responsive_web_graphql_skip_user_profile_image_extensions_enabled":false,"communities_web_enable_tweet_community_results_fetch":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,"articles_preview_enabled":true,"tweetypie_unmention_optimization_enabled":true,"responsive_web_edit_tweet_api_enabled":true,"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"view_counts_everywhere_api_enabled":true,"longform_notetweets_consumption_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,"tweet_awards_web_tipping_enabled":false,"creator_subscriptions_quote_tweet_preview_enabled":false,"freedom_of_speech_not_reach_fetch_enabled":true,"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,"rweb_video_timestamps_enabled":true,"longform_notetweets_rich_text_read_enabled":true,"longform_notetweets_inline_media_enabled":true,"responsive_web_enhance_cards_enabled":false}`
 
@@ -174,20 +191,10 @@ func NewPool(cfg config.AppConfig) (*Pool, error) {
 }
 
 func NewClient(cred Credentials, proxyURL string) (*Client, error) {
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-	}
-	if strings.TrimSpace(proxyURL) != "" {
-		parsed, err := url.Parse(proxyURL)
-		if err != nil {
-			return nil, err
-		}
-		transport.Proxy = http.ProxyURL(parsed)
+	// 复用带连接池与链路本地地址拨号防护的 Transport（M1/S2）；空代理时尊重环境变量代理。
+	transport, err := httpx.Transport(proxyURL)
+	if err != nil {
+		return nil, err
 	}
 	return &Client{
 		http:         &http.Client{Transport: transport, Timeout: 90 * time.Second},
@@ -217,10 +224,18 @@ func (p *Pool) Next() *Client {
 	return client
 }
 
+// maxPoolSelectWait 限制 Select 因"所有客户端限流"而阻塞等待的总时长：超过后立即返回错误，
+// 让归档把该次请求落到失败/重试队列，而不是在限流窗口上无限挂死（M5）。
+const maxPoolSelectWait = 2 * time.Minute
+
+// maxPoolSelectWaitStep 单次等待上限：若最早复位时间很远，只等待一个上限时长后重新评估。
+const maxPoolSelectWaitStep = 60 * time.Second
+
 func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 	if p == nil || len(p.clients) == 0 {
 		return nil, errors.New("没有可用 X 客户端")
 	}
+	var waited time.Duration
 	for {
 		var blocked int
 		var disabled int
@@ -248,7 +263,19 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 		if blocked == 0 {
 			return nil, errors.New("没有可用 X 客户端")
 		}
-		timer := time.NewTimer(3 * time.Second)
+		// 全部候选被限流：等最早复位时刻（有界），避免按固定 3s 空转碰运气。
+		wait := p.earliestBlockedWait()
+		if wait <= 0 {
+			wait = 200 * time.Millisecond
+		}
+		if wait > maxPoolSelectWaitStep {
+			wait = maxPoolSelectWaitStep
+		}
+		if waited+wait > maxPoolSelectWait {
+			return nil, errors.New("X 客户端暂时全部限流，请稍后重试")
+		}
+		waited += wait
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -256,6 +283,27 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 		case <-timer.C:
 		}
 	}
+}
+
+// earliestBlockedWait 返回当前所有客户端中最快结束限流的时间距离；无人限流返回 0。
+func (p *Pool) earliestBlockedWait() time.Duration {
+	var earliest time.Time
+	found := false
+	for _, client := range p.clients {
+		if client.isDisabled() || client.limiter == nil {
+			continue
+		}
+		if reset, ok := client.limiter.blockedReset(); ok {
+			if !found || reset.Before(earliest) {
+				earliest = reset
+				found = true
+			}
+		}
+	}
+	if !found {
+		return 0
+	}
+	return time.Until(earliest)
 }
 
 func (p *Pool) Diagnostics() PoolDiagnostics {
@@ -294,87 +342,18 @@ func (p *Pool) CheckAll(ctx context.Context) PoolDiagnostics {
 	return p.Diagnostics()
 }
 
+// ParseAdditionalCookies 解析备用 Cookie（JSON 数组或文本/每行一个账号），收敛到
+// config.ParseCookiePairs 统一实现（M2），仅保留成对完整的凭据。
 func ParseAdditionalCookies(raw string) []Credentials {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "********" {
-		return nil
-	}
-	type cookieJSON struct {
-		AuthToken  string `json:"authToken"`
-		CSRFToken  string `json:"csrfToken"`
-		AuthToken2 string `json:"auth_token"`
-		CT0        string `json:"ct0"`
-	}
-	var decoded []cookieJSON
-	if json.Unmarshal([]byte(raw), &decoded) == nil {
-		creds := make([]Credentials, 0, len(decoded))
-		for _, item := range decoded {
-			auth := firstNonEmpty(item.AuthToken, item.AuthToken2)
-			csrf := firstNonEmpty(item.CSRFToken, item.CT0)
-			if auth != "" && csrf != "" {
-				creds = append(creds, Credentials{AuthToken: auth, CSRFToken: csrf})
-			}
-		}
-		return creds
-	}
-	blocks := strings.Split(raw, "\n")
-	creds := []Credentials{}
-	current := Credentials{}
-	flush := func() {
-		if current.AuthToken != "" && current.CSRFToken != "" {
-			creds = append(creds, current)
-		}
-		current = Credentials{}
-	}
-	for _, line := range blocks {
-		line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
-		if line == "" {
-			flush()
+	pairs := config.ParseCookiePairs(raw)
+	creds := make([]Credentials, 0, len(pairs))
+	for _, pair := range pairs {
+		if pair.AuthToken == "" || pair.CSRFToken == "" {
 			continue
 		}
-		if strings.Contains(line, ":") && !strings.ContainsAny(line, ";,") {
-			if setCredentialValue(&current, line) {
-				if current.AuthToken != "" && current.CSRFToken != "" {
-					flush()
-				}
-				continue
-			}
-		}
-		for _, token := range strings.FieldsFunc(line, func(r rune) bool {
-			return r == ';' || r == ',' || r == ' '
-		}) {
-			setCredentialValue(&current, token)
-		}
-		if current.AuthToken != "" && current.CSRFToken != "" {
-			flush()
-		}
+		creds = append(creds, Credentials{AuthToken: pair.AuthToken, CSRFToken: pair.CSRFToken})
 	}
-	flush()
 	return creds
-}
-
-func setCredentialValue(current *Credentials, raw string) bool {
-	key, value, ok := strings.Cut(raw, "=")
-	if !ok {
-		key, value, ok = strings.Cut(raw, ":")
-	}
-	if !ok {
-		return false
-	}
-	key = strings.TrimSpace(key)
-	value = strings.Trim(strings.TrimSpace(value), `"'`)
-	if value == "" {
-		return false
-	}
-	switch key {
-	case "auth_token", "authToken":
-		current.AuthToken = value
-	case "ct0", "csrfToken":
-		current.CSRFToken = value
-	default:
-		return false
-	}
-	return true
 }
 
 func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
@@ -402,15 +381,18 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	matches := regexp.MustCompile(`"screen_name":"(\S+?)"`).FindSubmatch(payload)
+	matches := screenNamePattern.FindSubmatch(payload)
 	if len(matches) < 2 {
 		err := errors.New("无法从 X 首页识别登录账号")
 		c.disable(err)
 		return "", err
 	}
-	c.screen = string(matches[1])
+	screenName := string(matches[1])
+	c.mu.Lock()
+	c.screen = screenName
+	c.mu.Unlock()
 	c.clearError()
-	return c.screen, nil
+	return screenName, nil
 }
 
 func (c *Client) GetUserByInput(ctx context.Context, input string) (User, error) {
@@ -769,7 +751,7 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 		return nil, err
 	}
 	c.setCookieHeaders(request)
-	request.Header.Set("Authorization", "Bearer "+bearer)
+	request.Header.Set("Authorization", "Bearer "+guestBearer)
 	request.Header.Set("X-Csrf-Token", c.csrfToken)
 	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Accept", "application/json")
@@ -890,6 +872,10 @@ func (c *Client) status(index int, primary bool) ClientStatus {
 	disabled := c.disabled
 	lastError := c.lastError
 	c.mu.Unlock()
+	var rateLimits []RateLimitSnapshot
+	if c.limiter != nil {
+		rateLimits = c.limiter.snapshot()
+	}
 	return ClientStatus{
 		Index:        index,
 		Primary:      primary,
@@ -898,7 +884,7 @@ func (c *Client) status(index int, primary bool) ClientStatus {
 		Disabled:     disabled,
 		Error:        lastError,
 		RequestCount: c.requestCount.Load(),
-		RateLimits:   c.limiter.snapshot(),
+		RateLimits:   rateLimits,
 	}
 }
 

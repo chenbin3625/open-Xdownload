@@ -269,6 +269,63 @@ func TestWebDAVSaveMediaReplacesIncompleteExistingFile(t *testing.T) {
 	}
 }
 
+func TestWebDAVSaveMediaSkipsWhenHEADHasNoContentLength(t *testing.T) {
+	var mu sync.Mutex
+	deletes := []string{}
+	puts := []string{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Length", "10")
+			_, _ = w.Write([]byte("0123456789"))
+		case "MKCOL":
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodHead:
+			if strings.HasSuffix(r.URL.Path, "/media.mp4") {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			mu.Lock()
+			puts = append(puts, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodDelete:
+			mu.Lock()
+			deletes = append(deletes, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	store := newWebDAVStore(config.AppConfig{WebDAVURL: server.URL, WebDAVPath: "remote"}.Normalized(), base)
+	result, err := store.SaveMedia(context.Background(), downloader.New(), server.URL+"/media", store.Join(store.Root(), "downloads"), "media", downloader.Options{})
+	if err != nil {
+		t.Fatalf("save media: %v", err)
+	}
+	if !result.Skipped {
+		t.Fatal("skipped = false, want skip when HEAD has no Content-Length")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deletes) != 0 {
+		t.Fatalf("deletes = %#v, want no delete when size unknown", deletes)
+	}
+	if len(puts) != 0 {
+		t.Fatalf("puts = %#v, want no PUT when existing file size unknown", puts)
+	}
+}
+
 // TestSMBReregisterLockedOwnership 验证 reregisterLocked 的返回语义（Bug #10 修复）：
 // true 表示调用方持有的会话就是缓存中该键的持有者；false 表示同键已被另一条目占用，
 // 调用方已成为孤儿，必须在操作结束后关闭自己重连出来的连接。纯内存测试，不涉及网络。
@@ -332,4 +389,28 @@ func TestSMBReregisterLockedOwnership(t *testing.T) {
 		t.Fatalf("map entry for keyA after re-register = %p, want e2 %p", got, e2)
 	}
 	smbSessionsMu.Unlock()
+}
+
+func TestWebDAVRenameRejectsExistingTarget(t *testing.T) {
+	// M4：重命名不应覆盖已存在的目标——目标存在时应报错且不发送 MOVE。
+	var moveCalled atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// HEAD 一律返回 200：旧路径存在，新路径也已存在（目标冲突应被拒绝）。
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	store := newWebDAVStore(config.AppConfig{WebDAVURL: server.URL}.Normalized(), base)
+
+	err = store.Rename(context.Background(), "/old-dir", "/old-dir-new")
+	if err == nil {
+		t.Fatal("Rename with existing target: err = nil, want error")
+	}
+	if moveCalled.Load() {
+		t.Fatal("MOVE was issued despite target existing")
+	}
 }

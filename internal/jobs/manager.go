@@ -22,6 +22,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/filestore"
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
@@ -44,6 +45,7 @@ type Manager struct {
 	once       sync.Once
 	mu         sync.Mutex
 	active     map[int64]context.CancelFunc
+	stopCancel context.CancelFunc
 	wg         sync.WaitGroup
 	retryMu    sync.Mutex
 	userMu     sync.Mutex
@@ -53,7 +55,23 @@ type Manager struct {
 	xPoolMu    sync.Mutex
 	xPoolKey   string
 	cachedPool *xclient.Pool
+
+	// lastMaintenance 记录上次后台维护时间（M7：定期清理过期的失败记录）。仅在
+	// 调度循环单 goroutine 中读写，无需加锁。
+	lastMaintenance time.Time
 }
+
+const (
+	// failedRecordRetention 失败推文/失败媒体记录的保留期；超过后由后台维护清理。
+	failedRecordRetention = 180 * 24 * time.Hour
+	// maintenanceInterval 后台维护执行间隔。
+	maintenanceInterval = 12 * time.Hour
+	// progressWriteInterval 归档进度写入的最小时隔，避免每个媒体一次 DB 写 + SSE
+	// 发布造成写放大（P1）。终态与每用户完成仍即时写入。
+	progressWriteInterval = 400 * time.Millisecond
+	// managerStopTimeout 关停时等待调度循环与活跃任务退出的最长时间。
+	managerStopTimeout = 15 * time.Second
+)
 
 func NewManager(store *storage.Store, parserService *parser.Service, eventBus *EventBus) *Manager {
 	return &Manager{
@@ -70,17 +88,27 @@ func NewManager(store *storage.Store, parserService *parser.Service, eventBus *E
 
 func (m *Manager) Start(ctx context.Context) {
 	m.once.Do(func() {
+		runCtx, cancel := context.WithCancel(ctx)
+		m.mu.Lock()
+		m.stopCancel = cancel
+		m.mu.Unlock()
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			m.loop(ctx)
+			m.loop(runCtx)
 		}()
 	})
 }
 
-// Stop 等待调度循环与所有活跃任务退出（最多等待 15 秒），
-// 供主进程在关闭数据库前调用，避免 store.Close 与运行中的任务竞争。
+// Stop 取消调度循环及所有活跃任务，并在有界时间内等待它们退出。
+// 超时后仍返回，避免 SIGTERM 因个别阻塞路径无法结束进程；调用方随后可关闭数据库。
 func (m *Manager) Stop() {
+	m.mu.Lock()
+	stop := m.stopCancel
+	m.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
 	done := make(chan struct{})
 	go func() {
 		m.wg.Wait()
@@ -88,17 +116,14 @@ func (m *Manager) Stop() {
 	}()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
-		// 仍有任务未退出（通常是个别不尊重 ctx 的阻塞路径）。记录下来便于排查；
-		// 进程即将退出，残留 goroutine 会随之结束。main 会在 Stop 返回后关闭 DB，
-		// 这些任务的 m.save(Background) 可能写到已关闭的 DB——错误被 m.save 吞掉。
+	case <-time.After(managerStopTimeout):
 		m.mu.Lock()
 		ids := make([]int64, 0, len(m.active))
 		for id := range m.active {
 			ids = append(ids, id)
 		}
 		m.mu.Unlock()
-		log.Printf("manager.Stop: %d task(s) did not drain within 15s: %v", len(ids), ids)
+		log.Printf("manager.Stop: %d task(s) did not drain within %s: %v", len(ids), managerStopTimeout, ids)
 	}
 }
 
@@ -107,6 +132,54 @@ func (m *Manager) Notify() {
 	case m.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (m *Manager) publish(event Event) {
+	if m == nil || m.eventBus == nil {
+		return
+	}
+	m.eventBus.Publish(event)
+}
+
+func (m *Manager) attachMeta(ctx context.Context, event *Event) {
+	if m.store == nil || event == nil {
+		return
+	}
+	stats, count, err := m.store.DashboardMeta(ctx)
+	if err != nil {
+		return
+	}
+	event.Meta = storage.DashboardMetaView{Stats: stats, FailedTweetCount: count}
+}
+
+func isTerminalJobStatus(status storage.JobStatus) bool {
+	switch status {
+	case storage.JobCompleted, storage.JobCompletedWithErrors, storage.JobFailed, storage.JobCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) publishJob(ctx context.Context, typ string, job storage.Job) {
+	event := Event{Type: typ, JobID: job.ID, Payload: job}
+	if typ == "job.created" || isTerminalJobStatus(job.Status) {
+		m.attachMeta(ctx, &event)
+	}
+	m.publish(event)
+}
+
+func (m *Manager) publishJobsCreated(ctx context.Context, created []storage.Job) {
+	if len(created) == 0 {
+		return
+	}
+	if len(created) == 1 {
+		m.publishJob(ctx, "job.created", created[0])
+		return
+	}
+	event := Event{Type: "jobs.created", Payload: created}
+	m.attachMeta(ctx, &event)
+	m.publish(event)
 }
 
 func (m *Manager) CancelJob(ctx context.Context, id int64) (storage.Job, error) {
@@ -120,7 +193,7 @@ func (m *Manager) CancelJob(ctx context.Context, id int64) (storage.Job, error) 
 	if cancel != nil {
 		cancel()
 	}
-	m.eventBus.Publish(Event{Type: "job.updated", JobID: job.ID, Payload: job})
+	m.publishJob(ctx, "job.updated", job)
 	return job, nil
 }
 
@@ -130,7 +203,7 @@ func (m *Manager) RetryFailedTweetsNow(ctx context.Context) (storage.Job, error)
 		return storage.Job{}, err
 	}
 	m.Notify()
-	m.eventBus.Publish(Event{Type: "job.updated", JobID: job.ID, Payload: job})
+	m.publishJob(ctx, "job.created", job)
 	return job, nil
 }
 
@@ -152,10 +225,8 @@ func (m *Manager) RunArchiveScheduleNow(ctx context.Context, id int64) ([]storag
 	if err != nil {
 		return nil, err
 	}
-	for _, job := range jobs {
-		m.eventBus.Publish(Event{Type: "job.updated", JobID: job.ID, Payload: job})
-	}
-	m.eventBus.Publish(Event{Type: "archive_schedule.ran", Payload: map[string]any{"id": schedule.ID, "jobCount": len(jobs)}})
+	m.publishJobsCreated(ctx, jobs)
+	m.publish(Event{Type: "archive_schedule.ran", Payload: map[string]any{"id": schedule.ID, "jobCount": len(jobs)}})
 	m.Notify()
 	return jobs, nil
 }
@@ -176,6 +247,7 @@ func (m *Manager) loop(ctx context.Context) {
 }
 
 func (m *Manager) runOnce(ctx context.Context) {
+	m.maybeMaintain(ctx)
 	m.enqueueDueArchiveSchedules(ctx)
 
 	cfg, err := m.store.GetConfig(ctx)
@@ -211,7 +283,7 @@ func (m *Manager) enqueueDueArchiveSchedules(ctx context.Context) {
 			if active {
 				next := now.Add(1 * time.Minute)
 				if _, err := m.store.RescheduleArchiveSchedule(ctx, schedule.ID, next); err == nil {
-					m.eventBus.Publish(Event{Type: "archive_schedule.updated", Payload: map[string]any{"id": schedule.ID, "nextRunAt": next}})
+					m.publish(Event{Type: "archive_schedule.updated", Payload: map[string]any{"id": schedule.ID, "nextRunAt": next}})
 				}
 				continue
 			}
@@ -227,10 +299,8 @@ func (m *Manager) enqueueDueArchiveSchedules(ctx context.Context) {
 			continue
 		}
 		createdAny = true
-		for _, job := range jobs {
-			m.eventBus.Publish(Event{Type: "job.updated", JobID: job.ID, Payload: job})
-		}
-		m.eventBus.Publish(Event{Type: "archive_schedule.ran", Payload: map[string]any{"id": schedule.ID, "jobCount": len(jobs)}})
+		m.publishJobsCreated(ctx, jobs)
+		m.publish(Event{Type: "archive_schedule.ran", Payload: map[string]any{"id": schedule.ID, "jobCount": len(jobs)}})
 	}
 	if createdAny {
 		m.Notify()
@@ -247,6 +317,21 @@ func (m *Manager) availableSlots(limit int) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return limit - len(m.active)
+}
+
+// maybeMaintain 周期性执行后台维护（M7）：清理超过保留期的失败推文/失败媒体记录，
+// 防止 failed_tweets / failed_media 无界增长。downloads 历史保留。
+func (m *Manager) maybeMaintain(ctx context.Context) {
+	now := time.Now()
+	if !m.lastMaintenance.IsZero() && now.Sub(m.lastMaintenance) < maintenanceInterval {
+		return
+	}
+	m.lastMaintenance = now
+	if pruned, err := m.store.PruneFailedRecords(ctx, now.Add(-failedRecordRetention)); err != nil {
+		log.Printf("prune stale failed records: %v", err)
+	} else if pruned > 0 {
+		log.Printf("pruned %d stale failed records", pruned)
+	}
 }
 
 func (m *Manager) startJob(parent context.Context, job storage.Job) {
@@ -318,7 +403,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	tweet, err := m.parser.ParseTweetLinkWithOptions(ctx, job.Input, parserOptionsFromConfig(cfg))
+	tweet, err := m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
 	if err != nil {
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
@@ -336,8 +421,9 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		return
 	}
 	unavailable := 0
+	lastProgressSave := time.Time{}
 	for index, media := range tweet.Media {
-		if m.jobCanceled(ctx, saveCtx, job.ID) {
+		if ctx.Err() != nil {
 			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
@@ -349,7 +435,10 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		job.Progress = 0.2 + 0.7*float64(index)/float64(len(tweet.Media))
 		job.Message = fmt.Sprintf("正在下载 %d/%d", index+1, len(tweet.Media))
 		job.Error = ""
-		m.save(saveCtx, job)
+		if lastProgressSave.IsZero() || time.Since(lastProgressSave) >= progressWriteInterval {
+			lastProgressSave = time.Now()
+			m.save(saveCtx, job)
+		}
 		result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt)
 		if err != nil {
 			if isCancellation(ctx, err) {
@@ -363,7 +452,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 			unavailable++
 		}
 	}
-	if m.jobCanceled(ctx, saveCtx, job.ID) {
+	if ctx.Err() != nil {
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
@@ -405,7 +494,7 @@ func (m *Manager) processMediaURL(ctx context.Context, saveCtx context.Context, 
 		m.fail(saveCtx, job, mediaURL, err)
 		return
 	}
-	if m.jobCanceled(ctx, saveCtx, job.ID) {
+	if ctx.Err() != nil {
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
@@ -444,7 +533,7 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 		return
 	}
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, false)
-	if m.jobCanceled(ctx, saveCtx, job.ID) {
+	if ctx.Err() != nil {
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
@@ -463,7 +552,7 @@ func (m *Manager) processFailedRetry(ctx context.Context, saveCtx context.Contex
 	job.Error = ""
 	m.save(saveCtx, job)
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, true)
-	if m.jobCanceled(ctx, saveCtx, job.ID) {
+	if ctx.Err() != nil {
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
@@ -530,7 +619,7 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 		return
 	}
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, false)
-	if m.jobCanceled(ctx, saveCtx, job.ID) {
+	if ctx.Err() != nil {
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
@@ -579,7 +668,7 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 		return
 	}
 	retried := m.retryFailedTweets(ctx, saveCtx, job, cfg, false)
-	if m.jobCanceled(ctx, saveCtx, job.ID) {
+	if ctx.Err() != nil {
 		m.handleInterrupt(ctx, saveCtx, job)
 		return
 	}
@@ -600,34 +689,41 @@ type mediaDownloadResult struct {
 }
 
 func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time) (mediaDownloadResult, error) {
-	unavailable, err := m.store.GetUnavailableMedia(saveCtx, mediaURL)
-	if err != nil {
-		return mediaDownloadResult{}, err
-	}
-	if unavailable != nil {
-		return mediaDownloadResult{skipped: true, unavailable: true}, nil
-	}
-	target, err := filestore.New(cfg)
-	if err != nil {
-		return mediaDownloadResult{}, err
-	}
 	release, err := m.lockMedia(ctx, tweetID, mediaURL)
 	if err != nil {
 		return mediaDownloadResult{}, err
 	}
 	if release != nil {
 		defer release()
-		unavailable, err := m.store.GetUnavailableMedia(saveCtx, mediaURL)
-		if err != nil {
-			return mediaDownloadResult{}, err
-		}
-		if unavailable != nil {
-			return mediaDownloadResult{skipped: true, unavailable: true}, nil
-		}
-		if already, err := m.existingDownloadExists(ctx, saveCtx, target, tweetID, mediaURL); err != nil {
-			return mediaDownloadResult{}, err
-		} else if already {
-			return mediaDownloadResult{skipped: true}, nil
+	}
+	var existing *storage.DownloadRecord
+	var unavailable bool
+	if release != nil {
+		existing, unavailable, err = m.store.GetMediaDownloadState(saveCtx, tweetID, mediaURL)
+	} else {
+		item, lookupErr := m.store.GetUnavailableMedia(saveCtx, mediaURL)
+		err = lookupErr
+		unavailable = item != nil
+	}
+	if err != nil {
+		return mediaDownloadResult{}, err
+	}
+	if unavailable {
+		return mediaDownloadResult{skipped: true, unavailable: true}, nil
+	}
+	target, err := filestore.New(cfg)
+	if err != nil {
+		return mediaDownloadResult{}, err
+	}
+	if release != nil {
+		if existing != nil && strings.TrimSpace(existing.FilePath) != "" {
+			exists, err := target.Exists(ctx, existing.FilePath)
+			if err != nil {
+				return mediaDownloadResult{}, err
+			}
+			if exists {
+				return mediaDownloadResult{skipped: true}, nil
+			}
 		}
 	}
 	if dir == "" {
@@ -667,6 +763,15 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 		return mediaDownloadResult{}, err
 	}
 	if result.Skipped {
+		if _, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+			JobID:    job.ID,
+			TweetID:  tweetID,
+			MediaURL: mediaURL,
+			FilePath: result.Path,
+			Bytes:    result.Bytes,
+		}); err != nil {
+			return mediaDownloadResult{}, err
+		}
 		return mediaDownloadResult{skipped: true}, nil
 	}
 	_, err = m.store.CreateDownload(saveCtx, storage.DownloadRecord{
@@ -677,20 +782,6 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 		Bytes:    result.Bytes,
 	})
 	return mediaDownloadResult{}, err
-}
-
-func (m *Manager) existingDownloadExists(ctx context.Context, saveCtx context.Context, target filestore.Store, tweetID string, mediaURL string) (bool, error) {
-	if strings.TrimSpace(tweetID) == "" || strings.TrimSpace(mediaURL) == "" {
-		return false, nil
-	}
-	record, err := m.store.GetDownloadByTweetMedia(saveCtx, tweetID, mediaURL)
-	if err != nil || record == nil {
-		return false, err
-	}
-	if strings.TrimSpace(record.FilePath) == "" {
-		return false, nil
-	}
-	return target.Exists(ctx, record.FilePath)
 }
 
 // keyLock 是按 key 串行化的令牌锁，带 waiter 计数（持有者 + 等待者）。在无人持有时从
@@ -829,15 +920,25 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 
 	var jobMu sync.Mutex
 	completed := 0
+	lastProgressWrite := time.Time{}
+	// saveProgress 用于进度类中间状态，按 progressWriteInterval 节流（P1），丢弃中间
+	// 更新不会影响正确性：终态由 finishTask/completeArchive 即时写入。
 	saveProgress := func(status storage.JobStatus, message string) {
 		jobMu.Lock()
 		defer jobMu.Unlock()
+		if now := time.Now(); now.Sub(lastProgressWrite) < progressWriteInterval {
+			return
+		} else {
+			lastProgressWrite = now
+		}
 		progressJob.Status = status
 		progressJob.Progress = start + (end-start)*float64(completed)/float64(len(tasks))
 		progressJob.Message = message
 		progressJob.Error = ""
 		m.save(saveCtx, progressJob)
 	}
+	// finishTask 每完成一个用户即时写入：写放大主要来自"每个媒体"的进度保存；
+	// 每用户的完成事件频率低，即时写入可让进度条保持准确。
 	finishTask := func() {
 		jobMu.Lock()
 		defer jobMu.Unlock()
@@ -877,9 +978,6 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 			}()
 			for task := range taskCh {
 				if workCtx.Err() != nil {
-					return
-				}
-				if m.jobCanceled(workCtx, saveCtx, baseJob.ID) {
 					setErr(context.Canceled)
 					return
 				}
@@ -933,6 +1031,7 @@ func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, us
 	parent := target.Join(target.Root(), "users")
 	seen := map[string]struct{}{}
 	tasks := make([]archiveUserTask, 0, len(users))
+	userIDs := make([]string, 0, len(users))
 	skipped := 0
 	for index, user := range users {
 		if err := ctx.Err(); err != nil {
@@ -946,18 +1045,24 @@ func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, us
 			continue
 		}
 		seen[user.ID] = struct{}{}
+		tasks = append(tasks, archiveUserTask{
+			index: index,
+			user:  user,
+		})
+		userIDs = append(userIDs, user.ID)
+	}
+	existingEntities, err := m.store.LocateUserEntities(ctx, userIDs, parent)
+	if err != nil {
+		return nil, skipped, err
+	}
+	for index := range tasks {
+		user := tasks[index].user
 		missingMedia := user.MediaCount
-		if existing, err := m.store.LocateUserEntity(ctx, user.ID, parent); err != nil {
-			return nil, skipped, err
-		} else if existing != nil && existing.MediaCount.Valid {
+		if existing, ok := existingEntities[user.ID]; ok && existing.MediaCount.Valid {
 			missingMedia = max(0, user.MediaCount-int(existing.MediaCount.Int64))
 		}
-		tasks = append(tasks, archiveUserTask{
-			index:        index,
-			missingMedia: missingMedia,
-			primaryOnly:  user.Protected && user.Following,
-			user:         user,
-		})
+		tasks[index].missingMedia = missingMedia
+		tasks[index].primaryOnly = user.Protected && user.Following
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].primaryOnly != tasks[j].primaryOnly {
@@ -1042,29 +1147,15 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
 		return stats, nil
 	}
-	target, err := filestore.New(cfg)
-	if err != nil {
-		return stats, err
-	}
 	stats.Tweets += len(tweets)
 	failedBefore := stats.Failed
 	for _, tweet := range tweets {
 		for mediaIndex, media := range tweet.Media {
-			if m.jobCanceled(ctx, saveCtx, job.ID) {
+			if ctx.Err() != nil {
 				return stats, context.Canceled
 			}
 			mediaURL := bestMediaURL(media)
 			if mediaURL == "" {
-				continue
-			}
-			already, err := m.existingDownloadExists(ctx, saveCtx, target, tweet.ID, mediaURL)
-			if err != nil {
-				stats.Failed++
-				_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
-				continue
-			}
-			if already {
-				stats.Skipped++
 				continue
 			}
 			if updateDownloading != nil {
@@ -1163,7 +1254,7 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 	}
 	retried := 0
 	for _, item := range items {
-		if m.jobCanceled(ctx, saveCtx, job.ID) {
+		if ctx.Err() != nil {
 			return retried
 		}
 		entity, err := m.store.GetUserEntity(saveCtx, item.EntityID)
@@ -1186,11 +1277,17 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 				continue
 			}
 			// 跳过已下载的媒体，避免重试时把之前已成功的部分再下一遍。
-			if already, err := m.existingDownloadExists(ctx, saveCtx, target, tweet.ID, mediaURL); err == nil && already {
-				continue
-			}
 			if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
 				if !shouldRetryMediaError(err) {
+					if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
+						MediaURL: mediaURL,
+						TweetID:  tweet.ID,
+						Error:    err.Error(),
+					}); markErr != nil {
+						failed = true
+						break
+					}
+					_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
 					continue
 				}
 				failed = true
@@ -1369,7 +1466,7 @@ func (m *Manager) save(ctx context.Context, job storage.Job) {
 	// 直接用内存中的 job 作为事件载荷，省去一次 GetJob 往返；
 	// 前端收到事件后会通过 dashboard 重新拉取最新值，UpdatedAt 在此近似设置即可。
 	job.UpdatedAt = time.Now().UTC()
-	m.eventBus.Publish(Event{Type: "job.updated", JobID: job.ID, Payload: job})
+	m.publishJob(ctx, "job.updated", job)
 }
 
 func (m *Manager) cancel(ctx context.Context, job storage.Job) {
@@ -1566,12 +1663,18 @@ func syncLink(linkPath string, target string) error {
 		return err
 	}
 	if current, err := os.Readlink(linkPath); err == nil && current == targetAbs {
+		if sidecarErr := os.Remove(linkPath + ".link"); sidecarErr != nil && !os.IsNotExist(sidecarErr) {
+			return sidecarErr
+		}
 		return nil
 	}
 	if err := removeLinkPlaceholder(linkPath); err != nil {
 		return err
 	}
 	if err := os.Symlink(targetAbs, linkPath); err == nil || os.IsExist(err) {
+		if sidecarErr := os.Remove(linkPath + ".link"); sidecarErr != nil && !os.IsNotExist(sidecarErr) {
+			return sidecarErr
+		}
 		return nil
 	}
 	return os.WriteFile(linkPath+".link", []byte(targetAbs+"\n"), 0o644)

@@ -58,3 +58,15 @@ func TestNormalizeMediaURLEmpty(t *testing.T) {
 		t.Fatalf(`NormalizeMediaURL("") = %q, want empty`, got)
 	}
 }
+
+func TestNormalizeMediaURLRejectsLookalikeHosts(t *testing.T) {
+	for _, raw := range []string{
+		"https://notpbs.twimg.com.evil/video.mp4?tag=1",
+		"https://pbs.twimg.com.evil/media.jpg?tag=1",
+		"file://twimg.com/video.mp4?tag=1",
+	} {
+		if got := NormalizeMediaURL(raw); got != raw {
+			t.Fatalf("NormalizeMediaURL(%q) = %q, want unchanged", raw, got)
+		}
+	}
+}

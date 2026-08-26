@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 )
 
 func TestFilenameHonorsMaxLengthAndExtension(t *testing.T) {
@@ -560,5 +562,24 @@ func TestDownloadWithOptionsFallsBackToRenameWhenHardLinksUnsupported(t *testing
 	matches, _ := filepath.Glob(filepath.Join(dir, ".*.part"))
 	if len(matches) != 0 {
 		t.Fatalf("leftover temp files: %v", matches)
+	}
+}
+
+func TestOpenDirectConnectionUsesGuardedTransport(t *testing.T) {
+	_, err := New().Open(context.Background(), "http://169.254.169.254/media.mp4", Options{})
+	if !httpx.IsBlockedTargetError(err) {
+		t.Fatalf("Open(link-local) error = %v, want blocked target error", err)
+	}
+}
+
+func TestOpenRejectsRedirectOutsideTwimg(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://evil.example/media.mp4", http.StatusFound)
+	}))
+	defer server.Close()
+
+	_, err := New().Open(context.Background(), server.URL+"/media.mp4", Options{})
+	if err == nil || !strings.Contains(err.Error(), "非 twimg.com") {
+		t.Fatalf("Open(redirect) error = %v, want non-twimg redirect rejection", err)
 	}
 }

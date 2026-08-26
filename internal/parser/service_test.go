@@ -265,3 +265,29 @@ func TestParseSyndicationMediaRejectsNonTwimgPhotos(t *testing.T) {
 		t.Fatalf("unexpected photos media: %#v", media)
 	}
 }
+
+func TestParseTweetLinkWithClientUsesProvidedClient(t *testing.T) {
+	// M1：单推解析应使用调用方注入的 client（httpapi 用它带配置代理）。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"__typename": "Tweet",
+			"id_str": "101",
+			"text": "via client",
+			"user": {"id_str": "u1", "name": "A", "screen_name": "a"},
+			"mediaDetails": [{"id_str": "m1", "type": "photo", "media_url_https": "https://pbs.twimg.com/media/x.jpg"}]
+		}`))
+	}))
+	defer server.Close()
+
+	service := NewService()
+	service.syndicationURL = server.URL
+	// 故意不设置 service.client（保持 nil→DefaultClient 路径）；传入的 client 必须被使用。
+	tweet, err := service.ParseTweetLinkWithClient(context.Background(), "https://x.com/a/status/101", server.Client(), ParseOptions{})
+	if err != nil {
+		t.Fatalf("ParseTweetLinkWithClient: %v", err)
+	}
+	if tweet.ID != "101" {
+		t.Fatalf("tweet id = %q, want 101", tweet.ID)
+	}
+}

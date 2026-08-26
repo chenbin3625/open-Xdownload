@@ -12,10 +12,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 )
 
 type Result struct {
@@ -54,7 +55,7 @@ type Options struct {
 
 func New() *Downloader {
 	return &Downloader{
-		client: &http.Client{Timeout: 10 * time.Minute},
+		client: httpx.Client("", 10*time.Minute),
 	}
 }
 
@@ -77,7 +78,8 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 
 	basePath := filepath.Join(dir, Filename(rawURL, filenameHint, response.Header.Get("Content-Type"), maxFilenameLength))
 	// 已存在且大小与 Content-Length 一致 → 视为完整下载，跳过；大小不一致说明是崩溃/中断
-	// 留下的残缺文件，需要重新下载（覆盖）。Content-Length 未知时保守按已存在跳过。
+	// 留下的残缺文件，需要重新下载（覆盖）。Content-Length 未知时不凭文件存在判断完整性，
+	// 重新下载并在发布前替换旧文件。
 	existing, complete, replaceExisting, err := existingFileState(basePath, response.ContentLength)
 	if err != nil {
 		return Result{}, err
@@ -153,6 +155,9 @@ func existingFileState(path string, contentLength int64) (Result, bool, bool, er
 	if info.IsDir() {
 		return Result{}, false, false, nil
 	}
+	if contentLength < 0 {
+		return Result{}, false, true, nil
+	}
 	if contentLength >= 0 && info.Size() != contentLength {
 		return Result{}, false, true, nil
 	}
@@ -200,8 +205,8 @@ var linkFile = os.Link
 
 // publishFile 尝试把 tempPath 发布为 candidate：优先走硬链接（原子，且绝不覆盖
 // 已有文件）。在不支持硬链接的文件系统（exFAT/FAT32、部分网络盘/FUSE 挂载）上
-// os.Link 会返回 EPERM/EOPNOTSUPP 等错误，此时退化为"先 Lstat 确认目标不存在、
-// 再 os.Rename"的发布方式，保住不覆盖已有文件的语义。
+// os.Link 会返回 EPERM/EOPNOTSUPP 等错误，此时退化为先用 O_EXCL 原子占位，再
+// os.Rename 替换占位文件，保住不覆盖已有文件的语义。
 // 返回 handled=false 且 err=nil 表示 candidate 已存在（文件名冲突），调用方应继续
 // 尝试下一个编号后缀；返回 err 非 nil 表示发布失败。
 func publishFile(tempPath string, candidate string, bytes int64) (bool, error) {
@@ -218,13 +223,21 @@ func publishFile(tempPath string, candidate string, bytes int64) (bool, error) {
 	if !hardLinksUnsupported(err) {
 		return false, err
 	}
-	// 不支持硬链接：os.Rename 会覆盖已存在的目标，发布前必须确认目标不存在。
-	if _, statErr := os.Lstat(candidate); statErr == nil {
-		return false, nil
-	} else if !os.IsNotExist(statErr) {
-		return false, statErr
+	// 先创建独占占位文件。即使多个进程同时发布同一候选名，也只有一个能拿到占位，
+	// 之后 Rename 只会替换我们自己创建的占位文件，而不会覆盖原有文件。
+	reservation, reserveErr := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if reserveErr != nil {
+		if os.IsExist(reserveErr) {
+			return false, nil
+		}
+		return false, reserveErr
+	}
+	if err := reservation.Close(); err != nil {
+		_ = os.Remove(candidate)
+		return false, err
 	}
 	if err := os.Rename(tempPath, candidate); err != nil {
+		_ = os.Remove(candidate)
 		return false, err
 	}
 	return true, nil
@@ -271,14 +284,26 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 	if err != nil {
 		return nil, err
 	}
-	client := d.client
 	transport, err := transportForProxy(options.ProxyURL)
 	if err != nil {
 		return nil, err
 	}
-	if transport != nil {
-		// 复用带连接池的 Transport，避免每个请求都重新做 TCP/TLS 握手。
-		client = &http.Client{Timeout: d.client.Timeout, Transport: transport}
+	// 空代理也必须使用 httpx.Transport，确保直连和代理两条路径都经过拨号防护。
+	client := &http.Client{
+		Timeout:   d.client.Timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) == 0 {
+				return nil
+			}
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return fmt.Errorf("拒绝非 HTTP 媒体重定向: %s", req.URL.String())
+			}
+			if !isAllowedTwimgHost(req.URL.Hostname()) {
+				return fmt.Errorf("拒绝媒体重定向到非 twimg.com 域名: %s", req.URL.Hostname())
+			}
+			return nil
+		},
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -295,48 +320,15 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 	return response, nil
 }
 
-// proxyTransports 缓存按代理地址复用的 Transport，使代理下载也能复用空闲连接。
-// 有界：反复变更代理配置时，超出 maxProxyTransports 的旧 Transport 会被驱逐并
-// 关闭其空闲连接（不影响在途请求），避免连接随配置变更无界累积。
-const maxProxyTransports = 8
-
-var (
-	proxyTransportsMu sync.Mutex
-	proxyTransports   = map[string]*http.Transport{}
-)
-
+// transportForProxy 返回按代理地址复用的 Transport（底层拨号带链路本地防护）。
+// 空代理也返回受保护的直连 Transport，并尊重环境变量代理。
 func transportForProxy(proxyURL string) (*http.Transport, error) {
-	proxyURL = strings.TrimSpace(proxyURL)
-	if proxyURL == "" {
-		return nil, nil
-	}
-	parsed, err := url.Parse(proxyURL)
-	if err != nil {
-		return nil, err
-	}
-	key := parsed.String()
-	proxyTransportsMu.Lock()
-	defer proxyTransportsMu.Unlock()
-	if t, ok := proxyTransports[key]; ok {
-		return t, nil
-	}
-	transport := &http.Transport{
-		Proxy:                 http.ProxyURL(parsed),
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-	}
-	if len(proxyTransports) >= maxProxyTransports {
-		for k, t := range proxyTransports {
-			t.CloseIdleConnections()
-			delete(proxyTransports, k)
-			break
-		}
-	}
-	proxyTransports[key] = transport
-	return transport, nil
+	return httpx.Transport(proxyURL)
+}
+
+func isAllowedTwimgHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
 }
 
 var unsupportedFilenameChars = regexp.MustCompile(`[/\\:*?"<>\|]`)
@@ -428,7 +420,11 @@ func normalizeMediaExtension(ext string) string {
 
 func largePhotoURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
-	if err != nil || !strings.Contains(parsed.Host, "pbs.twimg.com") {
+	if err != nil {
+		return rawURL
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || !isAllowedTwimgHost(host) || (host != "pbs.twimg.com" && !strings.HasSuffix(host, ".pbs.twimg.com")) {
 		return rawURL
 	}
 	query := parsed.Query()
@@ -448,7 +444,7 @@ func NormalizeMediaURL(rawURL string) string {
 	if err != nil || parsed.RawQuery == "" {
 		return rawURL
 	}
-	if !strings.Contains(parsed.Host, "twimg.com") {
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || !isAllowedTwimgHost(parsed.Hostname()) {
 		return rawURL
 	}
 	query := parsed.Query()

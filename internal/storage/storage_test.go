@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,6 +250,21 @@ func TestListJobsPageAndJobStats(t *testing.T) {
 	}
 	if stats.Total != 5 || stats.Active != 2 || stats.Completed != 1 || stats.Failed != 2 {
 		t.Fatalf("stats = %+v, want total=5 active=2 completed=1 failed=2", stats)
+	}
+
+	meta, failedTweetCount, err := store.DashboardMeta(ctx)
+	if err != nil {
+		t.Fatalf("dashboard meta: %v", err)
+	}
+	if meta != stats {
+		t.Fatalf("DashboardMeta stats = %+v, want %+v", meta, stats)
+	}
+	counted, err := store.CountFailedTweets(ctx)
+	if err != nil {
+		t.Fatalf("count failed tweets: %v", err)
+	}
+	if failedTweetCount != counted {
+		t.Fatalf("failed tweet count = %d, want %d", failedTweetCount, counted)
 	}
 }
 
@@ -611,6 +627,44 @@ func TestUpdateConfigPersistsFilenameSettings(t *testing.T) {
 	}
 }
 
+func TestUpdateConfigDoesNotPersistEnvOnlyValues(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	t.Setenv(config.EnvAuthToken, "env-auth-token")
+	t.Setenv(config.EnvProxyURL, "http://env-proxy:8080")
+
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{
+		DownloadDir:    t.TempDir(),
+		MaxConcurrency: 2,
+		AuthToken:      "env-auth-token",
+		CSRFToken:      "env-ct0",
+		ProxyURL:       "http://env-proxy:8080",
+	}); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+
+	stored, err := store.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatalf("get stored config: %v", err)
+	}
+	if stored.AuthToken != "" || stored.ProxyURL != "" {
+		t.Fatalf("env-only values persisted to db: auth=%q proxy=%q", stored.AuthToken, stored.ProxyURL)
+	}
+
+	effective, err := store.GetConfig(ctx)
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if effective.AuthToken != "env-auth-token" || effective.ProxyURL != "http://env-proxy:8080" {
+		t.Fatalf("runtime env overrides lost: auth=%q proxy=%q", effective.AuthToken, effective.ProxyURL)
+	}
+}
+
 func TestUpdateConfigPersistsNestedTweetMediaSetting(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -635,5 +689,237 @@ func TestUpdateConfigPersistsNestedTweetMediaSetting(t *testing.T) {
 	}
 	if !got.IncludeNestedTweetMedia {
 		t.Fatal("IncludeNestedTweetMedia = false, want true")
+	}
+}
+
+func TestPruneFailedRecordsRemovesOnlyOldRows(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "https://example.com/m.mp4", "m")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "u1", ScreenName: "alice", Name: "Alice"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	entity, err := store.EnsureUserEntity(ctx, "u1", t.TempDir(), "Alice(alice)")
+	if err != nil {
+		t.Fatalf("ensure entity: %v", err)
+	}
+
+	if _, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "old", Payload: `{}`, Error: "old"}); err != nil {
+		t.Fatalf("create old failed tweet: %v", err)
+	}
+	if _, err := store.CreateFailedMedia(ctx, FailedMedia{JobID: job.ID, MediaURL: "https://example.com/old.mp4", Error: "old"}); err != nil {
+		t.Fatalf("create old failed media: %v", err)
+	}
+	// 把唯一一条记录改写到很久以前。
+	oldTime := time.Now().UTC().Add(-400 * 24 * time.Hour)
+	if _, err := store.db.Exec(`UPDATE failed_tweets SET updated_at = ? WHERE tweet_id = 'old'`, oldTime); err != nil {
+		t.Fatalf("backdate failed tweet: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE failed_media SET created_at = ? WHERE media_url = ?`, oldTime, "https://example.com/old.mp4"); err != nil {
+		t.Fatalf("backdate failed media: %v", err)
+	}
+
+	if _, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "fresh", Payload: `{}`, Error: "fresh"}); err != nil {
+		t.Fatalf("create fresh failed tweet: %v", err)
+	}
+
+	pruned, err := store.PruneFailedRecords(ctx, time.Now().UTC().Add(-180*24*time.Hour))
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("pruned = %d, want 2 (1 failed tweet + 1 failed media)", pruned)
+	}
+	if left, err := store.CountFailedTweets(ctx); err != nil || left != 1 {
+		t.Fatalf("remaining failed tweets = %d, %v; want 1", left, err)
+	}
+	media, err := store.ListFailedMedia(ctx, 10)
+	if err != nil || len(media) != 0 {
+		t.Fatalf("remaining failed media = %#v, %v; want none", media, err)
+	}
+}
+
+func TestLocateUserEntitiesBatchesExistingArchiveState(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	parent := t.TempDir()
+
+	for _, user := range []User{
+		{ID: "u1", ScreenName: "one", Name: "One"},
+		{ID: "u2", ScreenName: "two", Name: "Two"},
+	} {
+		if _, err := store.UpsertUser(ctx, user); err != nil {
+			t.Fatalf("upsert %s: %v", user.ID, err)
+		}
+	}
+	first, err := store.EnsureUserEntity(ctx, "u1", parent, "One(one)")
+	if err != nil {
+		t.Fatalf("ensure u1 entity: %v", err)
+	}
+	if err := store.UpdateUserEntityMediaCount(ctx, first.ID, 12); err != nil {
+		t.Fatalf("update u1 entity: %v", err)
+	}
+	if _, err := store.EnsureUserEntity(ctx, "u2", parent, "Two(two)"); err != nil {
+		t.Fatalf("ensure u2 entity: %v", err)
+	}
+
+	entities, err := store.LocateUserEntities(ctx, []string{"u1", "u2", "u1", "missing"}, parent)
+	if err != nil {
+		t.Fatalf("locate entities: %v", err)
+	}
+	if len(entities) != 2 {
+		t.Fatalf("entity count = %d, want 2", len(entities))
+	}
+	if got := entities["u1"].MediaCount.Int64; got != 12 {
+		t.Fatalf("u1 media count = %d, want 12", got)
+	}
+}
+
+func TestListFailedTweetViewsPageReturnsTotal(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "https://example.com/m.mp4", "m")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "u1", ScreenName: "alice", Name: "Alice"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	entity, err := store.EnsureUserEntity(ctx, "u1", t.TempDir(), "Alice(alice)")
+	if err != nil {
+		t.Fatalf("ensure entity: %v", err)
+	}
+	for _, tweetID := range []string{"1", "2", "3"} {
+		if _, err := store.CreateFailedTweet(ctx, FailedTweet{
+			JobID:    job.ID,
+			EntityID: entity.ID,
+			TweetID:  tweetID,
+			Payload:  `{}`,
+			Error:    "boom",
+		}); err != nil {
+			t.Fatalf("create failed tweet %s: %v", tweetID, err)
+		}
+	}
+
+	items, total, err := store.ListFailedTweetViewsPage(ctx, 2, 2)
+	if err != nil {
+		t.Fatalf("list page: %v", err)
+	}
+	if total != 3 || len(items) != 1 || items[0].TweetID == "" {
+		t.Fatalf("page = %+v total=%d, want 1 item with tweet id and total 3", items, total)
+	}
+
+	empty, emptyTotal, err := store.ListFailedTweetViewsPage(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if emptyTotal != 3 || len(empty) != 3 {
+		t.Fatalf("all = %d total=%d, want 3/3", len(empty), emptyTotal)
+	}
+
+	past, pastTotal, err := store.ListFailedTweetViewsPage(ctx, 10, 40)
+	if err != nil {
+		t.Fatalf("list past end: %v", err)
+	}
+	if pastTotal != 3 || len(past) != 0 {
+		t.Fatalf("past end = %d total=%d, want 0/3", len(past), pastTotal)
+	}
+}
+
+func TestOpenAppliesPerformancePragmas(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	var journal string
+	if err := store.db.Get(&journal, `PRAGMA journal_mode`); err != nil {
+		t.Fatalf("journal_mode: %v", err)
+	}
+	if !strings.EqualFold(journal, "wal") {
+		t.Fatalf("journal_mode = %q, want wal", journal)
+	}
+
+	var synchronous int
+	if err := store.db.Get(&synchronous, `PRAGMA synchronous`); err != nil {
+		t.Fatalf("synchronous: %v", err)
+	}
+	if synchronous != 1 {
+		t.Fatalf("synchronous = %d, want NORMAL(1)", synchronous)
+	}
+
+	var tempStore int
+	if err := store.db.Get(&tempStore, `PRAGMA temp_store`); err != nil {
+		t.Fatalf("temp_store: %v", err)
+	}
+	if tempStore != 2 {
+		t.Fatalf("temp_store = %d, want MEMORY(2)", tempStore)
+	}
+}
+
+func TestGetStoredConfigCachesUntilUpdate(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	downloadDir := filepath.Join(t.TempDir(), "cached-downloads")
+	updated, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: downloadDir})
+	if err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+	first, err := store.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatalf("get stored config: %v", err)
+	}
+	if first.DownloadDir != updated.DownloadDir {
+		t.Fatalf("cached dir = %q, want %q", first.DownloadDir, updated.DownloadDir)
+	}
+
+	if _, err := store.db.ExecContext(ctx, `UPDATE app_config SET download_dir = ? WHERE id = 1`, "/bypassed-cache"); err != nil {
+		t.Fatalf("bypass cache: %v", err)
+	}
+	cached, err := store.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatalf("get cached config: %v", err)
+	}
+	if cached.DownloadDir == "/bypassed-cache" {
+		t.Fatal("GetStoredConfig served a disk write that skipped the cache")
+	}
+	if cached.DownloadDir != updated.DownloadDir {
+		t.Fatalf("cached dir = %q, want %q", cached.DownloadDir, updated.DownloadDir)
+	}
+
+	refreshedDir := filepath.Join(t.TempDir(), "refreshed-downloads")
+	refreshed, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: refreshedDir})
+	if err != nil {
+		t.Fatalf("refresh config: %v", err)
+	}
+	after, err := store.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatalf("get refreshed config: %v", err)
+	}
+	if after.DownloadDir != refreshed.DownloadDir {
+		t.Fatalf("cache not invalidated: %q vs %q", after.DownloadDir, refreshed.DownloadDir)
 	}
 }

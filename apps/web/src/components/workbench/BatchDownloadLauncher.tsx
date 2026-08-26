@@ -1,55 +1,37 @@
-import {
-  CloudDownloadOutlined,
-  SyncOutlined,
-  UnorderedListOutlined,
-  UserAddOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  Badge,
-  Button,
-  Col,
-  Flex,
-  Input,
-  InputNumber,
-  List,
-  Row,
-  Space,
-  Tabs,
-  Tag,
-  Typography,
-  notification,
-} from "antd";
-import type { TabsProps } from "antd";
 import React, { useMemo, useState } from "react";
 import {
+  archiveScheduleQueryRoot,
   createArchiveSchedule,
   createJobsBatch,
-  type JobKind,
   type JobRequest,
 } from "../../lib/api";
-import {
-  EllipsisText,
-  PaginatedList,
-  Stack,
-  Toolbar,
-  formatIntervalMinutes,
-  getErrorMessage,
-  kindLabel,
-} from "../common/CommonUI";
+import { formatIntervalMinutes, getErrorMessage, kindLabel } from "../../lib/format";
+import { toast } from "../../lib/toast";
+import { prependJobsToCaches } from "../../lib/useDashboardEvents";
 
-const { Text } = Typography;
-const { TextArea } = Input;
+const targetTabs = [
+  { key: "users", label: "用户", placeholder: "elonmusk\n1234567" },
+  { key: "lists", label: "列表", placeholder: "8901234" },
+  { key: "following", label: "关注", placeholder: "567890\n@screen_name" },
+] as const;
+
+type TargetTab = (typeof targetTabs)[number]["key"];
 
 export function BatchDownloadLauncher() {
   const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<TargetTab>("users");
   const [users, setUsers] = useState("");
   const [lists, setLists] = useState("");
   const [following, setFollowing] = useState("");
   const [scheduleName, setScheduleName] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState(360);
+  const [previewPage, setPreviewPage] = useState(1);
   const items = useMemo(() => buildBatchDownloadItems(users, lists, following), [users, lists, following]);
+  const previewPageSize = 6;
+  const previewPages = Math.max(1, Math.ceil(items.length / previewPageSize));
+  const previewCurrent = Math.min(previewPage, previewPages);
+  const previewItems = items.slice((previewCurrent - 1) * previewPageSize, previewCurrent * previewPageSize);
 
   const createJobs = useMutation({
     mutationFn: () => createJobsBatch({ items }),
@@ -57,17 +39,12 @@ export function BatchDownloadLauncher() {
       setUsers("");
       setLists("");
       setFollowing("");
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      notification.success({
-        message: "批量任务已创建",
-        description: `已创建 ${data.length} 个任务`,
-      });
+      setPreviewPage(1);
+      prependJobsToCaches(queryClient, data);
+      toast("批量任务已创建", { description: `已创建 ${data.length} 个任务` });
     },
     onError: (error) => {
-      notification.error({
-        message: "创建失败",
-        description: getErrorMessage(error),
-      });
+      toast("创建失败", { description: getErrorMessage(error), tone: "err" });
     },
   });
 
@@ -81,177 +58,135 @@ export function BatchDownloadLauncher() {
       }),
     onSuccess: (schedule) => {
       setScheduleName("");
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      notification.success({
-        message: "定时计划已保存",
+      queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot });
+      toast("定时计划已保存", {
         description: `${schedule.name} · ${formatIntervalMinutes(schedule.intervalMinutes)}`,
       });
     },
     onError: (error) => {
-      notification.error({
-        message: "保存失败",
-        description: getErrorMessage(error),
-      });
+      toast("保存失败", { description: getErrorMessage(error), tone: "err" });
     },
   });
 
-  const tabs: TabsProps["items"] = [
-    {
-      key: "users",
-      label: (
-        <Space>
-          <UserOutlined />
-          用户
-        </Space>
-      ),
-      children: (
-        <BatchTargetInput
-          value={users}
-          onChange={setUsers}
-          placeholder={"elonmusk\n1234567"}
-        />
-      ),
-    },
-    {
-      key: "lists",
-      label: (
-        <Space>
-          <UnorderedListOutlined />
-          列表
-        </Space>
-      ),
-      children: (
-        <BatchTargetInput
-          value={lists}
-          onChange={setLists}
-          placeholder="8901234"
-        />
-      ),
-    },
-    {
-      key: "following",
-      label: (
-        <Space>
-          <UserAddOutlined />
-          关注
-        </Space>
-      ),
-      children: (
-        <BatchTargetInput
-          value={following}
-          onChange={setFollowing}
-          placeholder={"567890\n@screen_name"}
-        />
-      ),
-    },
-  ];
-
-  const previewSummary = items.length > 0 ? `准备创建 ${items.length} 个任务` : "输入目标后生成预览";
+  const busy = createJobs.isPending || createSchedule.isPending;
+  const activePlaceholder = targetTabs.find((tab) => tab.key === activeTab)?.placeholder ?? "";
+  const activeValue = activeTab === "users" ? users : activeTab === "lists" ? lists : following;
+  const setActiveValue = activeTab === "users" ? setUsers : activeTab === "lists" ? setLists : setFollowing;
 
   return (
-    <Stack size={14}>
-      <Toolbar>
-        <Space size={8} wrap>
-          <Text type="secondary">待创建</Text>
-          <Badge count={items.length} showZero color="#1677ff" />
-        </Space>
-        <Space size={8} wrap>
-          <Input
+    <div className="batch-stack">
+      <div className="batch-toolbar">
+        <span className="batch-count">待创建 {items.length}</span>
+        <label className="batch-field">
+          <span className="visually-hidden">计划名称</span>
+          <input
+            className="parser-input"
             value={scheduleName}
-            onChange={(event) => setScheduleName(event.target.value)}
             placeholder="计划名称"
-            style={{ width: 180 }}
+            onChange={(event) => setScheduleName(event.target.value)}
           />
-          <InputNumber
+        </label>
+        <label className="batch-interval">
+          每
+          <input
+            type="number"
             min={5}
             max={43200}
-            addonBefore="每"
-            addonAfter="分钟"
             value={intervalMinutes}
-            onChange={(value) => setIntervalMinutes(value ?? 5)}
-            style={{ width: 170 }}
+            onChange={(event) => setIntervalMinutes(Number(event.target.value) || 5)}
           />
-          <Button
-            icon={<SyncOutlined />}
-            loading={createSchedule.isPending}
-            disabled={items.length === 0}
-            onClick={() => createSchedule.mutate()}
-          >
-            保存计划
-          </Button>
-          <Button
-            type="primary"
-            icon={<CloudDownloadOutlined />}
-            loading={createJobs.isPending}
-            disabled={items.length === 0}
-            onClick={() => createJobs.mutate()}
-          >
-            批量下载
-          </Button>
-        </Space>
-      </Toolbar>
+          分钟
+        </label>
+        <button
+          type="button"
+          className="job-text-btn"
+          disabled={items.length === 0 || busy}
+          onClick={() => createSchedule.mutate()}
+        >
+          {createSchedule.isPending ? "保存中…" : "保存计划"}
+        </button>
+        <button
+          type="button"
+          className="shell-primary-btn"
+          disabled={items.length === 0 || busy}
+          onClick={() => createJobs.mutate()}
+        >
+          {createJobs.isPending ? "创建中…" : "批量下载"}
+        </button>
+      </div>
 
-      <Row gutter={[16, 16]} align="stretch" className="batch-launcher-grid">
-        <Col xs={24} lg={14}>
-          <div className="batch-input-pane">
-            <Tabs className="batch-target-tabs" items={tabs} />
+      <div className="batch-launcher-grid">
+        <div className="batch-input-pane">
+          <div className="batch-tabs" role="tablist" aria-label="批量目标">
+            {targetTabs.map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.key}
+                className={activeTab === tab.key ? "batch-tab is-active" : "batch-tab"}
+                onClick={() => setActiveTab(tab.key)}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
-        </Col>
-        <Col xs={24} lg={10}>
-          <div className="batch-preview-pane">
-            <Flex align="center" justify="space-between" gap={10} wrap="wrap" className="batch-preview-heading">
-              <Text strong>任务预览</Text>
-              <Text type="secondary">{previewSummary}</Text>
-            </Flex>
-            <PaginatedList
-              bordered
-              emptyDescription="暂无待创建任务"
-              itemName="个任务"
-              items={items}
-              loading={createJobs.isPending || createSchedule.isPending}
-              maxHeight={322}
-              pageSize={6}
-              renderItem={(item) => (
-                <List.Item>
-                  <List.Item.Meta
-                    title={<Tag>{kindLabel(item.kind)}</Tag>}
-                    description={
-                      <EllipsisText title={item.input}>
-                        {item.input}
-                      </EllipsisText>
-                    }
-                  />
-                </List.Item>
-              )}
-              size="small"
-            />
+          <textarea
+            className="batch-textarea"
+            value={activeValue}
+            placeholder={activePlaceholder}
+            rows={8}
+            onChange={(event) => {
+              setActiveValue(event.target.value);
+              setPreviewPage(1);
+            }}
+          />
+        </div>
+        <div className="batch-preview-pane">
+          <div className="batch-preview-heading">
+            <strong>任务预览</strong>
+            <span>{items.length > 0 ? `准备创建 ${items.length} 个任务` : "输入目标后生成预览"}</span>
           </div>
-        </Col>
-      </Row>
-    </Stack>
+          {items.length === 0 ? (
+            <p className="job-empty">暂无待创建任务</p>
+          ) : (
+            <ul className="batch-preview-list">
+              {previewItems.map((item) => (
+                <li key={`${item.kind}:${item.input}`}>
+                  <span className="job-kind-tag">{kindLabel(item.kind)}</span>
+                  <span className="job-ellipsis" title={item.input}>{item.input}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {previewPages > 1 ? (
+            <div className="shell-pagination">
+              <button
+                type="button"
+                className="shell-page-btn"
+                disabled={previewCurrent <= 1}
+                onClick={() => setPreviewPage(previewCurrent - 1)}
+              >
+                上一页
+              </button>
+              <span>
+                {previewCurrent}/{previewPages}
+              </span>
+              <button
+                type="button"
+                className="shell-page-btn"
+                disabled={previewCurrent >= previewPages}
+                onClick={() => setPreviewPage(previewCurrent + 1)}
+              >
+                下一页
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
   );
 }
-
-export function BatchTargetInput({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  placeholder: string;
-}) {
-  return (
-    <TextArea
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      placeholder={placeholder}
-      autoSize={{ minRows: 6, maxRows: 12 }}
-      className="mono-input"
-    />
-  );
-}
-
 export function buildBatchDownloadItems(users: string, lists: string, following: string): JobRequest[] {
   const items: JobRequest[] = [];
   for (const input of parseTargets(users)) {
