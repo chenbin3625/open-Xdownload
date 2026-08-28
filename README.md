@@ -16,6 +16,10 @@ open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web
 - 定时计划：可把用户、列表、关注目标保存为自动归档计划，支持启用、停用、立即运行和删除。
 - 增量归档：首次归档扫描用户媒体时间线，后续从上次成功位置继续；已下载过且仍存在的媒体会自动跳过。
 - 工作台任务列表：任务状态、进度、错误信息和下载记录直接在工作台展示，支持取消任务、重新执行、复制文件路径或失败媒体地址。
+- 媒体归档库：按图片、视频、GIF 分类查看已下载媒体，顶部显示各分类数量，并支持文件名、媒体地址和推文号搜索。
+- 用户分组筛选：归档媒体展示用户名和昵称，可按用户分组筛选；历史记录会根据归档目录自动识别用户。
+- 轻量媒体预览：图片使用懒加载；视频默认只加载缩略图，点击后在放大预览中使用播放器组件播放，不在卡片中加载视频播放器。
+- 预览快捷切换：打开媒体预览后可使用左右方向键或预览窗口按钮切换文件。
 - 部分失败识别：归档任务中有媒体下载失败时会明确标记为“部分失败”，不会与完全成功的任务混在一起。
 - 失败重试：批量归档中可重试的失败推文会进入失败队列，可在独立抽屉中手动重试，也可开启任务结束后的自动重试；重新执行任务会创建新任务并保留原任务记录。
 - Cookie 池：支持主 Cookie 和多组备用 Cookie，用于列表、用户、关注归档以及 API 限流轮换。
@@ -200,6 +204,16 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 - 可在失败队列抽屉中点击“全部重试”，也可删除单条失败记录或清空队列。
 - 配置中的“失败重试”开启后，批量归档任务结束时会自动尝试重试失败队列。
 
+### 浏览媒体归档库
+
+1. 打开侧边栏中的“媒体归档库”。
+2. 使用顶部分类标签按全部、图片、视频或 GIF 筛选；括号中的数字是当前归档数量。
+3. 使用用户下拉框按用户名分组筛选，或搜索文件名、媒体地址和推文号。
+4. 点击图片或视频缩略图打开大图预览；视频会在预览窗口中加载播放器并自动播放。
+5. 在预览窗口中使用左右方向键切换相邻文件。
+
+视频缩略图优先使用 X 返回的公开预览图；历史记录或没有缩略图的文件会自动尝试生成对应的 Twitter CDN 预览地址，失败时显示轻量占位图。
+
 ## 存储和文件目录
 
 本地存储默认目录结构：
@@ -221,6 +235,7 @@ downloads/
 - SMB 和 WebDAV 使用相同的逻辑路径，但不会创建本地符号链接。
 - 文件名会清理系统不支持的字符，并受“最大文件名长度”限制。
 - 图片会尽量下载大图版本，视频和 GIF 会选择最高码率 MP4。
+- 视频预览图地址会随下载记录保存；升级到新版本后，历史 Twitter 视频记录会在媒体归档库接口中自动补齐可用缩略图。
 
 ## 配置项说明
 
@@ -279,6 +294,10 @@ open-Xdownload is a local-first X / Twitter media downloader. It comes with a bu
 - Scheduled plans: Save users, lists, or followed accounts as automatic archiving plans, with support for enable, disable, run now, and delete.
 - Incremental archiving: The first run scans a user's full media timeline; later runs resume from the last successful position. Media already downloaded and still present is skipped automatically.
 - Workbench task list: Task status, progress, errors, and download records are shown directly in the workbench, with support for cancelling tasks, re-running them, and copying file paths or failed media URLs.
+- Media library: Browse downloaded media by image, video, or GIF category, with counts on each tab and search across file names, media URLs, and post IDs.
+- User grouping and filtering: Archived media shows the author's username and display name, supports filtering by user, and infers users from archive directories for older records.
+- Lightweight previews: Images use lazy loading; video cards load only a poster by default and mount the player component only after opening the enlarged preview.
+- Preview shortcuts: Use the left and right arrow keys, or the preview window buttons, to move between files.
 - Partial-failure detection: An archiving task with any failed media download is clearly marked "partial failure" instead of being lumped in with fully successful tasks.
 - Failure retry: Retryable failed posts from a batch archive go into a failure queue that can be retried manually in a dedicated drawer, or automatically when a task finishes; re-running a task creates a new task and keeps the original record.
 - Cookie pool: Supports a primary cookie plus multiple backup cookie groups, used for list / user / followed-account archiving and API rate-limit rotation.
@@ -463,6 +482,16 @@ Scheduled plans only support user, list, and followed targets — not single pos
 - In the failure-queue drawer you can retry all entries, delete individual records, or clear the queue.
 - With "Failure retry" enabled in configuration, batch archiving tasks automatically try to retry the failure queue when they finish.
 
+### Browse the Media Library
+
+1. Open **Media Library** from the sidebar.
+2. Use the category tabs to filter all files, images, videos, or GIFs; the number in parentheses is the current archive count.
+3. Use the user selector to filter by author, or search file names, media URLs, and post IDs.
+4. Click an image or video poster to open the enlarged preview. Videos mount the player component in the preview window and start playing automatically.
+5. Use the left and right arrow keys to move between adjacent files.
+
+Video posters use the public preview URL returned by X when available. Older Twitter video records are automatically given a matching CDN thumbnail URL by the library API; records without a usable poster fall back to a lightweight placeholder.
+
 ## Storage & Directory Structure
 
 Default local storage layout:
@@ -484,6 +513,7 @@ Notes:
 - SMB and WebDAV use the same logical paths but don't create local symlinks.
 - Filenames are cleaned of characters the system doesn't support and are limited by the max filename length.
 - Images are downloaded at the largest available size where possible; videos and GIFs pick the highest-bitrate MP4.
+- Video poster URLs are stored with download records; after upgrading, historical Twitter video records are backfilled with usable CDN thumbnails by the media library API.
 
 ## Configuration Options
 
