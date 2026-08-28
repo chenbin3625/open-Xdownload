@@ -34,7 +34,7 @@ export function FailedTweetDrawer({
           </span>
         </Space>
       }
-      width={screens.md ? 760 : "100%"}
+      size={screens.md ? 760 : "100%"}
       onClose={onClose}
     >
       <FailedTweetQueue items={items} total={total} />

@@ -118,7 +118,7 @@ export function AppSidebar({
             <div className="font-bold text-slate-900 dark:text-slate-100 tracking-tight flex items-center gap-1.5 text-[14px] leading-none">
               <span>open-Xdownload</span>
               <span className="text-[10px] font-mono font-semibold uppercase px-1.5 py-0.5 rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
-                v0.5
+                v0.5.1
               </span>
             </div>
             <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate mt-1">

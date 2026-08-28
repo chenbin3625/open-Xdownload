@@ -625,6 +625,69 @@ func TestGetJobFilesReturnsDownloadsAndFailedMedia(t *testing.T) {
 	}
 }
 
+func TestServeDownloadFileSupportsRangeAndKeepsPathContained(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "downloads")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir downloads: %v", err)
+	}
+	if _, err := db.UpdateConfig(ctx, config.AppConfig{
+		DownloadDir: root,
+		StorageType: config.StorageLocal,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	filePath := filepath.Join(root, "clip.mp4")
+	if err := os.WriteFile(filePath, []byte("0123456789"), 0o600); err != nil {
+		t.Fatalf("write media: %v", err)
+	}
+	job, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://video.twimg.com/clip.mp4", "clip")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	record, err := db.CreateDownload(ctx, storage.DownloadRecord{
+		JobID: job.ID, MediaURL: "https://video.twimg.com/clip.mp4", FilePath: filePath, Bytes: 10,
+	})
+	if err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+
+	handler := NewServer(db, nil, nil, nil).Routes()
+	request := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/file", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "0123456789" {
+		t.Fatalf("full response = %d %q, want 200 full media", response.Code, response.Body.String())
+	}
+
+	rangeRequest := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/file", nil)
+	rangeRequest.Header.Set("Range", "bytes=2-5")
+	rangeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(rangeResponse, rangeRequest)
+	if rangeResponse.Code != http.StatusPartialContent || rangeResponse.Body.String() != "2345" {
+		t.Fatalf("range response = %d %q, want 206 2345", rangeResponse.Code, rangeResponse.Body.String())
+	}
+
+	outside, err := db.CreateDownload(ctx, storage.DownloadRecord{
+		JobID: job.ID, MediaURL: "https://video.twimg.com/outside.mp4", FilePath: filepath.Join(t.TempDir(), "outside.mp4"), Bytes: 1,
+	})
+	if err != nil {
+		t.Fatalf("create outside download: %v", err)
+	}
+	outRequest := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(outside.ID, 10)+"/file", nil)
+	outResponse := httptest.NewRecorder()
+	handler.ServeHTTP(outResponse, outRequest)
+	if outResponse.Code != http.StatusForbidden {
+		t.Fatalf("outside response = %d, want 403", outResponse.Code)
+	}
+}
+
 func TestEventsNilBusReturnsServiceUnavailable(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
