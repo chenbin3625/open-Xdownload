@@ -18,8 +18,6 @@ const (
 	EnvCSRFToken         = "OPEN_XDOWNLOAD_CT0"
 	EnvProxyURL          = "OPEN_XDOWNLOAD_PROXY_URL"
 	EnvAdditionalCookies = "OPEN_XDOWNLOAD_ADDITIONAL_COOKIES"
-	EnvSMBPassword       = "OPEN_XDOWNLOAD_SMB_PASSWORD"
-	EnvWebDAVPassword    = "OPEN_XDOWNLOAD_WEBDAV_PASSWORD"
 )
 
 // ApplyEnvOverrides 用环境变量覆盖敏感配置字段。环境变量为空时保持原值。
@@ -36,12 +34,6 @@ func ApplyEnvOverrides(cfg AppConfig) AppConfig {
 	if value := os.Getenv(EnvAdditionalCookies); value != "" {
 		cfg.AdditionalCookies = value
 	}
-	if value := os.Getenv(EnvSMBPassword); value != "" {
-		cfg.SMBPassword = value
-	}
-	if value := os.Getenv(EnvWebDAVPassword); value != "" {
-		cfg.WebDAVPassword = value
-	}
 	return cfg.Normalized()
 }
 
@@ -53,25 +45,6 @@ func RevertEnvOnlyEcho(submitted, stored, envKey string) string {
 		return submitted
 	}
 	return stored
-}
-
-// MergeStorageSecret 依据目标是否未变（same target）决定是否继承已存密码：提交值为空或
-// 占位符且目标未变时返回已存值；目标已变时清空（绝不把字面量 "********" 当密码发给新主机）。
-func MergeStorageSecret(submitted, stored string, targetUnchanged bool) string {
-	if submitted == "" || submitted == SecretPlaceholder {
-		if targetUnchanged {
-			return stored
-		}
-		return ""
-	}
-	return submitted
-}
-
-// SameSMBTarget 报告两个配置的 SMB 主机/端口是否一致（决定密码是否可继承）。
-func SameSMBTarget(a, b AppConfig) bool {
-	a = a.Normalized()
-	b = b.Normalized()
-	return strings.EqualFold(strings.TrimSpace(a.SMBHost), strings.TrimSpace(b.SMBHost)) && a.SMBPort == b.SMBPort
 }
 
 // SecretPlaceholder is the sentinel substituted for secret values when
@@ -87,14 +60,11 @@ const (
 	FileNamingTweetText FileNamingMode = "tweet_text"
 	FileNamingUserTweet FileNamingMode = "user_tweet"
 
-	StorageLocal  StorageType = "local"
-	StorageSMB    StorageType = "smb"
-	StorageWebDAV StorageType = "webdav"
+	StorageLocal StorageType = "local"
 
 	DefaultMaxFilenameLength = 120
 	MinFilenameLength        = 16
 	MaxFilenameLength        = 240
-	DefaultSMBPort           = 445
 )
 
 const (
@@ -115,17 +85,6 @@ type AppConfig struct {
 	FileNamingMode          FileNamingMode `json:"fileNamingMode" db:"file_naming_mode"`
 	MaxFilenameLength       int            `json:"maxFilenameLength" db:"max_filename_length"`
 	StorageType             StorageType    `json:"storageType" db:"storage_type"`
-	SMBHost                 string         `json:"smbHost" db:"smb_host"`
-	SMBPort                 int            `json:"smbPort" db:"smb_port"`
-	SMBShare                string         `json:"smbShare" db:"smb_share"`
-	SMBPath                 string         `json:"smbPath" db:"smb_path"`
-	SMBDomain               string         `json:"smbDomain" db:"smb_domain"`
-	SMBUsername             string         `json:"smbUsername" db:"smb_username"`
-	SMBPassword             string         `json:"smbPassword,omitempty" db:"smb_password"`
-	WebDAVURL               string         `json:"webdavUrl" db:"webdav_url"`
-	WebDAVPath              string         `json:"webdavPath" db:"webdav_path"`
-	WebDAVUsername          string         `json:"webdavUsername" db:"webdav_username"`
-	WebDAVPassword          string         `json:"webdavPassword,omitempty" db:"webdav_password"`
 }
 
 type AuthCookie struct {
@@ -142,7 +101,6 @@ func Default() AppConfig {
 		FileNamingMode:    FileNamingTweetText,
 		MaxFilenameLength: DefaultMaxFilenameLength,
 		StorageType:       StorageLocal,
-		SMBPort:           DefaultSMBPort,
 	}
 }
 
@@ -173,21 +131,11 @@ func (cfg AppConfig) Normalized() AppConfig {
 		cfg.MaxFilenameLength = MaxFilenameLength
 	}
 	switch cfg.StorageType {
-	case StorageLocal, StorageSMB, StorageWebDAV:
+	case StorageLocal:
 	default:
+		// SMB/WebDAV 存储已移除：历史库里遗留的值一律回落到本地存储。
 		cfg.StorageType = StorageLocal
 	}
-	if cfg.SMBPort <= 0 {
-		cfg.SMBPort = DefaultSMBPort
-	}
-	cfg.SMBHost = strings.TrimSpace(cfg.SMBHost)
-	cfg.SMBShare = strings.Trim(strings.TrimSpace(cfg.SMBShare), `/\`)
-	cfg.SMBPath = cleanSlashPath(cfg.SMBPath)
-	cfg.SMBDomain = strings.TrimSpace(cfg.SMBDomain)
-	cfg.SMBUsername = strings.TrimSpace(cfg.SMBUsername)
-	cfg.WebDAVURL = strings.TrimRight(strings.TrimSpace(cfg.WebDAVURL), "/")
-	cfg.WebDAVPath = cleanSlashPath(cfg.WebDAVPath)
-	cfg.WebDAVUsername = strings.TrimSpace(cfg.WebDAVUsername)
 	return cfg
 }
 
@@ -195,10 +143,7 @@ func (cfg AppConfig) Redacted() AppConfig {
 	cfg.AuthToken = redact(cfg.AuthToken)
 	cfg.CSRFToken = redact(cfg.CSRFToken)
 	cfg.AdditionalCookies = RedactAdditionalCookies(cfg.AdditionalCookies)
-	cfg.SMBPassword = redact(cfg.SMBPassword)
-	cfg.WebDAVPassword = redact(cfg.WebDAVPassword)
 	cfg.ProxyURL = redactURLUserinfo(cfg.ProxyURL)
-	cfg.WebDAVURL = redactURLUserinfo(cfg.WebDAVURL)
 	return cfg
 }
 
@@ -431,7 +376,7 @@ func redactURLUserinfo(rawURL string) string {
 }
 
 // SameURLAuthority reports whether two URLs point at the same scheme/host/port.
-// It intentionally ignores path/query so a user can edit the WebDAV path on the
+// It intentionally ignores path/query so a user can edit the URL path on the
 // same server without losing saved credentials.
 func SameURLAuthority(a, b string) bool {
 	au, err := url.Parse(a)
@@ -471,11 +416,4 @@ func RestoreURLUserinfo(redacted, stored string) string {
 	}
 	ru.User = su.User
 	return ru.String()
-}
-
-func cleanSlashPath(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.ReplaceAll(value, "\\", "/")
-	value = strings.Trim(value, "/")
-	return value
 }

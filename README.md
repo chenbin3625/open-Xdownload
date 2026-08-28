@@ -4,7 +4,7 @@
   <img src="docs/assets/icon.png" width="96" height="96" alt="open-Xdownload icon">
 </p>
 
-open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web 界面与后台任务队列，支持单条推文、用户、列表、关注四种任务类型，提供批量任务、定时计划、增量归档、失败重试、Cookie 池与本地 / SMB / WebDAV 多存储后端。
+open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web 界面与后台任务队列，支持单条推文、用户、列表、关注四种任务类型，提供批量任务、定时计划、增量归档、失败重试、Cookie 池与本地目录存储。
 
 ## 功能概览
 
@@ -23,7 +23,7 @@ open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web
 - 部分失败识别：归档任务中有媒体下载失败时会明确标记为“部分失败”，不会与完全成功的任务混在一起。
 - 失败重试：批量归档中可重试的失败推文会进入失败队列，可在独立抽屉中手动重试，也可开启任务结束后的自动重试；重新执行任务会创建新任务并保留原任务记录。
 - Cookie 池：支持主 Cookie 和多组备用 Cookie，用于列表、用户、关注归档以及 API 限流轮换。
-- 多存储后端：支持本地目录、SMB 共享和 WebDAV；本地目录可在配置界面中浏览、直接输入或创建。
+- 本地目录存储：可在配置界面中浏览、直接输入或创建下载目录。
 
 ## 任务类型
 
@@ -151,15 +151,12 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 
 启动服务并打开 Web UI 后，进入“配置”页面：
 
-1. 选择存储方式。
-2. 如果使用本地目录，可浏览、直接输入或创建下载目录；Docker 部署时通常保持 `/downloads`。
-3. 如果使用 SMB，填写主机、端口、共享名、目录、域、用户名和密码。
-4. 如果使用 WebDAV，填写服务地址、目录、用户名和密码。
-5. 如访问 X 或下载媒体需要代理，填写代理地址，例如 `http://127.0.0.1:7890`。
-6. 设置最大并发、文件命名方式和最大文件名长度。
-7. 如需用户、列表、关注归档，填写 X Cookie：`auth_token` 和 `ct0`。
-8. 如有多个账号 Cookie，在“备用 Cookie”中按组填写，用于批量归档时轮换。
-9. 点击“保存配置”，再点击“校验登录”确认 Cookie 可用。
+1. 配置下载目录：可浏览、直接输入或创建；Docker 部署时通常保持 `/downloads`。
+2. 如访问 X 或下载媒体需要代理，填写代理地址，例如 `http://127.0.0.1:7890`。
+3. 设置最大并发、文件命名方式和最大文件名长度。
+4. 如需用户、列表、关注归档，填写 X Cookie：`auth_token` 和 `ct0`。
+5. 如有多个账号 Cookie，在“备用 Cookie”中按组填写，用于批量归档时轮换。
+6. 点击“保存配置”，再点击“校验登录”确认 Cookie 可用。
 
 敏感字段读取时会显示为 `********`。再次保存配置时，留空或保持 `********` 不会覆盖已有密钥或密码。
 
@@ -232,7 +229,6 @@ downloads/
 
 - 用户归档和关注归档会把媒体保存到 `users/用户名或昵称/`。
 - 列表归档会创建 `lists/列表名(列表ID)/`，其中包含指向用户目录的链接，避免同一用户媒体被复制多份。
-- SMB 和 WebDAV 使用相同的逻辑路径，但不会创建本地符号链接。
 - 文件名会清理系统不支持的字符，并受“最大文件名长度”限制。
 - 图片会尽量下载大图版本，视频和 GIF 会选择最高码率 MP4。
 - 视频预览图地址会随下载记录保存；升级到新版本后，历史 Twitter 视频记录会在媒体归档库接口中自动补齐可用缩略图。
@@ -241,7 +237,6 @@ downloads/
 
 | 配置项 | 说明 |
 | --- | --- |
-| 存储类型 | 可选本地目录、SMB、WebDAV。 |
 | 下载目录 | 本地存储根目录，可在界面中浏览、输入或创建。Docker 部署时建议映射到宿主机目录。 |
 | 代理 | 用于 X API 请求和媒体下载。留空则直连。 |
 | 并发 | 后台任务最大并发数，范围 `1-64`。 |
@@ -261,7 +256,7 @@ data/open-xdownload.db
 downloads/
 ```
 
-其中 `open-xdownload.db` 保存配置、任务、下载记录、用户、列表、定时计划和失败队列；`downloads/` 保存实际媒体文件。使用 SMB 或 WebDAV 时，实际媒体文件位于对应远程存储中。
+其中 `open-xdownload.db` 保存配置、任务、下载记录、用户、列表、定时计划和失败队列；`downloads/` 保存实际媒体文件。
 
 ## 安全说明
 
@@ -282,7 +277,7 @@ ports:
 
 # open-Xdownload
 
-open-Xdownload is a local-first X / Twitter media downloader. It comes with a built-in Web UI and background task queue, supports four task types — single posts, users, lists, and followed accounts — and offers batch tasks, scheduled plans, incremental archiving, failure retry, a cookie pool, and local / SMB / WebDAV storage backends.
+open-Xdownload is a local-first X / Twitter media downloader. It comes with a built-in Web UI and background task queue, supports four task types — single posts, users, lists, and followed accounts — and offers batch tasks, scheduled plans, incremental archiving, failure retry, a cookie pool, and local-directory storage.
 
 ## Features
 
@@ -301,7 +296,7 @@ open-Xdownload is a local-first X / Twitter media downloader. It comes with a bu
 - Partial-failure detection: An archiving task with any failed media download is clearly marked "partial failure" instead of being lumped in with fully successful tasks.
 - Failure retry: Retryable failed posts from a batch archive go into a failure queue that can be retried manually in a dedicated drawer, or automatically when a task finishes; re-running a task creates a new task and keeps the original record.
 - Cookie pool: Supports a primary cookie plus multiple backup cookie groups, used for list / user / followed-account archiving and API rate-limit rotation.
-- Multiple storage backends: Supports local directories, SMB shares, and WebDAV; local directories can be browsed, typed in, or created in the configuration UI.
+- Local-directory storage: the download directory can be browsed, typed in, or created in the configuration UI.
 
 ## Task Types
 
@@ -429,15 +424,12 @@ Available service flags:
 
 After starting the service and opening the Web UI, go to the "Configuration" page:
 
-1. Choose a storage type.
-2. For local storage, browse, type in, or create the download directory; for Docker deployments this is usually `/downloads`.
-3. For SMB, enter host, port, share, directory, domain, username, and password.
-4. For WebDAV, enter the service URL, directory, username, and password.
-5. If you need a proxy to reach X or download media, set a proxy address such as `http://127.0.0.1:7890`.
-6. Set the max concurrency, filename pattern, and max filename length.
-7. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0`.
-8. If you have cookies for multiple accounts, enter them as groups under "Backup cookies" for rotation during batch archiving.
-9. Click "Save configuration", then "Verify login" to confirm the cookies work.
+1. Configure the download directory: browse, type in, or create one; for Docker deployments this is usually `/downloads`.
+2. If you need a proxy to reach X or download media, set a proxy address such as `http://127.0.0.1:7890`.
+3. Set the max concurrency, filename pattern, and max filename length.
+4. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0`.
+5. If you have cookies for multiple accounts, enter them as groups under "Backup cookies" for rotation during batch archiving.
+6. Click "Save configuration", then "Verify login" to confirm the cookies work.
 
 Sensitive fields are shown as `********` when read. Leaving them empty or as `********` on a later save won't overwrite the existing keys or passwords.
 
@@ -510,7 +502,6 @@ Notes:
 
 - User and followed-account archiving save media to `users/username-or-display-name/`.
 - List archiving creates `lists/list-name(list-id)/` containing links to user directories, so the same user's media isn't copied multiple times.
-- SMB and WebDAV use the same logical paths but don't create local symlinks.
 - Filenames are cleaned of characters the system doesn't support and are limited by the max filename length.
 - Images are downloaded at the largest available size where possible; videos and GIFs pick the highest-bitrate MP4.
 - Video poster URLs are stored with download records; after upgrading, historical Twitter video records are backfilled with usable CDN thumbnails by the media library API.
@@ -519,7 +510,6 @@ Notes:
 
 | Option | Description |
 | --- | --- |
-| Storage type | Local directory, SMB, or WebDAV. |
 | Download directory | Root directory for local storage; can be browsed, entered, or created in the UI. For Docker, map it to a host directory. |
 | Proxy | Used for X API requests and media downloads; leave empty for a direct connection. |
 | Concurrency | Max concurrency for background tasks, range `1-64`. |
@@ -539,7 +529,7 @@ data/open-xdownload.db
 downloads/
 ```
 
-`open-xdownload.db` stores config, tasks, download records, users, lists, scheduled plans, and the failure queue; `downloads/` holds the actual media files. With SMB or WebDAV, the actual media files live on the corresponding remote storage.
+`open-xdownload.db` stores config, tasks, download records, users, lists, scheduled plans, and the failure queue; `downloads/` holds the actual media files.
 
 ## Security Notes
 

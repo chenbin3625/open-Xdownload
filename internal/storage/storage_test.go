@@ -430,18 +430,16 @@ func TestUpdateConfigRestoresRedactedURLUserinfo(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	if _, err := store.UpdateConfig(ctx, config.AppConfig{
-		ProxyURL:  "http://alice:s3cret@proxy.local:3128",
-		WebDAVURL: "https://bob:pw@webdav.example/dav",
+		ProxyURL: "http://alice:s3cret@proxy.local:3128",
 	}); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
 	// 模拟前端流程：GET 配置得到 Redacted() 形式（URL 内嵌凭据被替换为占位符），
 	// 改了别的字段后把 Redacted 形式原样 PUT 回去。UpdateConfig 必须还原真实凭据，
-	// 否则会把 "********" 当作真实代理/WebDAV 地址保存，破坏下载。
+	// 否则会把 "********" 当作真实代理地址保存，破坏下载。
 	submitted := config.AppConfig{
-		ProxyURL:  "http://" + config.SecretPlaceholder + "@proxy.local:3128",
-		WebDAVURL: "https://" + config.SecretPlaceholder + "@webdav.example/dav",
+		ProxyURL: "http://" + config.SecretPlaceholder + "@proxy.local:3128",
 	}
 	if _, err := store.UpdateConfig(ctx, submitted); err != nil {
 		t.Fatalf("update redacted config: %v", err)
@@ -453,9 +451,6 @@ func TestUpdateConfigRestoresRedactedURLUserinfo(t *testing.T) {
 	if got.ProxyURL != "http://alice:s3cret@proxy.local:3128" {
 		t.Fatalf("ProxyURL = %q, want restored credentials", got.ProxyURL)
 	}
-	if got.WebDAVURL != "https://bob:pw@webdav.example/dav" {
-		t.Fatalf("WebDAVURL = %q, want restored credentials", got.WebDAVURL)
-	}
 }
 
 func TestUpdateConfigDoesNotRestoreSecretsForChangedTargets(t *testing.T) {
@@ -466,25 +461,13 @@ func TestUpdateConfigDoesNotRestoreSecretsForChangedTargets(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	if _, err := store.UpdateConfig(ctx, config.AppConfig{
-		ProxyURL:       "http://alice:s3cret@proxy.local:3128",
-		StorageType:    config.StorageWebDAV,
-		SMBHost:        "nas.local",
-		SMBPort:        445,
-		SMBPassword:    "smb-secret",
-		WebDAVURL:      "https://webdav.example/dav",
-		WebDAVPassword: "webdav-secret",
+		ProxyURL: "http://alice:s3cret@proxy.local:3128",
 	}); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
 	if _, err := store.UpdateConfig(ctx, config.AppConfig{
-		ProxyURL:       "http://" + config.SecretPlaceholder + "@evil.local:3128",
-		StorageType:    config.StorageWebDAV,
-		SMBHost:        "other-nas.local",
-		SMBPort:        445,
-		SMBPassword:    config.SecretPlaceholder,
-		WebDAVURL:      "https://evil.example/dav",
-		WebDAVPassword: config.SecretPlaceholder,
+		ProxyURL: "http://" + config.SecretPlaceholder + "@evil.local:3128",
 	}); err != nil {
 		t.Fatalf("update config: %v", err)
 	}
@@ -494,12 +477,6 @@ func TestUpdateConfigDoesNotRestoreSecretsForChangedTargets(t *testing.T) {
 	}
 	if got.ProxyURL != "http://evil.local:3128" {
 		t.Fatalf("ProxyURL = %q, want placeholder credentials dropped for changed host", got.ProxyURL)
-	}
-	if got.SMBPassword != "" {
-		t.Fatalf("SMBPassword = %q, want cleared for changed host", got.SMBPassword)
-	}
-	if got.WebDAVPassword != "" {
-		t.Fatalf("WebDAVPassword = %q, want cleared for changed host", got.WebDAVPassword)
 	}
 }
 

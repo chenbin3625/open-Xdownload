@@ -5,15 +5,14 @@ go 1.26.0
 require (
 	github.com/andybalholm/brotli v1.2.2
 	github.com/go-chi/chi/v5 v5.2.3
-	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/quic-go/quic-go v0.57.1
 	github.com/tidwall/gjson v1.18.0
 	modernc.org/sqlite v1.53.0
 )
+
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/geoffgarside/ber v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

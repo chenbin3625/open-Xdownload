@@ -350,7 +350,7 @@ func (m *Manager) startJob(parent context.Context, job storage.Job) {
 		defer m.wg.Done()
 		defer cancel()
 		defer m.finishJob(job.ID)
-		// 处理不可信外部数据（推文/SMB/WebDAV 响应）时第三方库可能 panic；recover 防止
+		// 处理不可信外部数据（推文/远端响应）时第三方库可能 panic；recover 防止
 		// 单个坏 payload 崩溃整个进程并把任务留在 resolving/downloading。
 		defer func() {
 			if r := recover(); r != nil {
@@ -726,6 +726,9 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 				return mediaDownloadResult{}, err
 			}
 			if exists {
+				// 已下载过的媒体也要补预览：历史记录的 preview_url 与本地海报可能缺失，
+				// 用本次解析重新读到的预览图地址回填（失败只记日志，不影响任务）。
+				m.backfillExistingMedia(ctx, cfg, target, existing, previewURL)
 				return mediaDownloadResult{skipped: true}, nil
 			}
 		}
@@ -1380,9 +1383,6 @@ func (m *Manager) refreshUserLinks(ctx context.Context, cfg config.AppConfig, us
 		if _, err := m.store.EnsureUserLink(ctx, userID, link.ListEntityID, name); err != nil {
 			return err
 		}
-		if !target.SupportsLinks() {
-			continue
-		}
 		listDir := target.Join(link.ListParentDir, link.ListName)
 		if link.Name != "" && link.Name != name {
 			_ = removeLinkPlaceholder(target.Join(listDir, link.Name))
@@ -1425,9 +1425,6 @@ func (m *Manager) ensureUserLink(ctx context.Context, cfg config.AppConfig, list
 	target, err := filestore.New(cfg)
 	if err != nil {
 		return err
-	}
-	if !target.SupportsLinks() {
-		return nil
 	}
 	linkPath := target.Join(listEntity.ParentDir, listEntity.Name, name)
 	return syncLink(linkPath, targetDir)

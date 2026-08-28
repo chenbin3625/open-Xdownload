@@ -1,11 +1,10 @@
 // Package httpx 提供所有对外 HTTP 调用共享的、带 SSRF 拨号防护的 Transport/Client。
 //
 // 目的：
-//   - 统一代理注入（M1）：单推解析、媒体下载、WebDAV 上传、X GraphQL 客户端共用同一套
-//     代理解析逻辑，避免"timeline 走代理、单推解析/WebDAV 上传不走代理"的不一致。
-//   - 下沉链路本地地址防护（S2）：任何拨号（SMB/WebDAV/下载/API）在建立连接前都会检查
-//     目标 IP，拒绝 169.254.x.x 等链路本地地址（云元数据 SSRF 的主要目标），而不再局限于
-//     /api/storage/test 一个端点。
+//   - 统一代理注入（M1）：单推解析、媒体下载、X GraphQL 客户端共用同一套代理解析逻辑，
+//     避免"timeline 走代理、单推解析不走代理"的不一致。
+//   - 下沉链路本地地址防护（S2）：任何拨号（下载/API）在建立连接前都会检查目标 IP，
+//     拒绝 169.254.x.x 等链路本地地址（云元数据 SSRF 的主要目标）。
 package httpx
 
 import (
@@ -57,8 +56,8 @@ func IsBlockedTargetError(err error) bool {
 	return errors.As(err, &target)
 }
 
-// BlockedIP 报告 ip 是否为链路本地地址（169.254.0.0/16 等）。与 httpapi 存储目标
-// 校验保持一致；环回地址与私网地址（NAS/SMB 常见于私网）不拦截。
+// BlockedIP 报告 ip 是否为链路本地地址（169.254.0.0/16 等）。
+// 环回地址与私网地址不拦截。
 func BlockedIP(ip net.IP) bool {
 	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
@@ -114,29 +113,6 @@ func guardedDial(ctx context.Context, network string, address string, timeout ti
 		return nil, &blockedTargetError{host: host}
 	}
 	return nil, lastErr
-}
-
-// ResolveBlocked 用于不支持 http.Transport 的拨号路径（如 SMB 手动 dial），
-// 在真正建立连接前校验 host 是否解析出链路本地地址。
-func ResolveBlocked(ctx context.Context, host string) error {
-	if strings.TrimSpace(host) == "" {
-		return nil
-	}
-	ips, err := lookupIPs(ctx, host)
-	if err != nil {
-		return err
-	}
-	for _, ip := range ips {
-		if BlockedIP(ip) {
-			return &blockedTargetError{host: host}
-		}
-	}
-	return nil
-}
-
-// DialGuarded 是给 SMB 等手动拨号路径使用的带防护拨号器。
-func DialGuarded(ctx context.Context, network string, address string, timeout time.Duration) (net.Conn, error) {
-	return guardedDial(ctx, network, address, timeout)
 }
 
 // guardDialContext 是 http.Transport.DialContext 的拦截实现（附加稳定超时与 KeepAlive）。

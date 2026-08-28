@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
@@ -34,9 +35,16 @@ type Store struct {
 	libraryCache      []DownloadRecord
 	libraryCacheOK    bool
 	libraryCacheLimit int
+	// libraryCacheGen 每次失效递增；回填缓存前校验代数未变，避免查询期间新写入触发
+	// 的失效被随后到期的旧数据覆盖（脏缓存最长持续一个 TTL）。
+	libraryCacheGen atomic.Uint64
 }
 
 const libraryDownloadsCacheTTL = 30 * time.Minute
+
+// MaxLibraryDownloadsLimit 是媒体归档库单次返回的记录上限。前端在客户端做全部
+// 筛选/计数/搜索，因此总是请求全量；该上限只为超大规模归档约束响应与缓存体积。
+const MaxLibraryDownloadsLimit = 100000
 
 const sqliteOpenOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
 
@@ -84,32 +92,21 @@ func (s *Store) Close() error {
 
 func (s *Store) migrate() error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS app_config (
-		id INTEGER PRIMARY KEY CHECK (id = 1),
-		download_dir TEXT NOT NULL,
-		max_concurrency INTEGER NOT NULL,
-		proxy_url TEXT NOT NULL DEFAULT '',
-		auth_token TEXT NOT NULL DEFAULT '',
-			csrf_token TEXT NOT NULL DEFAULT '',
-			additional_cookies TEXT NOT NULL DEFAULT '',
-			auto_retry_failed BOOLEAN NOT NULL DEFAULT 1,
-			auto_follow_protected BOOLEAN NOT NULL DEFAULT 0,
-			include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0,
-			file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text',
-			max_filename_length INTEGER NOT NULL DEFAULT 120,
-			storage_type TEXT NOT NULL DEFAULT 'local',
-			smb_host TEXT NOT NULL DEFAULT '',
-			smb_port INTEGER NOT NULL DEFAULT 445,
-			smb_share TEXT NOT NULL DEFAULT '',
-			smb_path TEXT NOT NULL DEFAULT '',
-			smb_domain TEXT NOT NULL DEFAULT '',
-			smb_username TEXT NOT NULL DEFAULT '',
-			smb_password TEXT NOT NULL DEFAULT '',
-			webdav_url TEXT NOT NULL DEFAULT '',
-			webdav_path TEXT NOT NULL DEFAULT '',
-			webdav_username TEXT NOT NULL DEFAULT '',
-			webdav_password TEXT NOT NULL DEFAULT '',
-			updated_at DATETIME NOT NULL
+		CREATE TABLE IF NOT EXISTS app_config (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			download_dir TEXT NOT NULL,
+			max_concurrency INTEGER NOT NULL,
+			proxy_url TEXT NOT NULL DEFAULT '',
+			auth_token TEXT NOT NULL DEFAULT '',
+				csrf_token TEXT NOT NULL DEFAULT '',
+				additional_cookies TEXT NOT NULL DEFAULT '',
+				auto_retry_failed BOOLEAN NOT NULL DEFAULT 1,
+				auto_follow_protected BOOLEAN NOT NULL DEFAULT 0,
+				include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0,
+				file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text',
+				max_filename_length INTEGER NOT NULL DEFAULT 120,
+				storage_type TEXT NOT NULL DEFAULT 'local',
+				updated_at DATETIME NOT NULL
 		);
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -286,6 +283,12 @@ END;
 	if err := s.runMigrationOnce("backfill_download_preview_urls", s.backfillDownloadPreviewURLs); err != nil {
 		return err
 	}
+	if err := s.runMigrationOnce("rederive_download_preview_urls", s.rederiveDownloadPreviewURLs); err != nil {
+		return err
+	}
+	if err := s.runMigrationOnce("drop_smb_webdav_config_columns", s.dropSMBWebDAVConfigColumns); err != nil {
+		return err
+	}
 	if err := s.ensureDashboardCounters(); err != nil {
 		return err
 	}
@@ -333,17 +336,6 @@ func (s *Store) addMissingColumns() error {
 		"file_naming_mode":           `ALTER TABLE app_config ADD COLUMN file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text'`,
 		"max_filename_length":        `ALTER TABLE app_config ADD COLUMN max_filename_length INTEGER NOT NULL DEFAULT 120`,
 		"storage_type":               `ALTER TABLE app_config ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'local'`,
-		"smb_host":                   `ALTER TABLE app_config ADD COLUMN smb_host TEXT NOT NULL DEFAULT ''`,
-		"smb_port":                   `ALTER TABLE app_config ADD COLUMN smb_port INTEGER NOT NULL DEFAULT 445`,
-		"smb_share":                  `ALTER TABLE app_config ADD COLUMN smb_share TEXT NOT NULL DEFAULT ''`,
-		"smb_path":                   `ALTER TABLE app_config ADD COLUMN smb_path TEXT NOT NULL DEFAULT ''`,
-		"smb_domain":                 `ALTER TABLE app_config ADD COLUMN smb_domain TEXT NOT NULL DEFAULT ''`,
-		"smb_username":               `ALTER TABLE app_config ADD COLUMN smb_username TEXT NOT NULL DEFAULT ''`,
-		"smb_password":               `ALTER TABLE app_config ADD COLUMN smb_password TEXT NOT NULL DEFAULT ''`,
-		"webdav_url":                 `ALTER TABLE app_config ADD COLUMN webdav_url TEXT NOT NULL DEFAULT ''`,
-		"webdav_path":                `ALTER TABLE app_config ADD COLUMN webdav_path TEXT NOT NULL DEFAULT ''`,
-		"webdav_username":            `ALTER TABLE app_config ADD COLUMN webdav_username TEXT NOT NULL DEFAULT ''`,
-		"webdav_password":            `ALTER TABLE app_config ADD COLUMN webdav_password TEXT NOT NULL DEFAULT ''`,
 	}
 	for name, statement := range columns {
 		var exists int
@@ -471,6 +463,59 @@ WHERE preview_url = '' AND media_url <> ''`); err != nil {
 	return nil
 }
 
+// rederiveDownloadPreviewURLs re-derives stored poster URLs that were written
+// by the earlier derivation. 旧版推导直接把 .mp4 换成 .jpg，得到 /vid/…jpg 形式的
+// 死链（真实缩略图在 /img/ 下），历史媒体因此大面积 404。我们推导出的地址带有
+// ?name=small 特征（API 解析到的 media_url_https 无查询串），据此挑出旧值并用
+// 修正后的推导重写；解析得到真实海报地址的记录不受影响。
+func (s *Store) rederiveDownloadPreviewURLs(exec migrationExecutor) error {
+	type row struct {
+		ID         int64  `db:"id"`
+		MediaURL   string `db:"media_url"`
+		PreviewURL string `db:"preview_url"`
+	}
+	var rows []row
+	if err := exec.Select(&rows, `
+SELECT id, media_url, preview_url
+FROM downloads
+WHERE media_url LIKE '%video.twimg.com%'
+  AND (preview_url LIKE '%name=small%' OR preview_url LIKE '%/vid/%')`); err != nil {
+		return err
+	}
+	for _, item := range rows {
+		previewURL := deriveVideoPreviewURL(item.MediaURL)
+		if previewURL == "" || previewURL == item.PreviewURL {
+			continue
+		}
+		if _, err := exec.Exec(`UPDATE downloads SET preview_url = ? WHERE id = ? AND preview_url = ?`, previewURL, item.ID, item.PreviewURL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dropSMBWebDAVConfigColumns 删除历史版本 app_config 中遗留的 SMB/WebDAV 配置列，
+// 连同其中的明文密码一并清除（SMB/WebDAV 存储后端已移除）。
+func (s *Store) dropSMBWebDAVConfigColumns(exec migrationExecutor) error {
+	columns := []string{
+		"smb_host", "smb_port", "smb_share", "smb_path", "smb_domain",
+		"smb_username", "smb_password", "webdav_url", "webdav_path",
+		"webdav_username", "webdav_password",
+	}
+	for _, name := range columns {
+		var exists int
+		if err := exec.Get(&exists, `SELECT COUNT(*) FROM pragma_table_info('app_config') WHERE name = ?`, name); err != nil {
+			return err
+		}
+		if exists > 0 {
+			if _, err := exec.Exec(`ALTER TABLE app_config DROP COLUMN ` + name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Store) addMissingIndexes() error {
 	_, err := s.db.Exec(`
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_tweet_media_unique
@@ -505,16 +550,12 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 			id, download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 			additional_cookies, auto_retry_failed, auto_follow_protected,
 			include_nested_tweet_media,
-			file_naming_mode, max_filename_length, storage_type,
-			smb_host, smb_port, smb_share, smb_path, smb_domain, smb_username, smb_password,
-			webdav_url, webdav_path, webdav_username, webdav_password, updated_at
+			file_naming_mode, max_filename_length, storage_type, updated_at
 		) VALUES (
 			1, :download_dir, :max_concurrency, :proxy_url, :auth_token, :csrf_token,
 			:additional_cookies, :auto_retry_failed, :auto_follow_protected,
 			:include_nested_tweet_media,
-			:file_naming_mode, :max_filename_length, :storage_type,
-			:smb_host, :smb_port, :smb_share, :smb_path, :smb_domain, :smb_username, :smb_password,
-			:webdav_url, :webdav_path, :webdav_username, :webdav_password, :updated_at
+			:file_naming_mode, :max_filename_length, :storage_type, :updated_at
 		)`, map[string]any{
 		"download_dir":               cfg.DownloadDir,
 		"max_concurrency":            cfg.MaxConcurrency,
@@ -528,17 +569,6 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 		"file_naming_mode":           cfg.FileNamingMode,
 		"max_filename_length":        cfg.MaxFilenameLength,
 		"storage_type":               cfg.StorageType,
-		"smb_host":                   cfg.SMBHost,
-		"smb_port":                   cfg.SMBPort,
-		"smb_share":                  cfg.SMBShare,
-		"smb_path":                   cfg.SMBPath,
-		"smb_domain":                 cfg.SMBDomain,
-		"smb_username":               cfg.SMBUsername,
-		"smb_password":               cfg.SMBPassword,
-		"webdav_url":                 cfg.WebDAVURL,
-		"webdav_path":                cfg.WebDAVPath,
-		"webdav_username":            cfg.WebDAVUsername,
-		"webdav_password":            cfg.WebDAVPassword,
 		"updated_at":                 time.Now().UTC(),
 	})
 	return err
@@ -548,9 +578,7 @@ const storedConfigQuery = `
 SELECT download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 	additional_cookies, auto_retry_failed, auto_follow_protected,
 	include_nested_tweet_media,
-	file_naming_mode, max_filename_length, storage_type,
-	smb_host, smb_port, smb_share, smb_path, smb_domain, smb_username, smb_password,
-	webdav_url, webdav_path, webdav_username, webdav_password
+	file_naming_mode, max_filename_length, storage_type
 FROM app_config WHERE id = 1`
 
 func (s *Store) rememberStoredConfig(cfg config.AppConfig) {
@@ -616,17 +644,12 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 		cfg.CSRFToken = current.CSRFToken
 	}
 	cfg.AdditionalCookies = config.RestoreAdditionalCookies(cfg.AdditionalCookies, current.AdditionalCookies)
-	cfg.SMBPassword = config.MergeStorageSecret(cfg.SMBPassword, current.SMBPassword, config.SameSMBTarget(cfg, current))
-	cfg.WebDAVPassword = config.MergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
-	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据，避免把占位符当真实代理/WebDAV 地址保存。
+	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据，避免把占位符当真实代理地址保存。
 	cfg.ProxyURL = config.RestoreURLUserinfo(cfg.ProxyURL, current.ProxyURL)
-	cfg.WebDAVURL = config.RestoreURLUserinfo(cfg.WebDAVURL, current.WebDAVURL)
 	cfg.AuthToken = config.RevertEnvOnlyEcho(cfg.AuthToken, current.AuthToken, config.EnvAuthToken)
 	cfg.CSRFToken = config.RevertEnvOnlyEcho(cfg.CSRFToken, current.CSRFToken, config.EnvCSRFToken)
 	cfg.ProxyURL = config.RevertEnvOnlyEcho(cfg.ProxyURL, current.ProxyURL, config.EnvProxyURL)
 	cfg.AdditionalCookies = config.RevertEnvOnlyEcho(cfg.AdditionalCookies, current.AdditionalCookies, config.EnvAdditionalCookies)
-	cfg.SMBPassword = config.RevertEnvOnlyEcho(cfg.SMBPassword, current.SMBPassword, config.EnvSMBPassword)
-	cfg.WebDAVPassword = config.RevertEnvOnlyEcho(cfg.WebDAVPassword, current.WebDAVPassword, config.EnvWebDAVPassword)
 
 	_, err = tx.NamedExecContext(ctx, `
 	UPDATE app_config SET
@@ -642,17 +665,6 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 			file_naming_mode = :file_naming_mode,
 			max_filename_length = :max_filename_length,
 			storage_type = :storage_type,
-			smb_host = :smb_host,
-			smb_port = :smb_port,
-			smb_share = :smb_share,
-			smb_path = :smb_path,
-			smb_domain = :smb_domain,
-			smb_username = :smb_username,
-			smb_password = :smb_password,
-			webdav_url = :webdav_url,
-			webdav_path = :webdav_path,
-			webdav_username = :webdav_username,
-			webdav_password = :webdav_password,
 			updated_at = :updated_at
 		WHERE id = 1`, map[string]any{
 		"download_dir":               cfg.DownloadDir,
@@ -667,17 +679,6 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 		"file_naming_mode":           cfg.FileNamingMode,
 		"max_filename_length":        cfg.MaxFilenameLength,
 		"storage_type":               cfg.StorageType,
-		"smb_host":                   cfg.SMBHost,
-		"smb_port":                   cfg.SMBPort,
-		"smb_share":                  cfg.SMBShare,
-		"smb_path":                   cfg.SMBPath,
-		"smb_domain":                 cfg.SMBDomain,
-		"smb_username":               cfg.SMBUsername,
-		"smb_password":               cfg.SMBPassword,
-		"webdav_url":                 cfg.WebDAVURL,
-		"webdav_path":                cfg.WebDAVPath,
-		"webdav_username":            cfg.WebDAVUsername,
-		"webdav_password":            cfg.WebDAVPassword,
 		"updated_at":                 time.Now().UTC(),
 	})
 	if err != nil {
@@ -1120,12 +1121,14 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 // ListLibraryDownloads enriches archive records with the owning user when the
 // file was saved under a user entity directory. Older records remain valid and
 // simply return empty user fields when no entity can be inferred.
+//
+// 用户归属在 Go 侧按路径前缀匹配完成（而非 SQL LIKE）：目录名来自用户显示名，
+// 常含 `_`/`%` 等字符，LIKE 会把它们当通配符产生误归属。匹配不区分大小写，
+// 以兼容 macOS/Windows 等大小写不敏感文件系统记录的路径。
+// 注意：从磁盘删除的文件在下一次缓存失效（最长 30 分钟）前仍会出现在结果里。
 func (s *Store) ListLibraryDownloads(ctx context.Context, limit int) ([]DownloadRecord, error) {
-	if limit <= 0 {
-		limit = 10000
-	}
-	if limit > 10000 {
-		limit = 10000
+	if limit <= 0 || limit > MaxLibraryDownloadsLimit {
+		limit = MaxLibraryDownloadsLimit
 	}
 	s.libraryCacheMu.RLock()
 	if s.libraryCacheOK && time.Since(s.libraryCacheAt) < libraryDownloadsCacheTTL && s.libraryCacheLimit >= limit {
@@ -1139,22 +1142,16 @@ func (s *Store) ListLibraryDownloads(ctx context.Context, limit int) ([]Download
 	}
 	s.libraryCacheMu.RUnlock()
 
+	generation := s.libraryCacheGen.Load()
+
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `
-SELECT d.*,
-  COALESCE((SELECT u.screen_name
-    FROM user_entities ue JOIN users u ON u.id = ue.user_id
-    WHERE REPLACE(d.file_path, char(92), '/') LIKE
-      REPLACE(ue.parent_dir, char(92), '/') || '/' || REPLACE(ue.name, char(92), '/') || '/%'
-    ORDER BY ue.id LIMIT 1), '') AS user_screen_name,
-  COALESCE((SELECT u.name
-    FROM user_entities ue JOIN users u ON u.id = ue.user_id
-    WHERE REPLACE(d.file_path, char(92), '/') LIKE
-      REPLACE(ue.parent_dir, char(92), '/') || '/' || REPLACE(ue.name, char(92), '/') || '/%'
-    ORDER BY ue.id LIMIT 1), '') AS user_name
-FROM downloads d
+SELECT d.* FROM downloads d
 ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.attributeLibraryUsers(ctx, items); err != nil {
 		return nil, err
 	}
 	for index := range items {
@@ -1164,7 +1161,7 @@ ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit)
 	}
 	cfg, err := s.GetConfig(ctx)
 	if err != nil || cfg.StorageType != config.StorageLocal || strings.TrimSpace(cfg.DownloadDir) == "" {
-		s.cacheLibraryDownloads(items, limit)
+		s.cacheLibraryDownloads(items, limit, generation)
 		return append([]DownloadRecord(nil), items...), nil
 	}
 	root, err := filepath.Abs(cfg.DownloadDir)
@@ -1181,7 +1178,7 @@ ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit)
 		if walkErr != nil || entry.IsDir() {
 			return nil
 		}
-		if !isLibraryMediaPath(path) || strings.HasSuffix(strings.ToLower(path), ".preview.jpg") {
+		if !IsLibraryMediaPath(path) || strings.HasSuffix(strings.ToLower(path), ".preview.jpg") {
 			return nil
 		}
 		cleaned := filepath.Clean(path)
@@ -1200,12 +1197,59 @@ ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit)
 	if len(items) > limit {
 		items = items[:limit]
 	}
-	s.cacheLibraryDownloads(items, limit)
+	s.cacheLibraryDownloads(items, limit, generation)
 	return append([]DownloadRecord(nil), items...), nil
 }
 
-func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int) {
+// attributeLibraryUsers 按 file_path 前缀为下载记录补充归属用户。
+// 多个实体同时命中时沿用原 SQL 行为：取 id 最小的实体。
+func (s *Store) attributeLibraryUsers(ctx context.Context, items []DownloadRecord) error {
+	if len(items) == 0 {
+		return nil
+	}
+	type entityPrefix struct {
+		ScreenName string `db:"screen_name"`
+		UserName   string `db:"user_name"`
+		Prefix     string `db:"prefix"` // 小写、正斜杠化的 "parent_dir/name/" 前缀
+	}
+	entities := []entityPrefix{}
+	err := s.db.SelectContext(ctx, &entities, `
+SELECT COALESCE(u.screen_name, '') AS screen_name, COALESCE(u.name, '') AS user_name,
+  REPLACE(ue.parent_dir, char(92), '/') || '/' || REPLACE(ue.name, char(92), '/') || '/' AS prefix
+FROM user_entities ue JOIN users u ON u.id = ue.user_id
+ORDER BY ue.id`)
+	if err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	for index := range entities {
+		entities[index].Prefix = strings.ToLower(entities[index].Prefix)
+	}
+	for index := range items {
+		if items[index].UserScreenName != "" {
+			continue
+		}
+		pathLower := strings.ToLower(strings.ReplaceAll(items[index].FilePath, `\`, `/`))
+		for _, entity := range entities {
+			if strings.HasPrefix(pathLower, entity.Prefix) {
+				items[index].UserScreenName = entity.ScreenName
+				items[index].UserName = entity.UserName
+				break
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int, generation uint64) {
 	s.libraryCacheMu.Lock()
+	if s.libraryCacheGen.Load() != generation {
+		// 查询期间发生过失效：本结果可能缺少新记录，放弃回填，避免脏缓存。
+		s.libraryCacheMu.Unlock()
+		return
+	}
 	s.libraryCache = append([]DownloadRecord(nil), items...)
 	s.libraryCacheAt = time.Now()
 	s.libraryCacheOK = true
@@ -1214,6 +1258,7 @@ func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int) {
 }
 
 func (s *Store) invalidateLibraryDownloadsCache() {
+	s.libraryCacheGen.Add(1)
 	s.libraryCacheMu.Lock()
 	s.libraryCache = nil
 	s.libraryCacheAt = time.Time{}
@@ -1222,7 +1267,9 @@ func (s *Store) invalidateLibraryDownloadsCache() {
 	s.libraryCacheMu.Unlock()
 }
 
-func isLibraryMediaPath(path string) bool {
+// IsLibraryMediaPath reports whether path has a media extension that the
+// gallery indexes and the library file endpoint may serve.
+func IsLibraryMediaPath(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".m4v", ".webm", ".ogv":
 		return true
@@ -1236,6 +1283,12 @@ func VideoPreviewURL(mediaURL string) string { return deriveVideoPreviewURL(medi
 
 // deriveVideoPreviewURL maps Twitter's video CDN path to its public thumbnail
 // path. It provides posters for records created before preview_url was stored.
+//
+// 现代 X 视频 CDN 路径形如 video.twimg.com/ext_tw_video/<id>/pu/vid/avc1/1280x720/<stem>.mp4，
+// 对应缩略图为 pbs.twimg.com/ext_tw_video_thumb/<id>/pu/img/<stem>.jpg：目录段
+// ext_tw_video→ext_tw_video_thumb、视频轨目录 /vid/<codec>/<分辨率>/→/img/、扩展名
+// mp4→jpg。旧版直接把 .mp4 换成 .jpg，得到的 /vid/…jpg 地址并不存在，是历史媒体
+// 缩略图大面积 404 的原因。GIF（tweet_video）缩略图约定为 .png。
 func deriveVideoPreviewURL(mediaURL string) string {
 	u, err := url.Parse(mediaURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
@@ -1249,24 +1302,62 @@ func deriveVideoPreviewURL(mediaURL string) string {
 	if !strings.HasSuffix(lowerPath, ".mp4") {
 		return ""
 	}
+	thumbExt := ".jpg"
 	switch {
 	case strings.Contains(u.Path, "/ext_tw_video/"):
 		u.Path = strings.Replace(u.Path, "/ext_tw_video/", "/ext_tw_video_thumb/", 1)
 	case strings.Contains(u.Path, "/amplify_video/"):
 		u.Path = strings.Replace(u.Path, "/amplify_video/", "/amplify_video_thumb/", 1)
+	case strings.Contains(u.Path, "/tweet_video/"):
+		u.Path = strings.Replace(u.Path, "/tweet_video/", "/tweet_video_thumb/", 1)
+		thumbExt = ".png"
 	default:
 		return ""
 	}
-	u.Path = strings.TrimSuffix(u.Path, filepath.Ext(u.Path)) + ".jpg"
+	u.Path = videoThumbImagePath(u.Path, thumbExt)
 	u.RawQuery = "name=small"
 	u.Host = "pbs.twimg.com"
 	return u.String()
 }
 
+// videoThumbImagePath rewrites the video track directory (`/vid/<codec>/<res>/`
+// on modern URLs) to the thumbnail directory `/img/`, keeping only the file
+// stem. URLs without a `/vid/` segment keep their directory and just swap the
+// extension (older amplify/tweet_video layouts).
+func videoThumbImagePath(videoPath string, thumbExt string) string {
+	slash := strings.LastIndex(videoPath, "/")
+	dir, file := videoPath[:slash+1], videoPath[slash+1:]
+	stem := strings.TrimSuffix(file, filepath.Ext(file))
+	if index := strings.Index(strings.ToLower(dir), "/vid/"); index >= 0 {
+		dir = dir[:index+1] + "img/"
+	}
+	return dir + stem + thumbExt
+}
+
+// UpdateDownloadPreviewURL backfills a stored preview URL for records created
+// before preview_url was captured. It never reorders the record: only
+// preview_url changes, so gallery 排序与创建时间保持不变。
+func (s *Store) UpdateDownloadPreviewURL(ctx context.Context, id int64, previewURL string) error {
+	if id <= 0 || strings.TrimSpace(previewURL) == "" {
+		return nil
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE downloads SET preview_url = ? WHERE id = ? AND preview_url <> ?`, previewURL, id, previewURL)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed > 0 {
+		s.invalidateLibraryDownloadsCache()
+	}
+	return nil
+}
+
 // GetDownload returns one archived media record by its stable database ID.
+// Unknown and non-positive IDs both yield (nil, nil) so HTTP callers can map
+// them uniformly to 404.
 func (s *Store) GetDownload(ctx context.Context, id int64) (*DownloadRecord, error) {
 	if id <= 0 {
-		return nil, sql.ErrNoRows
+		return nil, nil
 	}
 	var record DownloadRecord
 	if err := s.db.GetContext(ctx, &record, `SELECT * FROM downloads WHERE id = ?`, id); err != nil {

@@ -26,15 +26,6 @@ const config: AppConfig = {
   fileNamingMode: "tweet_text",
   maxFilenameLength: 180,
   storageType: "local",
-  smbHost: "",
-  smbPort: 445,
-  smbShare: "",
-  smbPath: "",
-  smbDomain: "",
-  smbUsername: "",
-  webdavUrl: "",
-  webdavPath: "",
-  webdavUsername: "",
 };
 
 describe("parseAppBootstrap", () => {

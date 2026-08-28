@@ -3,119 +3,21 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
+	"net/url"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 )
-
-func TestTestStorageUsesSubmittedWebDAVConfigAndSavedPassword(t *testing.T) {
-	var mu sync.Mutex
-	paths := []string{}
-	putBody := ""
-
-	webdav := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		username, password, ok := r.BasicAuth()
-		if !ok || username != "alice" || password != "saved-secret" {
-			t.Errorf("BasicAuth = %q/%q/%t, want alice/saved-secret/true", username, password, ok)
-		}
-
-		mu.Lock()
-		paths = append(paths, r.Method+" "+r.URL.Path)
-		mu.Unlock()
-
-		switch r.Method {
-		case "MKCOL":
-			w.WriteHeader(http.StatusCreated)
-		case http.MethodPut:
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Errorf("read PUT body: %v", err)
-			}
-			putBody = string(body)
-			if got := r.Header.Get("If-None-Match"); got != "*" {
-				t.Errorf("If-None-Match = %q, want *", got)
-			}
-			w.WriteHeader(http.StatusCreated)
-		case http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer webdav.Close()
-
-	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	if _, err := db.UpdateConfig(ctx, config.AppConfig{WebDAVURL: webdav.URL + "/dav", WebDAVPassword: "saved-secret"}); err != nil {
-		t.Fatalf("save current config: %v", err)
-	}
-
-	handler := NewServer(db, nil, nil, nil).Routes()
-	requestBody := `{
-		"storageType": "webdav",
-		"webdavUrl": "` + webdav.URL + `/dav",
-		"webdavPath": "remote",
-		"webdavUsername": "alice",
-		"webdavPassword": "********"
-	}`
-	request := httptest.NewRequest(http.MethodPost, "/api/storage/test", strings.NewReader(requestBody))
-	request.Header.Set("Content-Type", "application/json")
-	response := httptest.NewRecorder()
-
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var result storageTestResult
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !result.OK || result.Type != config.StorageWebDAV {
-		t.Fatalf("result = %+v, want ok WebDAV result", result)
-	}
-	if result.Root != webdav.URL+"/dav/remote" {
-		t.Fatalf("root = %q, want %q", result.Root, webdav.URL+"/dav/remote")
-	}
-	if !strings.HasPrefix(result.Path, result.Root+"/.open-xdownload-storage-test-") {
-		t.Fatalf("path = %q, want probe path under %q", result.Path, result.Root)
-	}
-	if putBody != "open-Xdownload storage test\n" {
-		t.Fatalf("PUT body = %q, want probe payload", putBody)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	wantPrefix := []string{
-		"MKCOL /dav/remote",
-		"PUT /dav/remote/.open-xdownload-storage-test-",
-		"DELETE /dav/remote/.open-xdownload-storage-test-",
-	}
-	if len(paths) != len(wantPrefix) {
-		t.Fatalf("paths = %#v, want %d requests", paths, len(wantPrefix))
-	}
-	for index, prefix := range wantPrefix {
-		if !strings.HasPrefix(paths[index], prefix) {
-			t.Fatalf("paths[%d] = %q, want prefix %q; all paths=%#v", index, paths[index], prefix, paths)
-		}
-	}
-}
 
 func TestRetryActiveJobReturnsBusinessError(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -745,5 +647,143 @@ func TestEventsStreamsWithoutFlusherAssertion(t *testing.T) {
 	got = string(buf[:n])
 	if !strings.Contains(got, "job.created") {
 		t.Fatalf("event chunk = %q", got)
+	}
+}
+
+func newLibraryTestServer(t *testing.T) (*storage.Store, http.Handler, string) {
+	t.Helper()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "downloads")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir downloads: %v", err)
+	}
+	if _, err := db.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	return db, NewServer(db, nil, nil, nil).Routes(), root
+}
+
+func TestServeLibraryFileWhitelistsMediaAndKeepsPathContained(t *testing.T) {
+	_, handler, root := newLibraryTestServer(t)
+
+	mediaPath := filepath.Join(root, "users", "john_smith", "clip.mp4")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o700); err != nil {
+		t.Fatalf("mkdir media dir: %v", err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("video-bytes"), 0o600); err != nil {
+		t.Fatalf("write media: %v", err)
+	}
+	textPath := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(textPath, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.jpg")
+	if err := os.WriteFile(outsidePath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	// 媒体文件正常返回。
+	request := httptest.NewRequest(http.MethodGet, "/api/library/file?path="+strings.ReplaceAll(url.QueryEscape(mediaPath), "+", "%20"), nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "video-bytes" {
+		t.Fatalf("media response = %d %q, want 200 video-bytes", response.Code, response.Body.String())
+	}
+
+	// 非媒体扩展名被白名单拒绝。
+	request = httptest.NewRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(textPath), nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("text response = %d, want 403", response.Code)
+	}
+
+	// 下载目录之外拒绝。
+	request = httptest.NewRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(outsidePath), nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("outside response = %d, want 403", response.Code)
+	}
+
+	// 目录内的缺失媒体文件返回 404 而非 403。
+	request = httptest.NewRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(filepath.Join(root, "users", "john_smith", "gone.jpg")), nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing response = %d, want 404", response.Code)
+	}
+}
+
+func TestServeDownloadFileUnknownIDsReturn404(t *testing.T) {
+	_, handler, _ := newLibraryTestServer(t)
+
+	for _, id := range []string{"0", "-1", "99999"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+id+"/file", nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("id %s response = %d, want 404", id, response.Code)
+		}
+	}
+}
+
+func TestServeDownloadPreviewServesLocalPoster(t *testing.T) {
+	db, handler, root := newLibraryTestServer(t)
+	ctx := context.Background()
+
+	videoPath := filepath.Join(root, "clip.mp4")
+	if err := os.WriteFile(videoPath, []byte("video"), 0o600); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	job, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://video.twimg.com/clip.mp4", "clip")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	record, err := db.CreateDownload(ctx, storage.DownloadRecord{
+		JobID: job.ID, MediaURL: "https://video.twimg.com/clip.mp4", FilePath: videoPath, Bytes: 5,
+	})
+	if err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+	if err := os.WriteFile(videoPath+".preview.jpg", []byte("poster"), 0o600); err != nil {
+		t.Fatalf("write poster: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/preview", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "poster" {
+		t.Fatalf("preview response = %d %q, want 200 poster", response.Code, response.Body.String())
+	}
+}
+
+// TestResolveLocalLibraryPath 覆盖媒体库路径解析的边界：目录内文件、目录外拒绝、
+// 缺失文件以 os.ErrNotExist 语义返回（供 HTTP 层映射 404）。
+func TestResolveLocalLibraryPath(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "a.jpg")
+	if err := os.WriteFile(inside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// macOS 上 TempDir 位于 /var -> /private/var 符号链接下，期望值需同样解析。
+	expected, err := filepath.EvalSymlinks(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveLocalLibraryPath(root, inside); err != nil || got != expected {
+		t.Fatalf("inside = %q, %v; want %q", got, err, expected)
+	}
+	if _, err := resolveLocalLibraryPath(root, filepath.Join(t.TempDir(), "b.jpg")); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside err = %v, want non-ErrNotExist rejection", err)
+	}
+	if _, err := resolveLocalLibraryPath(root, filepath.Join(root, "missing.jpg")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing err = %v, want os.ErrNotExist", err)
 	}
 }

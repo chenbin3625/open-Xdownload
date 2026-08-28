@@ -67,7 +67,7 @@ func TestMigrateNormalizesAndDeduplicatesDownloadsMediaURL(t *testing.T) {
 	if items[0].MediaURL != want {
 		t.Fatalf("media_url = %q, want %q", items[0].MediaURL, want)
 	}
-	if got, wantPreview := items[0].PreviewURL, "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/vid/1280x720/abc.jpg?name=small"; got != wantPreview {
+	if got, wantPreview := items[0].PreviewURL, "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/abc.jpg?name=small"; got != wantPreview {
 		t.Fatalf("preview_url = %q, want %q", got, wantPreview)
 	}
 }
@@ -81,12 +81,17 @@ func TestDeriveVideoPreviewURL(t *testing.T) {
 		{
 			name: "extended video",
 			in:   "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12",
-			want: "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/vid/1280x720/abc.jpg?name=small",
+			want: "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/abc.jpg?name=small",
 		},
 		{
 			name: "amplify video",
 			in:   "https://video.twimg.com/amplify_video/456/vid/640x360/clip.mp4",
-			want: "https://pbs.twimg.com/amplify_video_thumb/456/vid/640x360/clip.jpg?name=small",
+			want: "https://pbs.twimg.com/amplify_video_thumb/456/img/clip.jpg?name=small",
+		},
+		{
+			name: "animated gif",
+			in:   "https://video.twimg.com/tweet_video/789/pu/vid/320x180/anim.mp4",
+			want: "https://pbs.twimg.com/tweet_video_thumb/789/pu/img/anim.png?name=small",
 		},
 		{name: "non Twitter", in: "https://example.com/video.mp4"},
 	}
@@ -96,6 +101,59 @@ func TestDeriveVideoPreviewURL(t *testing.T) {
 				t.Fatalf("deriveVideoPreviewURL(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRederiveDownloadPreviewURLs(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "one", "one")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	rows := []struct {
+		tweetID    string
+		mediaURL   string
+		previewURL string
+	}{
+		// 旧版推导写入的死链（/vid/ 段 + name=small 特征）：应被重写为 /img/ 推导。
+		{"t1", "https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1280x720/abc.mp4",
+			"https://pbs.twimg.com/ext_tw_video_thumb/123/pu/vid/avc1/1280x720/abc.jpg?name=small"},
+		// API 解析得到的真实海报（无 name=small 查询串）：保持不动。
+		{"t2", "https://video.twimg.com/ext_tw_video/456/pu/vid/avc1/720x1280/def.mp4",
+			"https://pbs.twimg.com/ext_tw_video_thumb/456/pu/img/def.jpg"},
+		// 无预览地址的历史记录：由 backfill_download_preview_urls 迁移负责，此处不动。
+		{"t3", "https://video.twimg.com/ext_tw_video/789/pu/vid/avc1/1280x720/ghi.mp4", ""},
+	}
+	for _, row := range rows {
+		if _, err := store.db.Exec(`INSERT INTO downloads (job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			job.ID, row.tweetID, row.mediaURL, row.previewURL, "/tmp/x.mp4", 100, time.Now().UTC()); err != nil {
+			t.Fatalf("insert download %s: %v", row.tweetID, err)
+		}
+	}
+	if err := store.rederiveDownloadPreviewURLs(store.db); err != nil {
+		t.Fatalf("rederive: %v", err)
+	}
+	items, err := store.ListDownloads(ctx, 10)
+	if err != nil {
+		t.Fatalf("list downloads: %v", err)
+	}
+	byTweet := map[string]DownloadRecord{}
+	for _, item := range items {
+		byTweet[item.TweetID] = item
+	}
+	if got := byTweet["t1"].PreviewURL; got != "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/abc.jpg?name=small" {
+		t.Fatalf("stale derived preview_url = %q, want re-derived /img/ URL", got)
+	}
+	if got := byTweet["t2"].PreviewURL; got != "https://pbs.twimg.com/ext_tw_video_thumb/456/pu/img/def.jpg" {
+		t.Fatalf("parsed poster preview_url changed: %q", got)
+	}
+	if got := byTweet["t3"].PreviewURL; got != "" {
+		t.Fatalf("empty preview_url unexpectedly filled: %q", got)
 	}
 }
 
@@ -197,3 +255,64 @@ func TestCreateDownloadDeduplicatesMediaURLJobs(t *testing.T) {
 		t.Fatalf("file_path = %q, want last write /tmp/abc-2.mp4", items[0].FilePath)
 	}
 }
+
+// TestListLibraryDownloadsAttributesUsersByExactPrefix 验证用户归属按路径前缀精确
+// 匹配（不区分大小写）：目录名中的 `_` 不再被当作 LIKE 通配符导致误归属。
+func TestListLibraryDownloadsAttributesUsersByExactPrefix(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root, StorageType: config.StorageLocal}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO users (id, screen_name, name, updated_at) VALUES ('u1', 'john_smith', 'John Smith', ?)`, time.Now().UTC()); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	// EnsureUserEntity 会把 parent_dir 规范化为绝对路径（与 manager 的调用方式一致）。
+	if _, err := store.EnsureUserEntity(ctx, "u1", filepath.Join(root, "users"), "john_smith"); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "one", "one")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	// 直接落盘两个文件：一个在实体目录内，一个在名字相近（含 X）但无实体的目录内。
+	inside := filepath.Join(root, "users", "john_smith", "a.mp4")
+	confusable := filepath.Join(root, "users", "johnXsmith", "b.mp4")
+	for _, dir := range []string{filepath.Dir(inside), filepath.Dir(confusable)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	for _, item := range []struct{ url, path string }{
+		{"https://video.twimg.com/a.mp4", inside},
+		{"https://video.twimg.com/b.mp4", confusable},
+	} {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{
+			JobID: job.ID, MediaURL: item.url, FilePath: item.path, Bytes: 1,
+		}); err != nil {
+			t.Fatalf("create download %s: %v", item.path, err)
+		}
+	}
+
+	items, err := store.ListLibraryDownloads(ctx, 100)
+	if err != nil {
+		t.Fatalf("list library: %v", err)
+	}
+	byPath := map[string]DownloadRecord{}
+	for _, item := range items {
+		byPath[item.FilePath] = item
+	}
+	if got := byPath[inside]; got.UserScreenName != "john_smith" || got.UserName != "John Smith" {
+		t.Fatalf("inside record user = %q/%q, want john_smith/John Smith", got.UserScreenName, got.UserName)
+	}
+	if got := byPath[confusable]; got.UserScreenName != "" || got.UserName != "" {
+		t.Fatalf("confusable record user = %q/%q, want empty (old LIKE matched `_` as wildcard)", got.UserScreenName, got.UserName)
+	}
+}
+

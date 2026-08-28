@@ -156,13 +156,10 @@ func TestApplyEnvOverrides(t *testing.T) {
 	t.Setenv(EnvAuthToken, "env-auth")
 	t.Setenv(EnvCSRFToken, "env-ct0")
 	t.Setenv(EnvProxyURL, "http://env-proxy:8080")
-	t.Setenv(EnvSMBPassword, "smb-secret")
-	t.Setenv(EnvWebDAVPassword, "webdav-secret")
 	t.Setenv(EnvAdditionalCookies, "auth_token=a; ct0=b")
 
 	cfg := ApplyEnvOverrides(AppConfig{
 		AuthToken: "db-auth",
-		SMBHost:   "nas.local",
 	})
 	if cfg.AuthToken != "env-auth" || cfg.CSRFToken != "env-ct0" {
 		t.Fatalf("env overrides not applied: %#v", cfg)
@@ -170,30 +167,8 @@ func TestApplyEnvOverrides(t *testing.T) {
 	if cfg.ProxyURL != "http://env-proxy:8080" {
 		t.Fatalf("proxy = %q", cfg.ProxyURL)
 	}
-	if cfg.SMBPassword != "smb-secret" || cfg.WebDAVPassword != "webdav-secret" {
-		t.Fatalf("storage secrets = %#v", cfg.SMBPassword)
-	}
 	if cfg.AdditionalCookies != "auth_token=a; ct0=b" {
 		t.Fatalf("additional cookies = %q", cfg.AdditionalCookies)
-	}
-	// 未设置的环境变量不得清空既有值。
-	if cfg.SMBHost != "nas.local" {
-		t.Fatalf("SMBHost lost: %q", cfg.SMBHost)
-	}
-}
-
-func TestMergeStorageSecretSemantics(t *testing.T) {
-	if got := MergeStorageSecret("", "stored", true); got != "stored" {
-		t.Fatalf("empty+unchanged = %q, want stored", got)
-	}
-	if got := MergeStorageSecret(SecretPlaceholder, "stored", true); got != "stored" {
-		t.Fatalf("placeholder+unchanged = %q, want stored", got)
-	}
-	if got := MergeStorageSecret("", "stored", false); got != "" {
-		t.Fatalf("empty+changed = %q, want empty (no credential replay)", got)
-	}
-	if got := MergeStorageSecret("newpass", "stored", false); got != "newpass" {
-		t.Fatalf("newpass = %q", got)
 	}
 }
 

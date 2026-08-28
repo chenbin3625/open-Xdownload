@@ -22,10 +22,11 @@ import {
   Typography,
   notification,
 } from "antd";
-import React, { lazy, Suspense, useDeferredValue, useEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   formatBytes,
   getLibraryDownloads,
+  libraryDownloadsLimit,
   libraryDownloadsQueryRoot,
   type DownloadRecord,
   type Job,
@@ -41,6 +42,200 @@ export interface GalleryPageProps {
   downloads?: DownloadRecord[];
 }
 
+const copyToClipboard = async (text: string, label = "路径") => {
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+  if (!copied) {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      copied = document.execCommand("copy");
+      textarea.remove();
+    } catch {
+      copied = false;
+    }
+  }
+  if (copied) {
+    notification.success({
+      message: "复制成功",
+      description: `已复制${label}到剪贴板`,
+    });
+  } else {
+    notification.warning({
+      message: "复制失败",
+      description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
+    });
+  }
+};
+
+// VideoPoster 依次尝试海报来源：记录里的预览图直链（浏览器直接加载，最快），
+// 失败后回退服务端预览端点（服务端经代理回源并缓存到磁盘，之后命中本地文件），
+// 全部失败才显示占位图标。旧实现失败后仅隐藏图片，历史媒体会永远停在占位图。
+// 状态保存在单个卡片内，一张海报失败不会触发整页重渲染。
+function VideoPoster({ item, fileName, onOpen }: { item: DownloadRecord; fileName: string; onOpen: () => void }) {
+  const sources = useMemo(() => {
+    const list: string[] = [];
+    if (item.previewUrl && !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)) {
+      list.push(item.previewUrl);
+    }
+    if (item.id > 0) {
+      list.push(`/api/library/downloads/${item.id}/preview`);
+    }
+    return list;
+  }, [item.previewUrl, item.id]);
+  const [sourceIndex, setSourceIndex] = useState(0);
+
+  return (
+    <button
+      type="button"
+      className="group h-full w-full cursor-pointer border-0 bg-slate-900 p-0"
+      onClick={onOpen}
+      aria-label={`预览 ${fileName}`}
+    >
+      <span className="relative block h-full w-full">
+        <span className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-300">
+          <PictureOutlined className="text-4xl text-indigo-400" />
+          <span className="text-xs">点击查看视频</span>
+        </span>
+        {sourceIndex < sources.length && (
+          <img
+            src={sources[sourceIndex]}
+            alt={fileName}
+            loading="lazy"
+            decoding="async"
+            onError={() => setSourceIndex((current) => current + 1)}
+            className="relative z-10 h-full w-full bg-slate-950 object-contain transition-transform group-hover:scale-[1.02]"
+          />
+        )}
+      </span>
+    </button>
+  );
+}
+
+// GalleryCard 按记录逐卡片 memo：预览弹窗开关、翻页前后共用同一 item 引用，
+// 父组件状态变化时未受影响的卡片直接跳过重渲染（60 张 antd Card 的开销可观）。
+const GalleryCard = React.memo(function GalleryCard({
+  item,
+  isVideo,
+  isPreviewableImage,
+  index,
+  onOpen,
+}: {
+  item: DownloadRecord;
+  isVideo: boolean;
+  isPreviewableImage: boolean;
+  index: number;
+  onOpen: (index: number) => void;
+}) {
+  const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
+  const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
+  const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
+  return (
+    <Card
+      hoverable
+      className="!rounded-xl !border-slate-200 dark:!border-slate-800 overflow-hidden shadow-xs"
+      styles={{ body: { padding: "10px 12px" } }}
+      cover={
+        <div className="aspect-square bg-slate-100 dark:bg-slate-950 relative flex items-center justify-center overflow-hidden">
+          {isVideo ? (
+            <VideoPoster item={item} fileName={fileName} onOpen={() => onOpen(index)} />
+          ) : isPreviewableImage ? (
+            // 兜底图标垫在图片下层：文件缺失/加载失败时隐藏 img 露出占位，
+            // 避免出现裂图。
+            <span className="relative block h-full w-full">
+              <span className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-400">
+                <PictureOutlined className="text-3xl" />
+                <span className="text-[11px] font-mono">{ext}</span>
+              </span>
+              <img
+                src={previewURL}
+                alt={fileName}
+                onClick={() => onOpen(index)}
+                loading="lazy"
+                decoding="async"
+                onError={(event) => {
+                  event.currentTarget.style.display = "none";
+                }}
+                className="relative z-10 h-full w-full cursor-pointer object-contain"
+              />
+            </span>
+          ) : (
+            <div className="flex flex-col items-center gap-1 text-slate-400">
+              <PictureOutlined className="text-3xl text-slate-400" />
+              <span className="text-[11px] font-mono font-medium">
+                {ext} 文件
+              </span>
+            </div>
+          )}
+
+          <span className="absolute top-2 right-2 px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white font-mono">
+            {ext} · {formatBytes(item.bytes)}
+          </span>
+        </div>
+      }
+    >
+      <div className="space-y-1">
+        <Tooltip title={item.filePath}>
+          <Typography.Text
+            strong
+            ellipsis
+            className="text-[12px] block text-slate-800 dark:text-slate-200"
+          >
+            {fileName}
+          </Typography.Text>
+        </Tooltip>
+
+        <Typography.Text
+          type="secondary"
+          ellipsis
+          className="!text-[11px] !font-mono block"
+        >
+          {item.userScreenName
+            ? `${item.userName || item.userScreenName}  @${item.userScreenName}`
+            : "未识别用户"}
+        </Typography.Text>
+
+        <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800">
+          <span className="text-[10px] text-slate-400 font-mono">
+            {formatDateTime(item.createdAt)}
+          </span>
+          <Space size={2}>
+            <Tooltip title="复制本地路径">
+              <Button
+                size="small"
+                type="text"
+                icon={<CopyOutlined className="text-xs" />}
+                onClick={() => void copyToClipboard(item.filePath, "本地路径")}
+                className="!h-6 !w-6 !p-0"
+              />
+            </Tooltip>
+            <Tooltip title="复制媒体直链">
+              <Button
+                size="small"
+                type="text"
+                icon={<LinkOutlined className="text-xs" />}
+                onClick={() => void copyToClipboard(item.mediaUrl, "原始下载直链")}
+                className="!h-6 !w-6 !p-0"
+              />
+            </Tooltip>
+          </Space>
+        </div>
+      </div>
+    </Card>
+  );
+});
+
 export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   const [filterType, setFilterType] = useState<string>("all");
   const [searchFilter, setSearchFilter] = useState<string>("");
@@ -52,7 +247,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
 
   const libraryQuery = useQuery({
     queryKey: libraryDownloadsQueryRoot,
-    queryFn: ({ signal }) => getLibraryDownloads(10000, signal),
+    queryFn: ({ signal }) => getLibraryDownloads(libraryDownloadsLimit, signal),
     staleTime: 10 * 60_000,
     gcTime: 30 * 60_000,
     refetchOnWindowFocus: false,
@@ -100,7 +295,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       .map(([value, label]) => ({ value, label }));
   }, [allDownloads]);
 
-  const filteredDownloads = useMemo(() => {
+  const filteredEntries = useMemo(() => {
     const kw = deferredSearchFilter.trim().toLowerCase();
     return indexedDownloads.filter((entry) => {
       const { item } = entry;
@@ -121,20 +316,20 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       }
 
       return true;
-    }).map((entry) => entry.item);
+    });
   }, [deferredSearchFilter, filterType, indexedDownloads, userFilter]);
 
   useEffect(() => {
     setCurrentPage(1);
   }, [filterType, searchFilter, userFilter]);
 
-  const visibleDownloads = useMemo(
-    () => filteredDownloads.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [currentPage, filteredDownloads],
+  const visibleEntries = useMemo(
+    () => filteredEntries.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [currentPage, filteredEntries],
   );
 
   useEffect(() => {
-    if (previewIndex !== null && previewIndex >= filteredDownloads.length) {
+    if (previewIndex !== null && previewIndex >= filteredEntries.length) {
       setPreviewIndex(null);
       return;
     }
@@ -143,23 +338,18 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
         setPreviewIndex((current) => {
-          if (current === null || filteredDownloads.length === 0) return current;
+          if (current === null || filteredEntries.length === 0) return current;
           const delta = event.key === "ArrowRight" ? 1 : -1;
-          return (current + delta + filteredDownloads.length) % filteredDownloads.length;
+          return (current + delta + filteredEntries.length) % filteredEntries.length;
         });
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [filteredDownloads.length, previewIndex]);
+  }, [filteredEntries.length, previewIndex]);
 
-  const copyToClipboard = (text: string, label = "路径") => {
-    void navigator.clipboard.writeText(text);
-    notification.success({
-      message: "复制成功",
-      description: `已复制${label}到剪贴板`,
-    });
-  };
+  // 稳定的 onOpen 引用是 GalleryCard memo 生效的前提。
+  const openPreview = useCallback((index: number) => setPreviewIndex(index), []);
 
   return (
     <div className="space-y-5">
@@ -205,7 +395,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
         </Space>
       </div>
 
-      {filteredDownloads.length === 0 ? (
+      {filteredEntries.length === 0 ? (
         <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800 p-12 text-center">
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -214,146 +404,29 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
         </Card>
       ) : (
         <Row gutter={[16, 16]}>
-          {visibleDownloads.map((item, visibleIndex) => {
+          {visibleEntries.map(({ item, isVideo, isImage, isGif }, visibleIndex) => {
             const filteredIndex = (currentPage - 1) * pageSize + visibleIndex;
-            const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
-            const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
-            const isVideo = ["MP4", "MOV", "M4V", "WEBM", "OGV"].includes(ext);
-            const isPreviewableImage = ["JPG", "JPEG", "PNG", "WEBP", "GIF"].includes(ext);
-            const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
-            // Use the CDN poster directly. The API preview endpoint is kept for
-            // explicit callers, but routing every card through it causes one
-            // extra request (and often a remote fetch) per video on first paint.
-            const posterURL = item.previewUrl &&
-              !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)
-              ? item.previewUrl
-              : item.id > 0
-                ? `/api/library/downloads/${item.id}/preview`
-                : undefined;
-
             return (
               <Col xs={24} sm={12} md={8} lg={6} xl={4} key={item.id || item.filePath}>
-                <Card
-                  hoverable
-                  className="!rounded-xl !border-slate-200 dark:!border-slate-800 overflow-hidden shadow-xs"
-                  styles={{ body: { padding: "10px 12px" } }}
-                  cover={
-                    <div className="aspect-square bg-slate-100 dark:bg-slate-950 relative flex items-center justify-center overflow-hidden">
-                      {isVideo ? (
-                        <button
-                          type="button"
-                          className="group h-full w-full cursor-pointer border-0 bg-slate-900 p-0"
-                          onClick={() => setPreviewIndex(filteredIndex)}
-                          aria-label={`预览 ${fileName}`}
-                        >
-                          {posterURL ? (
-                            <span className="relative block h-full w-full">
-                              <span className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-300">
-                                <PictureOutlined className="text-4xl text-indigo-400" />
-                                <span className="text-xs">点击查看视频</span>
-                              </span>
-                              <img
-                                src={posterURL}
-                                alt={fileName}
-                                loading="lazy"
-                                decoding="async"
-                                onError={(event) => {
-                                  event.currentTarget.style.display = "none";
-                                }}
-                                className="relative z-10 h-full w-full bg-slate-950 object-contain transition-transform group-hover:scale-[1.02]"
-                              />
-                            </span>
-                          ) : (
-                            <span className="flex h-full w-full flex-col items-center justify-center gap-2 text-slate-300">
-                              <PictureOutlined className="text-4xl text-indigo-400" />
-                              <span className="text-xs">点击查看视频</span>
-                            </span>
-                          )}
-                        </button>
-                      ) : isPreviewableImage ? (
-                        <img
-                          src={previewURL}
-                          alt={fileName}
-                          onClick={() => setPreviewIndex(filteredIndex)}
-                          loading="lazy"
-                          decoding="async"
-                          className="h-full w-full cursor-pointer object-contain"
-                        />
-                      ) : (
-                        <div className="flex flex-col items-center gap-1 text-slate-400">
-                          <PictureOutlined className="text-3xl text-slate-400" />
-                          <span className="text-[11px] font-mono font-medium">
-                            {ext} 文件
-                          </span>
-                        </div>
-                      )}
-
-                      <span className="absolute top-2 right-2 px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white font-mono">
-                        {ext} · {formatBytes(item.bytes)}
-                      </span>
-                    </div>
-                  }
-                >
-                  <div className="space-y-1">
-                    <Tooltip title={item.filePath}>
-                      <Typography.Text
-                        strong
-                        ellipsis
-                        className="text-[12px] block text-slate-800 dark:text-slate-200"
-                      >
-                        {fileName}
-                      </Typography.Text>
-                    </Tooltip>
-
-                    <Typography.Text
-                      type="secondary"
-                      ellipsis
-                      className="!text-[11px] !font-mono block"
-                    >
-                      {item.userScreenName
-                        ? `${item.userName || item.userScreenName}  @${item.userScreenName}`
-                        : "未识别用户"}
-                    </Typography.Text>
-
-                    <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800">
-                      <span className="text-[10px] text-slate-400 font-mono">
-                        {formatDateTime(item.createdAt)}
-                      </span>
-                      <Space size={2}>
-                        <Tooltip title="复制本地路径">
-                          <Button
-                            size="small"
-                            type="text"
-                            icon={<CopyOutlined className="text-xs" />}
-                            onClick={() => copyToClipboard(item.filePath, "本地路径")}
-                            className="!h-6 !w-6 !p-0"
-                          />
-                        </Tooltip>
-                        <Tooltip title="复制媒体直链">
-                          <Button
-                            size="small"
-                            type="text"
-                            icon={<LinkOutlined className="text-xs" />}
-                            onClick={() => copyToClipboard(item.mediaUrl, "原始下载直链")}
-                            className="!h-6 !w-6 !p-0"
-                          />
-                        </Tooltip>
-                      </Space>
-                    </div>
-                  </div>
-                </Card>
+                <GalleryCard
+                  item={item}
+                  isVideo={isVideo}
+                  isPreviewableImage={isImage || isGif}
+                  index={filteredIndex}
+                  onOpen={openPreview}
+                />
               </Col>
             );
           })}
         </Row>
       )}
 
-      {filteredDownloads.length > pageSize && (
+      {filteredEntries.length > pageSize && (
         <div className="flex justify-center pt-2">
           <Pagination
             current={currentPage}
             pageSize={pageSize}
-            total={filteredDownloads.length}
+            total={filteredEntries.length}
             showSizeChanger={false}
             showTotal={(total, range) => `${range[0]}-${range[1]} / ${total}`}
             onChange={setCurrentPage}
@@ -372,19 +445,18 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
           previewIndex === null
             ? undefined
             : (() => {
-                const item = filteredDownloads[previewIndex];
+                const entry = filteredEntries[previewIndex];
+                const item = entry?.item;
                 return item
                   ? `${item.userName || "未识别用户"}${item.userScreenName ? `  @${item.userScreenName}` : ""}`
                   : undefined;
               })()
         }
       >
-        {previewIndex !== null && filteredDownloads[previewIndex] && (() => {
-          const item = filteredDownloads[previewIndex];
+        {previewIndex !== null && filteredEntries[previewIndex] && (() => {
+          const { item, isVideo } = filteredEntries[previewIndex];
           const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
-          const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
           const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
-          const isVideo = ["MP4", "MOV", "M4V", "WEBM", "OGV"].includes(ext);
           return (
             <div className="relative flex min-h-[55vh] items-center justify-center bg-slate-950 rounded-lg overflow-hidden">
               {isVideo ? (
@@ -407,7 +479,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
                 <Button
                   shape="circle"
                   icon={<LeftOutlined />}
-                  onClick={() => setPreviewIndex((previewIndex - 1 + filteredDownloads.length) % filteredDownloads.length)}
+                  onClick={() => setPreviewIndex((previewIndex - 1 + filteredEntries.length) % filteredEntries.length)}
                   className="!absolute !left-3 !top-1/2 !-translate-y-1/2 !bg-black/60 !text-white !border-white/30"
                   aria-label="上一个文件"
                 />
@@ -416,7 +488,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
                 <Button
                   shape="circle"
                   icon={<RightOutlined />}
-                  onClick={() => setPreviewIndex((previewIndex + 1) % filteredDownloads.length)}
+                  onClick={() => setPreviewIndex((previewIndex + 1) % filteredEntries.length)}
                   className="!absolute !right-3 !top-1/2 !-translate-y-1/2 !bg-black/60 !text-white !border-white/30"
                   aria-label="下一个文件"
                 />

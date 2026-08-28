@@ -16,7 +16,7 @@ export type JobKind =
   | "failed_retry";
 
 export type FileNamingMode = "tweet_text" | "user_tweet";
-export type StorageType = "local" | "smb" | "webdav";
+export type StorageType = "local";
 
 export interface AppConfig {
   downloadDir: string;
@@ -31,17 +31,6 @@ export interface AppConfig {
   fileNamingMode: FileNamingMode;
   maxFilenameLength: number;
   storageType: StorageType;
-  smbHost: string;
-  smbPort: number;
-  smbShare: string;
-  smbPath: string;
-  smbDomain: string;
-  smbUsername: string;
-  smbPassword?: string;
-  webdavUrl: string;
-  webdavPath: string;
-  webdavUsername: string;
-  webdavPassword?: string;
 }
 
 export interface Job {
@@ -194,14 +183,6 @@ export interface AuthCheck {
   diagnostics?: PoolDiagnostics;
 }
 
-export interface StorageTestResult {
-  ok: boolean;
-  type: StorageType;
-  root: string;
-  message: string;
-  path: string;
-}
-
 export interface LocalDirectoryEntry {
   name: string;
   path: string;
@@ -263,6 +244,9 @@ export const configQueryRoot = ["config"] as const;
 export const archiveScheduleQueryRoot = ["archive-schedules"] as const;
 export const failedTweetQueryRoot = ["failed-tweets"] as const;
 export const libraryDownloadsQueryRoot = ["library-downloads"] as const;
+// 与后端 storage.MaxLibraryDownloadsLimit 对齐：媒体库前端做全量筛选/计数/搜索，
+// 总是请求全部记录，该值只为超大规模归档兜底。
+export const libraryDownloadsLimit = 100000;
 
 export interface FailedTweetPage {
   items: FailedTweet[];
@@ -356,12 +340,6 @@ export const clearFailedTweets = () =>
 export const updateConfig = (config: AppConfig) =>
   api<AppConfig>("/api/config", {
     method: "PUT",
-    body: JSON.stringify(config),
-  });
-
-export const testStorage = (config: AppConfig) =>
-  api<StorageTestResult>("/api/storage/test", {
-    method: "POST",
     body: JSON.stringify(config),
   });
 
