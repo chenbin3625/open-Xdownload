@@ -26,7 +26,17 @@ type Store struct {
 
 	configMu     sync.RWMutex
 	cachedStored *config.AppConfig
+
+	// libraryCache avoids repeating the relatively expensive user-path joins and
+	// download-directory walk whenever the gallery is revisited or refreshed.
+	libraryCacheMu    sync.RWMutex
+	libraryCacheAt    time.Time
+	libraryCache      []DownloadRecord
+	libraryCacheOK    bool
+	libraryCacheLimit int
 }
+
+const libraryDownloadsCacheTTL = 30 * time.Minute
 
 const sqliteOpenOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
 
@@ -144,6 +154,9 @@ CREATE TABLE IF NOT EXISTS downloads (
 	created_at DATETIME NOT NULL,
 	FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_downloads_created_at
+	ON downloads (created_at DESC, id DESC);
 
 	CREATE TABLE IF NOT EXISTS failed_media (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1042,6 +1055,9 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 		created_at = excluded.created_at
 	RETURNING *`,
 			record.JobID, record.TweetID, record.MediaURL, record.PreviewURL, record.FilePath, record.Bytes, now)
+		if err == nil {
+			s.invalidateLibraryDownloadsCache()
+		}
 		return record, err
 	}
 	// tweet_id 为空（直接媒体 URL 任务）：按 media_url 去重，避免同一 URL 重复跑产生重复行。
@@ -1055,6 +1071,9 @@ ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
 	created_at = excluded.created_at
 RETURNING *`,
 		record.JobID, record.TweetID, record.MediaURL, record.PreviewURL, record.FilePath, record.Bytes, now)
+	if err == nil {
+		s.invalidateLibraryDownloadsCache()
+	}
 	return record, err
 }
 
@@ -1077,6 +1096,18 @@ func (s *Store) ListLibraryDownloads(ctx context.Context, limit int) ([]Download
 	if limit > 10000 {
 		limit = 10000
 	}
+	s.libraryCacheMu.RLock()
+	if s.libraryCacheOK && time.Since(s.libraryCacheAt) < libraryDownloadsCacheTTL && s.libraryCacheLimit >= limit {
+		cached := s.libraryCache
+		if len(cached) > limit {
+			cached = cached[:limit]
+		}
+		items := append([]DownloadRecord(nil), cached...)
+		s.libraryCacheMu.RUnlock()
+		return items, nil
+	}
+	s.libraryCacheMu.RUnlock()
+
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `
 SELECT d.*,
@@ -1091,7 +1122,7 @@ SELECT d.*,
       REPLACE(ue.parent_dir, char(92), '/') || '/' || REPLACE(ue.name, char(92), '/') || '/%'
     ORDER BY ue.id LIMIT 1), '') AS user_name
 FROM downloads d
-ORDER BY d.created_at DESC LIMIT ?`, limit)
+ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1102,7 +1133,8 @@ ORDER BY d.created_at DESC LIMIT ?`, limit)
 	}
 	cfg, err := s.GetConfig(ctx)
 	if err != nil || cfg.StorageType != config.StorageLocal || strings.TrimSpace(cfg.DownloadDir) == "" {
-		return items, nil
+		s.cacheLibraryDownloads(items, limit)
+		return append([]DownloadRecord(nil), items...), nil
 	}
 	root, err := filepath.Abs(cfg.DownloadDir)
 	if err != nil {
@@ -1137,7 +1169,26 @@ ORDER BY d.created_at DESC LIMIT ?`, limit)
 	if len(items) > limit {
 		items = items[:limit]
 	}
-	return items, nil
+	s.cacheLibraryDownloads(items, limit)
+	return append([]DownloadRecord(nil), items...), nil
+}
+
+func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int) {
+	s.libraryCacheMu.Lock()
+	s.libraryCache = append([]DownloadRecord(nil), items...)
+	s.libraryCacheAt = time.Now()
+	s.libraryCacheOK = true
+	s.libraryCacheLimit = limit
+	s.libraryCacheMu.Unlock()
+}
+
+func (s *Store) invalidateLibraryDownloadsCache() {
+	s.libraryCacheMu.Lock()
+	s.libraryCache = nil
+	s.libraryCacheAt = time.Time{}
+	s.libraryCacheOK = false
+	s.libraryCacheLimit = 0
+	s.libraryCacheMu.Unlock()
 }
 
 func isLibraryMediaPath(path string) bool {
