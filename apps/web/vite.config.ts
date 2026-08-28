@@ -67,13 +67,16 @@ export default defineConfig({
       resolveDependencies(_filename, deps) {
         // 入口只预加载壳层；页面 chunk 按需加载。
         if (!_filename.includes("index")) return deps;
-        return deps.filter((dep) => !/(?:SettingsPage)/.test(dep));
+        return deps.filter((dep) => !/(?:SettingsPage|player)/.test(dep));
       },
     },
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes("node_modules")) return undefined;
+          if (
+            /\/react-player\/|\/(?:@mux\/mux-player-react|cloudflare-video-element|dash-video-element|hls-video-element|spotify-audio-element|tiktok-video-element|twitch-video-element|vimeo-video-element|wistia-video-element|youtube-video-element|screenfull)\//.test(id)
+          ) return "player";
           if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react";
           if (id.includes("/@tanstack/")) return "query";
           if (id.includes("/@ant-design/icons/")) return "icons";

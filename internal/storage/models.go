@@ -71,13 +71,16 @@ type ArchiveSchedule struct {
 }
 
 type DownloadRecord struct {
-	ID        int64     `json:"id" db:"id"`
-	JobID     int64     `json:"jobId" db:"job_id"`
-	TweetID   string    `json:"tweetId" db:"tweet_id"`
-	MediaURL  string    `json:"mediaUrl" db:"media_url"`
-	FilePath  string    `json:"filePath" db:"file_path"`
-	Bytes     int64     `json:"bytes" db:"bytes"`
-	CreatedAt time.Time `json:"createdAt" db:"created_at"`
+	ID             int64     `json:"id" db:"id"`
+	JobID          int64     `json:"jobId" db:"job_id"`
+	TweetID        string    `json:"tweetId" db:"tweet_id"`
+	MediaURL       string    `json:"mediaUrl" db:"media_url"`
+	PreviewURL     string    `json:"previewUrl,omitempty" db:"preview_url"`
+	FilePath       string    `json:"filePath" db:"file_path"`
+	Bytes          int64     `json:"bytes" db:"bytes"`
+	CreatedAt      time.Time `json:"createdAt" db:"created_at"`
+	UserScreenName string    `json:"userScreenName,omitempty" db:"user_screen_name"`
+	UserName       string    `json:"userName,omitempty" db:"user_name"`
 }
 
 type FailedMedia struct {
