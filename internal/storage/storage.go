@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1087,7 +1088,44 @@ SELECT d.*,
     ORDER BY ue.id LIMIT 1), '') AS user_name
 FROM downloads d
 ORDER BY d.created_at DESC LIMIT ?`, limit)
-	return items, err
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		if items[index].PreviewURL == "" {
+			items[index].PreviewURL = deriveVideoPreviewURL(items[index].MediaURL)
+		}
+	}
+	return items, nil
+}
+
+// deriveVideoPreviewURL maps Twitter's video CDN path to its public thumbnail
+// path. It provides posters for records created before preview_url was stored.
+func deriveVideoPreviewURL(mediaURL string) string {
+	u, err := url.Parse(mediaURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "video.twimg.com" && !strings.HasSuffix(host, ".video.twimg.com") {
+		return ""
+	}
+	lowerPath := strings.ToLower(u.Path)
+	if !strings.HasSuffix(lowerPath, ".mp4") {
+		return ""
+	}
+	switch {
+	case strings.Contains(u.Path, "/ext_tw_video/"):
+		u.Path = strings.Replace(u.Path, "/ext_tw_video/", "/ext_tw_video_thumb/", 1)
+	case strings.Contains(u.Path, "/amplify_video/"):
+		u.Path = strings.Replace(u.Path, "/amplify_video/", "/amplify_video_thumb/", 1)
+	default:
+		return ""
+	}
+	u.Path = strings.TrimSuffix(u.Path, filepath.Ext(u.Path)) + ".jpg"
+	u.RawQuery = "name=small"
+	u.Host = "pbs.twimg.com"
+	return u.String()
 }
 
 // GetDownload returns one archived media record by its stable database ID.

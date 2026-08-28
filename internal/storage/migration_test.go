@@ -63,6 +63,33 @@ func TestMigrateNormalizesAndDeduplicatesDownloadsMediaURL(t *testing.T) {
 	}
 }
 
+func TestDeriveVideoPreviewURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "extended video",
+			in:   "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12",
+			want: "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/vid/1280x720/abc.jpg?name=small",
+		},
+		{
+			name: "amplify video",
+			in:   "https://video.twimg.com/amplify_video/456/vid/640x360/clip.mp4",
+			want: "https://pbs.twimg.com/amplify_video_thumb/456/vid/640x360/clip.jpg?name=small",
+		},
+		{name: "non Twitter", in: "https://example.com/video.mp4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deriveVideoPreviewURL(tt.in); got != tt.want {
+				t.Fatalf("deriveVideoPreviewURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestMigrationsRunOnceAfterOpen 验证一次性数据迁移在 Open 后被登记，
 // 后续启动不会重跑（避免每次冷启动全表扫描）。
 func TestMigrationsRunOnceAfterOpen(t *testing.T) {
