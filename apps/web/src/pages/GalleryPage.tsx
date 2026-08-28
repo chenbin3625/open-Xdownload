@@ -201,13 +201,15 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
             const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
             const isVideo = ["MP4", "MOV", "M4V", "WEBM", "OGV"].includes(ext);
             const isPreviewableImage = ["JPG", "JPEG", "PNG", "WEBP", "GIF"].includes(ext);
-            const previewURL = `/api/library/downloads/${item.id}/file`;
-            const posterURL = item.previewUrl && !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)
-              ? item.previewUrl
+            const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
+            const posterURL = isVideo && item.id > 0
+              ? `/api/library/downloads/${item.id}/preview`
+              : item.previewUrl && !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)
+                ? item.previewUrl
               : undefined;
 
             return (
-              <Col xs={24} sm={12} md={8} lg={6} xl={4} key={item.id}>
+              <Col xs={24} sm={12} md={8} lg={6} xl={4} key={item.id || item.filePath}>
                 <Card
                   hoverable
                   className="!rounded-xl !border-slate-200 dark:!border-slate-800 overflow-hidden shadow-xs"
@@ -349,7 +351,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
           const item = filteredDownloads[previewIndex];
           const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
           const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
-          const previewURL = `/api/library/downloads/${item.id}/file`;
+          const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
           const isVideo = ["MP4", "MOV", "M4V", "WEBM", "OGV"].includes(ext);
           return (
             <div className="relative flex min-h-[55vh] items-center justify-center bg-slate-950 rounded-lg overflow-hidden">

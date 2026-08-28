@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1096,8 +1097,57 @@ ORDER BY d.created_at DESC LIMIT ?`, limit)
 			items[index].PreviewURL = deriveVideoPreviewURL(items[index].MediaURL)
 		}
 	}
+	cfg, err := s.GetConfig(ctx)
+	if err != nil || cfg.StorageType != config.StorageLocal || strings.TrimSpace(cfg.DownloadDir) == "" {
+		return items, nil
+	}
+	root, err := filepath.Abs(cfg.DownloadDir)
+	if err != nil {
+		return items, nil
+	}
+	known := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if path, err := filepath.Abs(item.FilePath); err == nil {
+			known[filepath.Clean(path)] = struct{}{}
+		}
+	}
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		if !isLibraryMediaPath(path) || strings.HasSuffix(strings.ToLower(path), ".preview.jpg") {
+			return nil
+		}
+		cleaned := filepath.Clean(path)
+		if _, exists := known[cleaned]; exists {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		items = append(items, DownloadRecord{FilePath: cleaned, Bytes: info.Size(), CreatedAt: info.ModTime().UTC()})
+		known[cleaned] = struct{}{}
+		return nil
+	})
+	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+	if len(items) > limit {
+		items = items[:limit]
+	}
 	return items, nil
 }
+
+func isLibraryMediaPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".m4v", ".webm", ".ogv":
+		return true
+	default:
+		return false
+	}
+}
+
+// VideoPreviewURL returns the public Twitter thumbnail URL for a video CDN URL.
+func VideoPreviewURL(mediaURL string) string { return deriveVideoPreviewURL(mediaURL) }
 
 // deriveVideoPreviewURL maps Twitter's video CDN path to its public thumbnail
 // path. It provides posters for records created before preview_url was stored.

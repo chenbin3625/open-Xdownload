@@ -133,6 +133,7 @@ export interface DownloadRecord {
   createdAt: string;
   userScreenName?: string;
   userName?: string;
+  fileUrl?: string;
 }
 
 export interface FailedMedia {

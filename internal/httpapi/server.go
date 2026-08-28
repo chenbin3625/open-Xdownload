@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"net"
@@ -83,6 +84,8 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/events", s.events)
 	r.Get("/api/library/downloads", s.listDownloads)
 	r.Get("/api/library/downloads/{id}/file", s.serveDownloadFile)
+	r.Get("/api/library/downloads/{id}/preview", s.serveDownloadPreview)
+	r.Get("/api/library/file", s.serveLibraryFile)
 	r.Get("/api/logs", s.listFailedMedia)
 	r.Get("/api/failed-tweets", s.listFailedTweets)
 	r.Post("/api/failed-tweets/retry", s.retryFailedTweets)
@@ -820,7 +823,161 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	for index := range items {
+		if items[index].ID == 0 {
+			items[index].FileURL = "/api/library/file?path=" + url.QueryEscape(items[index].FilePath)
+		}
+	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) serveLibraryFile(w http.ResponseWriter, r *http.Request) {
+	pathValue := strings.TrimSpace(r.URL.Query().Get("path"))
+	if pathValue == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("缺少文件路径"))
+		return
+	}
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil || cfg.StorageType != config.StorageLocal {
+		writeError(w, http.StatusConflict, fmt.Errorf("当前存储类型不支持在线播放"))
+		return
+	}
+	filePath, err := resolveLocalLibraryPath(cfg.DownloadDir, pathValue)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	info, err := os.Stat(filePath)
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	http.ServeFile(w, r, filePath)
+}
+
+func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	record, err := s.store.GetDownload(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if record == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("download not found"))
+		return
+	}
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil || cfg.StorageType != config.StorageLocal {
+		writeError(w, http.StatusConflict, fmt.Errorf("当前存储类型不支持预览图"))
+		return
+	}
+	videoPath, err := resolveLocalLibraryPath(cfg.DownloadDir, record.FilePath)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if _, err := os.Stat(videoPath); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	posterPath := videoPath + ".preview.jpg"
+	if info, err := os.Stat(posterPath); err == nil && !info.IsDir() {
+		http.ServeFile(w, r, posterPath)
+		return
+	}
+	posterURL := record.PreviewURL
+	if strings.TrimSpace(posterURL) == "" || isVideoURL(posterURL) {
+		posterURL = storage.VideoPreviewURL(record.MediaURL)
+	}
+	parsed, err := url.Parse(posterURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || !isAllowedPreviewHost(parsed.Hostname()) {
+		writeError(w, http.StatusNotFound, fmt.Errorf("没有可用的视频预览图"))
+		return
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, posterURL, nil)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("预览图地址无效"))
+		return
+	}
+	response, err := (&http.Client{Timeout: 20 * time.Second}).Do(request)
+	if err != nil || response.Body == nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("下载视频预览图失败"))
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		writeError(w, http.StatusNotFound, fmt.Errorf("视频预览图不可用"))
+		return
+	}
+	contentType := response.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "image/") {
+		writeError(w, http.StatusUnsupportedMediaType, fmt.Errorf("视频预览图格式无效"))
+		return
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(posterPath), ".preview-*.jpg")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	temporaryPath := temporary.Name()
+	if _, err = io.Copy(temporary, io.LimitReader(response.Body, 10<<20)); err != nil {
+		temporary.Close()
+		_ = os.Remove(temporaryPath)
+		writeError(w, http.StatusBadGateway, fmt.Errorf("保存视频预览图失败"))
+		return
+	}
+	if err = temporary.Close(); err != nil || os.Rename(temporaryPath, posterPath) != nil {
+		_ = os.Remove(temporaryPath)
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("保存视频预览图失败"))
+		return
+	}
+	http.ServeFile(w, r, posterPath)
+}
+
+func isAllowedPreviewHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
+}
+
+func isVideoURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(parsed.Path))
+	return ext == ".mp4" || ext == ".mov" || ext == ".m4v" || ext == ".webm" || ext == ".ogv"
+}
+
+func resolveLocalLibraryPath(root, requested string) (string, error) {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	filePath, err := filepath.Abs(requested)
+	if err != nil {
+		return "", fmt.Errorf("文件路径无效")
+	}
+	rel, err := filepath.Rel(rootAbs, filePath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("文件不在下载目录内")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("下载目录不存在")
+	}
+	resolvedFile, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		return "", fmt.Errorf("文件不存在")
+	}
+	resolvedRel, err := filepath.Rel(resolvedRoot, resolvedFile)
+	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
+		return "", fmt.Errorf("文件不在下载目录内")
+	}
+	return resolvedFile, nil
 }
 
 // serveDownloadFile exposes only files recorded by the local filestore and
