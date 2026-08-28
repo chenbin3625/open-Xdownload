@@ -1053,6 +1053,21 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 	return items, err
 }
 
+// GetDownload returns one archived media record by its stable database ID.
+func (s *Store) GetDownload(ctx context.Context, id int64) (*DownloadRecord, error) {
+	if id <= 0 {
+		return nil, sql.ErrNoRows
+	}
+	var record DownloadRecord
+	if err := s.db.GetContext(ctx, &record, `SELECT * FROM downloads WHERE id = ?`, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &record, nil
+}
+
 func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []FailedMedia, error) {
 	type jobFileRow struct {
 		SortOrder  int            `db:"sort_order"`

@@ -1,10 +1,7 @@
 import {
   CopyOutlined,
-  EyeOutlined,
-  FolderOpenOutlined,
   LinkOutlined,
   PictureOutlined,
-  VideoCameraOutlined,
 } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -52,15 +49,14 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
 
   const filteredDownloads = useMemo(() => {
     return allDownloads.filter((item) => {
-      const lower = item.filePath.toLowerCase();
-      const isVideo =
-        lower.endsWith(".mp4") || lower.endsWith(".mov") || lower.endsWith(".m4v");
+      const lower = item.filePath.toLowerCase().split("?")[0];
+      const isVideo = [".mp4", ".mov", ".m4v", ".webm", ".ogv"].some((ext) =>
+        lower.endsWith(ext),
+      );
       const isGif = lower.endsWith(".gif");
-      const isImage =
-        lower.endsWith(".jpg") ||
-        lower.endsWith(".jpeg") ||
-        lower.endsWith(".png") ||
-        lower.endsWith(".webp");
+      const isImage = [".jpg", ".jpeg", ".png", ".webp", ".gif"].some((ext) =>
+        lower.endsWith(ext),
+      );
 
       if (filterType === "images" && !isImage) return false;
       if (filterType === "videos" && !isVideo) return false;
@@ -132,9 +128,11 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       ) : (
         <Row gutter={[16, 16]}>
           {filteredDownloads.map((item) => {
-            const fileName = item.filePath.split("/").pop() || item.filePath;
+            const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
             const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
-            const isVideo = ext === "MP4" || ext === "MOV";
+            const isVideo = ["MP4", "MOV", "M4V", "WEBM", "OGV"].includes(ext);
+            const isPreviewableImage = ["JPG", "JPEG", "PNG", "WEBP", "GIF"].includes(ext);
+            const previewURL = `/api/library/downloads/${item.id}/file`;
 
             return (
               <Col xs={24} sm={12} md={8} lg={6} xl={4} key={item.id}>
@@ -145,17 +143,34 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
                   cover={
                     <div className="aspect-square bg-slate-100 dark:bg-slate-950 relative flex items-center justify-center overflow-hidden">
                       {isVideo ? (
-                        <div className="flex flex-col items-center gap-1 text-slate-400">
-                          <VideoCameraOutlined className="text-3xl text-indigo-400" />
-                          <span className="text-[11px] font-mono font-medium">
-                            {ext} 视频
-                          </span>
-                        </div>
+                        <video
+                          controls
+                          preload="metadata"
+                          playsInline
+                          className="h-full w-full object-contain bg-black"
+                          aria-label={`在线播放 ${fileName}`}
+                        >
+                          <source src={previewURL} />
+                        </video>
+                      ) : isPreviewableImage ? (
+                        <Image
+                          src={previewURL}
+                          alt={fileName}
+                          preview={{
+                            mask: (
+                              <span className="text-xs text-white">点击预览</span>
+                            ),
+                          }}
+                          classNames={{
+                            root: "!h-full !w-full",
+                            image: "!h-full !w-full !object-contain",
+                          }}
+                        />
                       ) : (
                         <div className="flex flex-col items-center gap-1 text-slate-400">
-                          <PictureOutlined className="text-3xl text-sky-400" />
+                          <PictureOutlined className="text-3xl text-slate-400" />
                           <span className="text-[11px] font-mono font-medium">
-                            {ext} 图片
+                            {ext} 文件
                           </span>
                         </div>
                       )}

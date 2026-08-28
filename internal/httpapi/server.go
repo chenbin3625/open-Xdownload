@@ -82,6 +82,7 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/jobs/{id}/retry", s.retryJob)
 	r.Get("/api/events", s.events)
 	r.Get("/api/library/downloads", s.listDownloads)
+	r.Get("/api/library/downloads/{id}/file", s.serveDownloadFile)
 	r.Get("/api/logs", s.listFailedMedia)
 	r.Get("/api/failed-tweets", s.listFailedTweets)
 	r.Post("/api/failed-tweets/retry", s.retryFailedTweets)
@@ -820,6 +821,72 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+// serveDownloadFile exposes only files recorded by the local filestore and
+// keeps the resolved path inside the configured download directory. This
+// endpoint is intentionally unsuitable for SMB/WebDAV records, whose paths
+// are remote URLs and cannot be safely served by the HTTP process.
+func (s *Server) serveDownloadFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	record, err := s.store.GetDownload(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if record == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("download not found"))
+		return
+	}
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if cfg.StorageType != config.StorageLocal {
+		writeError(w, http.StatusConflict, fmt.Errorf("当前存储类型不支持在线播放"))
+		return
+	}
+	root, err := filepath.Abs(cfg.DownloadDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	filePath, err := filepath.Abs(record.FilePath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("文件路径无效"))
+		return
+	}
+	rel, err := filepath.Rel(root, filePath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("文件不在下载目录内"))
+		return
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	resolvedFile, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	resolvedRel, err := filepath.Rel(resolvedRoot, resolvedFile)
+	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("文件不在下载目录内"))
+		return
+	}
+	info, err := os.Stat(resolvedFile)
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	http.ServeFile(w, r, resolvedFile)
 }
 
 func (s *Server) listFailedMedia(w http.ResponseWriter, r *http.Request) {
