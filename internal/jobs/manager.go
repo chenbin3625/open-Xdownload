@@ -726,12 +726,6 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 				return mediaDownloadResult{}, err
 			}
 			if exists {
-				if existing.PreviewURL == "" && previewURL != "" {
-					existing.PreviewURL = previewURL
-					if _, err := m.store.CreateDownload(saveCtx, *existing); err != nil {
-						return mediaDownloadResult{}, err
-					}
-				}
 				return mediaDownloadResult{skipped: true}, nil
 			}
 		}

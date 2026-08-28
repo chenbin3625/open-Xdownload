@@ -5,6 +5,7 @@ import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:z
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
+import webPackage from "./package.json";
 
 const compressibleExt = new Set([
   ".js",
@@ -60,6 +61,9 @@ function precompress(): Plugin {
 }
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(webPackage.version),
+  },
   plugins: [tailwindcss(), react(), precompress()],
   build: {
     modulePreload: {

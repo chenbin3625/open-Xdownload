@@ -1071,8 +1071,11 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 // file was saved under a user entity directory. Older records remain valid and
 // simply return empty user fields when no entity can be inferred.
 func (s *Store) ListLibraryDownloads(ctx context.Context, limit int) ([]DownloadRecord, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 100
+	if limit <= 0 {
+		limit = 10000
+	}
+	if limit > 10000 {
+		limit = 10000
 	}
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `

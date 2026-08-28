@@ -14,6 +14,7 @@ import {
   Image,
   Input,
   Modal,
+  Pagination,
   Row,
   Segmented,
   Select,
@@ -44,10 +45,12 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   const [searchFilter, setSearchFilter] = useState<string>("");
   const [userFilter, setUserFilter] = useState<string>("all");
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 60;
 
   const libraryQuery = useQuery({
     queryKey: libraryDownloadsQueryRoot,
-    queryFn: ({ signal }) => getLibraryDownloads(150, signal),
+    queryFn: ({ signal }) => getLibraryDownloads(10000, signal),
     staleTime: 30_000,
     enabled: !downloads,
   });
@@ -114,6 +117,15 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       return true;
     });
   }, [allDownloads, filterType, searchFilter, userFilter]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterType, searchFilter, userFilter]);
+
+  const visibleDownloads = useMemo(
+    () => filteredDownloads.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [currentPage, filteredDownloads],
+  );
 
   useEffect(() => {
     if (previewIndex !== null && previewIndex >= filteredDownloads.length) {
@@ -196,7 +208,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
         </Card>
       ) : (
         <Row gutter={[16, 16]}>
-          {filteredDownloads.map((item) => {
+          {visibleDownloads.map((item) => {
             const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
             const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
             const isVideo = ["MP4", "MOV", "M4V", "WEBM", "OGV"].includes(ext);
@@ -327,6 +339,19 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
             );
           })}
         </Row>
+      )}
+
+      {filteredDownloads.length > pageSize && (
+        <div className="flex justify-center pt-2">
+          <Pagination
+            current={currentPage}
+            pageSize={pageSize}
+            total={filteredDownloads.length}
+            showSizeChanger={false}
+            showTotal={(total, range) => `${range[0]}-${range[1]} / ${total}`}
+            onChange={setCurrentPage}
+          />
+        </div>
       )}
 
       <Modal
