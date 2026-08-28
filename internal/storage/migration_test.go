@@ -49,6 +49,9 @@ func TestMigrateNormalizesAndDeduplicatesDownloadsMediaURL(t *testing.T) {
 	if err := store.deduplicateDownloads(store.db); err != nil {
 		t.Fatalf("dedup: %v", err)
 	}
+	if err := store.backfillDownloadPreviewURLs(store.db); err != nil {
+		t.Fatalf("backfill previews: %v", err)
+	}
 	if err := store.addMissingIndexes(); err != nil {
 		t.Fatalf("add indexes: %v", err)
 	}
@@ -63,6 +66,9 @@ func TestMigrateNormalizesAndDeduplicatesDownloadsMediaURL(t *testing.T) {
 	want := "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4"
 	if items[0].MediaURL != want {
 		t.Fatalf("media_url = %q, want %q", items[0].MediaURL, want)
+	}
+	if got, wantPreview := items[0].PreviewURL, "https://pbs.twimg.com/ext_tw_video_thumb/123/pu/vid/1280x720/abc.jpg?name=small"; got != wantPreview {
+		t.Fatalf("preview_url = %q, want %q", got, wantPreview)
 	}
 }
 
