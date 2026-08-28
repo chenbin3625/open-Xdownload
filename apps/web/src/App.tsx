@@ -1,4 +1,4 @@
-import { theme as antdTheme, Alert, Badge, Button, ConfigProvider, Drawer, Grid, Skeleton } from "antd";
+import { theme as antdTheme, Alert, Badge, Button, Card, ConfigProvider, Drawer, Grid, Skeleton } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useState } from "react";
@@ -27,6 +27,7 @@ import { AppSidebar } from "./components/layout/AppSidebar";
 import { AppHeader } from "./components/layout/AppHeader";
 import { CreateJobModal } from "./components/modals/CreateJobModal";
 import { FailedTweetDrawer } from "./components/drawers/FailedTweetDrawer";
+import { GlobalLoadingBar } from "./components/common/GlobalLoadingBar";
 
 import { TaskCenterPage } from "./pages/TaskCenterPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
@@ -191,6 +192,9 @@ export default function App() {
   return (
     <ConfigProvider theme={antdThemeConfig} locale={zhCN}>
       <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200">
+        {/* 任意接口请求在途时的全局顶部加载进度条 */}
+        <GlobalLoadingBar />
+
         {/* 顶部通知横幅 / 状态栏提示 (Ant Design + Tailwind) */}
         <div className="h-7 bg-gradient-to-r from-sky-900/60 via-slate-900/80 to-indigo-900/60 border-b border-sky-500/20 px-4 text-[12px] text-sky-200 flex items-center justify-between shrink-0 select-none">
           <div className="flex items-center gap-2">
@@ -320,38 +324,55 @@ export default function App() {
                 </div>
               )}
 
-              {/* 初始加载骨架屏 */}
-              {isWorkbenchActive && !jobs.data && jobs.isLoading && (
-                <div className="space-y-4">
-                  <Skeleton active paragraph={{ rows: 4 }} />
-                  <Skeleton active paragraph={{ rows: 6 }} />
-                </div>
-              )}
+              {/* 初始加载骨架屏（仅任务中心；归档计划与媒体库由页面内部骨架屏负责） */}
+              {(activeSection === "overview" ||
+                activeSection === "workbench" ||
+                activeSection === "tasks") &&
+                !jobs.data &&
+                jobs.isLoading && (
+                  <div className="space-y-4">
+                    <Skeleton active paragraph={{ rows: 4 }} />
+                    <Skeleton active paragraph={{ rows: 6 }} />
+                  </div>
+                )}
 
               {/* 视图分发：默认首页即为任务调度中心 */}
               {(activeSection === "overview" ||
                 activeSection === "workbench" ||
-                activeSection === "tasks") && (
-                <TaskCenterPage
-                  jobs={jobsData}
-                  failedTweetCount={failedTweetCount}
-                  pagination={currentPagination}
-                  onPageChange={handleJobPageChange}
-                  onPageSizeChange={handleJobPageSizeChange}
-                  onOpenCreateModal={() => openCreateModal()}
-                  onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
-                />
-              )}
+                activeSection === "tasks") &&
+                !(jobs.isLoading && !jobs.data) && (
+                  <TaskCenterPage
+                    jobs={jobsData}
+                    failedTweetCount={failedTweetCount}
+                    pagination={currentPagination}
+                    tableLoading={jobs.isPlaceholderData}
+                    onPageChange={handleJobPageChange}
+                    onPageSizeChange={handleJobPageSizeChange}
+                    onOpenCreateModal={() => openCreateModal()}
+                    onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+                  />
+                )}
 
               {activeSection === "schedules" && (
                 <SchedulesPage
                   schedules={schedules.data ?? []}
+                  loading={schedules.isLoading}
                   onOpenCreateModal={() => openCreateModal("", "schedule")}
                 />
               )}
 
               {activeSection === "gallery" && (
                 <GalleryPage jobs={jobsData} />
+              )}
+
+              {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
+              {activeSection === "settings" && config.isLoading && (
+                <div className="space-y-4">
+                  <Skeleton active title paragraph={{ rows: 1 }} />
+                  <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800">
+                    <Skeleton active paragraph={{ rows: 8 }} />
+                  </Card>
+                </div>
               )}
 
               {activeSection === "settings" && config.data && (

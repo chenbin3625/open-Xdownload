@@ -67,6 +67,7 @@ export interface TaskCenterPageProps {
   failed?: FailedMedia[];
   failedTweetCount: number;
   pagination: DashboardPagination;
+  tableLoading?: boolean;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
   onOpenCreateModal: () => void;
@@ -77,6 +78,7 @@ export function TaskCenterPage({
   jobs,
   failedTweetCount,
   pagination,
+  tableLoading = false,
   onPageChange,
   onPageSizeChange,
   onOpenCreateModal,
@@ -473,6 +475,7 @@ export function TaskCenterPage({
           rowKey="id"
           size="middle"
           scroll={{ x: 860 }}
+          loading={tableLoading}
           pagination={{
             current: pagination.page,
             pageSize: pagination.pageSize,

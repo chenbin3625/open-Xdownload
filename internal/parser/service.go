@@ -39,6 +39,7 @@ type ParseOptions struct {
 
 	// StopAtTweetID 用于增量归档：getUserTimeline 翻页时遇到该推文即停止，
 	// 因为 timeline 按时间倒序，遇到已归档的旧推文即可早停，避免全量拉取。
+	// 仅在配置开启增量归档时由 manager 传入；为空表示全量扫描。
 	StopAtTweetID string
 }
 

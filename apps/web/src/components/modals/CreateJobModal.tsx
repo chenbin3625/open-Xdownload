@@ -413,7 +413,7 @@ export function CreateJobModal({
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
                 <ScheduleOutlined className="text-sky-500" />
-                是否保存为自动归档计划（定期增量抓取）？
+                是否保存为自动归档计划（定期抓取）？
               </span>
               <Checkbox
                 checked={isSchedule}
@@ -430,7 +430,7 @@ export function CreateJobModal({
                   <Input
                     value={scheduleName}
                     onChange={(e) => setScheduleName(e.target.value)}
-                    placeholder="例如：重点博主媒体日常增量归档"
+                    placeholder="例如：重点博主媒体日常归档"
                     size="small"
                     className="!bg-white dark:!bg-slate-900"
                   />

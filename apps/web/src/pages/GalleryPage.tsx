@@ -5,7 +5,7 @@ import {
   PictureOutlined,
   RightOutlined,
 } from "@ant-design/icons";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Button,
   Card,
@@ -17,17 +17,30 @@ import {
   Row,
   Segmented,
   Select,
+  Skeleton,
   Space,
   Tooltip,
   Typography,
   notification,
 } from "antd";
-import React, { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
+import React, {
+  lazy,
+  Suspense,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   formatBytes,
   getLibraryDownloads,
+  getPosterBackfillStatus,
   libraryDownloadsLimit,
   libraryDownloadsQueryRoot,
+  posterBackfillQueryRoot,
+  startPosterBackfill,
   type DownloadRecord,
   type Job,
 } from "../lib/api";
@@ -254,6 +267,48 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
     enabled: !downloads,
   });
 
+  // 视频封面批量回填：运行中每 1.5s 轮询进度，空闲时不轮询。
+  const queryClient = useQueryClient();
+  const backfillQuery = useQuery({
+    queryKey: posterBackfillQueryRoot,
+    queryFn: ({ signal }) => getPosterBackfillStatus(signal),
+    refetchInterval: (query) => (query.state.data?.running ? 1500 : false),
+  });
+  const backfillStatus = backfillQuery.data;
+  const backfillRunning = backfillStatus?.running ?? false;
+
+  const backfillMutation = useMutation({
+    mutationFn: startPosterBackfill,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: posterBackfillQueryRoot });
+    },
+    onError: (error) => {
+      notification.error({ message: "封面补齐启动失败", description: String(error) });
+    },
+  });
+
+  const backfillWasRunning = useRef(false);
+  useEffect(() => {
+    if (!backfillStatus) return;
+    const wasRunning = backfillWasRunning.current;
+    backfillWasRunning.current = backfillStatus.running;
+    if (wasRunning && !backfillStatus.running && backfillStatus.total > 0) {
+      if (backfillStatus.failed > 0) {
+        notification.info({
+          message: "封面补齐完成",
+          description: `新增 ${backfillStatus.fetched} 张，跳过 ${backfillStatus.skipped} 张，失败 ${backfillStatus.failed} 张`,
+        });
+      } else {
+        notification.success({
+          message: "封面补齐完成",
+          description: `新增 ${backfillStatus.fetched} 张，其余均已存在`,
+        });
+      }
+      // 新海报落盘后重新拉一次列表，让卡片立即拿到可用封面。
+      void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+    }
+  }, [backfillStatus, queryClient]);
+
   const allDownloads = downloads ?? libraryQuery.data ?? [];
 
   // Derive file metadata once per response. Filtering and category counters no
@@ -392,10 +447,42 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
             allowClear
             className="!w-56"
           />
+
+          <Tooltip title="扫描媒体库，为缺失封面的视频/GIF 重新拉取预览图并保存到本地；已有封面的记录会自动跳过">
+            <Button
+              icon={<PictureOutlined />}
+              loading={backfillMutation.isPending}
+              disabled={backfillRunning}
+              onClick={() => backfillMutation.mutate()}
+            >
+              {backfillRunning && backfillStatus
+                ? `补齐封面 ${backfillStatus.done}/${backfillStatus.total}`
+                : "补齐视频封面"}
+            </Button>
+          </Tooltip>
         </Space>
       </div>
 
-      {filteredEntries.length === 0 ? (
+      {!downloads && libraryQuery.isLoading ? (
+        <Row gutter={[16, 16]}>
+          {Array.from({ length: 12 }, (_, index) => (
+            <Col key={index} xs={24} sm={12} md={8} lg={6} xl={4}>
+              <Card
+                className="!rounded-xl !border-slate-200 dark:!border-slate-800 overflow-hidden"
+                styles={{ body: { padding: "10px 12px" } }}
+                cover={
+                  <Skeleton.Image
+                    active
+                    style={{ width: "100%", height: 140 }}
+                  />
+                }
+              >
+                <Skeleton active title={false} paragraph={{ rows: 1 }} />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      ) : filteredEntries.length === 0 ? (
         <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800 p-12 text-center">
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}

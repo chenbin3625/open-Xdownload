@@ -15,6 +15,7 @@ import {
   Empty,
   Popconfirm,
   Row,
+  Skeleton,
   Space,
   Switch,
   Tag,
@@ -37,11 +38,13 @@ import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 
 export interface SchedulesPageProps {
   schedules: ArchiveSchedule[];
+  loading?: boolean;
   onOpenCreateModal: () => void;
 }
 
 export function SchedulesPage({
   schedules,
+  loading = false,
   onOpenCreateModal,
 }: SchedulesPageProps) {
   const queryClient = useQueryClient();
@@ -111,7 +114,7 @@ export function SchedulesPage({
             自动归档计划
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            配置定时轮询任务，定时扫描指定用户时间线、列表或关注成员，全自动增量下载最新媒体
+            配置定时轮询任务，定时扫描指定用户时间线、列表或关注成员，自动同步最新媒体
           </p>
         </div>
         <Button
@@ -124,7 +127,17 @@ export function SchedulesPage({
         </Button>
       </div>
 
-      {schedules.length === 0 ? (
+      {loading && schedules.length === 0 ? (
+        <Row gutter={[16, 16]}>
+          {Array.from({ length: 3 }, (_, index) => (
+            <Col xs={24} md={12} lg={8} key={index}>
+              <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800">
+                <Skeleton active paragraph={{ rows: 5 }} />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      ) : schedules.length === 0 ? (
         <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800 p-8 text-center">
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -135,7 +148,7 @@ export function SchedulesPage({
                 </Typography.Text>
                 <Typography.Text type="secondary" className="block text-xs max-w-md mx-auto">
                   您可以把常用关注的 X
-                  博主、列表或推文账号加入自动计划，系统将按设置的频率自动增量同步，免去手动重复输入的繁琐。
+                  博主、列表或推文账号加入自动计划，系统将按设置的频率自动同步最新媒体，免去手动重复输入的繁琐。
                 </Typography.Text>
               </div>
             }

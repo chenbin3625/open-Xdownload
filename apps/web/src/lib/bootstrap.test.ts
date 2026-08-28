@@ -23,6 +23,7 @@ const config: AppConfig = {
   autoRetryFailed: false,
   autoFollowProtected: false,
   includeNestedTweetMedia: true,
+  incrementalArchive: false,
   fileNamingMode: "tweet_text",
   maxFilenameLength: 180,
   storageType: "local",

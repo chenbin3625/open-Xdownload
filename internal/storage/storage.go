@@ -103,6 +103,7 @@ func (s *Store) migrate() error {
 				auto_retry_failed BOOLEAN NOT NULL DEFAULT 1,
 				auto_follow_protected BOOLEAN NOT NULL DEFAULT 0,
 				include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0,
+				incremental_archive BOOLEAN NOT NULL DEFAULT 0,
 				file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text',
 				max_filename_length INTEGER NOT NULL DEFAULT 120,
 				storage_type TEXT NOT NULL DEFAULT 'local',
@@ -333,6 +334,7 @@ func (s *Store) addMissingColumns() error {
 		"additional_cookies":         `ALTER TABLE app_config ADD COLUMN additional_cookies TEXT NOT NULL DEFAULT ''`,
 		"auto_follow_protected":      `ALTER TABLE app_config ADD COLUMN auto_follow_protected BOOLEAN NOT NULL DEFAULT 0`,
 		"include_nested_tweet_media": `ALTER TABLE app_config ADD COLUMN include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0`,
+		"incremental_archive":        `ALTER TABLE app_config ADD COLUMN incremental_archive BOOLEAN NOT NULL DEFAULT 0`,
 		"file_naming_mode":           `ALTER TABLE app_config ADD COLUMN file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text'`,
 		"max_filename_length":        `ALTER TABLE app_config ADD COLUMN max_filename_length INTEGER NOT NULL DEFAULT 120`,
 		"storage_type":               `ALTER TABLE app_config ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'local'`,
@@ -348,7 +350,7 @@ func (s *Store) addMissingColumns() error {
 			}
 		}
 	}
-	// user_entities：增量归档早停所需的 last_seen_tweet_id
+	// user_entities：增量归档早停游标（可配置开关）
 	var hasLastSeen int
 	if err := s.db.Get(&hasLastSeen, `SELECT COUNT(*) FROM pragma_table_info('user_entities') WHERE name = 'last_seen_tweet_id'`); err != nil {
 		return err
@@ -549,12 +551,12 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 		INSERT INTO app_config (
 			id, download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 			additional_cookies, auto_retry_failed, auto_follow_protected,
-			include_nested_tweet_media,
+			include_nested_tweet_media, incremental_archive,
 			file_naming_mode, max_filename_length, storage_type, updated_at
 		) VALUES (
 			1, :download_dir, :max_concurrency, :proxy_url, :auth_token, :csrf_token,
 			:additional_cookies, :auto_retry_failed, :auto_follow_protected,
-			:include_nested_tweet_media,
+			:include_nested_tweet_media, :incremental_archive,
 			:file_naming_mode, :max_filename_length, :storage_type, :updated_at
 		)`, map[string]any{
 		"download_dir":               cfg.DownloadDir,
@@ -566,6 +568,7 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 		"auto_retry_failed":          cfg.AutoRetryFailed,
 		"auto_follow_protected":      cfg.AutoFollowProtected,
 		"include_nested_tweet_media": cfg.IncludeNestedTweetMedia,
+		"incremental_archive":        cfg.IncrementalArchive,
 		"file_naming_mode":           cfg.FileNamingMode,
 		"max_filename_length":        cfg.MaxFilenameLength,
 		"storage_type":               cfg.StorageType,
@@ -577,7 +580,7 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 const storedConfigQuery = `
 SELECT download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 	additional_cookies, auto_retry_failed, auto_follow_protected,
-	include_nested_tweet_media,
+	include_nested_tweet_media, incremental_archive,
 	file_naming_mode, max_filename_length, storage_type
 FROM app_config WHERE id = 1`
 
@@ -662,6 +665,7 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 			auto_retry_failed = :auto_retry_failed,
 			auto_follow_protected = :auto_follow_protected,
 			include_nested_tweet_media = :include_nested_tweet_media,
+			incremental_archive = :incremental_archive,
 			file_naming_mode = :file_naming_mode,
 			max_filename_length = :max_filename_length,
 			storage_type = :storage_type,
@@ -676,6 +680,7 @@ func (s *Store) UpdateConfig(ctx context.Context, cfg config.AppConfig) (config.
 		"auto_retry_failed":          cfg.AutoRetryFailed,
 		"auto_follow_protected":      cfg.AutoFollowProtected,
 		"include_nested_tweet_media": cfg.IncludeNestedTweetMedia,
+		"incremental_archive":        cfg.IncrementalArchive,
 		"file_naming_mode":           cfg.FileNamingMode,
 		"max_filename_length":        cfg.MaxFilenameLength,
 		"storage_type":               cfg.StorageType,
@@ -1352,6 +1357,18 @@ func (s *Store) UpdateDownloadPreviewURL(ctx context.Context, id int64, previewU
 	return nil
 }
 
+// ListVideoDownloadsForPosterBackfill 返回视频/GIF 媒体记录（仅必需列），供封面
+// 批量回填扫描。照片的预览就是文件本身，无需参与扫描。
+func (s *Store) ListVideoDownloadsForPosterBackfill(ctx context.Context) ([]DownloadRecord, error) {
+	items := []DownloadRecord{}
+	err := s.db.SelectContext(ctx, &items, `
+SELECT id, media_url, preview_url, file_path
+FROM downloads
+WHERE media_url LIKE '%video.twimg.com%' AND file_path <> ''
+ORDER BY id`)
+	return items, err
+}
+
 // GetDownload returns one archived media record by its stable database ID.
 // Unknown and non-positive IDs both yield (nil, nil) so HTTP callers can map
 // them uniformly to 404.
@@ -1691,6 +1708,8 @@ UPDATE user_entities SET media_count = ?, updated_at = ? WHERE id = ?`,
 	return err
 }
 
+// UpdateUserEntityLastSeenTweet 记录增量归档（可配置开关）使用的早停游标。
+// 无论开关是否开启，manager 在每轮归档后都会写入，保证切换开关后游标可用。
 func (s *Store) UpdateUserEntityLastSeenTweet(ctx context.Context, id int64, tweetID string) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE user_entities SET last_seen_tweet_id = ?, updated_at = ? WHERE id = ?`,

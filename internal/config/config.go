@@ -82,9 +82,12 @@ type AppConfig struct {
 	AutoRetryFailed         bool           `json:"autoRetryFailed" db:"auto_retry_failed"`
 	AutoFollowProtected     bool           `json:"autoFollowProtected" db:"auto_follow_protected"`
 	IncludeNestedTweetMedia bool           `json:"includeNestedTweetMedia" db:"include_nested_tweet_media"`
-	FileNamingMode          FileNamingMode `json:"fileNamingMode" db:"file_naming_mode"`
-	MaxFilenameLength       int            `json:"maxFilenameLength" db:"max_filename_length"`
-	StorageType             StorageType    `json:"storageType" db:"storage_type"`
+	// IncrementalArchive 开启后用户/列表/关注归档使用早停游标，从上次成功位置继续，
+	// 节省 X API 配额；默认关闭，每次全量扫描时间线，已存在媒体自动跳过并补齐预览图。
+	IncrementalArchive bool           `json:"incrementalArchive" db:"incremental_archive"`
+	FileNamingMode     FileNamingMode `json:"fileNamingMode" db:"file_naming_mode"`
+	MaxFilenameLength  int            `json:"maxFilenameLength" db:"max_filename_length"`
+	StorageType        StorageType    `json:"storageType" db:"storage_type"`
 }
 
 type AuthCookie struct {
