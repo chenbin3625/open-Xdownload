@@ -11,7 +11,6 @@ import {
   Card,
   Col,
   Empty,
-  Image,
   Input,
   Modal,
   Pagination,
@@ -23,7 +22,7 @@ import {
   Typography,
   notification,
 } from "antd";
-import React, { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
   formatBytes,
   getLibraryDownloads,
@@ -34,6 +33,8 @@ import {
 import { formatDateTime } from "../components/common/CommonUI";
 
 const ReactPlayer = lazy(() => import("react-player"));
+const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
+const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
 
 export interface GalleryPageProps {
   jobs?: Job[];
@@ -47,30 +48,43 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 60;
+  const deferredSearchFilter = useDeferredValue(searchFilter);
 
   const libraryQuery = useQuery({
     queryKey: libraryDownloadsQueryRoot,
     queryFn: ({ signal }) => getLibraryDownloads(10000, signal),
-    staleTime: 30_000,
+    staleTime: 10 * 60_000,
+    gcTime: 30 * 60_000,
+    refetchOnWindowFocus: false,
     enabled: !downloads,
   });
 
   const allDownloads = downloads ?? libraryQuery.data ?? [];
 
+  // Derive file metadata once per response. Filtering and category counters no
+  // longer repeat extension parsing for every control update.
+  const indexedDownloads = useMemo(
+    () => allDownloads.map((item) => {
+      const lower = item.filePath.toLowerCase().split("?")[0];
+      return {
+        item,
+        isVideo: VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext)),
+        isImage: IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext)),
+        isGif: lower.endsWith(".gif"),
+      };
+    }),
+    [allDownloads],
+  );
+
   const categoryCounts = useMemo(() => {
     const counts = { all: allDownloads.length, images: 0, videos: 0, gifs: 0 };
-    for (const item of allDownloads) {
-      const lower = item.filePath.toLowerCase().split("?")[0];
-      if ([".mp4", ".mov", ".m4v", ".webm", ".ogv"].some((ext) => lower.endsWith(ext))) {
-        counts.videos += 1;
-      }
-      if ([".jpg", ".jpeg", ".png", ".webp"].some((ext) => lower.endsWith(ext))) {
-        counts.images += 1;
-      }
-      if (lower.endsWith(".gif")) counts.gifs += 1;
+    for (const entry of indexedDownloads) {
+      if (entry.isVideo) counts.videos += 1;
+      if (entry.isImage) counts.images += 1;
+      if (entry.isGif) counts.gifs += 1;
     }
     return counts;
-  }, [allDownloads]);
+  }, [allDownloads.length, indexedDownloads]);
 
   const userOptions = useMemo(() => {
     const users = new Map<string, string>();
@@ -87,26 +101,18 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   }, [allDownloads]);
 
   const filteredDownloads = useMemo(() => {
-    return allDownloads.filter((item) => {
-      const lower = item.filePath.toLowerCase().split("?")[0];
-      const isVideo = [".mp4", ".mov", ".m4v", ".webm", ".ogv"].some((ext) =>
-        lower.endsWith(ext),
-      );
-      const isGif = lower.endsWith(".gif");
-      const isImage = [".jpg", ".jpeg", ".png", ".webp"].some((ext) =>
-        lower.endsWith(ext),
-      );
-
-      if (filterType === "images" && !isImage) return false;
-      if (filterType === "videos" && !isVideo) return false;
-      if (filterType === "gifs" && !isGif) return false;
+    const kw = deferredSearchFilter.trim().toLowerCase();
+    return indexedDownloads.filter((entry) => {
+      const { item } = entry;
+      if (filterType === "images" && !entry.isImage) return false;
+      if (filterType === "videos" && !entry.isVideo) return false;
+      if (filterType === "gifs" && !entry.isGif) return false;
 
       if (userFilter !== "all" && (item.userScreenName || "unknown") !== userFilter) {
         return false;
       }
 
-      if (searchFilter.trim()) {
-        const kw = searchFilter.trim().toLowerCase();
+      if (kw) {
         return (
           item.filePath.toLowerCase().includes(kw) ||
           item.mediaUrl.toLowerCase().includes(kw) ||
@@ -115,8 +121,8 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       }
 
       return true;
-    });
-  }, [allDownloads, filterType, searchFilter, userFilter]);
+    }).map((entry) => entry.item);
+  }, [deferredSearchFilter, filterType, indexedDownloads, userFilter]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -208,16 +214,19 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
         </Card>
       ) : (
         <Row gutter={[16, 16]}>
-          {visibleDownloads.map((item) => {
+          {visibleDownloads.map((item, visibleIndex) => {
+            const filteredIndex = (currentPage - 1) * pageSize + visibleIndex;
             const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
             const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
             const isVideo = ["MP4", "MOV", "M4V", "WEBM", "OGV"].includes(ext);
             const isPreviewableImage = ["JPG", "JPEG", "PNG", "WEBP", "GIF"].includes(ext);
             const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
-            const posterURL = isVideo && item.id > 0
-              ? `/api/library/downloads/${item.id}/preview`
-              : item.previewUrl && !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)
-                ? item.previewUrl
+            // Use the CDN poster directly. The API preview endpoint is kept for
+            // explicit callers, but routing every card through it causes one
+            // extra request (and often a remote fetch) per video on first paint.
+            const posterURL = item.previewUrl &&
+              !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)
+              ? item.previewUrl
               : undefined;
 
             return (
@@ -232,7 +241,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
                         <button
                           type="button"
                           className="group h-full w-full cursor-pointer border-0 bg-slate-900 p-0"
-                          onClick={() => setPreviewIndex(filteredDownloads.indexOf(item))}
+                          onClick={() => setPreviewIndex(filteredIndex)}
                           aria-label={`预览 ${fileName}`}
                         >
                           {posterURL ? (
@@ -260,17 +269,13 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
                           )}
                         </button>
                       ) : isPreviewableImage ? (
-                        <Image
+                        <img
                           src={previewURL}
                           alt={fileName}
-                          preview={false}
-                          onClick={() => setPreviewIndex(filteredDownloads.indexOf(item))}
+                          onClick={() => setPreviewIndex(filteredIndex)}
                           loading="lazy"
                           decoding="async"
-                          classNames={{
-                            root: "!h-full !w-full",
-                            image: "!h-full !w-full !object-contain",
-                          }}
+                          className="h-full w-full cursor-pointer object-contain"
                         />
                       ) : (
                         <div className="flex flex-col items-center gap-1 text-slate-400">
