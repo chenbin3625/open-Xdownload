@@ -283,6 +283,9 @@ END;
 	if err := s.runMigrationOnce("deduplicate_downloads_media_url_only", s.deduplicateDownloadsMediaURLOnly); err != nil {
 		return err
 	}
+	if err := s.runMigrationOnce("backfill_download_preview_urls", s.backfillDownloadPreviewURLs); err != nil {
+		return err
+	}
 	if err := s.ensureDashboardCounters(); err != nil {
 		return err
 	}
@@ -434,6 +437,34 @@ func (s *Store) normalizeDownloadsMediaURL(exec migrationExecutor) error {
 	}
 	for _, r := range pending {
 		if _, err := exec.Exec(`UPDATE downloads SET media_url = ? WHERE id = ?`, downloader.NormalizeMediaURL(r.MediaURL), r.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillDownloadPreviewURLs restores the CDN poster URL for historical
+// Twitter video records created before preview_url was persisted. It is a
+// one-time migration so opening the gallery no longer needs to derive this
+// value across the whole downloads table.
+func (s *Store) backfillDownloadPreviewURLs(exec migrationExecutor) error {
+	type row struct {
+		ID       int64  `db:"id"`
+		MediaURL string `db:"media_url"`
+	}
+	var rows []row
+	if err := exec.Select(&rows, `
+SELECT id, media_url
+FROM downloads
+WHERE preview_url = '' AND media_url <> ''`); err != nil {
+		return err
+	}
+	for _, item := range rows {
+		previewURL := deriveVideoPreviewURL(item.MediaURL)
+		if previewURL == "" {
+			continue
+		}
+		if _, err := exec.Exec(`UPDATE downloads SET preview_url = ? WHERE id = ? AND preview_url = ''`, previewURL, item.ID); err != nil {
 			return err
 		}
 	}

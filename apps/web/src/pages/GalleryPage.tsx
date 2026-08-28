@@ -227,7 +227,9 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
             const posterURL = item.previewUrl &&
               !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)
               ? item.previewUrl
-              : undefined;
+              : item.id > 0
+                ? `/api/library/downloads/${item.id}/preview`
+                : undefined;
 
             return (
               <Col xs={24} sm={12} md={8} lg={6} xl={4} key={item.id || item.filePath}>
