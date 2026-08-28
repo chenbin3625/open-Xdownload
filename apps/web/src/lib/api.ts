@@ -258,6 +258,7 @@ export const dashboardMetaQueryRoot = ["dashboard-meta"] as const;
 export const configQueryRoot = ["config"] as const;
 export const archiveScheduleQueryRoot = ["archive-schedules"] as const;
 export const failedTweetQueryRoot = ["failed-tweets"] as const;
+export const libraryDownloadsQueryRoot = ["library-downloads"] as const;
 
 export interface FailedTweetPage {
   items: FailedTweet[];
@@ -290,6 +291,8 @@ export const getJobsPage = ({
 export const getConfig = (signal?: AbortSignal) => api<AppConfig>("/api/config", { signal });
 
 export const getJobFiles = (id: number, signal?: AbortSignal) => api<JobFiles>(`/api/jobs/${id}/files`, { signal });
+export const getLibraryDownloads = (limit = 100, signal?: AbortSignal) =>
+  api<DownloadRecord[]>(`/api/library/downloads?limit=${limit}`, { signal });
 
 export const getDashboardMeta = (signal?: AbortSignal) => api<DashboardMeta>("/api/dashboard/meta", { signal });
 

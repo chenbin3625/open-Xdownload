@@ -1,34 +1,6 @@
-import {
-  CloseCircleOutlined,
-  CloudDownloadOutlined,
-  ExclamationCircleOutlined,
-  HomeOutlined,
-  ReloadOutlined,
-  SettingOutlined,
-  SyncOutlined,
-  UnorderedListOutlined,
-} from "@ant-design/icons";
+import { theme as antdTheme, Alert, Badge, Button, ConfigProvider, Drawer, Grid, Skeleton } from "antd";
+import zhCN from "antd/locale/zh_CN";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Avatar,
-  Badge,
-  Button,
-  Card,
-  Col,
-  Drawer,
-  Flex,
-  Grid,
-  Layout,
-  Menu,
-  Row,
-  Skeleton,
-  Space,
-  Tag,
-  Tooltip,
-  Typography,
-} from "antd";
-import type { MenuProps } from "antd";
 import React, { useCallback, useEffect, useState } from "react";
 import {
   archiveScheduleQueryRoot,
@@ -40,33 +12,33 @@ import {
   getJobsPage,
   jobsQueryRoot,
   type AppConfig,
-  type Dashboard,
+  type DashboardMeta,
+  type JobsPage,
 } from "./lib/api";
 import {
   invalidateWorkbenchQueries,
   useDashboardEvents,
 } from "./lib/useDashboardEvents";
-import {
-  useRouteState,
-  type SectionKey,
-} from "./lib/useRouteState";
-import { ListSkeleton } from "./components/common/CommonUI";
-import { StatsSummary } from "./components/workbench/StatsSummary";
-import { TweetParser } from "./components/workbench/TweetParser";
-import { BatchDownloadLauncher } from "./components/workbench/BatchDownloadLauncher";
-import { ArchiveScheduleList } from "./components/workbench/ArchiveScheduleList";
-import { JobTable } from "./components/jobs/JobTable";
-import { FailedTweetQueue } from "./components/jobs/FailedTweetQueue";
-import { ConfigForm } from "./components/settings/ConfigForm";
+import { jobStatusBucket } from "./lib/jobStatus";
+import { useRouteState, type SectionKey } from "./lib/useRouteState";
+import { useTheme } from "./lib/useTheme";
 
-const { Sider, Content, Header } = Layout;
-const { Text, Title } = Typography;
-const appIconPath = "/icon.svg";
+import { AppSidebar } from "./components/layout/AppSidebar";
+import { AppHeader } from "./components/layout/AppHeader";
+import { CreateJobModal } from "./components/modals/CreateJobModal";
+import { FailedTweetDrawer } from "./components/drawers/FailedTweetDrawer";
+
+import { TaskCenterPage } from "./pages/TaskCenterPage";
+import { SchedulesPage } from "./pages/SchedulesPage";
+import { GalleryPage } from "./pages/GalleryPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 export default function App() {
   const queryClient = useQueryClient();
   const screens = Grid.useBreakpoint();
   const isCompact = !screens.lg;
+  const { theme, isDark, toggleTheme } = useTheme();
+
   const {
     activeSection,
     jobPage,
@@ -77,45 +49,83 @@ export default function App() {
     syncServerPage,
   } = useRouteState();
 
+  // 模态框与抽屉状态
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [createInitialInput, setCreateInitialInput] = useState("");
+  const [createInitialKind, setCreateInitialKind] = useState<string>("user");
+  const [failedDrawerOpen, setFailedDrawerOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
+
   const refreshDashboard = useCallback(
     () => invalidateWorkbenchQueries(queryClient),
     [queryClient],
   );
 
-  const { sseConnected } = useDashboardEvents(queryClient, refreshDashboard, activeSection === "overview");
+  const isWorkbenchActive =
+    activeSection === "overview" ||
+    activeSection === "workbench" ||
+    activeSection === "tasks" ||
+    activeSection === "schedules" ||
+    activeSection === "gallery";
 
+  const { sseConnected } = useDashboardEvents(
+    queryClient,
+    refreshDashboard,
+    isWorkbenchActive,
+  );
+
+  // 任务分页 Query
   const jobs = useQuery({
     queryKey: [...jobsQueryRoot, jobPage, jobPageSize],
-    queryFn: ({ signal }) => getJobsPage({ page: jobPage, pageSize: jobPageSize, signal }),
+    queryFn: ({ signal }) =>
+      getJobsPage({ page: jobPage, pageSize: jobPageSize, signal }),
     placeholderData: (previousData) => previousData,
     staleTime: 15_000,
-    enabled: activeSection === "overview",
+    enabled: isWorkbenchActive,
+    refetchInterval: (query) => {
+      const page = query.state.data as JobsPage | undefined;
+      return page?.items.some((job) => jobStatusBucket(job.status) === "active")
+        ? 5_000
+        : false;
+    },
   });
+
+  // 统计与计数 Query
   const meta = useQuery({
     queryKey: dashboardMetaQueryRoot,
     queryFn: ({ signal }) => getDashboardMeta(signal),
     staleTime: 30_000,
-    enabled: activeSection === "overview",
+    enabled: isWorkbenchActive,
+    refetchInterval: (query) => {
+      const data = query.state.data as DashboardMeta | undefined;
+      return data && data.stats.active > 0 ? 5_000 : false;
+    },
   });
+
+  // 定时计划 Query
+  const schedules = useQuery({
+    queryKey: archiveScheduleQueryRoot,
+    queryFn: ({ signal }) => getArchiveSchedules(signal),
+    staleTime: 15_000,
+    enabled: isWorkbenchActive,
+  });
+
+  // 系统配置 Query
   const config = useQuery({
     queryKey: configQueryRoot,
     queryFn: ({ signal }) => getConfig(signal),
     staleTime: 15_000,
     enabled: activeSection === "settings",
   });
-  const schedules = useQuery({
-    queryKey: archiveScheduleQueryRoot,
-    queryFn: ({ signal }) => getArchiveSchedules(signal),
-    staleTime: 15_000,
-    enabled: activeSection === "overview",
-  });
 
+  // 分页边界校验
   useEffect(() => {
     if (jobs.isPlaceholderData || !meta.data) return;
-    const totalPages = meta.data.stats.total > 0
-      ? Math.ceil(meta.data.stats.total / jobPageSize)
-      : 1;
+    const totalPages =
+      meta.data.stats.total > 0
+        ? Math.ceil(meta.data.stats.total / jobPageSize)
+        : 1;
     if (jobPage > totalPages) {
       syncServerPage(totalPages);
     }
@@ -123,366 +133,255 @@ export default function App() {
 
   function handleManualRefresh() {
     setManualRefreshPending(true);
-    const task = activeSection === "settings"
-      ? queryClient.invalidateQueries({ queryKey: configQueryRoot })
-      : refreshDashboard();
+    const task =
+      activeSection === "settings"
+        ? queryClient.invalidateQueries({ queryKey: configQueryRoot })
+        : refreshDashboard();
     void task.finally(() => setManualRefreshPending(false));
   }
 
-  const menuItems: MenuProps["items"] = [
-    { key: "overview", icon: <HomeOutlined />, label: "工作台" },
-    { key: "settings", icon: <SettingOutlined />, label: "配置" },
-  ];
+  function openCreateModal(initial = "", kind = "user") {
+    setCreateInitialInput(initial);
+    setCreateInitialKind(kind);
+    setCreateModalOpen(true);
+  }
 
-  const jobsData = jobs.data;
-  const dashboardData: Dashboard | undefined = jobsData
-    ? {
-        jobs: jobsData.items,
-        downloads: [],
-        failed: [],
-        failedTweets: [],
-        failedTweetCount: meta.data?.failedTweetCount ?? 0,
-        archiveSchedules: schedules.data ?? [],
-        pagination: {
-          page: jobsData.page,
-          pageSize: jobsData.pageSize,
-          total: meta.data?.stats.total ?? 0,
-          totalPages: meta.data?.stats.total
-            ? Math.ceil(meta.data.stats.total / jobsData.pageSize)
-            : 0,
-        },
-        stats: meta.data?.stats ?? { total: 0, active: 0, completed: 0, failed: 0 },
-      }
-    : undefined;
-  const isInitialDashboardLoading = activeSection === "settings"
-    ? !config.data && config.isLoading
-    : !dashboardData && jobs.isLoading;
-  const isInitialDashboardError = activeSection === "settings"
-    ? !config.data && config.isError
-    : !dashboardData && jobs.isError;
+  const jobsData = jobs.data?.items ?? [];
+  const currentPagination = {
+    page: jobs.data?.page ?? jobPage,
+    pageSize: jobs.data?.pageSize ?? jobPageSize,
+    total: meta.data?.stats.total ?? 0,
+    totalPages: meta.data?.stats.total
+      ? Math.ceil(meta.data.stats.total / (jobs.data?.pageSize ?? jobPageSize))
+      : 0,
+  };
 
-  const navigation = (
-    <Menu
-      mode={isCompact ? "horizontal" : "inline"}
-      selectedKeys={[activeSection]}
-      items={menuItems}
-      onClick={({ key }) => handleSectionChange(key as SectionKey)}
-    />
-  );
+  const currentStats = meta.data?.stats ?? {
+    total: 0,
+    active: 0,
+    completed: 0,
+    failed: 0,
+  };
+  const failedTweetCount = meta.data?.failedTweetCount ?? 0;
+
+  // 主题配置
+  const antdThemeConfig = {
+    algorithm: isDark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+    token: {
+      colorPrimary: "#0ea5e9",
+      borderRadius: 10,
+      colorBgContainer: isDark ? "#0f172a" : "#ffffff",
+      colorBgLayout: isDark ? "#020617" : "#f8fafc",
+      colorBorder: isDark ? "#1e293b" : "#e2e8f0",
+      fontFamily:
+        'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    },
+    components: {
+      Button: {
+        borderRadius: 10,
+        controlHeight: 36,
+        controlHeightSM: 30,
+        fontSize: 13,
+        fontSizeSM: 12,
+        fontWeight: 500,
+      },
+    },
+  };
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      {!isCompact ? (
-        <Sider width={200} theme="light">
-          <Card variant="borderless" size="small">
-            <Space size={10}>
-              <Avatar shape="square" size={32} src={appIconPath} />
-              <Flex vertical>
-                <Text strong>open-Xdownload</Text>
-                <Text type="secondary">X / Twitter 下载器</Text>
-              </Flex>
-            </Space>
-          </Card>
-          {navigation}
-        </Sider>
-      ) : null}
+    <ConfigProvider theme={antdThemeConfig} locale={zhCN}>
+      <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200">
+        {/* 顶部通知横幅 / 状态栏提示 (Ant Design + Tailwind) */}
+        <div className="h-7 bg-gradient-to-r from-sky-900/60 via-slate-900/80 to-indigo-900/60 border-b border-sky-500/20 px-4 text-[12px] text-sky-200 flex items-center justify-between shrink-0 select-none">
+          <div className="flex items-center gap-2">
+            <Badge status={sseConnected ? "processing" : "warning"} />
+            <span className="font-medium text-slate-200">
+              SSE 实时连接{sseConnected ? "正常" : "正在重连"}
+            </span>
+            <span className="text-slate-500">·</span>
+            <span className="text-slate-300 truncate">
+              {currentStats.active > 0
+                ? `当前正在并发执行 ${currentStats.active} 个媒体下载任务`
+                : "下载队列当前就绪空闲"}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-slate-400 text-[11px] hidden sm:inline">
+              Cookie 账号池: 认证有效
+            </span>
+            <Button
+              type="text"
+              size="small"
+              onClick={toggleTheme}
+              className="!h-5 !px-2 !rounded-full !bg-slate-800/90 hover:!bg-slate-700 !text-slate-300 !text-[11px] !border !border-slate-700/80 !font-medium"
+            >
+              {isDark ? "☀️ 明亮模式" : "🌙 暗黑模式"}
+            </Button>
+          </div>
+        </div>
 
-      <Layout>
-        {isCompact ? (
-          <Header style={{ height: "auto", padding: 0 }}>
-            <Card variant="borderless" size="small">
-              <Flex align="center" gap={8} wrap="wrap">
-                <Avatar shape="square" size={28} src={appIconPath} />
-                <Text strong>open-Xdownload</Text>
-                {navigation}
-              </Flex>
-            </Card>
-          </Header>
-        ) : null}
-        <Content>
-          <Flex justify="center" style={{ padding: isCompact ? 12 : 24 }}>
-            <Flex vertical gap={16} style={{ width: "100%", maxWidth: 1440 }}>
-              {isInitialDashboardLoading ? (
-                <DashboardSkeleton />
-              ) : isInitialDashboardError ? (
-                <Alert
-                  type="error"
-                  showIcon
-                  message="加载失败"
-                  description={activeSection === "settings"
-                    ? config.error instanceof Error ? config.error.message : "请稍后重试"
-                    : jobs.error instanceof Error ? jobs.error.message : "请稍后重试"}
+        {/* 主布局容器 */}
+        <div className="flex flex-1 overflow-hidden">
+          {/* 桌面端常驻侧边栏 */}
+          {!isCompact && (
+            <AppSidebar
+              activeSection={activeSection}
+              onSectionChange={handleSectionChange}
+              onOpenCreateModal={() => openCreateModal()}
+              onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+              totalJobsCount={currentStats.total}
+              activeJobsCount={currentStats.active}
+              schedulesCount={schedules.data?.length ?? 0}
+              failedTweetCount={failedTweetCount}
+              storageType={config.data?.storageType || "local"}
+              storagePath={config.data?.downloadDir || "/downloads"}
+            />
+          )}
+
+        {/* 移动端抽屉侧边栏 */}
+        {isCompact && (
+          <Drawer
+            placement="left"
+            open={mobileMenuOpen}
+            onClose={() => setMobileMenuOpen(false)}
+            styles={{ body: { padding: 0 } }}
+            size={280}
+          >
+            <AppSidebar
+              activeSection={activeSection}
+              onSectionChange={(sec) => {
+                handleSectionChange(sec);
+                setMobileMenuOpen(false);
+              }}
+              onOpenCreateModal={() => {
+                setMobileMenuOpen(false);
+                openCreateModal();
+              }}
+              onOpenFailedDrawer={() => {
+                setMobileMenuOpen(false);
+                setFailedDrawerOpen(true);
+              }}
+              totalJobsCount={currentStats.total}
+              activeJobsCount={currentStats.active}
+              schedulesCount={schedules.data?.length ?? 0}
+              failedTweetCount={failedTweetCount}
+              storageType={config.data?.storageType || "local"}
+              storagePath={config.data?.downloadDir || "/downloads"}
+            />
+          </Drawer>
+        )}
+
+        {/* 右侧主视窗内容流 */}
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          {/* 全局顶栏 */}
+          <AppHeader
+            sseConnected={sseConnected}
+            activeCount={currentStats.active}
+            maxConcurrency={config.data?.maxConcurrency ?? 8}
+            refreshPending={manualRefreshPending}
+            onRefresh={handleManualRefresh}
+            theme={theme}
+            onToggleTheme={toggleTheme}
+            onQuickSubmit={(input) => openCreateModal(input)}
+            onToggleMobileMenu={() => setMobileMenuOpen(true)}
+          />
+
+          {/* 页面主内容滚动容器 */}
+          <main className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8">
+            <div className="max-w-7xl mx-auto w-full">
+              {/* 异常状态提示 */}
+              {isWorkbenchActive && jobs.isError && (
+                <div className="mb-4">
+                  <Alert
+                    type="error"
+                    showIcon
+                    message="任务数据加载失败"
+                    description={
+                      jobs.error instanceof Error
+                        ? jobs.error.message
+                        : "请检查后台服务连接"
+                    }
+                  />
+                </div>
+              )}
+
+              {activeSection === "settings" && config.isError && (
+                <div className="mb-4">
+                  <Alert
+                    type="error"
+                    showIcon
+                    message="配置数据加载失败"
+                    description={
+                      config.error instanceof Error
+                        ? config.error.message
+                        : "请检查后台服务连接"
+                    }
+                  />
+                </div>
+              )}
+
+              {/* 初始加载骨架屏 */}
+              {isWorkbenchActive && !jobs.data && jobs.isLoading && (
+                <div className="space-y-4">
+                  <Skeleton active paragraph={{ rows: 4 }} />
+                  <Skeleton active paragraph={{ rows: 6 }} />
+                </div>
+              )}
+
+              {/* 视图分发：默认首页即为任务调度中心 */}
+              {(activeSection === "overview" ||
+                activeSection === "workbench" ||
+                activeSection === "tasks") && (
+                <TaskCenterPage
+                  jobs={jobsData}
+                  failedTweetCount={failedTweetCount}
+                  pagination={currentPagination}
+                  onPageChange={handleJobPageChange}
+                  onPageSizeChange={handleJobPageSizeChange}
+                  onOpenCreateModal={() => openCreateModal()}
+                  onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
                 />
-              ) : activeSection === "overview" && dashboardData ? (
-                <DashboardContent
-                  data={dashboardData}
-                  sseConnected={sseConnected}
-                  refreshPending={manualRefreshPending}
-                  onRefresh={handleManualRefresh}
-                  onJobPageChange={handleJobPageChange}
-                  onJobPageSizeChange={handleJobPageSizeChange}
+              )}
+
+              {activeSection === "schedules" && (
+                <SchedulesPage
+                  schedules={schedules.data ?? []}
+                  onOpenCreateModal={() => openCreateModal("", "schedule")}
                 />
-              ) : activeSection === "settings" && config.data ? (
+              )}
+
+              {activeSection === "gallery" && (
+                <GalleryPage jobs={jobsData} />
+              )}
+
+              {activeSection === "settings" && config.data && (
                 <SettingsPage
                   config={config.data}
-                  refreshPending={manualRefreshPending}
                   onRefresh={handleManualRefresh}
+                  refreshPending={manualRefreshPending}
                 />
-              ) : null}
-            </Flex>
-          </Flex>
-        </Content>
-      </Layout>
-    </Layout>
-  );
-}
+              )}
+            </div>
+          </main>
+        </div>
+      </div>
 
-function DashboardContent({
-  data,
-  onRefresh,
-  refreshPending,
-  sseConnected,
-  onJobPageChange,
-  onJobPageSizeChange,
-}: {
-  data: Dashboard;
-  onRefresh: () => void;
-  refreshPending: boolean;
-  sseConnected: boolean;
-  onJobPageChange: (page: number) => void;
-  onJobPageSizeChange: (pageSize: number) => void;
-}) {
-  return (
-    <OverviewPage
-      data={data}
-      onRefresh={onRefresh}
-      refreshPending={refreshPending}
-      sseConnected={sseConnected}
-      onJobPageChange={onJobPageChange}
-      onJobPageSizeChange={onJobPageSizeChange}
-    />
-  );
-}
-
-function OverviewPage({
-  data,
-  onRefresh,
-  refreshPending,
-  sseConnected,
-  onJobPageChange,
-  onJobPageSizeChange,
-}: {
-  data: Dashboard;
-  onRefresh: () => void;
-  refreshPending: boolean;
-  sseConnected: boolean;
-  onJobPageChange: (page: number) => void;
-  onJobPageSizeChange: (pageSize: number) => void;
-}) {
-  const screens = Grid.useBreakpoint();
-  const [batchDrawerOpen, setBatchDrawerOpen] = useState(false);
-  const [failedDrawerOpen, setFailedDrawerOpen] = useState(false);
-  const failedTweetCount = data.failedTweetCount ?? 0;
-
-  useEffect(() => {
-    if (failedTweetCount === 0) {
-      setFailedDrawerOpen(false);
-    }
-  }, [failedTweetCount]);
-
-  return (
-    <Flex vertical gap={16}>
-      <PageHeading
-        title="工作台"
-        description="管理下载任务与归档计划"
-        extra={(
-          <Space size={8} wrap>
-            {!sseConnected ? (
-              <Tag icon={<ExclamationCircleOutlined />} color="warning">
-                连接已断开，正在重连
-              </Tag>
-            ) : null}
-            <Tooltip title="刷新">
-              <Button icon={<ReloadOutlined />} loading={refreshPending} onClick={onRefresh} />
-            </Tooltip>
-            <Button
-              type="primary"
-              icon={<CloudDownloadOutlined />}
-              onClick={() => setBatchDrawerOpen(true)}
-            >
-              批量归档
-            </Button>
-          </Space>
-        )}
-      />
-
-      {data.stats ? (
-        <StatsSummary
-          stats={data.stats}
-          failedTweetCount={failedTweetCount}
-          onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+        {/* 统一新建任务/归档模态框 */}
+        <CreateJobModal
+          open={createModalOpen}
+          onClose={() => setCreateModalOpen(false)}
+          initialInput={createInitialInput}
+          initialKind={createInitialKind as any}
         />
-      ) : null}
 
-      <Card title="新建下载" extra={<Text type="secondary">粘贴推文链接并解析媒体</Text>}>
-        <TweetParser />
-      </Card>
-
-      <Row gutter={[16, 16]} align="top">
-        <Col xs={24} xl={18}>
-          <TaskCenterSections
-            data={data}
-            failedDrawerOpen={failedDrawerOpen}
-            onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
-            onCloseFailedDrawer={() => setFailedDrawerOpen(false)}
-            onJobPageChange={onJobPageChange}
-            onJobPageSizeChange={onJobPageSizeChange}
-          />
-        </Col>
-        <Col xs={24} xl={6}>
-          <Card
-            title={<Space><SyncOutlined />定时计划</Space>}
-            extra={<Badge count={data.archiveSchedules?.length ?? 0} showZero color="blue" />}
-          >
-            <ArchiveScheduleList schedules={data.archiveSchedules ?? []} />
-          </Card>
-        </Col>
-      </Row>
-
-      <Drawer
-        destroyOnHidden
-        open={batchDrawerOpen}
-        title={
-          <Space>
-            <CloudDownloadOutlined />
-            批量归档
-          </Space>
-        }
-        size={screens.md ? 920 : "100%"}
-        onClose={() => setBatchDrawerOpen(false)}
-      >
-        <BatchDownloadLauncher />
-      </Drawer>
-    </Flex>
-  );
-}
-
-function TaskCenterSections({
-  data,
-  failedDrawerOpen,
-  onOpenFailedDrawer,
-  onCloseFailedDrawer,
-  onJobPageChange,
-  onJobPageSizeChange,
-}: {
-  data: Dashboard;
-  failedDrawerOpen: boolean;
-  onOpenFailedDrawer: () => void;
-  onCloseFailedDrawer: () => void;
-  onJobPageChange: (page: number) => void;
-  onJobPageSizeChange: (pageSize: number) => void;
-}) {
-  const screens = Grid.useBreakpoint();
-  const failedTweetCount = data.failedTweetCount ?? 0;
-
-  return (
-    <Card
-      title={<Space><UnorderedListOutlined />任务列表</Space>}
-      extra={failedTweetCount > 0 ? (
-          <Badge count={failedTweetCount} size="small" overflowCount={999}>
-            <Button
-              size="small"
-              danger
-              icon={<CloseCircleOutlined />}
-              onClick={onOpenFailedDrawer}
-            >
-              查看失败项
-            </Button>
-          </Badge>
-        ) : null}
-    >
-      <JobTable
-          jobs={data.jobs}
-          downloads={data.downloads ?? []}
-          failed={data.failed ?? []}
-          pagination={data.pagination}
-          onPageChange={onJobPageChange}
-          onPageSizeChange={onJobPageSizeChange}
-      />
-
-      <Drawer
-        destroyOnHidden
-        open={failedDrawerOpen}
-        title={
-          <Space>
-            <CloseCircleOutlined />
-            失败推文队列
-          </Space>
-        }
-        size={screens.md ? 760 : "100%"}
-        onClose={onCloseFailedDrawer}
-      >
-        <FailedTweetQueue
-          items={data.failedTweets ?? []}
+        {/* 失败推文重试抽屉 */}
+        <FailedTweetDrawer
+          open={failedDrawerOpen}
+          onClose={() => setFailedDrawerOpen(false)}
+          items={[]}
           total={failedTweetCount}
         />
-      </Drawer>
-    </Card>
-  );
-}
-
-function SettingsPage({
-  config,
-  onRefresh,
-  refreshPending,
-}: {
-  config: AppConfig;
-  onRefresh: () => void;
-  refreshPending: boolean;
-}) {
-  return (
-    <ConfigForm config={config} onRefresh={onRefresh} refreshPending={refreshPending} />
-  );
-}
-
-function DashboardSkeleton() {
-  return (
-    <Row gutter={[16, 16]}>
-      <Col xs={24} xl={18}>
-        <Flex vertical gap={16}>
-          <Card>
-            <Skeleton active paragraph={{ rows: 4 }} />
-          </Card>
-          <Card>
-            <ListSkeleton rows={4} />
-          </Card>
-        </Flex>
-      </Col>
-      <Col xs={24} xl={6}>
-        <Card>
-          <Skeleton active paragraph={{ rows: 6 }} />
-        </Card>
-      </Col>
-    </Row>
-  );
-}
-
-function PageHeading({
-  description,
-  extra,
-  title,
-}: {
-  description: string;
-  extra?: React.ReactNode;
-  title: string;
-}) {
-  return (
-    <Flex align="center" justify="space-between" gap={16} wrap="wrap">
-      <Flex vertical>
-        <Title level={3}>{title}</Title>
-        <Text type="secondary">{description}</Text>
-      </Flex>
-      {extra}
-    </Flex>
+      </div>
+    </ConfigProvider>
   );
 }

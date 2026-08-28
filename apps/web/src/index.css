@@ -1,0 +1,339 @@
+@import "tailwindcss";
+
+@variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --color-brand-primary: #0ea5e9;
+    --color-brand-indigo: #6366f1;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  svg {
+    vertical-align: middle;
+  }
+
+  /* 平滑过渡与选中文本 */
+  ::selection {
+    background-color: #0ea5e9;
+    color: #ffffff;
+  }
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* =========================================================
+   Ant Design 暗黑模式全量高保真定制 (Slate/Indigo 调色板)
+   ========================================================= */
+
+.dark {
+  color-scheme: dark;
+}
+
+.dark .ant-card {
+  background-color: rgba(15, 23, 42, 0.75) !important;
+  border-color: rgba(30, 41, 59, 0.8) !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-card-head {
+  border-bottom-color: rgba(30, 41, 59, 0.8) !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-modal-content {
+  background-color: #0f172a !important;
+  border: 1px solid #1e293b !important;
+  color: #f1f5f9 !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5) !important;
+}
+
+.dark .ant-modal-header {
+  background-color: transparent !important;
+  color: #f1f5f9 !important;
+  border-bottom: 1px solid #1e293b !important;
+}
+
+.dark .ant-drawer-content {
+  background-color: #0f172a !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-drawer-header {
+  background-color: #020617 !important;
+  border-bottom: 1px solid #1e293b !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-tabs-nav {
+  border-bottom-color: #1e293b !important;
+}
+
+.dark .ant-tabs-tab {
+  color: #94a3b8 !important;
+}
+
+.dark .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: #38bdf8 !important;
+}
+
+.dark .ant-input,
+.dark .ant-input-affix-wrapper,
+.dark .ant-input-number,
+.dark .ant-select-selector {
+  background-color: #020617 !important;
+  border-color: #1e293b !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-input::placeholder,
+.dark .ant-input-affix-wrapper input::placeholder {
+  color: #64748b !important;
+}
+
+.dark .ant-segmented {
+  background-color: #020617 !important;
+  color: #94a3b8 !important;
+  border: 1px solid #1e293b !important;
+}
+
+.dark .ant-segmented-item-selected {
+  background-color: #1e293b !important;
+  color: #f1f5f9 !important;
+}
+
+/* 暗黑表格高质感定制 */
+.dark .ant-table {
+  background: transparent !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-table-thead > tr > th {
+  background-color: rgba(2, 6, 23, 0.6) !important;
+  color: #94a3b8 !important;
+  border-bottom: 1px solid #1e293b !important;
+  font-size: 11px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.05em !important;
+}
+
+.dark .ant-table-tbody > tr > td {
+  border-bottom: 1px solid rgba(30, 41, 59, 0.7) !important;
+  color: #cbd5e1 !important;
+}
+
+.dark .ant-table-tbody > tr:hover > td {
+  background-color: rgba(30, 41, 59, 0.35) !important;
+}
+
+.dark .ant-table-expanded-row > td {
+  background-color: rgba(2, 6, 23, 0.7) !important;
+}
+
+.dark .ant-pagination-item {
+  background-color: #0f172a !important;
+  border-color: #1e293b !important;
+}
+
+.dark .ant-pagination-item a {
+  color: #94a3b8 !important;
+}
+
+.dark .ant-pagination-item-active {
+  background-color: #0ea5e9 !important;
+  border-color: #0ea5e9 !important;
+}
+
+.dark .ant-pagination-item-active a {
+  color: #ffffff !important;
+}
+
+.dark .ant-descriptions-item-label {
+  color: #94a3b8 !important;
+}
+
+.dark .ant-descriptions-item-content {
+  color: #f1f5f9 !important;
+}
+
+/* =========================================================
+   全局统一按钮设计规范 (Button Design System)
+   ========================================================= */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  white-space: nowrap;
+  user-select: none;
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
+  text-decoration: none !important;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+/* 按钮规格体系 (统一高度与字阶) */
+.btn-md {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 13px;
+  border-radius: 10px;
+  gap: 6px;
+}
+
+.btn-sm {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+  border-radius: 8px;
+  gap: 5px;
+}
+
+.btn-xs {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  gap: 4px;
+}
+
+.btn-icon {
+  width: 32px;
+  height: 32px;
+  padding: 0 !important;
+  border-radius: 8px;
+}
+
+.btn-icon-sm {
+  width: 28px;
+  height: 28px;
+  padding: 0 !important;
+  border-radius: 6px;
+}
+
+/* 按钮颜色体系 (统一文本颜色与背景) */
+.btn-primary {
+  background-color: #0ea5e9;
+  color: #ffffff !important;
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px rgba(14, 165, 233, 0.25);
+}
+.btn-primary:hover {
+  background-color: #38bdf8;
+}
+
+.btn-secondary {
+  background-color: #ffffff;
+  color: #334155 !important;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.btn-secondary:hover {
+  background-color: #f8fafc;
+  color: #0f172a !important;
+  border-color: #cbd5e1;
+}
+.dark .btn-secondary {
+  background-color: #1e293b;
+  color: #e2e8f0 !important;
+  border-color: #334155;
+  box-shadow: none;
+}
+.dark .btn-secondary:hover {
+  background-color: #334155;
+  color: #ffffff !important;
+  border-color: #475569;
+}
+
+.btn-danger-soft {
+  background-color: rgba(239, 68, 68, 0.1);
+  color: #ef4444 !important;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+.btn-danger-soft:hover {
+  background-color: rgba(239, 68, 68, 0.18);
+  color: #dc2626 !important;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.dark .btn-danger-soft {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: #f87171 !important;
+  border-color: rgba(239, 68, 68, 0.25);
+}
+.dark .btn-danger-soft:hover {
+  background-color: rgba(239, 68, 68, 0.25);
+  color: #fca5a5 !important;
+}
+
+.btn-danger {
+  background-color: #ef4444;
+  color: #ffffff !important;
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px rgba(239, 68, 68, 0.25);
+}
+.btn-danger:hover {
+  background-color: #dc2626;
+}
+
+/* Ant Design Button 深度对齐 */
+.ant-btn {
+  font-family: inherit !important;
+  font-weight: 500 !important;
+  box-shadow: none !important;
+  transition: all 0.15s ease-in-out !important;
+}
+
+.ant-btn-primary {
+  background-color: #0ea5e9 !important;
+  border-color: #0ea5e9 !important;
+  color: #ffffff !important;
+}
+.ant-btn-primary:hover {
+  background-color: #38bdf8 !important;
+  border-color: #38bdf8 !important;
+}
+
+.dark .ant-btn-default {
+  background-color: #1e293b !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+.dark .ant-btn-default:hover {
+  background-color: #334155 !important;
+  border-color: #475569 !important;
+  color: #ffffff !important;
+}

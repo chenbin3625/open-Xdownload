@@ -2,13 +2,16 @@ package xclient
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/tidwall/gjson"
 )
 
@@ -212,5 +215,137 @@ func TestPoolSelectErrorsWhenAllClientsDisabled(t *testing.T) {
 	}}
 	if _, err := pool.Select(context.Background(), "/x"); err == nil {
 		t.Fatal("Select with all disabled should error")
+	}
+}
+
+// fakeTimelineRequester 依次返回预置的 timeline 页面，记录请求次数。
+type fakeTimelineRequester struct {
+	pages []string
+	calls int
+}
+
+func (f *fakeTimelineRequester) graphQL(_ context.Context, _ string, _ url.Values) ([]byte, error) {
+	if f.calls >= len(f.pages) {
+		return []byte(`{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[]}}}}}}`), nil
+	}
+	page := f.pages[f.calls]
+	f.calls++
+	return []byte(page), nil
+}
+
+// timelinePagePayload 构造一页 UserMedia timeline：按给定推文 ID 生成带图片媒体的条目，
+// 可选附带 Bottom 游标。
+func timelinePagePayload(tweetIDs []string, cursor string) string {
+	entries := make([]string, 0, len(tweetIDs)+1)
+	for _, id := range tweetIDs {
+		entries = append(entries, fmt.Sprintf(
+			`{"content":{"entryType":"TimelineTimelineItem","itemContent":{"tweet_results":{"result":{"rest_id":%q,"legacy":{"full_text":"tweet %s","extended_entities":{"media":[{"id_str":"m-%s","type":"photo","media_url_https":"https://pbs.twimg.com/media/%s.jpg"}]}}}}}}}`,
+			id, id, id, id))
+	}
+	if cursor != "" {
+		entries = append(entries, fmt.Sprintf(
+			`{"content":{"entryType":"TimelineTimelineCursor","cursorType":"Bottom","value":%q}}`, cursor))
+	}
+	return fmt.Sprintf(
+		`{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[%s]}]}}}}}}`,
+		strings.Join(entries, ","))
+}
+
+func tweetIDs(tweets []parser.TweetData) []string {
+	ids := make([]string, 0, len(tweets))
+	for _, tweet := range tweets {
+		ids = append(ids, tweet.ID)
+	}
+	return ids
+}
+
+func TestGetUserTimelineStopsAtExactMatchMidPage(t *testing.T) {
+	// 正常场景：stopID 出现在首页中部，其后均为已归档的旧推文。
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"300", "250", "200", "150"}, "cursor-2"),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u1", ScreenName: "u"}, parser.ParseOptions{StopAtTweetID: "200"})
+	if err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if got, want := strings.Join(tweetIDs(tweets), ","), "300,250"; got != want {
+		t.Fatalf("tweet IDs = %q, want %q", got, want)
+	}
+	if requester.calls != 1 {
+		t.Fatalf("graphQL calls = %d, want 1 (early stop must not fetch page 2)", requester.calls)
+	}
+}
+
+func TestGetUserTimelinePinnedStopTweetKeepsNewerTweets(t *testing.T) {
+	// 置顶回归：上次归档时置顶推文恰好是最新推文（游标=200=置顶）。本次首页为
+	// [置顶200, 新推文300, 新推文250, 旧推文100]。若在 200 上立即返回，会永久漏掉
+	// 300/250；正确行为是扫完本页、只保留比 200 新的推文，且不再翻页。
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"200", "300", "250", "100"}, "cursor-2"),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u1", ScreenName: "u"}, parser.ParseOptions{StopAtTweetID: "200"})
+	if err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if got, want := strings.Join(tweetIDs(tweets), ","), "300,250"; got != want {
+		t.Fatalf("tweet IDs = %q, want %q (newer tweets after pinned stop must be kept)", got, want)
+	}
+	if requester.calls != 1 {
+		t.Fatalf("graphQL calls = %d, want 1 (reached stop must not fetch page 2)", requester.calls)
+	}
+}
+
+func TestGetUserTimelinePinnedOldTweetDoesNotFalseStop(t *testing.T) {
+	// 置顶较旧（100 < stopID）排在首页最前：首页不能因数值比较误停（page 0 仅精确
+	// 匹配），置顶本身照旧包含（重复由下游去重），精确命中 200 后停止。
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"100", "300", "250", "200", "150"}, "cursor-2"),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u1", ScreenName: "u"}, parser.ParseOptions{StopAtTweetID: "200"})
+	if err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if got, want := strings.Join(tweetIDs(tweets), ","), "100,300,250"; got != want {
+		t.Fatalf("tweet IDs = %q, want %q", got, want)
+	}
+	if requester.calls != 1 {
+		t.Fatalf("graphQL calls = %d, want 1", requester.calls)
+	}
+}
+
+func TestGetUserTimelineWithoutStopCursorPaginates(t *testing.T) {
+	// 无游标：完整翻页。
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"300", "250"}, "cursor-2"),
+		timelinePagePayload([]string{"200", "100"}, ""),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u1", ScreenName: "u"}, parser.ParseOptions{})
+	if err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if got, want := strings.Join(tweetIDs(tweets), ","), "300,250,200,100"; got != want {
+		t.Fatalf("tweet IDs = %q, want %q", got, want)
+	}
+	if requester.calls != 2 {
+		t.Fatalf("graphQL calls = %d, want 2", requester.calls)
+	}
+}
+
+func TestGetUserTimelineNumericStopOnLaterPage(t *testing.T) {
+	// stopID 推文已删除：首页全为新推文，第二页出现数值更旧的推文时按数值比较停止。
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"400", "350"}, "cursor-2"),
+		timelinePagePayload([]string{"150", "100"}, ""),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u1", ScreenName: "u"}, parser.ParseOptions{StopAtTweetID: "200"})
+	if err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	// 第二页首个条目 150 <= 200 触发停止；其后仅保留数值更新的项（无）。
+	if got, want := strings.Join(tweetIDs(tweets), ","), "400,350"; got != want {
+		t.Fatalf("tweet IDs = %q, want %q", got, want)
+	}
+	if requester.calls != 2 {
+		t.Fatalf("graphQL calls = %d, want 2", requester.calls)
 	}
 }
