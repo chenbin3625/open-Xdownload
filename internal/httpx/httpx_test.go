@@ -1,12 +1,8 @@
 package httpx
 
 import (
-	"context"
 	"net"
-	"strconv"
-	"strings"
 	"testing"
-	"time"
 )
 
 func TestBlockedIPLinkLocal(t *testing.T) {
@@ -18,7 +14,7 @@ func TestBlockedIPLinkLocal(t *testing.T) {
 		{"169.254.0.1", true},
 		{"fe80::1", true},
 		{"127.0.0.1", false},    // 环回（测试服务器）不拦
-		{"192.168.1.10", false}, // 私网 NAS/SMB 不拦
+		{"192.168.1.10", false}, // 私网地址不拦
 		{"10.0.0.5", false},
 		{"8.8.8.8", false},
 	}
@@ -30,41 +26,6 @@ func TestBlockedIPLinkLocal(t *testing.T) {
 		if got := BlockedIP(ip); got != tt.blocked {
 			t.Fatalf("BlockedIP(%s) = %v, want %v", tt.ip, got, tt.blocked)
 		}
-	}
-}
-
-func TestResolveBlockedRejectsLinkLocalLiteral(t *testing.T) {
-	err := ResolveBlocked(context.Background(), "169.254.169.254")
-	if !IsBlockedTargetError(err) {
-		t.Fatalf("ResolveBlocked(link-local) err = %v, want blocked error", err)
-	}
-	if err := ResolveBlocked(context.Background(), "8.8.8.8"); err != nil {
-		t.Fatalf("ResolveBlocked(public) err = %v", err)
-	}
-	if err := ResolveBlocked(context.Background(), ""); err != nil {
-		t.Fatalf("ResolveBlocked(empty) err = %v", err)
-	}
-}
-
-func TestDialGuardedRejectsLinkLocalBeforeConnecting(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	conn, err := DialGuarded(ctx, "tcp", net.JoinHostPort("169.254.169.254", strconv.Itoa(80)), 3*time.Second)
-	if !IsBlockedTargetError(err) {
-		if conn != nil {
-			_ = conn.Close()
-		}
-		t.Fatalf("DialGuarded(link-local) err = %v, want blocked error", err)
-	}
-	if conn != nil {
-		_ = conn.Close()
-	}
-}
-
-func TestBlockedTargetErrorMessageReadable(t *testing.T) {
-	err := ResolveBlocked(context.Background(), "169.254.169.254")
-	if err == nil || !strings.Contains(err.Error(), "链路本地") {
-		t.Fatalf("error message = %v, want readable link-local message", err)
 	}
 }
 

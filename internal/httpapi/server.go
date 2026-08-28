@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
-	"github.com/chenbin3625/open-Xdownload/internal/filestore"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
@@ -61,10 +59,16 @@ func (s *Server) withMeta(ctx context.Context, event jobs.Event) jobs.Event {
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	// 防止浏览器对下载目录内文件做 MIME 嗅探（媒体库端点可能输出任意扩展名文件）。
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			next.ServeHTTP(w, req)
+		})
+	})
 	r.Get("/api/health", s.health)
 	r.Get("/api/config", s.getConfig)
 	r.Put("/api/config", s.updateConfig)
-	r.Post("/api/storage/test", s.testStorage)
 	r.Get("/api/local-directories", s.listLocalDirectories)
 	r.Post("/api/local-directories", s.createLocalDirectory)
 	r.Post("/api/auth/check", s.checkAuth)
@@ -132,45 +136,6 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated.Redacted())
-}
-
-func (s *Server) testStorage(w http.ResponseWriter, r *http.Request) {
-	var cfg config.AppConfig
-	if err := decodeJSON(w, r, &cfg); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	stored, err := s.store.GetStoredConfig(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	cfg = mergeSecretPlaceholders(cfg, stored).Normalized()
-	cfg = config.ApplyEnvOverrides(cfg)
-	// 阻止对链路本地地址（如云元数据 169.254.169.254）的测试请求，缓解 SSRF。
-	if blockedStorageTarget(r.Context(), cfg.SMBHost) || blockedStorageTarget(r.Context(), urlHostname(cfg.WebDAVURL)) {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("不允许的存储目标地址"))
-		return
-	}
-	target, err := filestore.New(cfg)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	probePath, err := target.TestWritable(ctx)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, storageTestResult{
-		OK:      true,
-		Type:    target.Type(),
-		Root:    target.Root(),
-		Message: "存储连接与写入测试通过",
-		Path:    probePath,
-	})
 }
 
 func (s *Server) listLocalDirectories(w http.ResponseWriter, r *http.Request) {
@@ -497,14 +462,6 @@ type archiveScheduleRequest struct {
 	Items           []storage.ArchiveScheduleItem `json:"items"`
 }
 
-type storageTestResult struct {
-	OK      bool               `json:"ok"`
-	Type    config.StorageType `json:"type"`
-	Root    string             `json:"root"`
-	Message string             `json:"message"`
-	Path    string             `json:"path"`
-}
-
 type failedTweetPage struct {
 	Items      []storage.FailedTweetView `json:"items"`
 	Pagination storage.Pagination        `json:"pagination"`
@@ -537,58 +494,9 @@ func mergeSecretPlaceholders(cfg config.AppConfig, current config.AppConfig) con
 		cfg.CSRFToken = current.CSRFToken
 	}
 	cfg.AdditionalCookies = config.RestoreAdditionalCookies(cfg.AdditionalCookies, current.AdditionalCookies)
-	// 仅当目标主机未变时才继承已存的存储凭据，否则调用方可令服务器用管理员真实的
-	// WebDAV/SMB 密码去认证一个由调用方提供的主机（凭据外泄）。主机变更时清掉占位符，
-	// 避免把字面量 "********" 当作密码发送给新主机。
-	cfg.SMBPassword = config.MergeStorageSecret(cfg.SMBPassword, current.SMBPassword, config.SameSMBTarget(cfg, current))
-	cfg.WebDAVPassword = config.MergeStorageSecret(cfg.WebDAVPassword, current.WebDAVPassword, config.SameURLAuthority(cfg.WebDAVURL, current.WebDAVURL))
 	// 还原 Redacted() 为展示而屏蔽的 URL 内嵌凭据。
 	cfg.ProxyURL = config.RestoreURLUserinfo(cfg.ProxyURL, current.ProxyURL)
-	cfg.WebDAVURL = config.RestoreURLUserinfo(cfg.WebDAVURL, current.WebDAVURL)
 	return cfg
-}
-
-// urlHostname returns the host (without port) of rawURL, or "" if unparseable.
-func urlHostname(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
-	}
-	return u.Hostname()
-}
-
-// isBlockedStorageTarget reports whether host is a link-local IP literal
-// (e.g. 169.254.169.254 cloud-metadata), which the storage test endpoint must
-// not be allowed to reach. Hostnames are allowed (resolved by the dialer); a
-// full egress allowlist is out of scope for the local no-auth service.
-func isBlockedStorageTarget(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-}
-
-func blockedStorageTarget(ctx context.Context, host string) bool {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return false
-	}
-	if isBlockedStorageTarget(host) {
-		return true
-	}
-	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	addresses, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
-	if err != nil {
-		return false
-	}
-	for _, address := range addresses {
-		if isBlockedStorageTarget(address.IP.String()) {
-			return true
-		}
-	}
-	return false
 }
 
 func isAllowedDirectMediaURL(parsed *url.URL) bool {
@@ -818,7 +726,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListLibraryDownloads(r.Context(), parseLimit(r, 10000))
+	items, err := s.store.ListLibraryDownloads(r.Context(), parseLimit(r, storage.MaxLibraryDownloadsLimit))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -829,30 +737,6 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, items)
-}
-
-func (s *Server) serveLibraryFile(w http.ResponseWriter, r *http.Request) {
-	pathValue := strings.TrimSpace(r.URL.Query().Get("path"))
-	if pathValue == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("缺少文件路径"))
-		return
-	}
-	cfg, err := s.store.GetConfig(r.Context())
-	if err != nil || cfg.StorageType != config.StorageLocal {
-		writeError(w, http.StatusConflict, fmt.Errorf("当前存储类型不支持在线播放"))
-		return
-	}
-	filePath, err := resolveLocalLibraryPath(cfg.DownloadDir, pathValue)
-	if err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
-	info, err := os.Stat(filePath)
-	if err != nil || info.IsDir() {
-		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
-		return
-	}
-	http.ServeFile(w, r, filePath)
 }
 
 func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
@@ -871,13 +755,13 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg, err := s.store.GetConfig(r.Context())
-	if err != nil || cfg.StorageType != config.StorageLocal {
-		writeError(w, http.StatusConflict, fmt.Errorf("当前存储类型不支持预览图"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	videoPath, err := resolveLocalLibraryPath(cfg.DownloadDir, record.FilePath)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err)
+		writeResolveError(w, err)
 		return
 	}
 	if _, err := os.Stat(videoPath); err != nil {
@@ -903,7 +787,15 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("预览图地址无效"))
 		return
 	}
-	response, err := (&http.Client{Timeout: 20 * time.Second}).Do(request)
+	// 缩略图回源必须与媒体下载共用同一套代理解析：浏览器无法直连 twimg 的部署里，
+	// 走系统默认 transport 的回源请求会全部失败，这正是历史媒体看不到预览图的
+	// 原因之一。并发经信号量限流：首屏几十张缺海报的卡片不会同时发起远程抓取。
+	if err := posterFetchLimiter.acquire(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("预览图抓取繁忙"))
+		return
+	}
+	response, err := httpx.Client(cfg.ProxyURL, 20*time.Second).Do(request)
+	posterFetchLimiter.release()
 	if err != nil || response.Body == nil {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("下载视频预览图失败"))
 		return
@@ -943,6 +835,31 @@ func isAllowedPreviewHost(host string) bool {
 	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
 }
 
+// posterFetchLimiter bounds concurrent remote poster fetches: a gallery grid
+// with many missing posters would otherwise open dozens of simultaneous
+// proxied requests in one paint. Local disk hits return before acquiring it.
+const maxConcurrentPosterFetches = 4
+
+type countingSemaphore chan struct{}
+
+var posterFetchLimiter = make(countingSemaphore, maxConcurrentPosterFetches)
+
+func (s countingSemaphore) acquire(ctx context.Context) error {
+	select {
+	case s <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s countingSemaphore) release() {
+	select {
+	case <-s:
+	default:
+	}
+}
+
 func isVideoURL(value string) bool {
 	parsed, err := url.Parse(value)
 	if err != nil {
@@ -952,6 +869,9 @@ func isVideoURL(value string) bool {
 	return ext == ".mp4" || ext == ".mov" || ext == ".m4v" || ext == ".webm" || ext == ".ogv"
 }
 
+// resolveLocalLibraryPath resolves requested against the download directory,
+// rejecting traversal and symlink escapes. Missing files return an error that
+// satisfies errors.Is(err, os.ErrNotExist) so callers can map it to 404.
 func resolveLocalLibraryPath(root, requested string) (string, error) {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
@@ -963,27 +883,68 @@ func resolveLocalLibraryPath(root, requested string) (string, error) {
 	}
 	rel, err := filepath.Rel(rootAbs, filePath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("文件不在下载目录内")
+		return "", errFileOutsideDownloadDir
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
-		return "", fmt.Errorf("下载目录不存在")
+		return "", fmt.Errorf("下载目录不存在: %w", os.ErrNotExist)
 	}
 	resolvedFile, err := filepath.EvalSymlinks(filePath)
 	if err != nil {
-		return "", fmt.Errorf("文件不存在")
+		return "", fmt.Errorf("文件不存在: %w", os.ErrNotExist)
 	}
 	resolvedRel, err := filepath.Rel(resolvedRoot, resolvedFile)
 	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
-		return "", fmt.Errorf("文件不在下载目录内")
+		return "", errFileOutsideDownloadDir
 	}
 	return resolvedFile, nil
 }
 
+var errFileOutsideDownloadDir = errors.New("文件不在下载目录内")
+
+// writeResolveError maps resolveLocalLibraryPath failures to 404 (missing) or 403 (escape).
+func writeResolveError(w http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeError(w, http.StatusForbidden, err)
+}
+
+// serveLibraryFile exposes media files saved under the download directory
+// (including unregistered/orphan files referenced by the gallery). The
+// extension whitelist keeps the endpoint from turning into an arbitrary file
+// reader for anything else that may live in the download directory.
+func (s *Server) serveLibraryFile(w http.ResponseWriter, r *http.Request) {
+	pathValue := strings.TrimSpace(r.URL.Query().Get("path"))
+	if pathValue == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("缺少文件路径"))
+		return
+	}
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !storage.IsLibraryMediaPath(pathValue) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("仅支持媒体文件"))
+		return
+	}
+	filePath, err := resolveLocalLibraryPath(cfg.DownloadDir, pathValue)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	info, err := os.Stat(filePath)
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	http.ServeFile(w, r, filePath)
+}
+
 // serveDownloadFile exposes only files recorded by the local filestore and
-// keeps the resolved path inside the configured download directory. This
-// endpoint is intentionally unsuitable for SMB/WebDAV records, whose paths
-// are remote URLs and cannot be safely served by the HTTP process.
+// keeps the resolved path inside the configured download directory.
 func (s *Server) serveDownloadFile(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
 	if err != nil {
@@ -1004,46 +965,17 @@ func (s *Server) serveDownloadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if cfg.StorageType != config.StorageLocal {
-		writeError(w, http.StatusConflict, fmt.Errorf("当前存储类型不支持在线播放"))
-		return
-	}
-	root, err := filepath.Abs(cfg.DownloadDir)
+	filePath, err := resolveLocalLibraryPath(cfg.DownloadDir, record.FilePath)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeResolveError(w, err)
 		return
 	}
-	filePath, err := filepath.Abs(record.FilePath)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("文件路径无效"))
-		return
-	}
-	rel, err := filepath.Rel(root, filePath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("文件不在下载目录内"))
-		return
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
-		return
-	}
-	resolvedFile, err := filepath.EvalSymlinks(filePath)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
-		return
-	}
-	resolvedRel, err := filepath.Rel(resolvedRoot, resolvedFile)
-	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("文件不在下载目录内"))
-		return
-	}
-	info, err := os.Stat(resolvedFile)
+	info, err := os.Stat(filePath)
 	if err != nil || info.IsDir() {
 		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
 		return
 	}
-	http.ServeFile(w, r, resolvedFile)
+	http.ServeFile(w, r, filePath)
 }
 
 func (s *Server) listFailedMedia(w http.ResponseWriter, r *http.Request) {

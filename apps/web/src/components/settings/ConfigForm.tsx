@@ -266,17 +266,6 @@ export function normalizeConfig(config: AppConfig): AppConfig {
     ...config,
     includeNestedTweetMedia: config.includeNestedTweetMedia ?? false,
     storageType: config.storageType ?? "local",
-    smbHost: config.smbHost ?? "",
-    smbPort: config.smbPort || 445,
-    smbShare: config.smbShare ?? "",
-    smbPath: config.smbPath ?? "",
-    smbDomain: config.smbDomain ?? "",
-    smbUsername: config.smbUsername ?? "",
-    smbPassword: config.smbPassword ?? "",
-    webdavUrl: config.webdavUrl ?? "",
-    webdavPath: config.webdavPath ?? "",
-    webdavUsername: config.webdavUsername ?? "",
-    webdavPassword: config.webdavPassword ?? "",
   };
 }
 

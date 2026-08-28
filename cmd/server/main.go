@@ -61,8 +61,8 @@ func main() {
 	}
 	defer store.Close()
 	// Restrict the SQLite file and its -wal/-shm sidecars to the owner; the DB
-	// stores X auth_token/ct0 and SMB/WebDAV passwords in cleartext, which
-	// modernc.org/sqlite otherwise creates world-readable (0644).
+	// stores X auth_token/ct0 in cleartext, which modernc.org/sqlite otherwise
+	// creates world-readable (0644).
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		if err := os.Chmod(dbPath+suffix, 0o600); err != nil && !os.IsNotExist(err) {
 			log.Printf("chmod db%s: %v", suffix, err)
