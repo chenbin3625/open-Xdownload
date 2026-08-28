@@ -439,7 +439,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 			lastProgressSave = time.Now()
 			m.save(saveCtx, job)
 		}
-		result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt)
+		result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL)
 		if err != nil {
 			if isCancellation(ctx, err) {
 				m.handleInterrupt(ctx, saveCtx, job)
@@ -688,7 +688,11 @@ type mediaDownloadResult struct {
 	unavailable bool
 }
 
-func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time) (mediaDownloadResult, error) {
+func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time, previewURLs ...string) (mediaDownloadResult, error) {
+	previewURL := ""
+	if len(previewURLs) > 0 {
+		previewURL = previewURLs[0]
+	}
 	release, err := m.lockMedia(ctx, tweetID, mediaURL)
 	if err != nil {
 		return mediaDownloadResult{}, err
@@ -722,6 +726,12 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 				return mediaDownloadResult{}, err
 			}
 			if exists {
+				if existing.PreviewURL == "" && previewURL != "" {
+					existing.PreviewURL = previewURL
+					if _, err := m.store.CreateDownload(saveCtx, *existing); err != nil {
+						return mediaDownloadResult{}, err
+					}
+				}
 				return mediaDownloadResult{skipped: true}, nil
 			}
 		}
@@ -764,22 +774,24 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	}
 	if result.Skipped {
 		if _, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-			JobID:    job.ID,
-			TweetID:  tweetID,
-			MediaURL: mediaURL,
-			FilePath: result.Path,
-			Bytes:    result.Bytes,
+			JobID:      job.ID,
+			TweetID:    tweetID,
+			MediaURL:   mediaURL,
+			PreviewURL: previewURL,
+			FilePath:   result.Path,
+			Bytes:      result.Bytes,
 		}); err != nil {
 			return mediaDownloadResult{}, err
 		}
 		return mediaDownloadResult{skipped: true}, nil
 	}
 	_, err = m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-		JobID:    job.ID,
-		TweetID:  tweetID,
-		MediaURL: mediaURL,
-		FilePath: result.Path,
-		Bytes:    result.Bytes,
+		JobID:      job.ID,
+		TweetID:    tweetID,
+		MediaURL:   mediaURL,
+		PreviewURL: previewURL,
+		FilePath:   result.Path,
+		Bytes:      result.Bytes,
 	})
 	return mediaDownloadResult{}, err
 }
@@ -1161,7 +1173,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 			if updateDownloading != nil {
 				updateDownloading(fmt.Sprintf("下载 @%s 的媒体", fallbackUserName(user)))
 			}
-			result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, mediaIndex), media.Type == parser.MediaPhoto, tweet.CreatedAt)
+			result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, mediaIndex), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL)
 			if err != nil {
 				if isCancellation(ctx, err) {
 					return stats, err
@@ -1277,7 +1289,7 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 				continue
 			}
 			// 跳过已下载的媒体，避免重试时把之前已成功的部分再下一遍。
-			if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt); err != nil {
+			if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL); err != nil {
 				if !shouldRetryMediaError(err) {
 					if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
 						MediaURL: mediaURL,

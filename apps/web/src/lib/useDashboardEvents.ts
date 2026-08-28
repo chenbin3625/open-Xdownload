@@ -7,6 +7,7 @@ import {
   failedTweetQueryRoot,
   getDashboardMeta,
   jobFilesQueryRoot,
+  libraryDownloadsQueryRoot,
   jobsQueryRoot,
 } from "./api";
 import { isDashboardMeta } from "./bootstrap";
@@ -20,6 +21,7 @@ export function invalidateWorkbenchQueries(queryClient: QueryClient) {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: jobsQueryRoot }),
     queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot }),
+    queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot }),
   ]);
 }
 

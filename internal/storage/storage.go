@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS downloads (
 	job_id INTEGER NOT NULL,
 	tweet_id TEXT NOT NULL DEFAULT '',
 	media_url TEXT NOT NULL,
+	preview_url TEXT NOT NULL DEFAULT '',
 	file_path TEXT NOT NULL,
 	bytes INTEGER NOT NULL DEFAULT 0,
 	created_at DATETIME NOT NULL,
@@ -344,6 +345,15 @@ func (s *Store) addMissingColumns() error {
 	}
 	if hasLastSeen == 0 {
 		if _, err := s.db.Exec(`ALTER TABLE user_entities ADD COLUMN last_seen_tweet_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	var hasPreviewURL int
+	if err := s.db.Get(&hasPreviewURL, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'preview_url'`); err != nil {
+		return err
+	}
+	if hasPreviewURL == 0 {
+		if _, err := s.db.Exec(`ALTER TABLE downloads ADD COLUMN preview_url TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -1021,26 +1031,28 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	now := time.Now().UTC()
 	if strings.TrimSpace(record.TweetID) != "" {
 		err := s.db.GetContext(ctx, &record, `
-	INSERT INTO downloads (job_id, tweet_id, media_url, file_path, bytes, created_at)
-	VALUES (?, ?, ?, ?, ?, ?)
+	INSERT INTO downloads (job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(tweet_id, media_url) WHERE tweet_id <> '' DO UPDATE SET
+		preview_url = CASE WHEN excluded.preview_url <> '' THEN excluded.preview_url ELSE downloads.preview_url END,
 		file_path = excluded.file_path,
 		bytes = excluded.bytes,
 		created_at = excluded.created_at
 	RETURNING *`,
-			record.JobID, record.TweetID, record.MediaURL, record.FilePath, record.Bytes, now)
+			record.JobID, record.TweetID, record.MediaURL, record.PreviewURL, record.FilePath, record.Bytes, now)
 		return record, err
 	}
 	// tweet_id 为空（直接媒体 URL 任务）：按 media_url 去重，避免同一 URL 重复跑产生重复行。
 	err := s.db.GetContext(ctx, &record, `
-INSERT INTO downloads (job_id, tweet_id, media_url, file_path, bytes, created_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO downloads (job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
-	file_path = excluded.file_path,
+		preview_url = CASE WHEN excluded.preview_url <> '' THEN excluded.preview_url ELSE downloads.preview_url END,
+		file_path = excluded.file_path,
 	bytes = excluded.bytes,
 	created_at = excluded.created_at
 RETURNING *`,
-		record.JobID, record.TweetID, record.MediaURL, record.FilePath, record.Bytes, now)
+		record.JobID, record.TweetID, record.MediaURL, record.PreviewURL, record.FilePath, record.Bytes, now)
 	return record, err
 }
 
@@ -1050,6 +1062,31 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 	}
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `SELECT * FROM downloads ORDER BY created_at DESC LIMIT ?`, limit)
+	return items, err
+}
+
+// ListLibraryDownloads enriches archive records with the owning user when the
+// file was saved under a user entity directory. Older records remain valid and
+// simply return empty user fields when no entity can be inferred.
+func (s *Store) ListLibraryDownloads(ctx context.Context, limit int) ([]DownloadRecord, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	items := []DownloadRecord{}
+	err := s.db.SelectContext(ctx, &items, `
+SELECT d.*,
+  COALESCE((SELECT u.screen_name
+    FROM user_entities ue JOIN users u ON u.id = ue.user_id
+    WHERE REPLACE(d.file_path, char(92), '/') LIKE
+      REPLACE(ue.parent_dir, char(92), '/') || '/' || REPLACE(ue.name, char(92), '/') || '/%'
+    ORDER BY ue.id LIMIT 1), '') AS user_screen_name,
+  COALESCE((SELECT u.name
+    FROM user_entities ue JOIN users u ON u.id = ue.user_id
+    WHERE REPLACE(d.file_path, char(92), '/') LIKE
+      REPLACE(ue.parent_dir, char(92), '/') || '/' || REPLACE(ue.name, char(92), '/') || '/%'
+    ORDER BY ue.id LIMIT 1), '') AS user_name
+FROM downloads d
+ORDER BY d.created_at DESC LIMIT ?`, limit)
 	return items, err
 }
 
@@ -1076,6 +1113,7 @@ func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []
 		JobID      int64          `db:"job_id"`
 		TweetID    sql.NullString `db:"tweet_id"`
 		MediaURL   sql.NullString `db:"media_url"`
+		PreviewURL sql.NullString `db:"preview_url"`
 		FilePath   sql.NullString `db:"file_path"`
 		Bytes      sql.NullInt64  `db:"bytes"`
 		Error      sql.NullString `db:"error"`
@@ -1084,17 +1122,17 @@ func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []
 	rows := []jobFileRow{}
 	err := s.db.SelectContext(ctx, &rows, `
 SELECT 1 AS sort_order, 'download' AS record_kind, id, job_id,
-	tweet_id, media_url, file_path, bytes, NULL AS error, created_at
+	tweet_id, media_url, preview_url, file_path, bytes, NULL AS error, created_at
 FROM downloads
 WHERE job_id = ?
 UNION ALL
 SELECT 2 AS sort_order, 'failed' AS record_kind, id, job_id,
-	NULL AS tweet_id, media_url, NULL AS file_path, NULL AS bytes, error, created_at
+	NULL AS tweet_id, media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes, error, created_at
 FROM failed_media
 WHERE job_id = ?
 UNION ALL
 SELECT 0 AS sort_order, 'job' AS record_kind, id, id AS job_id,
-	NULL AS tweet_id, NULL AS media_url, NULL AS file_path, NULL AS bytes,
+	NULL AS tweet_id, NULL AS media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes,
 	NULL AS error, NULL AS created_at
 FROM jobs
 WHERE id = ?
@@ -1114,13 +1152,14 @@ ORDER BY sort_order, created_at DESC`, jobID, jobID, jobID)
 			continue
 		case "download":
 			downloads = append(downloads, DownloadRecord{
-				ID:        row.ID,
-				JobID:     row.JobID,
-				TweetID:   row.TweetID.String,
-				MediaURL:  row.MediaURL.String,
-				FilePath:  row.FilePath.String,
-				Bytes:     row.Bytes.Int64,
-				CreatedAt: row.CreatedAt.Time,
+				ID:         row.ID,
+				JobID:      row.JobID,
+				TweetID:    row.TweetID.String,
+				MediaURL:   row.MediaURL.String,
+				PreviewURL: row.PreviewURL.String,
+				FilePath:   row.FilePath.String,
+				Bytes:      row.Bytes.Int64,
+				CreatedAt:  row.CreatedAt.Time,
 			})
 		case "failed":
 			failed = append(failed, FailedMedia{
@@ -1171,6 +1210,7 @@ type mediaDownloadStateRow struct {
 	JobID       sql.NullInt64  `db:"job_id"`
 	TweetID     sql.NullString `db:"tweet_id"`
 	MediaURL    sql.NullString `db:"media_url"`
+	PreviewURL  sql.NullString `db:"preview_url"`
 	FilePath    sql.NullString `db:"file_path"`
 	Bytes       sql.NullInt64  `db:"bytes"`
 	CreatedAt   sql.NullTime   `db:"created_at"`
@@ -1181,7 +1221,7 @@ func (s *Store) GetMediaDownloadState(ctx context.Context, tweetID string, media
 	err := s.db.GetContext(ctx, &row, `
 SELECT
 	CASE WHEN um.media_url IS NOT NULL THEN 1 ELSE 0 END AS unavailable,
-	d.id, d.job_id, d.tweet_id, d.media_url, d.file_path, d.bytes, d.created_at
+	d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes, d.created_at
 FROM (SELECT ? AS tweet_id, ? AS media_url) request
 LEFT JOIN unavailable_media um ON um.media_url = request.media_url
 LEFT JOIN downloads d ON d.tweet_id = request.tweet_id AND d.media_url = request.media_url`, tweetID, mediaURL)
@@ -1192,13 +1232,14 @@ LEFT JOIN downloads d ON d.tweet_id = request.tweet_id AND d.media_url = request
 		return nil, row.Unavailable != 0, nil
 	}
 	return &DownloadRecord{
-		ID:        row.ID.Int64,
-		JobID:     row.JobID.Int64,
-		TweetID:   row.TweetID.String,
-		MediaURL:  row.MediaURL.String,
-		FilePath:  row.FilePath.String,
-		Bytes:     row.Bytes.Int64,
-		CreatedAt: row.CreatedAt.Time,
+		ID:         row.ID.Int64,
+		JobID:      row.JobID.Int64,
+		TweetID:    row.TweetID.String,
+		MediaURL:   row.MediaURL.String,
+		PreviewURL: row.PreviewURL.String,
+		FilePath:   row.FilePath.String,
+		Bytes:      row.Bytes.Int64,
+		CreatedAt:  row.CreatedAt.Time,
 	}, row.Unavailable != 0, nil
 }
 

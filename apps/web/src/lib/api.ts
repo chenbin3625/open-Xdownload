@@ -127,9 +127,12 @@ export interface DownloadRecord {
   jobId: number;
   tweetId: string;
   mediaUrl: string;
+  previewUrl?: string;
   filePath: string;
   bytes: number;
   createdAt: string;
+  userScreenName?: string;
+  userName?: string;
 }
 
 export interface FailedMedia {
