@@ -15,6 +15,22 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestTweetResultIDUnwrapsVisibilityResultForStopAt(t *testing.T) {
+	result := gjson.Parse(`{
+		"__typename": "TweetWithVisibilityResults",
+		"tweet": {
+			"rest_id": "12345",
+			"legacy": {}
+		}
+	}`)
+	if got := tweetResultID(result); got != "12345" {
+		t.Fatalf("tweetResultID() = %q, want 12345", got)
+	}
+	if !shouldStopAt(tweetResultID(result), "12345", 0) {
+		t.Fatal("wrapped stop tweet did not trigger exact-match early stop")
+	}
+}
+
 func TestClientRetriesTransientFailuresUntilFifthAttempt(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -142,22 +158,6 @@ func TestLimitedErrorPayloadTruncatesLargeResponses(t *testing.T) {
 	}
 }
 
-func TestTweetResultIDUnwrapsVisibilityResultForStopAt(t *testing.T) {
-	result := gjson.Parse(`{
-		"__typename": "TweetWithVisibilityResults",
-		"tweet": {
-			"rest_id": "12345",
-			"legacy": {}
-		}
-	}`)
-	if got := tweetResultID(result); got != "12345" {
-		t.Fatalf("tweetResultID() = %q, want 12345", got)
-	}
-	if !shouldStopAt(tweetResultID(result), "12345", 0) {
-		t.Fatal("wrapped stop tweet did not trigger exact-match early stop")
-	}
-}
-
 func TestPoolSelectPrefersUnblockedClient(t *testing.T) {
 	now := time.Now()
 	blockedLimiter := newRateLimiter()
@@ -260,7 +260,7 @@ func tweetIDs(tweets []parser.TweetData) []string {
 }
 
 func TestGetUserTimelineStopsAtExactMatchMidPage(t *testing.T) {
-	// 正常场景：stopID 出现在首页中部，其后均为已归档的旧推文。
+	// 增量归档（开关开启）：stopID 出现在首页中部，其后均为已归档的旧推文。
 	requester := &fakeTimelineRequester{pages: []string{
 		timelinePagePayload([]string{"300", "250", "200", "150"}, "cursor-2"),
 	}}
@@ -314,7 +314,8 @@ func TestGetUserTimelinePinnedOldTweetDoesNotFalseStop(t *testing.T) {
 }
 
 func TestGetUserTimelineWithoutStopCursorPaginates(t *testing.T) {
-	// 无游标：完整翻页。
+	// 全量归档（开关关闭，默认）：完整翻页取回时间线上所有带媒体的推文，
+	// 已下载媒体由下游去重跳过。
 	requester := &fakeTimelineRequester{pages: []string{
 		timelinePagePayload([]string{"300", "250"}, "cursor-2"),
 		timelinePagePayload([]string{"200", "100"}, ""),

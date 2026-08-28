@@ -46,6 +46,26 @@
   background: rgba(148, 163, 184, 0.4);
 }
 
+/* 全局顶部加载进度条的往复滑动 */
+@keyframes global-loading-bar-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(360%);
+  }
+}
+
+.global-loading-bar-slide {
+  animation: global-loading-bar-slide 1.1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .global-loading-bar-slide {
+    animation-duration: 2.5s;
+  }
+}
+
 /* =========================================================
    Ant Design 暗黑模式全量高保真定制 (Slate/Indigo 调色板)
    ========================================================= */

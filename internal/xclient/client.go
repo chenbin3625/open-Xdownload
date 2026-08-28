@@ -502,6 +502,7 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 	tweets := []parser.TweetData{}
 	// reachedStop 表示已翻到上次归档位置（精确命中 stopID，或 page>0 时数值不新于 stopID）。
 	// 命中后本页剩余项里只有数值更新的推文（置顶命中场景）才需要保留，且不再翻下一页。
+	// 仅在配置开启增量归档时才会传入 StopAtTweetID；为空时全程翻页（全量扫描）。
 	reachedStop := false
 	for page := 0; page < 1000 && !reachedStop; page++ {
 		values := url.Values{}

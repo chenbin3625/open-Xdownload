@@ -265,6 +265,7 @@ export function normalizeConfig(config: AppConfig): AppConfig {
   return {
     ...config,
     includeNestedTweetMedia: config.includeNestedTweetMedia ?? false,
+    incrementalArchive: config.incrementalArchive ?? false,
     storageType: config.storageType ?? "local",
   };
 }

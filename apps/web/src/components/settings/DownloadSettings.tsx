@@ -22,6 +22,12 @@ export const downloadSettingsTips = {
   autoRetryFailed: "批量归档结束后，自动再次处理失败推文队列。",
   autoFollowProtected: "遇到未关注的保护账号时，使用已配置 Cookie 尝试发起关注后再归档。",
   includeNestedTweetMedia: "开启后会把引用或转推中的媒体也纳入单条下载和批量归档；关闭时只处理当前推文本体媒体。",
+  incrementalArchive: (
+    <Space orientation="vertical" size={2}>
+      <Typography.Text>开启后重复归档从上次成功位置继续，节省 X API 配额。</Typography.Text>
+      <Typography.Text>默认关闭：每次全量扫描时间线，已存在媒体自动跳过，并顺带补齐历史视频缺失的封面。</Typography.Text>
+    </Space>
+  ),
 };
 
 export function DownloadSettingsFields({
@@ -96,6 +102,14 @@ export function DownloadSettingsFields({
           <Switch
             checked={draft.includeNestedTweetMedia}
             onChange={(checked) => onChange((current) => ({ ...current, includeNestedTweetMedia: checked }))}
+          />
+        </Form.Item>
+      </Col>
+      <Col xs={24} sm={12} lg={6}>
+        <Form.Item label="增量归档" tooltip={downloadSettingsTips.incrementalArchive}>
+          <Switch
+            checked={draft.incrementalArchive}
+            onChange={(checked) => onChange((current) => ({ ...current, incrementalArchive: checked }))}
           />
         </Form.Item>
       </Col>

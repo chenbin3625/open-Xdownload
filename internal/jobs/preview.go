@@ -25,22 +25,25 @@ const (
 	maxPosterBytes = 10 << 20
 )
 
-// backfillExistingMedia 在归档重新遇到“已下载且文件仍在”的媒体时运行。
-// preview_url 是较晚上线的字段，历史记录里常为空：这里用本次解析重新读到的
-// 预览图地址回填数据库（仅更新 preview_url，不改创建时间，媒体库排序不变），
-// 并在本地存储下把缩略图保存为 <视频文件>.preview.jpg —— 媒体库预览端点会直接
-// 命中该文件，浏览器不再逐个回源 twimg 拉图。仅视频/GIF 需要海报（图片的预览
-// 就是文件本身）。所有失败只记日志，绝不影响归档任务本身。
-func (m *Manager) backfillExistingMedia(ctx context.Context, cfg config.AppConfig, target filestore.Store, record *storage.DownloadRecord, freshPreviewURL string) {
+// ensureVideoPoster 为单条视频/GIF 记录补齐 preview_url 与本地海报文件。归档重新
+// 遇到已下载媒体时（附本次解析读到的海报地址）与媒体库"补齐视频封面"批量回填
+// 共用本函数。返回 fetched（本次抓到了海报）、skipped（无需处理或海报已存在）。
+// 所有失败只记日志，绝不影响归档任务本身。
+func (m *Manager) ensureVideoPoster(ctx context.Context, cfg config.AppConfig, target filestore.Store, record *storage.DownloadRecord, freshPreviewURL string) (fetched bool, skipped bool) {
 	if record == nil || record.ID <= 0 || ctx.Err() != nil {
-		return
+		return false, true
 	}
 	if !isVideoLikePath(record.FilePath) {
-		return
+		return false, true
 	}
 	posterURL := strings.TrimSpace(freshPreviewURL)
 	if posterURL == "" || isVideoLikePath(posterURL) {
-		posterURL = storage.VideoPreviewURL(record.MediaURL)
+		if record.PreviewURL != "" && !isVideoLikePath(record.PreviewURL) {
+			// 沿用解析得到的真实海报地址（media_url_https），不得用推导值覆盖。
+			posterURL = record.PreviewURL
+		} else {
+			posterURL = storage.VideoPreviewURL(record.MediaURL)
+		}
 	}
 	if posterURL != "" && posterURL != record.PreviewURL {
 		if err := m.store.UpdateDownloadPreviewURL(ctx, record.ID, posterURL); err != nil {
@@ -50,16 +53,18 @@ func (m *Manager) backfillExistingMedia(ctx context.Context, cfg config.AppConfi
 		}
 	}
 	if posterURL == "" || target.Type() != config.StorageLocal {
-		return
+		return false, true
 	}
 	posterPath := record.FilePath + ".preview.jpg"
 	exists, err := target.Exists(ctx, posterPath)
 	if err != nil || exists {
-		return
+		return false, true
 	}
 	if err := savePosterImage(ctx, cfg.ProxyURL, posterURL, posterPath); err != nil {
 		log.Printf("backfill video poster %s: %v", record.FilePath, err)
+		return false, false
 	}
+	return true, false
 }
 
 // isVideoLikePath reports whether value looks like a video/GIF media path or
@@ -75,8 +80,8 @@ func isVideoLikePath(value string) bool {
 
 // savePosterImage fetches an image over HTTP（代理感知）and publishes it
 // atomically to destPath. 预览图地址只允许 twimg.com：即便 downloads 表被篡改，
-// 也不能把本服务变成任意地址的抓取代理。
-func savePosterImage(ctx context.Context, proxyURL string, rawURL string, destPath string) error {
+// 也不能把本服务变成任意地址的抓取代理。var 间接引用便于测试注入。
+var savePosterImage = func(ctx context.Context, proxyURL string, rawURL string, destPath string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || !isTwimgPreviewHost(parsed.Hostname()) {
 		return fmt.Errorf("预览图地址无效")

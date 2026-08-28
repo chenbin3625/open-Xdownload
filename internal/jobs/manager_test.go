@@ -492,7 +492,7 @@ func TestDownloadMediaDoesNotCacheGenericForbidden(t *testing.T) {
 
 func TestNewestTweetIDIgnoresPinnedOrdering(t *testing.T) {
 	// timeline 按时间倒序，但置顶推文（ID 较旧）排在 index 0；游标必须取数值最大的，
-	// 否则下次归档会在首页对置顶推文精确命中而早停，漏掉更新的推文。
+	// 否则下次增量归档会在首页对置顶推文精确命中而早停，漏掉更新的推文。
 	tweets := []parser.TweetData{
 		{ID: "100"}, // 置顶，较旧
 		{ID: "300"}, // 最新
