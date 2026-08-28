@@ -818,7 +818,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListLibraryDownloads(r.Context(), parseLimit(r, 100))
+	items, err := s.store.ListLibraryDownloads(r.Context(), parseLimit(r, 10000))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
