@@ -3,9 +3,12 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/chenbin3625/open-Xdownload/internal/config"
 )
 
 // TestMigrateNormalizesAndDeduplicatesDownloadsMediaURL 验证历史 downloads 记录中
@@ -87,6 +90,36 @@ func TestDeriveVideoPreviewURL(t *testing.T) {
 				t.Fatalf("deriveVideoPreviewURL(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestListLibraryDownloadsIncludesUnrecordedLocalMedia(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "untracked.mp4"), []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "untracked.jpg"), []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.UpdateConfig(context.Background(), config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+	items, err := store.ListLibraryDownloads(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("list library: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("library count = %d, want 2", len(items))
+	}
+	for _, item := range items {
+		if item.ID != 0 {
+			t.Fatalf("untracked item has database id %d", item.ID)
+		}
 	}
 }
 

@@ -81,6 +81,7 @@ type DownloadRecord struct {
 	CreatedAt      time.Time `json:"createdAt" db:"created_at"`
 	UserScreenName string    `json:"userScreenName,omitempty" db:"user_screen_name"`
 	UserName       string    `json:"userName,omitempty" db:"user_name"`
+	FileURL        string    `json:"fileUrl,omitempty" db:"-"`
 }
 
 type FailedMedia struct {
