@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib";
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 
@@ -59,7 +60,7 @@ function precompress(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), precompress()],
+  plugins: [tailwindcss(), react(), precompress()],
   build: {
     modulePreload: {
       polyfill: false,

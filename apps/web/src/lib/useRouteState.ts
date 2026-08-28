@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { tablePageSizeOptions } from "./pagination";
 
-export type SectionKey = "overview" | "settings";
+export type SectionKey =
+  | "overview"
+  | "workbench"
+  | "tasks"
+  | "schedules"
+  | "gallery"
+  | "settings";
 
 export type RouteState = {
   section: SectionKey;
@@ -15,13 +21,21 @@ export const defaultJobPageSize = 20;
 
 export const sectionRoutes: Record<SectionKey, string> = {
   overview: "/overview",
+  workbench: "/workbench",
+  tasks: "/tasks",
+  schedules: "/schedules",
+  gallery: "/gallery",
   settings: "/settings",
 };
 
 export const routeSections: Record<string, SectionKey> = {
   "/": "overview",
   "/overview": "overview",
-  "/jobs": "overview",
+  "/workbench": "overview",
+  "/jobs": "tasks",
+  "/tasks": "tasks",
+  "/schedules": "schedules",
+  "/gallery": "gallery",
   "/settings": "settings",
 };
 
@@ -29,6 +43,7 @@ export function normalizePathname(pathname: string) {
   const normalized = pathname.replace(/\/+$/, "");
   return normalized === "" ? "/" : normalized;
 }
+
 export function parsePositiveInteger(value: string | null, fallback: number) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -45,7 +60,7 @@ export function buildRoutePath(
   jobPageSize = defaultJobPageSize,
 ) {
   const params = new URLSearchParams();
-  if (section === "overview") {
+  if (section === "overview" || section === "workbench" || section === "tasks") {
     if (jobPage > defaultJobPage) {
       params.set("page", String(jobPage));
     }
@@ -54,7 +69,8 @@ export function buildRoutePath(
     }
   }
   const query = params.toString();
-  return `${sectionRoutes[section]}${query ? `?${query}` : ""}`;
+  const route = sectionRoutes[section] ?? `/${section}`;
+  return `${route}${query ? `?${query}` : ""}`;
 }
 
 export function readRouteState(): RouteState {
@@ -70,14 +86,14 @@ export function readRouteState(): RouteState {
   const pathname = normalizePathname(window.location.pathname);
   const section = routeSections[pathname] ?? "overview";
   const params = new URLSearchParams(window.location.search);
-  const jobPage =
-    section === "overview"
-      ? parsePositiveInteger(params.get("page"), defaultJobPage)
-      : defaultJobPage;
-  const jobPageSize =
-    section === "overview"
-      ? parseJobPageSize(params.get("pageSize"))
-      : defaultJobPageSize;
+  const carriesPagination =
+    section === "overview" || section === "workbench" || section === "tasks";
+  const jobPage = carriesPagination
+    ? parsePositiveInteger(params.get("page"), defaultJobPage)
+    : defaultJobPage;
+  const jobPageSize = carriesPagination
+    ? parseJobPageSize(params.get("pageSize"))
+    : defaultJobPageSize;
   const canonicalRoute = buildRoutePath(section, jobPage, jobPageSize);
   const currentRoute = `${window.location.pathname}${window.location.search}`;
 
@@ -139,24 +155,24 @@ export function useRouteState() {
 
   const handleJobPageChange = useCallback((page: number) => {
     setJobPage(page);
-    if (activeSection === "overview") {
-      updateBrowserRoute("overview", page, jobPageSize);
+    if (activeSection === "overview" || activeSection === "workbench" || activeSection === "tasks") {
+      updateBrowserRoute(activeSection, page, jobPageSize);
     }
   }, [activeSection, jobPageSize]);
 
   const handleJobPageSizeChange = useCallback((pageSize: number) => {
     setJobPageSize(pageSize);
     setJobPage(1);
-    if (activeSection === "overview") {
-      updateBrowserRoute("overview", defaultJobPage, pageSize);
+    if (activeSection === "overview" || activeSection === "workbench" || activeSection === "tasks") {
+      updateBrowserRoute(activeSection, defaultJobPage, pageSize);
     }
   }, [activeSection]);
 
   const syncServerPage = useCallback((serverPage?: number) => {
     if (serverPage && serverPage !== jobPage) {
       setJobPage(serverPage);
-      if (activeSection === "overview") {
-        updateBrowserRoute("overview", serverPage, jobPageSize, true);
+      if (activeSection === "overview" || activeSection === "workbench" || activeSection === "tasks") {
+        updateBrowserRoute(activeSection, serverPage, jobPageSize, true);
       }
     }
   }, [activeSection, jobPage, jobPageSize]);

@@ -29,13 +29,19 @@ func NewEventBus() *EventBus {
 	return &EventBus{subscribers: make(map[chan Event]struct{})}
 }
 
+// subscriberBuffer 是每个订阅者的 SSE 事件缓冲深度。Manager 以 ≥400ms/活跃任务 的频率
+// 发布 job.updated，MaxConcurrency 上限 64 时事件速率可达 ~160/s；16 槽缓冲在慢客户端
+// 上容易溢出导致 Publish 丢弃事件（非阻塞发送），前端依赖轮询对账兜底。加大缓冲把丢弃
+// 概率压到只有真正的慢消费者才会触发。
+const subscriberBuffer = 64
+
 func (bus *EventBus) Subscribe() (chan Event, bool) {
 	bus.mu.Lock()
 	defer bus.mu.Unlock()
 	if len(bus.subscribers) >= maxEventSubscribers {
 		return nil, false
 	}
-	channel := make(chan Event, 16)
+	channel := make(chan Event, subscriberBuffer)
 	bus.subscribers[channel] = struct{}{}
 	return channel, true
 }

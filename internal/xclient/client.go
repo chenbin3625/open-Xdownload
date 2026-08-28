@@ -500,7 +500,10 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 	cursor := ""
 	seenCursor := map[string]struct{}{}
 	tweets := []parser.TweetData{}
-	for page := 0; page < 1000; page++ {
+	// reachedStop 表示已翻到上次归档位置（精确命中 stopID，或 page>0 时数值不新于 stopID）。
+	// 命中后本页剩余项里只有数值更新的推文（置顶命中场景）才需要保留，且不再翻下一页。
+	reachedStop := false
+	for page := 0; page < 1000 && !reachedStop; page++ {
 		values := url.Values{}
 		values.Set("variables", fmt.Sprintf(`{"userId":%q,"count":100,"cursor":%q,"includePromotedContent":false,"withClientEventToken":false,"withBirdwatchNotes":false,"withVoice":true,"withV2Timeline":true}`, user.ID, cursor))
 		values.Set("features", timelineFeatures)
@@ -524,15 +527,28 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 			// 先判断早停（在 media/parse 跳过之前）：直接从 rest_id 取 ID，使无媒体或解析
 			// 失败的停止推文仍能触发早停，避免切换 IncludeNestedTweetMedia 或停止推文被删
 			// 时全量重翻页、空耗 X API 配额。
-			if options.StopAtTweetID != "" && shouldStopAt(tweetResultID(result), options.StopAtTweetID, page) {
-				// timeline 按时间倒序，已翻到上次归档过的推文，更旧的均已处理过，提前停止。
-				return tweets, nil
+			id := tweetResultID(result)
+			if options.StopAtTweetID != "" && !reachedStop && shouldStopAt(id, options.StopAtTweetID, page) {
+				// 不能立即 return：page 0 的精确命中可能落在置顶推文上——上次归档时它恰为
+				// 最新推文（newestTweetID 游标就是它），而其后仍排着本次新增的推文。继续
+				// 扫完本页，只保留数值更新的项，再停止翻页。
+				reachedStop = true
+			}
+			if reachedStop {
+				// 已到上次归档位置：数值不新于 stopID 的推文均已归档（含 stopID 本身），跳过；
+				// 仅保留比 stopID 新的（置顶命中场景）。
+				if !tweetIDNewerThan(id, options.StopAtTweetID) {
+					continue
+				}
 			}
 			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result, options)
 			if err != nil || len(tweet.Media) == 0 {
 				continue
 			}
 			tweets = append(tweets, tweet)
+		}
+		if reachedStop {
+			break
 		}
 		if next == "" {
 			break
@@ -563,6 +579,18 @@ func shouldStopAt(tweetID, stopID string, page int) bool {
 		return false
 	}
 	return t <= s
+}
+
+// tweetIDNewerThan 报告 tweetID 是否数值上大于 stopID。任一 ID 解析失败时返回 true：
+// 保守保留该推文交给下游去重（downloads 表 / 媒体锁），避免 ID 异常时漏归档。
+// X 的雪花 ID 均为数字，该分支正常不会触发。
+func tweetIDNewerThan(tweetID, stopID string) bool {
+	t, err1 := strconv.ParseInt(tweetID, 10, 64)
+	s, err2 := strconv.ParseInt(stopID, 10, 64)
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	return t > s
 }
 
 func tweetResultID(result gjson.Result) string {

@@ -29,7 +29,10 @@ func main() {
 	var tlsCert string
 	var tlsKey string
 	var tlsAuto bool
-	flag.StringVar(&addr, "addr", envOrDefault("OPEN_XDOWNLOAD_ADDR", "0.0.0.0:8787"), "HTTP listen address")
+	// 服务本身无内置鉴权：默认只绑定回环地址，避免裸跑时把 X Cookie、下载目录
+	// 与任务接口暴露给局域网。Docker 镜像通过 ENV 显式设置 0.0.0.0 以便端口映射；
+	// 需要局域网访问时由部署方显式指定，并建议前置带鉴权的反向代理。
+	flag.StringVar(&addr, "addr", envOrDefault("OPEN_XDOWNLOAD_ADDR", "127.0.0.1:8787"), "HTTP listen address")
 	flag.StringVar(&dataDir, "data-dir", envOrDefault("OPEN_XDOWNLOAD_DATA_DIR", "data"), "application data directory")
 	flag.StringVar(&webDir, "web-dir", envOrDefault("OPEN_XDOWNLOAD_WEB_DIR", "apps/web/dist"), "built web app directory")
 	flag.StringVar(&tlsCert, "tls-cert", envOrDefault("OPEN_XDOWNLOAD_TLS_CERT", ""), "TLS certificate file; enables HTTPS, HTTP/2 and HTTP/3")

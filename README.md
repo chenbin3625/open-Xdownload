@@ -124,21 +124,21 @@ PGID=1000
 ./open-xdownload
 ```
 
-默认监听 `0.0.0.0:8787`，数据目录为当前目录下的 `data`，下载目录为当前目录下的 `downloads`。
+默认监听 `127.0.0.1:8787`（仅本机可访问），数据目录为当前目录下的 `data`，下载目录为当前目录下的 `downloads`。
 
 如需指定路径：
 
 ```bash
 OPEN_XDOWNLOAD_DATA_DIR=/path/to/data \
 OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
-./open-xdownload -addr 127.0.0.1:8787
+./open-xdownload -addr 0.0.0.0:8787
 ```
 
 可用服务参数：
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `0.0.0.0:8787` | HTTP 监听地址。如只在本机使用，可设为 `127.0.0.1:8787`。 |
+| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `127.0.0.1:8787` | HTTP 监听地址。服务无内置鉴权，默认只绑定本机；如需局域网访问可设为 `0.0.0.0:8787`，并建议前置带鉴权的反向代理。 |
 | `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite 数据库目录，数据库文件为 `open-xdownload.db`。 |
 | `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | 前端静态文件目录；目录不存在时使用二进制内置的 Web UI。 |
 | 无 | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | 当前目录下的 `downloads` | 首次生成配置时使用的默认下载目录。 |
@@ -250,7 +250,7 @@ downloads/
 
 ## 安全说明
 
-open-Xdownload 面向个人本地归档场景，服务本身没有内置用户登录和访问鉴权。默认监听所有网卡；如只在本机使用，建议通过 `-addr 127.0.0.1:8787` 或 `OPEN_XDOWNLOAD_ADDR=127.0.0.1:8787` 只绑定本机地址，或放在带鉴权的反向代理后面。
+open-Xdownload 面向个人本地归档场景，服务本身没有内置用户登录和访问鉴权。默认只监听本机回环地址 `127.0.0.1:8787`；如需局域网访问，需通过 `-addr 0.0.0.0:8787` 或 `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` 显式放开（Docker 镜像为便于端口映射默认设置了 `0.0.0.0`，发布端口时请自行限制），并把服务放在带鉴权的反向代理后面。
 
 Docker Compose 示例中的端口映射为：
 
@@ -387,21 +387,21 @@ Download the `open-xdownload` binary for your platform from the Releases page an
 ./open-xdownload
 ```
 
-It listens on `0.0.0.0:8787` by default, with the data directory at `data` and the download directory at `downloads` in the current directory.
+It listens on `127.0.0.1:8787` (local-only) by default, with the data directory at `data` and the download directory at `downloads` in the current directory.
 
 To specify paths:
 
 ```bash
 OPEN_XDOWNLOAD_DATA_DIR=/path/to/data \
 OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
-./open-xdownload -addr 127.0.0.1:8787
+./open-xdownload -addr 0.0.0.0:8787
 ```
 
 Available service flags:
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `0.0.0.0:8787` | HTTP listen address. Set to `127.0.0.1:8787` for local-only use. |
+| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `127.0.0.1:8787` | HTTP listen address. The service has no built-in auth, so it binds to localhost by default; set `0.0.0.0:8787` for LAN access, preferably behind an authenticating reverse proxy. |
 | `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite database directory; the database file is `open-xdownload.db`. |
 | `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | Frontend static file directory; falls back to the built-in Web UI if the directory doesn't exist. |
 | n/a | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | `downloads` in the current directory | Default download directory used when the config is first generated. |
@@ -513,7 +513,7 @@ downloads/
 
 ## Security Notes
 
-open-Xdownload targets personal, local archiving; the service itself has no built-in user login or access control. It listens on all interfaces by default. For local-only use, bind to localhost with `-addr 127.0.0.1:8787` or `OPEN_XDOWNLOAD_ADDR=127.0.0.1:8787`, or put it behind a reverse proxy with authentication.
+open-Xdownload targets personal, local archiving; the service itself has no built-in user login or access control. It binds to the loopback address `127.0.0.1:8787` by default. LAN access requires explicitly opting in with `-addr 0.0.0.0:8787` or `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` (the Docker image sets `0.0.0.0` by default for port mapping — restrict the published port accordingly), and the service should then sit behind a reverse proxy with authentication.
 
 The Docker Compose example maps the port as:
 
