@@ -6,36 +6,111 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      skip_ci_check:
+        description: Publish even when CI has not passed for this commit
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: dockerhub-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   IMAGE_NAME: chenbin3625/open-xdownload
 
 jobs:
-  dockerhub:
+  # A push to main used to publish :latest immediately, in parallel with CI, so a
+  # commit with failing tests could still become the published image. The image is
+  # now only built once the CI workflow for this exact commit reports success.
+  ci-gate:
+    name: CI gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Wait for CI to pass on this commit
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_ci_check) }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$(( SECONDS + 1200 ))
+          while :; do
+            # Only the CI run caused by the push to main counts; a pull_request run
+            # for the same SHA must not be able to unlock a publish.
+            runs="$(gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" \
+              --limit 10 --json status,conclusion,event)"
+            runs="$(jq '[.[] | select(.event == "push")]' <<<"$runs")"
+
+            if [ "$(jq 'length' <<<"$runs")" -gt 0 ]; then
+              if [ "$(jq '[.[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "skipped")] | length' <<<"$runs")" -gt 0 ]; then
+                echo "::error::CI failed for $SHA, refusing to publish an image."
+                exit 1
+              fi
+              if [ "$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")" -eq 0 ]; then
+                echo "CI passed for $SHA."
+                exit 0
+              fi
+              echo "CI is still running for $SHA, waiting..."
+            elif [ "$SECONDS" -ge 300 ]; then
+              # Older commits (or tags on them) may no longer have a CI run at all;
+              # do not block a release forever in that case.
+              echo "::warning::No CI run found for $SHA, publishing without a CI gate."
+              exit 0
+            else
+              echo "Waiting for a CI run for $SHA..."
+            fi
+
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for CI on $SHA."
+              exit 1
+            fi
+            sleep 20
+          done
+
+  dockerhub:
+    name: Build and publish image
+    runs-on: ubuntu-latest
+    needs: ci-gate
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
+      # The final stage runs `apk add` on the target architecture, so emulation is
+      # required for the arm64 leg even though the Go binary is cross-compiled.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Build metadata
+        id: build-meta
+        run: |
+          # github.event.head_commit is absent on tag pushes and workflow_dispatch,
+          # which used to leave the image DATE build-arg empty.
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -45,7 +120,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -53,6 +128,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.build-meta.outputs.version }}
             COMMIT=${{ github.sha }}
-            DATE=${{ github.event.head_commit.timestamp }}
+            DATE=${{ steps.build-meta.outputs.date }}
