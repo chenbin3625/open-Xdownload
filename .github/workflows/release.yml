@@ -46,7 +46,10 @@ jobs:
       - name: Upload web assets
         uses: actions/upload-artifact@v7
         with:
-          name: open-xdownload-webui
+          # Deliberately not named open-xdownload-*: the release job downloads
+          # every open-xdownload-* artifact, and this build input must never be
+          # published as a release asset.
+          name: web-assets
           path: open-xdownload-webui.tar.gz
           if-no-files-found: error
 
@@ -90,7 +93,7 @@ jobs:
       - name: Download web assets
         uses: actions/download-artifact@v8
         with:
-          name: open-xdownload-webui
+          name: web-assets
 
       - name: Extract web assets
         run: |
@@ -158,6 +161,9 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: dist
+          # Only the per-platform archives; without the pattern the web-assets
+          # build input is downloaded too and ends up in the release.
+          pattern: open-xdownload-*
           merge-multiple: true
 
       - name: Create GitHub Release
