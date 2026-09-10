@@ -1,5 +1,7 @@
 # open-Xdownload
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Release](https://img.shields.io/github/v/release/chenbin3625/open-Xdownload)](https://github.com/chenbin3625/open-Xdownload/releases) [![CI](https://github.com/chenbin3625/open-Xdownload/actions/workflows/ci.yml/badge.svg)](https://github.com/chenbin3625/open-Xdownload/actions/workflows/ci.yml) [![Docker Pulls](https://img.shields.io/docker/pulls/chenbin3625/open-xdownload)](https://hub.docker.com/r/chenbin3625/open-xdownload)
+
 <p align="center">
   <img src="docs/assets/icon.png" width="96" height="96" alt="open-Xdownload icon">
 </p>
@@ -272,6 +274,10 @@ ports:
 This means only the host machine can reach it. To expose it to a LAN or the public internet, configure a reverse proxy, access control, and HTTPS first.
 
 Please make sure you have the right to download and keep the content, and comply with X / Twitter's terms of service, the rules of the target sites, and applicable local laws.
+
+## License
+
+This project is released under the [MIT License](LICENSE).
 
 ---
 
@@ -547,3 +553,7 @@ ports:
 这表示只有宿主机本机可以访问。如需暴露到局域网或公网，请先配置反向代理、访问控制和 HTTPS。
 
 请确认你有权下载和保存相关内容，并遵守 X / Twitter 的服务条款、目标站点规则以及所在地法律法规。
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 授权。
