@@ -28,7 +28,7 @@ export function GlobalLoadingBar() {
       }`}
     >
       <div
-        className={`h-full w-2/5 rounded-full bg-gradient-to-r from-sky-400 via-sky-500 to-indigo-500 ${
+        className={`h-full w-2/5 rounded-full bg-gradient-to-r from-sky-300 via-sky-500 to-sky-600 ${
           visible ? "global-loading-bar-slide" : ""
         }`}
       />

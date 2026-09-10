@@ -241,9 +241,9 @@ export function CreateJobModal({
       ),
       children: (
         <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between text-xs text-slate-500">
+          <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
             <span>支持用户名、@screen_name 或数字 ID，每行一个</span>
-            <span className="font-mono text-sky-500">
+            <span className="font-mono" style={{ color: "var(--brand-500)" }}>
               已识别: {currentBatchItems.length} 个
             </span>
           </div>
@@ -252,7 +252,7 @@ export function CreateJobModal({
             value={userInputs}
             onChange={(e) => setUserInputs(e.target.value)}
             placeholder={"elonmusk\n@sama\n44196397\nhttps://x.com/OpenAI"}
-            className="!font-mono !text-xs !bg-slate-50 dark:!bg-slate-950 dark:!border-slate-800"
+            className="font-mono" style={{ fontSize: 12 }}
           />
         </div>
       ),
@@ -276,36 +276,36 @@ export function CreateJobModal({
               }}
               onPressEnter={handleParseTweet}
               placeholder="https://x.com/username/status/1234567890"
-              className="!bg-slate-50 dark:!bg-slate-950 dark:!border-slate-800 !text-xs"
+              style={{ fontSize: 12 }}
             />
             <Button
               type="primary"
               disabled={!tweetUrl.trim()}
               loading={parseMutation.isPending}
               onClick={handleParseTweet}
-              className="!rounded-xl !h-9 !text-xs shrink-0"
+              className="shrink-0"
             >
               解析推文
             </Button>
           </div>
 
           {parsedTweet && (
-            <div className="p-3 bg-slate-100 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 rounded-xl space-y-2 text-xs">
+            <div className="p-3 rounded-lg space-y-2" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)", fontSize: 12 }}>
               <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-800 dark:text-slate-200">
+                <span style={{ fontWeight: 600 }}>
                   @{parsedTweet.author.screenName} ({parsedTweet.author.name})
                 </span>
-                <span className="text-emerald-500 font-medium">
+                <span style={{ color: "#10b981", fontWeight: 500 }}>
                   {parsedTweet.media.length} 个可用媒体
                 </span>
               </div>
               <Paragraph
                 ellipsis={{ rows: 2 }}
-                className="!text-slate-600 dark:!text-slate-400 !mb-1 text-xs"
+                style={{ fontSize: 12 }}
               >
                 {parsedTweet.text || "无正文"}
               </Paragraph>
-              <div className="flex items-center gap-2 text-[11px] text-slate-500">
+              <div className="flex items-center gap-2" style={{ fontSize: 11, color: "var(--text-muted)" }}>
                 <span>推文 ID: {parsedTweet.id}</span>
                 <span>·</span>
                 <span>发布于: {parsedTweet.createdAt || "未知"}</span>
@@ -325,9 +325,9 @@ export function CreateJobModal({
       ),
       children: (
         <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between text-xs text-slate-500">
+          <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
             <span>输入 X 列表 ID 或完整列表 URL，自动获取列表成员推文媒体</span>
-            <span className="font-mono text-sky-500">
+            <span className="font-mono" style={{ color: "var(--brand-500)" }}>
               已识别: {currentBatchItems.length} 个
             </span>
           </div>
@@ -336,7 +336,7 @@ export function CreateJobModal({
             value={listInputs}
             onChange={(e) => setListInputs(e.target.value)}
             placeholder={"1492019283\nhttps://x.com/i/lists/1647289190"}
-            className="!font-mono !text-xs !bg-slate-50 dark:!bg-slate-950 dark:!border-slate-800"
+            className="font-mono" style={{ fontSize: 12 }}
           />
         </div>
       ),
@@ -351,9 +351,9 @@ export function CreateJobModal({
       ),
       children: (
         <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between text-xs text-slate-500">
+          <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
             <span>输入目标账号，自动获取其关注的所有账号并进行媒体归档</span>
-            <span className="font-mono text-sky-500">
+            <span className="font-mono" style={{ color: "var(--brand-500)" }}>
               已识别: {currentBatchItems.length} 个
             </span>
           </div>
@@ -362,7 +362,7 @@ export function CreateJobModal({
             value={followingInputs}
             onChange={(e) => setFollowingInputs(e.target.value)}
             placeholder={"elonmusk\n@OpenAI"}
-            className="!font-mono !text-xs !bg-slate-50 dark:!bg-slate-950 dark:!border-slate-800"
+            className="font-mono" style={{ fontSize: 12 }}
           />
         </div>
       ),
@@ -382,20 +382,19 @@ export function CreateJobModal({
       width={680}
       title={
         <div className="flex items-center gap-2.5 py-1">
-          <div className="w-8 h-8 rounded-xl bg-sky-500/20 text-sky-500 flex items-center justify-center font-bold text-base">
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "var(--brand-100)", color: "var(--brand-600)", fontWeight: 700 }}>
             +
           </div>
           <div>
-            <div className="font-bold text-slate-900 dark:text-slate-100 text-base">
+            <div style={{ fontWeight: 600, fontSize: 16 }}>
               新建下载任务 / 归档计划
             </div>
-            <div className="text-xs text-slate-500 font-normal">
+            <div style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 400 }}>
               支持单条推文、批量用户时间线、列表与关注关系媒体高速入库
             </div>
           </div>
         </div>
       }
-      className="dark:bg-slate-900"
     >
       <div className="py-2 space-y-4">
         <Tabs
@@ -409,10 +408,10 @@ export function CreateJobModal({
 
         {/* 存为定时归档计划选项 (单条推文除外) */}
         {activeTab !== "tweet_link" && (
-          <div className="p-3.5 bg-slate-50 dark:bg-slate-950/60 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+          <div className="p-3.5 rounded-lg space-y-3" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)" }}>
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-                <ScheduleOutlined className="text-sky-500" />
+              <span className="flex items-center gap-1.5" style={{ fontSize: 12, fontWeight: 600 }}>
+                <ScheduleOutlined style={{ color: "var(--brand-500)" }} />
                 是否保存为自动归档计划（定期抓取）？
               </span>
               <Checkbox
@@ -422,9 +421,9 @@ export function CreateJobModal({
             </div>
 
             {isSchedule && (
-              <div className="pt-2 border-t border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="pt-2 grid grid-cols-1 sm:grid-cols-2 gap-3" style={{ borderTop: "1px solid var(--app-border)", fontSize: 12 }}>
                 <div>
-                  <div className="text-slate-500 dark:text-slate-400 mb-1">
+                  <div className="mb-1" style={{ color: "var(--text-muted)" }}>
                     计划名称
                   </div>
                   <Input
@@ -432,11 +431,11 @@ export function CreateJobModal({
                     onChange={(e) => setScheduleName(e.target.value)}
                     placeholder="例如：重点博主媒体日常归档"
                     size="small"
-                    className="!bg-white dark:!bg-slate-900"
+                    
                   />
                 </div>
                 <div>
-                  <div className="text-slate-500 dark:text-slate-400 mb-1">
+                  <div className="mb-1" style={{ color: "var(--text-muted)" }}>
                     调度频率 (分钟)
                   </div>
                   <InputNumber
@@ -446,7 +445,7 @@ export function CreateJobModal({
                     onChange={(val) => setIntervalMinutes(val ?? 360)}
                     size="small"
                     addonAfter="分钟"
-                    className="!w-full !bg-white dark:!bg-slate-900"
+                    style={{ width: "100%" }}
                   />
                 </div>
               </div>
@@ -455,8 +454,8 @@ export function CreateJobModal({
         )}
 
         {/* 底部按钮栏 */}
-        <div className="flex items-center justify-between pt-3 border-t border-slate-200 dark:border-slate-800">
-          <span className="text-xs text-slate-400">
+        <div className="flex items-center justify-between pt-3" style={{ borderTop: "1px solid var(--app-border)" }}>
+          <span style={{ fontSize: 12, color: "var(--text-subtle)" }}>
             {activeTab === "tweet_link"
               ? "解析后点击立即下载入库"
               : isSchedule
@@ -464,7 +463,7 @@ export function CreateJobModal({
               : `将同时创建 ${currentBatchItems.length} 个后台下载任务`}
           </span>
           <Space size={8}>
-            <Button onClick={handleClose} className="!rounded-xl !h-9 !text-[13px]">
+            <Button onClick={handleClose}>
               取消
             </Button>
             <Button
@@ -473,7 +472,6 @@ export function CreateJobModal({
               loading={createJobsMutation.isPending}
               onClick={() => createJobsMutation.mutate()}
               icon={<CloudDownloadOutlined />}
-              className="!rounded-xl !h-9 !text-[13px]"
             >
               {isSchedule
                 ? "保存定时计划"

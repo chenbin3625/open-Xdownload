@@ -1,4 +1,4 @@
-import { theme as antdTheme, Alert, Badge, Button, Card, ConfigProvider, Drawer, Grid, Skeleton } from "antd";
+import { Alert, ConfigProvider, Drawer, Grid, Skeleton, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useState } from "react";
@@ -11,7 +11,6 @@ import {
   getDashboardMeta,
   getJobsPage,
   jobsQueryRoot,
-  type AppConfig,
   type DashboardMeta,
   type JobsPage,
 } from "./lib/api";
@@ -20,8 +19,7 @@ import {
   useDashboardEvents,
 } from "./lib/useDashboardEvents";
 import { jobStatusBucket } from "./lib/jobStatus";
-import { useRouteState, type SectionKey } from "./lib/useRouteState";
-import { useTheme } from "./lib/useTheme";
+import { useRouteState } from "./lib/useRouteState";
 
 import { AppSidebar } from "./components/layout/AppSidebar";
 import { AppHeader } from "./components/layout/AppHeader";
@@ -34,11 +32,41 @@ import { SchedulesPage } from "./pages/SchedulesPage";
 import { GalleryPage } from "./pages/GalleryPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
+// 单一浅色主题：颜色、圆角、控件高度统一由 token 下发，页面里不再各写一套。
+const BRAND = "#0ea5e9";
+
+const antdThemeConfig = {
+  algorithm: antdTheme.defaultAlgorithm,
+  token: {
+    colorPrimary: BRAND,
+    colorInfo: BRAND,
+    colorLink: BRAND,
+    colorBgContainer: "#ffffff",
+    colorBgLayout: "#f5f7fa",
+    colorBorder: "#e5e9f0",
+    colorBorderSecondary: "#eef1f6",
+    colorTextHeading: "#0f172a",
+    colorText: "#334155",
+    colorTextSecondary: "#64748b",
+    colorTextTertiary: "#94a3b8",
+    borderRadius: 8,
+    borderRadiusLG: 12,
+    fontFamily:
+      'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  },
+  components: {
+    Button: { controlHeight: 36, controlHeightSM: 28, fontWeight: 500 },
+    Card: { paddingLG: 20 },
+    Menu: { itemHeight: 40, itemMarginInline: 0, itemBorderRadius: 8 },
+    Table: { headerBg: "#f8fafc", cellPaddingBlock: 12 },
+    Statistic: { titleFontSize: 12, contentFontSize: 24 },
+  },
+};
+
 export default function App() {
   const queryClient = useQueryClient();
   const screens = Grid.useBreakpoint();
   const isCompact = !screens.lg;
-  const { theme, isDark, toggleTheme } = useTheme();
 
   const {
     activeSection,
@@ -96,7 +124,7 @@ export default function App() {
   const meta = useQuery({
     queryKey: dashboardMetaQueryRoot,
     queryFn: ({ signal }) => getDashboardMeta(signal),
-    staleTime: 30_000,
+    staleTime: 15_000,
     enabled: isWorkbenchActive,
     refetchInterval: (query) => {
       const data = query.state.data as DashboardMeta | undefined;
@@ -165,82 +193,31 @@ export default function App() {
   };
   const failedTweetCount = meta.data?.failedTweetCount ?? 0;
 
-  // 主题配置
-  const antdThemeConfig = {
-    algorithm: isDark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
-    token: {
-      colorPrimary: "#0ea5e9",
-      borderRadius: 10,
-      colorBgContainer: isDark ? "#0f172a" : "#ffffff",
-      colorBgLayout: isDark ? "#020617" : "#f8fafc",
-      colorBorder: isDark ? "#1e293b" : "#e2e8f0",
-      fontFamily:
-        'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    },
-    components: {
-      Button: {
-        borderRadius: 10,
-        controlHeight: 36,
-        controlHeightSM: 30,
-        fontSize: 13,
-        fontSizeSM: 12,
-        fontWeight: 500,
-      },
-    },
+  const sidebarProps = {
+    activeSection,
+    totalJobsCount: currentStats.total,
+    activeJobsCount: currentStats.active,
+    schedulesCount: schedules.data?.length ?? 0,
+    failedTweetCount,
+    storageType: config.data?.storageType || "local",
+    storagePath: config.data?.downloadDir || "/downloads",
   };
 
   return (
     <ConfigProvider theme={antdThemeConfig} locale={zhCN}>
-      <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200">
+      <div className="app-shell flex h-screen w-screen overflow-hidden">
         {/* 任意接口请求在途时的全局顶部加载进度条 */}
         <GlobalLoadingBar />
 
-        {/* 顶部通知横幅 / 状态栏提示 (Ant Design + Tailwind) */}
-        <div className="h-7 bg-gradient-to-r from-sky-900/60 via-slate-900/80 to-indigo-900/60 border-b border-sky-500/20 px-4 text-[12px] text-sky-200 flex items-center justify-between shrink-0 select-none">
-          <div className="flex items-center gap-2">
-            <Badge status={sseConnected ? "processing" : "warning"} />
-            <span className="font-medium text-slate-200">
-              SSE 实时连接{sseConnected ? "正常" : "正在重连"}
-            </span>
-            <span className="text-slate-500">·</span>
-            <span className="text-slate-300 truncate">
-              {currentStats.active > 0
-                ? `当前正在并发执行 ${currentStats.active} 个媒体下载任务`
-                : "下载队列当前就绪空闲"}
-            </span>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="text-slate-400 text-[11px] hidden sm:inline">
-              Cookie 账号池: 认证有效
-            </span>
-            <Button
-              type="text"
-              size="small"
-              onClick={toggleTheme}
-              className="!h-5 !px-2 !rounded-full !bg-slate-800/90 hover:!bg-slate-700 !text-slate-300 !text-[11px] !border !border-slate-700/80 !font-medium"
-            >
-              {isDark ? "☀️ 明亮模式" : "🌙 暗黑模式"}
-            </Button>
-          </div>
-        </div>
-
-        {/* 主布局容器 */}
-        <div className="flex flex-1 overflow-hidden">
-          {/* 桌面端常驻侧边栏 */}
-          {!isCompact && (
-            <AppSidebar
-              activeSection={activeSection}
-              onSectionChange={handleSectionChange}
-              onOpenCreateModal={() => openCreateModal()}
-              onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
-              totalJobsCount={currentStats.total}
-              activeJobsCount={currentStats.active}
-              schedulesCount={schedules.data?.length ?? 0}
-              failedTweetCount={failedTweetCount}
-              storageType={config.data?.storageType || "local"}
-              storagePath={config.data?.downloadDir || "/downloads"}
-            />
-          )}
+        {/* 桌面端常驻侧边栏 */}
+        {!isCompact && (
+          <AppSidebar
+            {...sidebarProps}
+            onSectionChange={handleSectionChange}
+            onOpenCreateModal={() => openCreateModal()}
+            onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+          />
+        )}
 
         {/* 移动端抽屉侧边栏 */}
         {isCompact && (
@@ -249,12 +226,12 @@ export default function App() {
             open={mobileMenuOpen}
             onClose={() => setMobileMenuOpen(false)}
             styles={{ body: { padding: 0 } }}
-            size={280}
+            size={272}
           >
             <AppSidebar
-              activeSection={activeSection}
-              onSectionChange={(sec) => {
-                handleSectionChange(sec);
+              {...sidebarProps}
+              onSectionChange={(section) => {
+                handleSectionChange(section);
                 setMobileMenuOpen(false);
               }}
               onOpenCreateModal={() => {
@@ -265,63 +242,51 @@ export default function App() {
                 setMobileMenuOpen(false);
                 setFailedDrawerOpen(true);
               }}
-              totalJobsCount={currentStats.total}
-              activeJobsCount={currentStats.active}
-              schedulesCount={schedules.data?.length ?? 0}
-              failedTweetCount={failedTweetCount}
-              storageType={config.data?.storageType || "local"}
-              storagePath={config.data?.downloadDir || "/downloads"}
             />
           </Drawer>
         )}
 
         {/* 右侧主视窗内容流 */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* 全局顶栏 */}
           <AppHeader
             sseConnected={sseConnected}
             activeCount={currentStats.active}
             maxConcurrency={config.data?.maxConcurrency ?? 8}
             refreshPending={manualRefreshPending}
             onRefresh={handleManualRefresh}
-            theme={theme}
-            onToggleTheme={toggleTheme}
             onQuickSubmit={(input) => openCreateModal(input)}
             onToggleMobileMenu={() => setMobileMenuOpen(true)}
+            showMenuButton={isCompact}
           />
 
           {/* 页面主内容滚动容器 */}
-          <main className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8">
-            <div className="max-w-7xl mx-auto w-full">
+          <main className="app-main flex-1 overflow-y-auto">
+            <div className="app-content page-stack">
               {/* 异常状态提示 */}
               {isWorkbenchActive && jobs.isError && (
-                <div className="mb-4">
-                  <Alert
-                    type="error"
-                    showIcon
-                    message="任务数据加载失败"
-                    description={
-                      jobs.error instanceof Error
-                        ? jobs.error.message
-                        : "请检查后台服务连接"
-                    }
-                  />
-                </div>
+                <Alert
+                  type="error"
+                  showIcon
+                  message="任务数据加载失败"
+                  description={
+                    jobs.error instanceof Error
+                      ? jobs.error.message
+                      : "请检查后台服务连接"
+                  }
+                />
               )}
 
               {activeSection === "settings" && config.isError && (
-                <div className="mb-4">
-                  <Alert
-                    type="error"
-                    showIcon
-                    message="配置数据加载失败"
-                    description={
-                      config.error instanceof Error
-                        ? config.error.message
-                        : "请检查后台服务连接"
-                    }
-                  />
-                </div>
+                <Alert
+                  type="error"
+                  showIcon
+                  message="配置数据加载失败"
+                  description={
+                    config.error instanceof Error
+                      ? config.error.message
+                      : "请检查后台服务连接"
+                  }
+                />
               )}
 
               {/* 初始加载骨架屏（仅任务中心；归档计划与媒体库由页面内部骨架屏负责） */}
@@ -330,10 +295,10 @@ export default function App() {
                 activeSection === "tasks") &&
                 !jobs.data &&
                 jobs.isLoading && (
-                  <div className="space-y-4">
+                  <>
                     <Skeleton active paragraph={{ rows: 4 }} />
                     <Skeleton active paragraph={{ rows: 6 }} />
-                  </div>
+                  </>
                 )}
 
               {/* 视图分发：默认首页即为任务调度中心 */}
@@ -361,18 +326,11 @@ export default function App() {
                 />
               )}
 
-              {activeSection === "gallery" && (
-                <GalleryPage jobs={jobsData} />
-              )}
+              {activeSection === "gallery" && <GalleryPage jobs={jobsData} />}
 
               {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
               {activeSection === "settings" && config.isLoading && (
-                <div className="space-y-4">
-                  <Skeleton active title paragraph={{ rows: 1 }} />
-                  <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800">
-                    <Skeleton active paragraph={{ rows: 8 }} />
-                  </Card>
-                </div>
+                <Skeleton active title paragraph={{ rows: 10 }} />
               )}
 
               {activeSection === "settings" && config.data && (
@@ -385,7 +343,6 @@ export default function App() {
             </div>
           </main>
         </div>
-      </div>
 
         {/* 统一新建任务/归档模态框 */}
         <CreateJobModal

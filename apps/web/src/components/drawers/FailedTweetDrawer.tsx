@@ -1,5 +1,5 @@
 import { CloseCircleOutlined } from "@ant-design/icons";
-import { Drawer, Grid, Space } from "antd";
+import { Drawer, Grid, Space, Tag, Typography } from "antd";
 import React from "react";
 import type { FailedTweet } from "../../lib/api";
 import { FailedTweetQueue } from "../jobs/FailedTweetQueue";
@@ -24,14 +24,12 @@ export function FailedTweetDrawer({
       destroyOnHidden
       open={open}
       title={
-        <Space>
-          <CloseCircleOutlined className="text-red-500" />
-          <span className="font-semibold text-slate-800 dark:text-slate-200">
-            失败推文队列
-          </span>
-          <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400 font-mono">
+        <Space size={8}>
+          <CloseCircleOutlined style={{ color: "#ef4444" }} />
+          <Typography.Text strong>失败推文队列</Typography.Text>
+          <Tag color="error" style={{ margin: 0 }} className="font-mono">
             {total}
-          </span>
+          </Tag>
         </Space>
       }
       size={screens.md ? 760 : "100%"}

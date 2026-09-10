@@ -11,6 +11,7 @@ import {
   Card,
   Col,
   Empty,
+  Flex,
   Input,
   Modal,
   Pagination,
@@ -118,7 +119,7 @@ function VideoPoster({ item, fileName, onOpen }: { item: DownloadRecord; fileNam
     >
       <span className="relative block h-full w-full">
         <span className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-300">
-          <PictureOutlined className="text-4xl text-indigo-400" />
+          <PictureOutlined style={{ fontSize: 32, color: "var(--brand-200)" }} />
           <span className="text-xs">点击查看视频</span>
         </span>
         {sourceIndex < sources.length && (
@@ -157,10 +158,10 @@ const GalleryCard = React.memo(function GalleryCard({
   return (
     <Card
       hoverable
-      className="!rounded-xl !border-slate-200 dark:!border-slate-800 overflow-hidden shadow-xs"
+      style={{ overflow: "hidden" }}
       styles={{ body: { padding: "10px 12px" } }}
       cover={
-        <div className="aspect-square bg-slate-100 dark:bg-slate-950 relative flex items-center justify-center overflow-hidden">
+        <div className="aspect-square relative flex items-center justify-center overflow-hidden" style={{ background: "var(--app-surface-muted)" }}>
           {isVideo ? (
             <VideoPoster item={item} fileName={fileName} onOpen={() => onOpen(index)} />
           ) : isPreviewableImage ? (
@@ -203,7 +204,7 @@ const GalleryCard = React.memo(function GalleryCard({
           <Typography.Text
             strong
             ellipsis
-            className="text-[12px] block text-slate-800 dark:text-slate-200"
+            className="block" style={{ fontSize: 12 }}
           >
             {fileName}
           </Typography.Text>
@@ -212,15 +213,15 @@ const GalleryCard = React.memo(function GalleryCard({
         <Typography.Text
           type="secondary"
           ellipsis
-          className="!text-[11px] !font-mono block"
+          className="font-mono block" style={{ fontSize: 11 }}
         >
           {item.userScreenName
             ? `${item.userName || item.userScreenName}  @${item.userScreenName}`
             : "未识别用户"}
         </Typography.Text>
 
-        <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800">
-          <span className="text-[10px] text-slate-400 font-mono">
+        <div className="flex items-center justify-between pt-1.5" style={{ borderTop: "1px solid var(--app-border)" }}>
+          <span className="font-mono" style={{ fontSize: 10, color: "var(--text-subtle)" }}>
             {formatDateTime(item.createdAt)}
           </span>
           <Space size={2}>
@@ -228,18 +229,16 @@ const GalleryCard = React.memo(function GalleryCard({
               <Button
                 size="small"
                 type="text"
-                icon={<CopyOutlined className="text-xs" />}
+                icon={<CopyOutlined />}
                 onClick={() => void copyToClipboard(item.filePath, "本地路径")}
-                className="!h-6 !w-6 !p-0"
               />
             </Tooltip>
             <Tooltip title="复制媒体直链">
               <Button
                 size="small"
                 type="text"
-                icon={<LinkOutlined className="text-xs" />}
+                icon={<LinkOutlined />}
                 onClick={() => void copyToClipboard(item.mediaUrl, "原始下载直链")}
-                className="!h-6 !w-6 !p-0"
               />
             </Tooltip>
           </Space>
@@ -407,19 +406,25 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   const openPreview = useCallback((index: number) => setPreviewIndex(index), []);
 
   return (
-    <div className="space-y-5">
-      {/* 顶部标题与筛选 (纯 Ant Design 组件) */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-3 border-b border-slate-200 dark:border-slate-800/80">
+    <div className="page-stack">
+      {/* 顶部标题与筛选 */}
+      <Flex
+        className="page-header"
+        align="center"
+        justify="space-between"
+        gap={16}
+        wrap="wrap"
+      >
         <div>
-          <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">
+          <Typography.Title level={4} style={{ margin: 0 }}>
             媒体归档库
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+          </Typography.Title>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             集中浏览所有已下载的高清图片、动态 GIF 与 4K 视频原片
-          </p>
+          </Typography.Text>
         </div>
 
-        <Space size={10} wrap>
+        <Space wrap>
           <Segmented
             value={filterType}
             onChange={(val) => setFilterType(val as string)}
@@ -434,7 +439,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
           <Select
             value={userFilter}
             onChange={setUserFilter}
-            className="!w-56"
+            style={{ width: 220 }}
             options={[{ value: "all", label: "全部用户" }, ...userOptions]}
             showSearch
             optionFilterProp="label"
@@ -445,7 +450,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
             value={searchFilter}
             onChange={(e) => setSearchFilter(e.target.value)}
             allowClear
-            className="!w-56"
+            style={{ width: 220 }}
           />
 
           <Tooltip title="扫描媒体库，为缺失封面的视频/GIF 重新拉取预览图并保存到本地；已有封面的记录会自动跳过">
@@ -461,14 +466,14 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
             </Button>
           </Tooltip>
         </Space>
-      </div>
+      </Flex>
 
       {!downloads && libraryQuery.isLoading ? (
         <Row gutter={[16, 16]}>
           {Array.from({ length: 12 }, (_, index) => (
             <Col key={index} xs={24} sm={12} md={8} lg={6} xl={4}>
               <Card
-                className="!rounded-xl !border-slate-200 dark:!border-slate-800 overflow-hidden"
+                style={{ overflow: "hidden" }}
                 styles={{ body: { padding: "10px 12px" } }}
                 cover={
                   <Skeleton.Image
@@ -483,7 +488,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
           ))}
         </Row>
       ) : filteredEntries.length === 0 ? (
-        <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800 p-12 text-center">
+        <Card style={{ textAlign: "center", padding: 32 }}>
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description="暂无归档文件记录。完成下载任务后，媒体文件将自动在此呈现。"

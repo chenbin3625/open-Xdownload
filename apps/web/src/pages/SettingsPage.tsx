@@ -14,12 +14,10 @@ export function SettingsPage({
   refreshPending = false,
 }: SettingsPageProps) {
   return (
-    <div className="space-y-6">
-      <ConfigForm
-        config={config}
-        onRefresh={onRefresh}
-        refreshPending={refreshPending}
-      />
-    </div>
+    <ConfigForm
+      config={config}
+      onRefresh={onRefresh}
+      refreshPending={refreshPending}
+    />
   );
 }

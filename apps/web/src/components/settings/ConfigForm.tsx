@@ -9,12 +9,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Button,
   Card,
-  Divider,
   Flex,
   Form,
-  Grid,
   Space,
-  Tabs,
   Tooltip,
   Typography,
   notification,
@@ -43,7 +40,6 @@ export function ConfigForm({
   onRefresh?: () => void;
   refreshPending?: boolean;
 }) {
-  const screens = Grid.useBreakpoint();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(() => normalizeConfig(config));
   const [draftDirty, setDraftDirty] = useState(false);
@@ -161,56 +157,35 @@ export function ConfigForm({
     void runAuthCheck(normalized, false);
   }, [config]);
 
-  const sections = [
-    {
-      key: "storage",
-      label: <Space><DatabaseOutlined />存储</Space>,
-      children: (
-        <ConfigPanel title="存储" description="选择下载文件的保存方式与目标目录">
-          <StorageSettings draft={draft} onChange={updateDraft} />
-        </ConfigPanel>
-      ),
-    },
-    {
-      key: "download",
-      label: <Space><DownloadOutlined />下载</Space>,
-      children: (
-        <ConfigPanel title="下载" description="控制网络请求、任务并发和文件命名">
-          <DownloadSettingsFields draft={draft} onChange={updateDraft} onAuthChange={updateAuthDraft} />
-        </ConfigPanel>
-      ),
-    },
-    {
-      key: "cookie",
-      label: <Space><SafetyCertificateOutlined />X Cookie</Space>,
-      children: (
-        <ConfigPanel title="X Cookie" description="配置用于访问 X / Twitter 的账号认证信息">
-          <CookieSettingsFields
-            authError={authError}
-            authResult={authResult}
-            checking={authChecking}
-            draft={draft}
-            onChange={updateAuthDraft}
-          />
-        </ConfigPanel>
-      ),
-    },
-  ];
-
   return (
-    <Form layout="vertical">
-      <Flex vertical gap={16}>
+    <Form layout="vertical" className="page-stack">
+      {/* 页头 + 操作区：保存动作常驻，滚动时不会丢失 */}
+      <div
+        className="page-header"
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+          background: "var(--app-bg)",
+          paddingTop: 4,
+        }}
+      >
         <Flex align="center" justify="space-between" gap={16} wrap="wrap">
-          <Flex vertical>
-            <Title level={3}>配置</Title>
-            <Text type="secondary">设置存储、下载规则与 X Cookie</Text>
-          </Flex>
-          <Space wrap>
+          <div>
+            <Title level={4} style={{ margin: 0 }}>
+              系统与存储配置
+            </Title>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              存储位置、下载行为与 X Cookie 都在本页，修改后统一保存
+            </Text>
+          </div>
+          <Space>
             <Tooltip title="重新加载配置">
               <Button
                 icon={<ReloadOutlined />}
                 loading={refreshPending}
                 onClick={onRefresh}
+                aria-label="重新加载配置"
               />
             </Tooltip>
             <Button
@@ -230,34 +205,76 @@ export function ConfigForm({
             </Button>
           </Space>
         </Flex>
+      </div>
 
-        <Card>
-          <Tabs
-            items={sections}
-            tabPlacement={screens.md ? "start" : "top"}
-          />
-        </Card>
-      </Flex>
+      <ConfigSection
+        icon={<DatabaseOutlined />}
+        title="存储"
+        description="选择下载文件的保存方式与目标目录"
+      >
+        <StorageSettings draft={draft} onChange={updateDraft} />
+      </ConfigSection>
+
+      <ConfigSection
+        icon={<DownloadOutlined />}
+        title="下载"
+        description="控制网络请求、任务并发和文件命名"
+      >
+        <DownloadSettingsFields
+          draft={draft}
+          onChange={updateDraft}
+          onAuthChange={updateAuthDraft}
+        />
+      </ConfigSection>
+
+      <ConfigSection
+        icon={<SafetyCertificateOutlined />}
+        title="X Cookie"
+        description="配置用于访问 X / Twitter 的账号认证信息"
+      >
+        <CookieSettingsFields
+          authError={authError}
+          authResult={authResult}
+          checking={authChecking}
+          draft={draft}
+          onChange={updateAuthDraft}
+        />
+      </ConfigSection>
     </Form>
   );
 }
 
-export function ConfigPanel({
+// 分节卡片：替代原来的三个 Tab，标题常显，配置项一屏内可直接看到。
+export function ConfigSection({
   children,
   description,
+  icon,
   title,
 }: {
   children: React.ReactNode;
   description?: string;
+  icon?: React.ReactNode;
   title: string;
 }) {
   return (
-    <Flex vertical>
-      <Title level={4}>{title}</Title>
-      {description ? <Text type="secondary">{description}</Text> : null}
-      <Divider />
+    <Card
+      className="settings-section"
+      title={
+        <Space size={8}>
+          {icon}
+          <span>{title}</span>
+        </Space>
+      }
+      extra={
+        description ? (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {description}
+          </Text>
+        ) : null
+      }
+    >
       {children}
-    </Flex>
+    </Card>
   );
 }
 

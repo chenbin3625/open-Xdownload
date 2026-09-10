@@ -13,6 +13,7 @@ import {
   Col,
   Descriptions,
   Empty,
+  Flex,
   Popconfirm,
   Row,
   Skeleton,
@@ -106,39 +107,40 @@ export function SchedulesPage({
   });
 
   return (
-    <div className="space-y-5">
+    <div className="page-stack">
       {/* 顶部标题与行动 */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-3 border-b border-slate-200 dark:border-slate-800/80">
+      <Flex
+        className="page-header"
+        align="center"
+        justify="space-between"
+        gap={16}
+        wrap="wrap"
+      >
         <div>
-          <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">
+          <Typography.Title level={4} style={{ margin: 0 }}>
             自动归档计划
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+          </Typography.Title>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             配置定时轮询任务，定时扫描指定用户时间线、列表或关注成员，自动同步最新媒体
-          </p>
+          </Typography.Text>
         </div>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={onOpenCreateModal}
-          className="!h-9 !rounded-xl !text-[13px] shadow-sm shadow-sky-500/20"
-        >
+        <Button type="primary" icon={<PlusOutlined />} onClick={onOpenCreateModal}>
           新建归档计划
         </Button>
-      </div>
+      </Flex>
 
       {loading && schedules.length === 0 ? (
         <Row gutter={[16, 16]}>
           {Array.from({ length: 3 }, (_, index) => (
             <Col xs={24} md={12} lg={8} key={index}>
-              <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800">
+              <Card>
                 <Skeleton active paragraph={{ rows: 5 }} />
               </Card>
             </Col>
           ))}
         </Row>
       ) : schedules.length === 0 ? (
-        <Card className="!rounded-2xl !border-slate-200 dark:!border-slate-800 p-8 text-center">
+        <Card style={{ textAlign: "center", padding: 24 }}>
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={
@@ -153,7 +155,7 @@ export function SchedulesPage({
               </div>
             }
           >
-            <Button type="primary" onClick={onOpenCreateModal} className="!rounded-xl !mt-2">
+            <Button type="primary" onClick={onOpenCreateModal}>
               立即创建第一个计划
             </Button>
           </Empty>
@@ -163,10 +165,10 @@ export function SchedulesPage({
           {schedules.map((schedule) => (
             <Col xs={24} md={12} lg={8} key={schedule.id}>
               <Card
-                className="!rounded-2xl !border-slate-200 dark:!border-slate-800 shadow-xs hover:border-sky-500/40 transition"
+                hoverable
                 title={
                   <Space size={6} className="max-w-[70%]">
-                    <ClockCircleOutlined className="text-sky-500" />
+                    <ClockCircleOutlined style={{ color: "var(--brand-500)" }} />
                     <Typography.Text strong ellipsis className="text-sm">
                       {schedule.name}
                     </Typography.Text>
@@ -200,7 +202,7 @@ export function SchedulesPage({
                         removeSchedule.isPending &&
                         removeSchedule.variables === schedule.id
                       }
-                      className="!text-xs"
+                      
                     >
                       删除
                     </Button>
@@ -215,7 +217,7 @@ export function SchedulesPage({
                       runSchedule.variables === schedule.id
                     }
                     onClick={() => runSchedule.mutate(schedule.id)}
-                    className="!text-xs"
+                    
                   >
                     立即运行
                   </Button>,
@@ -224,7 +226,7 @@ export function SchedulesPage({
                 <div className="space-y-3">
                   {/* 目标列表 Tags */}
                   <div>
-                    <Typography.Text type="secondary" className="!text-[11px] block mb-1">
+                    <Typography.Text type="secondary" className="block mb-1" style={{ fontSize: 11 }}>
                       归档目标 ({schedule.items.length} 个):
                     </Typography.Text>
                     <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto">
@@ -232,8 +234,7 @@ export function SchedulesPage({
                         <Tag
                           key={idx}
                           icon={<UserOutlined />}
-                          color="cyan"
-                          className="!rounded-md !text-[11px] !m-0"
+                          style={{ margin: 0, fontSize: 11 }}
                         >
                           {item.title || item.input}
                         </Tag>
@@ -242,7 +243,7 @@ export function SchedulesPage({
                   </div>
 
                   {/* 调度信息 Descriptions */}
-                  <div className="bg-slate-50 dark:bg-slate-950/60 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800">
+                  <div className="p-2.5 rounded-lg" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)" }}>
                     <Descriptions
                       size="small"
                       column={1}
@@ -251,7 +252,7 @@ export function SchedulesPage({
                           key: "freq",
                           label: "执行频率",
                           children: (
-                            <Typography.Text strong className="text-sky-600 dark:text-sky-400">
+                            <Typography.Text strong style={{ color: "var(--brand-600)" }}>
                               {formatIntervalMinutes(schedule.intervalMinutes)}
                             </Typography.Text>
                           ),
@@ -260,7 +261,7 @@ export function SchedulesPage({
                           key: "last",
                           label: "上次执行",
                           children: (
-                            <span className="font-mono text-xs text-slate-500">
+                            <span className="font-mono" style={{ fontSize: 12, color: "var(--text-muted)" }}>
                               {schedule.lastRunAt ? formatDateTime(schedule.lastRunAt) : "尚未执行"}
                             </span>
                           ),
@@ -269,7 +270,7 @@ export function SchedulesPage({
                           key: "next",
                           label: "下次触发",
                           children: (
-                            <Typography.Text strong type="success" className="font-mono text-xs">
+                            <Typography.Text strong type="success" className="font-mono" style={{ fontSize: 12 }}>
                               {formatDateTime(schedule.nextRunAt)}
                             </Typography.Text>
                           ),
