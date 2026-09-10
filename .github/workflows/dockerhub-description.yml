@@ -14,7 +14,7 @@ permissions:
 env:
   IMAGE_NAME: chenbin3625/open-xdownload
   README_FILE: .dockerhub/README.md
-  SHORT_DESCRIPTION: "Local-first X/Twitter media downloader with Web UI and SQLite | 本地优先的 X/Twitter 媒体下载归档工具"
+  SHORT_DESCRIPTION: "Local-first X/Twitter media downloader | 本地优先媒体下载工具"
 
 jobs:
   update:
