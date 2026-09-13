@@ -287,6 +287,9 @@ END;
 	if err := s.runMigrationOnce("rederive_download_preview_urls", s.rederiveDownloadPreviewURLs); err != nil {
 		return err
 	}
+	if err := s.runMigrationOnce("backfill_downloads_media_key", s.backfillDownloadsMediaKey); err != nil {
+		return err
+	}
 	if err := s.runMigrationOnce("drop_smb_webdav_config_columns", s.dropSMBWebDAVConfigColumns); err != nil {
 		return err
 	}
@@ -369,6 +372,16 @@ func (s *Store) addMissingColumns() error {
 			return err
 		}
 	}
+	// downloads：媒体身份键（同一媒体内容的稳定键），用于跨推文/跨目录去重与复用。
+	var hasMediaKey int
+	if err := s.db.Get(&hasMediaKey, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'media_key'`); err != nil {
+		return err
+	}
+	if hasMediaKey == 0 {
+		if _, err := s.db.Exec(`ALTER TABLE downloads ADD COLUMN media_key TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -431,6 +444,30 @@ func (s *Store) normalizeDownloadsMediaURL(exec migrationExecutor) error {
 	}
 	for _, r := range pending {
 		if _, err := exec.Exec(`UPDATE downloads SET media_url = ? WHERE id = ?`, downloader.NormalizeMediaURL(r.MediaURL), r.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillDownloadsMediaKey 为历史 downloads 记录补齐媒体身份键（新增列默认为空）。
+// 身份键在写入入口由 downloader.MediaIdentity 计算，新记录无需回填；一次性执行，
+// 只为让旧记录也能参与"同一媒体同名同大小即跳过"的判定。
+func (s *Store) backfillDownloadsMediaKey(exec migrationExecutor) error {
+	type downloadRow struct {
+		ID       int64  `db:"id"`
+		MediaURL string `db:"media_url"`
+	}
+	rows := []downloadRow{}
+	if err := exec.Select(&rows, `SELECT id, media_url FROM downloads WHERE media_key = '' AND media_url <> ''`); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		key := downloader.MediaIdentity(row.MediaURL)
+		if key == "" {
+			continue
+		}
+		if _, err := exec.Exec(`UPDATE downloads SET media_key = ? WHERE id = ?`, key, row.ID); err != nil {
 			return err
 		}
 	}
@@ -528,6 +565,8 @@ func (s *Store) addMissingIndexes() error {
 	WHERE tweet_id = '' AND media_url <> '';
 	CREATE INDEX IF NOT EXISTS idx_downloads_job_created_at
 	ON downloads (job_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_downloads_media_key
+	ON downloads (media_key);
 	CREATE INDEX IF NOT EXISTS idx_failed_media_job_created_at
 	ON failed_media (job_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_failed_tweets_updated_at
@@ -1081,17 +1120,20 @@ UPDATE archive_schedules SET last_job_ids = ?, updated_at = ? WHERE id = ?`,
 
 func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (DownloadRecord, error) {
 	now := time.Now().UTC()
+	// 媒体身份键：同一媒体内容的稳定键，供跨推文/跨目录复用查找（见 FindDownloadsByMediaKey）。
+	record.MediaKey = downloader.MediaIdentity(record.MediaURL)
 	if strings.TrimSpace(record.TweetID) != "" {
 		err := s.db.GetContext(ctx, &record, `
-	INSERT INTO downloads (job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO downloads (job_id, tweet_id, media_url, media_key, preview_url, file_path, bytes, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(tweet_id, media_url) WHERE tweet_id <> '' DO UPDATE SET
+		media_key = excluded.media_key,
 		preview_url = CASE WHEN excluded.preview_url <> '' THEN excluded.preview_url ELSE downloads.preview_url END,
 		file_path = excluded.file_path,
 		bytes = excluded.bytes,
 		created_at = excluded.created_at
 	RETURNING *`,
-			record.JobID, record.TweetID, record.MediaURL, record.PreviewURL, record.FilePath, record.Bytes, now)
+			record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.PreviewURL, record.FilePath, record.Bytes, now)
 		if err == nil {
 			s.invalidateLibraryDownloadsCache()
 		}
@@ -1099,15 +1141,16 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	}
 	// tweet_id 为空（直接媒体 URL 任务）：按 media_url 去重，避免同一 URL 重复跑产生重复行。
 	err := s.db.GetContext(ctx, &record, `
-INSERT INTO downloads (job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO downloads (job_id, tweet_id, media_url, media_key, preview_url, file_path, bytes, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
+		media_key = excluded.media_key,
 		preview_url = CASE WHEN excluded.preview_url <> '' THEN excluded.preview_url ELSE downloads.preview_url END,
 		file_path = excluded.file_path,
 	bytes = excluded.bytes,
 	created_at = excluded.created_at
 RETURNING *`,
-		record.JobID, record.TweetID, record.MediaURL, record.PreviewURL, record.FilePath, record.Bytes, now)
+		record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.PreviewURL, record.FilePath, record.Bytes, now)
 	if err == nil {
 		s.invalidateLibraryDownloadsCache()
 	}
@@ -1483,6 +1526,27 @@ func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, med
 		return nil, err
 	}
 	return &record, nil
+}
+
+// FindDownloadsByMediaKey 返回同一媒体身份（downloader.MediaIdentity）的历史下载记录，
+// 按写入顺序升序，最多 limit 条。同一份媒体可能分布在多个归档目录里（转推、引用推文、
+// 卡片媒体会复用同一条媒体 URL），归档时据此判断目标目录下是否已经有同名同大小的文件，
+// 从而跳过重复下载。记录里的文件未必仍然存在，调用方必须自行校验。
+func (s *Store) FindDownloadsByMediaKey(ctx context.Context, mediaKey string, limit int) ([]DownloadRecord, error) {
+	mediaKey = strings.TrimSpace(mediaKey)
+	if mediaKey == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	items := []DownloadRecord{}
+	err := s.db.SelectContext(ctx, &items, `
+SELECT * FROM downloads
+WHERE media_key = ? AND file_path <> ''
+ORDER BY id ASC
+LIMIT ?`, mediaKey, limit)
+	return items, err
 }
 
 type mediaDownloadStateRow struct {

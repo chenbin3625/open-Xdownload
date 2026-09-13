@@ -900,3 +900,84 @@ func TestGetStoredConfigCachesUntilUpdate(t *testing.T) {
 		t.Fatalf("cache not invalidated: %q vs %q", after.DownloadDir, refreshed.DownloadDir)
 	}
 }
+
+func TestCreateDownloadPersistsMediaKey(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "alice", "用户 alice")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	record, err := store.CreateDownload(ctx, DownloadRecord{
+		JobID:    job.ID,
+		TweetID:  "tweet-1",
+		MediaURL: "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12",
+		FilePath: "/archive/alice/abc.mp4",
+		Bytes:    100,
+	})
+	if err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+	if want := "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc"; record.MediaKey != want {
+		t.Fatalf("media_key = %q, want %q", record.MediaKey, want)
+	}
+	if record.MediaKey != "" && strings.Contains(record.MediaKey, "tag=") {
+		t.Fatalf("media_key 保留了易变参数: %q", record.MediaKey)
+	}
+}
+
+func TestFindDownloadsByMediaKeyFindsEquivalentURLs(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindList, "list-1", "列表")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	// 两条推文（转推/引用场景）复用同一份媒体，URL 写法不同但内容相同。
+	for index, item := range []struct {
+		tweetID  string
+		mediaURL string
+		filePath string
+	}{
+		{"tweet-1", "https://pbs.twimg.com/media/abc.jpg", "/archive/alice/abc.jpg"},
+		{"tweet-2", "https://pbs.twimg.com/media/abc?format=jpg", "/archive/bob/abc.jpg"},
+		{"tweet-3", "https://pbs.twimg.com/media/other.jpg", "/archive/bob/other.jpg"},
+	} {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{
+			JobID:    job.ID,
+			TweetID:  item.tweetID,
+			MediaURL: item.mediaURL,
+			FilePath: item.filePath,
+			Bytes:    int64(index + 1),
+		}); err != nil {
+			t.Fatalf("create download %s: %v", item.tweetID, err)
+		}
+	}
+
+	items, err := store.FindDownloadsByMediaKey(ctx, "https://pbs.twimg.com/media/abc", 20)
+	if err != nil {
+		t.Fatalf("find by media key: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("matched %d records, want 2 (both tweet copies of the same media)", len(items))
+	}
+	if items[0].TweetID != "tweet-1" || items[1].TweetID != "tweet-2" {
+		t.Fatalf("unexpected order: %q, %q", items[0].TweetID, items[1].TweetID)
+	}
+
+	empty, err := store.FindDownloadsByMediaKey(ctx, "   ", 20)
+	if err != nil {
+		t.Fatalf("find with empty key: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty key matched %d records, want 0", len(empty))
+	}
+}

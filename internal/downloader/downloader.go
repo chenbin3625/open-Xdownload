@@ -435,6 +435,48 @@ func largePhotoURL(rawURL string) string {
 	return parsed.String()
 }
 
+// MediaIdentity 返回媒体内容的稳定身份键。同一份媒体即使 URL 写法不同（?tag= 这类
+// 易变参数、`.jpg` 与 `?format=jpg` 这类等价扩展名写法、主机大小写）也映射到同一个键，
+// 供跨推文去重使用：转推、引用推文与卡片媒体经常复用同一条媒体 URL，仅按
+// (tweet_id, media_url) 判重会漏判，导致同一份媒体被重复下载多份。
+//
+// 保留决定尺寸/清晰度的参数（name 等），只忽略不影响内容的差异，避免把小尺寸缩略图
+// 误判成原图。非 twimg.com URL 原样返回：没有已知的等价改写规则，只按完全相同的 URL 去重。
+// 幂等；返回空字符串表示该 URL 不能用于去重。
+func MediaIdentity(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || !isAllowedTwimgHost(parsed.Hostname()) {
+		return trimmed
+	}
+	query := parsed.Query()
+	// tag：Twitter 重新编码后变化；format：与路径上的媒体扩展名等价（相同内容）。
+	query.Del("tag")
+	query.Del("format")
+	parsed.Scheme = "https"
+	parsed.Host = strings.ToLower(parsed.Hostname())
+	parsed.User = nil
+	parsed.Path = stripMediaExtension(parsed.Path)
+	parsed.RawPath = ""
+	parsed.RawQuery = query.Encode()
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+// stripMediaExtension 去掉路径末尾的媒体扩展名（.jpg/.mp4 等），使 `.jpg` 与
+// `?format=jpg` 两种写法收敛到同一个身份；非媒体扩展名与空路径原样保留。
+func stripMediaExtension(pathValue string) string {
+	rawExt := filepath.Ext(pathValue)
+	if normalizeMediaExtension(rawExt) == "" {
+		return pathValue
+	}
+	trimmed := pathValue[:len(pathValue)-len(rawExt)]
+	if trimmed == "" || strings.HasSuffix(trimmed, "/") {
+		return pathValue
+	}
+	return trimmed
+}
+
 // NormalizeMediaURL 去掉 Twitter 视频 URL 中易变且不影响内容的查询参数（?tag=N，
 // Twitter 重新编码后该值会变），使同一媒体在多次解析中获得稳定的去重键。
 // 仅对 video.twimg.com / twimg.com 生效；其他域名的 URL 原样返回。

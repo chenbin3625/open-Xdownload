@@ -2,17 +2,20 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
+	"github.com/chenbin3625/open-Xdownload/internal/filestore"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
@@ -784,4 +787,359 @@ func eventually(t *testing.T, fn func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("condition was not met before deadline")
+}
+
+// TestDownloadMediaSkipsSameMediaWithSameNameAndSize 验证同一目录下同一份媒体（转推、
+// 引用推文等不同 tweet_id 复用同一条媒体 URL）已存在同名同大小的文件时直接跳过：
+// 不重复下载、不创建硬链接、也不再产生第二份文件。
+func TestDownloadMediaSkipsSameMediaWithSameNameAndSize(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("shared media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+	mediaURL := server.URL + "/media.mp4"
+
+	first, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "tweet-1", root, "same text", false, time.Time{})
+	if err != nil {
+		t.Fatalf("first download: %v", err)
+	}
+	if first.skipped {
+		t.Fatal("first download skipped = true, want false")
+	}
+	second, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "tweet-2", root, "same text", false, time.Time{})
+	if err != nil {
+		t.Fatalf("second download: %v", err)
+	}
+	if !second.skipped {
+		t.Fatal("second download skipped = false, want true (same name and size already archived)")
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("HTTP requests = %d, want 1 (same media must be downloaded once)", requests.Load())
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read archive dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("archive dir has %d entries, want 1", len(entries))
+	}
+	firstRecord, err := store.GetDownloadByTweetMedia(ctx, "tweet-1", mediaURL)
+	if err != nil || firstRecord == nil {
+		t.Fatalf("first record = %+v, err = %v", firstRecord, err)
+	}
+	secondRecord, err := store.GetDownloadByTweetMedia(ctx, "tweet-2", mediaURL)
+	if err != nil || secondRecord == nil {
+		t.Fatalf("second record = %+v, err = %v", secondRecord, err)
+	}
+	if secondRecord.FilePath != firstRecord.FilePath {
+		t.Fatalf("second record path = %q, want reused %q", secondRecord.FilePath, firstRecord.FilePath)
+	}
+}
+
+// TestDownloadMediaDoesNotHardLinkAcrossDirectories 验证批量归档不同用户时不会创建硬链接：
+// 目标目录下没有同名同大小的文件就正常下载一份独立文件（内容相同也各自占磁盘）。
+func TestDownloadMediaDoesNotHardLinkAcrossDirectories(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("viral media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindFollowing, "alice", "following")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+	mediaURL := server.URL + "/media.mp4"
+	aliceDir := filepath.Join(root, "users", "Alice(alice)")
+	bobDir := filepath.Join(root, "users", "Bob(bob)")
+
+	if _, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "tweet-1", aliceDir, "photo", false, time.Time{}); err != nil {
+		t.Fatalf("download for alice: %v", err)
+	}
+	result, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "tweet-2", bobDir, "photo", false, time.Time{})
+	if err != nil {
+		t.Fatalf("download for bob: %v", err)
+	}
+	if result.skipped {
+		t.Fatal("bob download skipped = true, want false (no cross-directory reuse)")
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("HTTP requests = %d, want 2 (each archive directory downloads its own copy)", requests.Load())
+	}
+
+	aliceFile := filepath.Join(aliceDir, "photo.mp4")
+	bobFile := filepath.Join(bobDir, "photo.mp4")
+	aliceInfo, err := os.Stat(aliceFile)
+	if err != nil {
+		t.Fatalf("alice file: %v", err)
+	}
+	bobInfo, err := os.Stat(bobFile)
+	if err != nil {
+		t.Fatalf("bob file: %v", err)
+	}
+	if os.SameFile(aliceInfo, bobInfo) {
+		t.Fatal("files are hard linked, want independent copies")
+	}
+	for path, want := range map[string]string{aliceFile: "viral media", bobFile: "viral media"} {
+		if payload, err := os.ReadFile(path); err != nil || string(payload) != want {
+			t.Fatalf("file %s = %q, err = %v", path, payload, err)
+		}
+	}
+}
+
+// TestDownloadMediaSameMediaDifferentNameStillDownloads 验证"同名同大小才跳过"：同一份
+// 媒体但本次落盘文件名不同（例如转推文本不同）时照常下载自己的文件，不跳过也不硬链接。
+func TestDownloadMediaSameMediaDifferentNameStillDownloads(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("shared media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+	mediaURL := server.URL + "/media.mp4"
+
+	if _, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "tweet-1", root, "original text", false, time.Time{}); err != nil {
+		t.Fatalf("first download: %v", err)
+	}
+	result, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "tweet-2", root, "retweet text", false, time.Time{})
+	if err != nil {
+		t.Fatalf("second download: %v", err)
+	}
+	if result.skipped {
+		t.Fatal("second download skipped = true, want false for a different file name")
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("HTTP requests = %d, want 2", requests.Load())
+	}
+	for _, name := range []string{"original text.mp4", "retweet text.mp4"} {
+		if payload, err := os.ReadFile(filepath.Join(root, name)); err != nil || string(payload) != "shared media" {
+			t.Fatalf("file %s = %q, err = %v", name, payload, err)
+		}
+	}
+}
+
+// TestSkipArchivedMediaRequiresSameSize 验证同名但大小不同（残缺/被替换的文件）不会
+// 被当成已归档：必须重新下载，避免旧文件内容被误认为本次媒体。
+func TestSkipArchivedMediaRequiresSameSize(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	target, err := filestore.New(config.AppConfig{DownloadDir: root})
+	if err != nil {
+		t.Fatalf("filestore: %v", err)
+	}
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+
+	// 同一媒体的另一条推文副本：文件真实存在，大小 5 字节。
+	other := filepath.Join(root, "elsewhere", "photo.mp4")
+	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(other, []byte("media"), 0o600); err != nil {
+		t.Fatalf("write copy: %v", err)
+	}
+	if _, err := store.CreateDownload(ctx, storage.DownloadRecord{
+		JobID:    job.ID,
+		TweetID:  "tweet-1",
+		MediaURL: "https://pbs.twimg.com/media/abc.jpg",
+		FilePath: other,
+		Bytes:    5,
+	}); err != nil {
+		t.Fatalf("seed copy: %v", err)
+	}
+
+	// 目标目录下同名文件已被替换成另一份更短的内容：大小不一致，不能跳过。
+	targetPath := filepath.Join(root, "photo.mp4")
+	if err := os.WriteFile(targetPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	mediaKey := downloader.MediaIdentity("https://pbs.twimg.com/media/abc.jpg")
+	skipped, err := manager.skipArchivedMedia(ctx, ctx, job, cfg, target, nil, mediaKey, "https://pbs.twimg.com/media/abc.jpg", "tweet-2", root, "photo", "")
+	if err != nil {
+		t.Fatalf("skip archived media: %v", err)
+	}
+	if skipped {
+		t.Fatal("skipped = true, want false when the target file size differs")
+	}
+
+	// 大小一致时跳过。
+	if err := os.WriteFile(targetPath, []byte("media"), 0o600); err != nil {
+		t.Fatalf("rewrite target: %v", err)
+	}
+	skipped, err = manager.skipArchivedMedia(ctx, ctx, job, cfg, target, nil, mediaKey, "https://pbs.twimg.com/media/abc.jpg", "tweet-2", root, "photo", "")
+	if err != nil {
+		t.Fatalf("skip archived media: %v", err)
+	}
+	if !skipped {
+		t.Fatal("skipped = false, want true when the target file has the same name and size")
+	}
+}
+
+// TestDownloadMediaJobSkipsAlreadyDownloadedURL 验证 tweet_id 为空的直接媒体 URL 任务
+// 也会查下载记录并跳过：重复执行同一 URL 任务不再下载，也不产生第二份副本。
+func TestDownloadMediaJobSkipsAlreadyDownloadedURL(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	mediaURL := server.URL + "/media.mp4"
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, mediaURL, "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+
+	first, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "", root, "media", false, time.Time{})
+	if err != nil {
+		t.Fatalf("first download: %v", err)
+	}
+	if first.skipped {
+		t.Fatal("first download skipped = true, want false")
+	}
+	second, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "", root, "media", false, time.Time{})
+	if err != nil {
+		t.Fatalf("second download: %v", err)
+	}
+	if !second.skipped {
+		t.Fatal("second download skipped = false, want true")
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("HTTP requests = %d, want 1", requests.Load())
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("archive dir has %d entries, want 1", len(entries))
+	}
+}
+
+// TestDownloadMediaConcurrentSameTargetDownloadsOnce 验证并发归档同一目录下的同一份
+// 媒体只下载一次：媒体锁按媒体身份串行化，先到者下载，其余任务命中"同名同大小"跳过，
+// 不会并发写出 (1)/(2) 之类的副本。
+func TestDownloadMediaConcurrentSameTargetDownloadsOnce(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("viral media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength, MaxConcurrency: 8}
+	mediaURL := server.URL + "/media.mp4"
+
+	const archives = 6
+	results := make([]mediaDownloadResult, archives)
+	errs := make([]error, archives)
+	var wg sync.WaitGroup
+	for index := 0; index < archives; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			results[index], errs[index] = manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, fmt.Sprintf("tweet-%d", index), root, "photo", false, time.Time{})
+		}(index)
+	}
+	wg.Wait()
+
+	for index, err := range errs {
+		if err != nil {
+			t.Fatalf("archive %d: %v", index, err)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("HTTP requests = %d, want 1 (same media must be downloaded once)", requests.Load())
+	}
+	downloaded := 0
+	for _, result := range results {
+		if !result.skipped {
+			downloaded++
+		}
+	}
+	if downloaded != 1 {
+		t.Fatalf("downloads = %d, want exactly 1", downloaded)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read archive dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("archive dir has %d entries, want 1", len(entries))
+	}
+	if payload, err := os.ReadFile(filepath.Join(root, "photo.mp4")); err != nil || string(payload) != "viral media" {
+		t.Fatalf("archived media = %q, err = %v", payload, err)
+	}
 }

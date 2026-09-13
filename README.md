@@ -17,6 +17,7 @@ open-Xdownload is a local-first X / Twitter media downloader. It comes with a bu
 - Batch tasks: Users, lists, and followed accounts can be entered one per line in a single batch — up to 200 tasks at once, with automatic deduplication.
 - Scheduled plans: Save users, lists, or followed accounts as automatic archiving plans, with support for enable, disable, run now, and delete.
 - Incremental archiving: The first run scans a user's full media timeline; later runs resume from the last successful position. Media already downloaded and still present is skipped automatically.
+- Duplicate-download skipping: Retweets, quote posts, and card media reuse the same media URL. When the target archive directory already holds a file with the same name and the same size, the media is skipped outright — no download, no hard link, and no copy. Files with a different name are still downloaded normally.
 - Workbench task list: Task status, progress, errors, and download records are shown directly in the workbench, with support for cancelling tasks, re-running them, and copying file paths or failed media URLs.
 - Media library: Browse downloaded media by image, video, or GIF category, with counts on each tab and search across file names, media URLs, and post IDs.
 - User grouping and filtering: Archived media shows the author's username and display name, supports filtering by user, and infers users from archive directories for older records.
@@ -294,6 +295,7 @@ open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web
 - 批量任务：用户、列表、关注目标可以一次输入多行，单次最多创建 200 个任务，并会自动去重。
 - 定时计划：可把用户、列表、关注目标保存为自动归档计划，支持启用、停用、立即运行和删除。
 - 全量归档：每次归档都完整扫描用户媒体时间线；已下载过且文件仍在的媒体自动跳过，历史视频缺失的预览图地址与缩略图会在归档途中自动补齐。
+- 重复下载跳过：转推、引用推文与卡片媒体会复用同一条媒体 URL。目标归档目录下已经有同名同大小的文件时直接跳过——不下载、不建硬链接、也不复制副本；文件名不同的仍然正常下载。
 - 增量归档开关（可选）：开启后重复归档使用早停游标从上次成功位置继续，节省 X API 配额；默认关闭，保持全量扫描。
 - 工作台任务列表：任务状态、进度、错误信息和下载记录直接在工作台展示，支持取消任务、重新执行、复制文件路径或失败媒体地址。
 - 媒体归档库：按图片、视频、GIF 分类查看已下载媒体，顶部显示各分类数量，并支持文件名、媒体地址和推文号搜索。

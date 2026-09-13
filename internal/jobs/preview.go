@@ -23,6 +23,8 @@ const (
 	posterFetchTimeout = 20 * time.Second
 	// maxPosterBytes caps the poster image size；name=small 缩略图通常 <100KB。
 	maxPosterBytes = 10 << 20
+	// posterSuffix 是视频/GIF 海报文件相对媒体文件的固定后缀。
+	posterSuffix = ".preview.jpg"
 )
 
 // ensureVideoPoster 为单条视频/GIF 记录补齐 preview_url 与本地海报文件。归档重新
@@ -55,7 +57,7 @@ func (m *Manager) ensureVideoPoster(ctx context.Context, cfg config.AppConfig, t
 	if posterURL == "" || target.Type() != config.StorageLocal {
 		return false, true
 	}
-	posterPath := record.FilePath + ".preview.jpg"
+	posterPath := record.FilePath + posterSuffix
 	exists, err := target.Exists(ctx, posterPath)
 	if err != nil || exists {
 		return false, true

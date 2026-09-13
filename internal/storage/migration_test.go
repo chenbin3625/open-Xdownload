@@ -316,3 +316,70 @@ func TestListLibraryDownloadsAttributesUsersByExactPrefix(t *testing.T) {
 	}
 }
 
+// TestBackfillDownloadsMediaKeyFillsHistoricalRows 验证升级后的历史 downloads 记录会被
+// 补上媒体身份键：旧记录没有 media_key，只有回填后才能参与"同一媒体只下载一次"的复用判定。
+func TestBackfillDownloadsMediaKeyFillsHistoricalRows(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "one", "one")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	// 直接写入 media_key 为空的历史记录，模拟升级前遗留的数据。
+	rows := []struct {
+		tweetID  string
+		mediaURL string
+		want     string
+	}{
+		{"tweet-1", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc"},
+		{"tweet-2", "https://pbs.twimg.com/media/abc.jpg", "https://pbs.twimg.com/media/abc"},
+		{"", "https://pbs.twimg.com/media/xyz?format=png", "https://pbs.twimg.com/media/xyz"},
+	}
+	for _, row := range rows {
+		if _, err := store.db.Exec(`INSERT INTO downloads (job_id, tweet_id, media_url, media_key, file_path, bytes, created_at) VALUES (?, ?, ?, '', ?, ?, ?)`,
+			job.ID, row.tweetID, row.mediaURL, "/tmp/"+row.tweetID+".bin", 100, time.Now().UTC()); err != nil {
+			t.Fatalf("insert download %q: %v", row.mediaURL, err)
+		}
+	}
+
+	if err := store.backfillDownloadsMediaKey(store.db); err != nil {
+		t.Fatalf("backfill media key: %v", err)
+	}
+	items, err := store.ListDownloads(ctx, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != len(rows) {
+		t.Fatalf("download count = %d, want %d", len(items), len(rows))
+	}
+	byTweet := map[string]DownloadRecord{}
+	for _, item := range items {
+		byTweet[item.TweetID] = item
+	}
+	for _, row := range rows {
+		if got := byTweet[row.tweetID].MediaKey; got != row.want {
+			t.Fatalf("media_key for tweet %q = %q, want %q", row.tweetID, got, row.want)
+		}
+	}
+
+	// 幂等：再次执行不会产生新的变更（没有待回填的行）。
+	var pending int
+	if err := store.db.Get(&pending, `SELECT COUNT(*) FROM downloads WHERE media_key = ''`); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("pending media_key rows = %d, want 0", pending)
+	}
+	var applied int
+	if err := store.db.Get(&applied, `SELECT COUNT(*) FROM schema_migrations WHERE name = 'backfill_downloads_media_key'`); err != nil {
+		t.Fatalf("check migration record: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("migration recorded %d times, want 1", applied)
+	}
+}
