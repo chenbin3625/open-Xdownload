@@ -109,7 +109,9 @@ The container listens on port **8787** and sets `OPEN_XDOWNLOAD_ADDR=0.0.0.0:878
 
 **First-time setup** — open the Web UI and go to the "Configuration" page: set the download directory (`/downloads` for Docker), optionally set a proxy for X API requests and media downloads, adjust concurrency, filename pattern and max filename length, then fill in your X Cookie (`auth_token` and `ct0`) and click "Verify login". A cookie is required for user, list, and followed-account archiving; single-post parsing usually works without one.
 
-The X Cookie and download directory are configured through the Web UI / database — they are not environment variables. Sensitive fields are shown as `********` when read, and leaving them empty or as `********` on a later save won't overwrite the stored values.
+**Getting the cookie** — log in to `https://x.com` in a desktop browser, open the developer tools (`F12`), then go to **Application** (Firefox: **Storage**) → **Cookies** → `https://x.com` and copy the **Value** of the `auth_token` row and of the `ct0` row. Both must come from the same browser and the same account, because X rejects a `ct0` that doesn't match its `auth_token`. `auth_token` is `HttpOnly`, so `document.cookie` in the console won't show it. Copy the pair again if logging out or changing the password invalidates it, and for the backup pool log the other account in through a private window or a second browser profile. A cookie is equivalent to the account password — never share it.
+
+The download directory and X Cookie are normally configured through the Web UI. Alternatively, `OPEN_XDOWNLOAD_AUTH_TOKEN`, `OPEN_XDOWNLOAD_CT0`, and `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` inject cookies as environment variables; values supplied only by the environment are used at runtime and are not written into the database. Sensitive fields are shown as `********` when read, and leaving them empty or as `********` on a later save won't overwrite the stored values.
 
 ## Data Persistence
 
@@ -257,7 +259,9 @@ PGID=1000
 
 **首次配置** —— 打开 Web UI 进入「配置」页面：设置下载目录（Docker 部署通常保持 `/downloads`），如需访问 X 或下载媒体要经过代理则填写代理地址，调整并发、文件名命名方式和最大文件名长度，然后填写 X Cookie（`auth_token` 和 `ct0`）并点击「校验登录」。用户、列表、关注归档需要 Cookie；单条推文解析通常不需要。
 
-X Cookie 与下载目录通过 Web UI / 数据库配置，**不是环境变量**。敏感字段读取时会显示为 `********`，再次保存时留空或保持 `********` 不会覆盖已存的值。
+**获取 Cookie** —— 在桌面浏览器中登录 `https://x.com`，打开开发者工具（`F12`），进入「应用」（Firefox 为「存储」）→「Cookies」→ `https://x.com`，复制 `auth_token` 和 `ct0` 两行的 **Value**。两个值必须来自同一个浏览器、同一个账号，`ct0` 与 `auth_token` 不匹配时 X 会按 CSRF 校验失败拒绝请求。`auth_token` 是 `HttpOnly` Cookie，控制台执行 `document.cookie` 看不到。退出登录或修改密码后 Cookie 会失效，按同样步骤重新复制即可；备用 Cookie 需在无痕窗口或另一个浏览器配置中登录其他账号后获取。Cookie 等同于账号密码，请勿分享。
+
+下载目录与 X Cookie 通常通过 Web UI 配置；也可用 `OPEN_XDOWNLOAD_AUTH_TOKEN`、`OPEN_XDOWNLOAD_CT0`、`OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` 环境变量注入 Cookie，仅由环境变量提供的值只在运行时生效，不会写入数据库。敏感字段读取时会显示为 `********`，再次保存时留空或保持 `********` 不会覆盖已存的值。
 
 ## 数据持久化
 

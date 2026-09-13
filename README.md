@@ -157,11 +157,39 @@ After starting the service and opening the Web UI, go to the "Configuration" pag
 1. Configure the download directory: browse, type in, or create one; for Docker deployments this is usually `/downloads`.
 2. If you need a proxy to reach X or download media, set a proxy address such as `http://127.0.0.1:7890`.
 3. Set the max concurrency, filename pattern, and max filename length.
-4. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0`.
+4. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0` (see [Getting the X Cookie](#getting-the-x-cookie)).
 5. If you have cookies for multiple accounts, enter them as groups under "Backup cookies" for rotation during batch archiving.
 6. Click "Save configuration", then "Verify login" to confirm the cookies work.
 
 Sensitive fields are shown as `********` when read. Leaving them empty or as `********` on a later save won't overwrite the existing keys or passwords.
+
+## Getting the X Cookie
+
+User, list, and followed-account archiving call X's authenticated GraphQL API, so they need two cookies copied from a logged-in browser session:
+
+| Cookie | Description |
+| --- | --- |
+| `auth_token` | Account session token; it decides which account the requests are made as. |
+| `ct0` | CSRF token paired with that session. It is sent both as a cookie and as the `X-Csrf-Token` request header. |
+
+Both values must come from the same browser and the same account — X rejects a `ct0` that doesn't match the `auth_token` it was issued for.
+
+### Steps
+
+1. Log in to `https://x.com` in a desktop browser. A separate browser profile or a private window keeps your everyday session untouched.
+2. Open the developer tools: `F12`, or `Cmd+Option+I` on macOS, `Ctrl+Shift+I` on Windows / Linux.
+3. Open the **Application** panel (Firefox: **Storage**), expand **Cookies** in the sidebar, and select `https://x.com`.
+4. Copy the **Value** of the `auth_token` row, then the **Value** of the `ct0` row.
+5. Paste both into the "X Cookie" section of the "Configuration" page, click "Save configuration", then click "Verify login". A working pair is reported together with the account's `@screen_name`.
+
+Notes:
+
+- `auth_token` is an `HttpOnly` cookie, so `document.cookie` in the browser console won't show it — copy it from the Cookies panel instead.
+- Logging out, changing the password, or X invalidating the session makes the pair stop working; copy both values again to recover.
+- One browser profile holds only one X session. For the backup cookie pool, log in to the other account in a private window or a second browser profile and copy its pair the same way.
+- The cookie is equivalent to the account password. It is stored only in the local database, so don't share it or paste it into other sites.
+- For headless deployments, `OPEN_XDOWNLOAD_AUTH_TOKEN`, `OPEN_XDOWNLOAD_CT0`, and `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` inject the same values as environment variables; values supplied only by the environment are used at runtime and are not written into the database.
+- Single-post parsing usually works without a cookie; one is needed only when the post itself isn't publicly visible.
 
 ## Usage Guide
 
@@ -177,7 +205,7 @@ Parsing a single post usually doesn't require an X Cookie, but private, deleted,
 
 ### Batch archive users, lists, or followed accounts
 
-1. First fill in and verify your X Cookie on the "Configuration" page.
+1. First fill in and verify your X Cookie on the "Configuration" page ([how to get it](#getting-the-x-cookie)).
 2. Back in the workbench, open the "Batch archive" drawer.
 3. In the "Users", "Lists", or "Followed" tabs, enter your targets, one per line.
 4. Review the task preview on the right.
@@ -245,8 +273,8 @@ Notes:
 | Concurrency | Max concurrency for background tasks, range `1-64`. |
 | Filename pattern | Either "post only" or "username + user ID + post". |
 | Max filename length | Range `16-240`. |
-| X Cookie | Primary `auth_token` and `ct0`, used for authenticated APIs. |
-| Backup cookies | Additional `auth_token` / `ct0` groups, rotated during batch archiving. |
+| X Cookie | Primary `auth_token` and `ct0`, used for authenticated APIs; see [Getting the X Cookie](#getting-the-x-cookie) for how to copy them from your browser. |
+| Backup cookies | Additional `auth_token` / `ct0` groups, rotated during batch archiving; copy each pair from the account's own browser session. |
 | Failure retry | Automatically retries the failed-post queue when batch archiving finishes. |
 | Auto-follow protected accounts | Tries to auto-follow protected accounts it hasn't followed yet when encountered. |
 
@@ -437,11 +465,39 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 1. 配置下载目录：可浏览、直接输入或创建；Docker 部署时通常保持 `/downloads`。
 2. 如访问 X 或下载媒体需要代理，填写代理地址，例如 `http://127.0.0.1:7890`。
 3. 设置最大并发、文件命名方式和最大文件名长度。
-4. 如需用户、列表、关注归档，填写 X Cookie：`auth_token` 和 `ct0`。
+4. 如需用户、列表、关注归档，填写 X Cookie：`auth_token` 和 `ct0`（获取方式见[获取 X Cookie](#获取-x-cookie)）。
 5. 如有多个账号 Cookie，在“备用 Cookie”中按组填写，用于批量归档时轮换。
 6. 点击“保存配置”，再点击“校验登录”确认 Cookie 可用。
 
 敏感字段读取时会显示为 `********`。再次保存配置时，留空或保持 `********` 不会覆盖已有密钥或密码。
+
+## 获取 X Cookie
+
+用户、列表和关注归档会调用 X 的登录态 GraphQL 接口，需要从已登录的浏览器会话中复制两个 Cookie：
+
+| Cookie | 说明 |
+| --- | --- |
+| `auth_token` | 账号会话令牌，决定请求以哪个账号发起。 |
+| `ct0` | 与该会话配对的 CSRF 令牌，会同时作为 Cookie 和 `X-Csrf-Token` 请求头发送。 |
+
+两个值必须来自同一个浏览器、同一个账号；`ct0` 与签发它的 `auth_token` 不匹配时，X 会按 CSRF 校验失败拒绝请求。
+
+### 操作步骤
+
+1. 在桌面浏览器中登录 `https://x.com`。建议使用独立的浏览器配置或无痕窗口，避免影响日常登录状态。
+2. 打开开发者工具：`F12`，macOS 上也可用 `Cmd+Option+I`，Windows / Linux 上也可用 `Ctrl+Shift+I`。
+3. 打开「应用」面板（Firefox 为「存储」），在左侧展开「Cookies」，选择 `https://x.com`。
+4. 复制 `auth_token` 一行的 **Value**，再复制 `ct0` 一行的 **Value**。
+5. 粘贴到「配置」页面的「X Cookie」区域，点击「保存配置」，再点击「校验登录」；Cookie 有效时会一并显示对应的 `@用户名`。
+
+注意事项：
+
+- `auth_token` 是 `HttpOnly` Cookie，在浏览器控制台执行 `document.cookie` 看不到，需要从开发者工具的 Cookies 面板复制。
+- 退出登录、修改密码或 X 主动失效会话后，这对 Cookie 会失效，按同样步骤重新复制即可。
+- 一个浏览器配置只保留一个 X 登录态。要配置备用 Cookie 池，可在无痕窗口或另一个浏览器配置中登录其他账号，再按同样方式获取。
+- Cookie 等同于账号密码：本服务只把它保存在本地数据库中，请勿分享或粘贴到其他站点。
+- 无界面部署时，可用 `OPEN_XDOWNLOAD_AUTH_TOKEN`、`OPEN_XDOWNLOAD_CT0`、`OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` 环境变量注入同样的值；仅由环境变量提供的值只在运行时生效，不会写入数据库。
+- 单条推文解析通常不需要 Cookie，只有推文本身不可公开访问时才需要。
 
 ## 使用教程
 
@@ -457,7 +513,7 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 
 ### 批量归档用户、列表或关注关系
 
-1. 先在“配置”页面填写并校验 X Cookie。
+1. 先在“配置”页面填写并校验 X Cookie（[获取方式](#获取-x-cookie)）。
 2. 回到“工作台”，点击“批量归档”打开抽屉。
 3. 在“用户”“列表”“关注”标签页中输入目标，每行一个。
 4. 右侧确认任务预览。
@@ -525,8 +581,8 @@ downloads/
 | 并发 | 后台任务最大并发数，范围 `1-64`。 |
 | 文件名命名 | 可选“仅推文”或“用户名 + 用户 ID + 推文”。 |
 | 最大文件名长度 | 范围 `16-240`。 |
-| X Cookie | 主 `auth_token` 和 `ct0`，用于登录态接口。 |
-| 备用 Cookie | 多组备用 `auth_token` / `ct0`，用于批量归档轮换。 |
+| X Cookie | 主 `auth_token` 和 `ct0`，用于登录态接口；获取方式见[获取 X Cookie](#获取-x-cookie)。 |
+| 备用 Cookie | 多组备用 `auth_token` / `ct0`，用于批量归档轮换；每组需从对应账号的浏览器会话中复制。 |
 | 失败重试 | 批量归档结束时自动重试失败推文队列。 |
 | 保护账号自动关注 | 遇到未关注的保护账号时尝试自动关注。 |
 

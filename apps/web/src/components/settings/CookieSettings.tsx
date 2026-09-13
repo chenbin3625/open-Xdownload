@@ -9,6 +9,7 @@ import {
   PlusOutlined,
 } from "@ant-design/icons";
 import {
+  Alert,
   Button,
   Col,
   Form,
@@ -27,9 +28,25 @@ const { Text } = Typography;
 
 export type CookieClientStatus = ClientStatus;
 
+// 获取步骤与注意事项同时用于配置页提示，保持文案单一来源，便于后续随浏览器界面调整。
+export const cookieHelpSteps = [
+  "在浏览器中登录 x.com，建议使用独立浏览器配置或无痕窗口，避免影响日常登录状态。",
+  "打开开发者工具：F12，或 macOS 上 Cmd+Option+I、Windows / Linux 上 Ctrl+Shift+I。",
+  "切换到「应用 / Application」面板（Firefox 为「存储 / Storage」），左侧展开「Cookies」并选择 https://x.com。",
+  "复制 auth_token 一行的 Value 填入上方 auth_token，再复制 ct0 一行的 Value 填入 ct0；两者必须来自同一个浏览器、同一个账号。",
+  "保存配置后点击「检测 Cookie」，确认状态显示为有效。",
+];
+
+export const cookieHelpNotes = [
+  "auth_token 是 HttpOnly Cookie，控制台执行 document.cookie 读不到，必须用开发者工具的 Cookies 面板复制。",
+  "退出登录、修改密码或 X 主动失效会话后 Cookie 会失效，按同样步骤重新复制即可。",
+  "一个浏览器配置只保留一个 X 登录态；备用 Cookie 可用无痕窗口或另一个浏览器配置登录其他账号后获取。",
+  "Cookie 等同于账号密码，只会保存在本地数据库中，请勿分享或粘贴到其他站点。",
+];
+
 export const cookieSettingsTips = {
-  authToken: "X/Twitter 登录 Cookie 中的 auth_token，用于鉴权。",
-  csrfToken: "X/Twitter 登录 Cookie 中的 ct0（CSRF Token），与 auth_token 对应。",
+  authToken: "X/Twitter 登录 Cookie 中的 auth_token，用于鉴权。位置：开发者工具「应用 → Cookies → https://x.com」，需与 ct0 来自同一账号。",
+  csrfToken: "X/Twitter 登录 Cookie 中的 ct0（CSRF Token），与 auth_token 对应。位置同上，取 Cookies 面板中 ct0 一行的 Value。",
   backupCookie: (
     <Space orientation="vertical" size={2}>
       <Text>用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。</Text>
@@ -69,6 +86,7 @@ export function CookieSettingsFields({
 
   return (
     <Stack size={16}>
+      <CookieHelpAlert />
       <Stack size={8}>
         <Text strong>主 Cookie</Text>
         <Row gutter={[16, 0]}>
@@ -119,6 +137,30 @@ export function CookieSettingsFields({
         onChange={(additionalCookies) => onChange((current) => ({ ...current, additionalCookies }))}
       />
     </Stack>
+  );
+}
+
+export function CookieHelpAlert() {
+  return (
+    <Alert
+      type="info"
+      showIcon
+      message="如何获取 X Cookie（auth_token / ct0）"
+      description={
+        <Stack size={6}>
+          <ol style={{ margin: 0, paddingLeft: 20 }}>
+            {cookieHelpSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+          {cookieHelpNotes.map((note) => (
+            <Text key={note} type="secondary" style={{ display: "block", fontSize: 12 }}>
+              · {note}
+            </Text>
+          ))}
+        </Stack>
+      }
+    />
   );
 }
 
