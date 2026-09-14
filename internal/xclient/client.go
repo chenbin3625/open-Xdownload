@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -190,6 +191,17 @@ func NewPool(cfg config.AppConfig) (*Pool, error) {
 	return &Pool{clients: clients}, nil
 }
 
+// sameHost 判断重定向目标是否仍在同一主机（忽略大小写与端口）。
+func sameHost(a string, b string) bool {
+	stripPort := func(hostport string) string {
+		if host, _, err := net.SplitHostPort(hostport); err == nil {
+			return host
+		}
+		return hostport
+	}
+	return strings.EqualFold(stripPort(a), stripPort(b))
+}
+
 func NewClient(cred Credentials, proxyURL string) (*Client, error) {
 	// 复用带连接池与链路本地地址拨号防护的 Transport（M1/S2）；空代理时尊重环境变量代理。
 	transport, err := httpx.Transport(proxyURL)
@@ -197,7 +209,22 @@ func NewClient(cred Credentials, proxyURL string) (*Client, error) {
 		return nil, err
 	}
 	return &Client{
-		http:         &http.Client{Transport: transport, Timeout: 90 * time.Second},
+		http: &http.Client{
+			Transport: transport,
+			Timeout:   90 * time.Second,
+			// 标准库会在跨域重定向时剥离 Cookie/Authorization，但 X-Csrf-Token 是
+			// 自定义头，会被原样带到重定向目标——ct0 因此泄漏给第三方主机。同时
+			// 拒绝跨域跳转也避免被重定向到内网地址。
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("重定向次数过多")
+				}
+				if len(via) > 0 && !sameHost(req.URL.Host, via[0].URL.Host) {
+					return fmt.Errorf("拒绝跨域重定向: %s", req.URL.Host)
+				}
+				return nil
+			},
+		},
 		baseURL:      host,
 		retryBackoff: requestRetryDelay,
 		authToken:    cred.AuthToken,

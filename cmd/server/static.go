@@ -75,6 +75,32 @@ func externalWebApp(webDir string) (http.FileSystem, bool) {
 	return fsys, true
 }
 
+// webAppCSP 约束 SPA 可加载的资源。构建产物中没有内联可执行脚本（bootstrap 注入
+// 的是 <script type="application/json"> 数据块，不受 script-src 限制），因此
+// script-src 可以收到 'self'。style-src 需要 'unsafe-inline'：antd 的 CSS-in-JS
+// 会在运行时注入 <style>。字体与字体样式表来自 Google Fonts（index.html 中已有
+// preconnect），媒体与图片需允许 twimg 以显示远端海报。
+const webAppCSP = "default-src 'self'; " +
+	"base-uri 'self'; " +
+	"object-src 'none'; " +
+	"frame-ancestors 'none'; " +
+	"form-action 'self'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+	"font-src 'self' data: https://fonts.gstatic.com; " +
+	"img-src 'self' data: blob: https://pbs.twimg.com https://*.twimg.com; " +
+	"media-src 'self' blob: https://*.twimg.com; " +
+	"connect-src 'self'"
+
+func setWebAppSecurityHeaders(w http.ResponseWriter) {
+	header := w.Header()
+	header.Set("Content-Security-Policy", webAppCSP)
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Referrer-Policy", "no-referrer")
+	// 该服务无内置鉴权，被 iframe 嵌套没有正当用途。
+	header.Set("X-Frame-Options", "DENY")
+}
+
 func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) http.Handler {
 	cache := newAssetCache(fsys)
 	fileServer := http.FileServer(fsys)
@@ -83,6 +109,7 @@ func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) 
 			api.ServeHTTP(w, r)
 			return
 		}
+		setWebAppSecurityHeaders(w)
 
 		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		if name == "" {

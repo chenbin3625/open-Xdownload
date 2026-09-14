@@ -203,3 +203,80 @@ func TestStartPosterBackfillRunsOnceAndCompletes(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// 回归：worker 里的 recover 必须被 defer。写成普通语句时 recover() 恒为 nil，
+// 一次 panic 就会逃出 goroutine 打死整个进程（连带所有在跑的归档任务）。
+func TestPosterBackfillContainsWorkerPanic(t *testing.T) {
+	manager, store, _, _ := newPosterTestManager(t)
+	original := savePosterImage
+	savePosterImage = func(ctx context.Context, proxyURL string, rawURL string, destPath string) error {
+		panic("poster fetch exploded")
+	}
+	t.Cleanup(func() { savePosterImage = original })
+
+	seedVideoDownload(t, store, "tweet-panic", videoMediaURL, filepath.Join(t.TempDir(), "boom.mp4"), "")
+
+	if _, err := manager.StartPosterBackfill(context.Background()); err != nil {
+		t.Fatalf("start backfill: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status := manager.PosterBackfillStatus()
+		if !status.Running {
+			if status.Failed != 1 || status.Done != 1 {
+				t.Fatalf("final status = %+v, want done=1 failed=1 (panic counted, not fatal)", status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backfill did not finish after panic: %+v", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// 回归：回填 goroutine 必须计入 m.wg 且从调度根上下文派生，否则 Stop() 会在
+// worker 仍在写库时返回，调用方随即关闭数据库。
+func TestStopWaitsForPosterBackfill(t *testing.T) {
+	manager, store, _, _ := newPosterTestManager(t)
+	entered := make(chan struct{}, 1)
+	observed := make(chan error, 1)
+	original := savePosterImage
+	savePosterImage = func(ctx context.Context, proxyURL string, rawURL string, destPath string) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-ctx.Done() // 等待 Stop() 取消：证明上下文确实挂在调度树上
+		observed <- ctx.Err()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { savePosterImage = original })
+
+	seedVideoDownload(t, store, "tweet-stop", videoMediaURL, filepath.Join(t.TempDir(), "stop.mp4"), "")
+
+	manager.Start(context.Background())
+	if _, err := manager.StartPosterBackfill(context.Background()); err != nil {
+		t.Fatalf("start backfill: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backfill worker never started")
+	}
+
+	manager.Stop()
+
+	select {
+	case err := <-observed:
+		if err == nil {
+			t.Fatal("worker context was not canceled by Stop()")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() returned without canceling the backfill worker")
+	}
+	if status := manager.PosterBackfillStatus(); status.Running {
+		t.Fatalf("backfill still marked running after Stop(): %+v", status)
+	}
+}

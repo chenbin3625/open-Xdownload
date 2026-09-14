@@ -46,8 +46,13 @@ jobs:
       - name: Sync embedded web assets
         run: npm run sync:web
 
-      - name: Test Go
-        run: go test ./...
+      - name: Vet Go
+        run: go vet ./...
+
+      # 竞态检测必须在 CI 跑：本服务的并发写者可达数百（MaxConcurrency 上限 64，
+      # 每个归档任务再开多个 worker），普通 go test 无法暴露数据竞争。
+      - name: Test Go (race)
+        run: go test -race ./...
 
       - name: Build server
         run: CGO_ENABLED=0 go build -trimpath -o dist/open-xdownload ./cmd/server

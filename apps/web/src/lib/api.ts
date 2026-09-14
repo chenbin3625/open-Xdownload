@@ -264,8 +264,10 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(payload.error ?? response.statusText);
+    const payload: { error?: string } | null = await response
+      .json()
+      .catch(() => ({ error: response.statusText }));
+    throw new Error(payload?.error ?? response.statusText);
   }
   return response.json() as Promise<T>;
 }

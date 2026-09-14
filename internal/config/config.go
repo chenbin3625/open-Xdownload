@@ -73,15 +73,15 @@ const (
 )
 
 type AppConfig struct {
-	DownloadDir             string         `json:"downloadDir" db:"download_dir"`
-	MaxConcurrency          int            `json:"maxConcurrency" db:"max_concurrency"`
-	ProxyURL                string         `json:"proxyUrl" db:"proxy_url"`
-	AuthToken               string         `json:"authToken,omitempty" db:"auth_token"`
-	CSRFToken               string         `json:"csrfToken,omitempty" db:"csrf_token"`
-	AdditionalCookies       string         `json:"additionalCookies,omitempty" db:"additional_cookies"`
-	AutoRetryFailed         bool           `json:"autoRetryFailed" db:"auto_retry_failed"`
-	AutoFollowProtected     bool           `json:"autoFollowProtected" db:"auto_follow_protected"`
-	IncludeNestedTweetMedia bool           `json:"includeNestedTweetMedia" db:"include_nested_tweet_media"`
+	DownloadDir             string `json:"downloadDir" db:"download_dir"`
+	MaxConcurrency          int    `json:"maxConcurrency" db:"max_concurrency"`
+	ProxyURL                string `json:"proxyUrl" db:"proxy_url"`
+	AuthToken               string `json:"authToken,omitempty" db:"auth_token"`
+	CSRFToken               string `json:"csrfToken,omitempty" db:"csrf_token"`
+	AdditionalCookies       string `json:"additionalCookies,omitempty" db:"additional_cookies"`
+	AutoRetryFailed         bool   `json:"autoRetryFailed" db:"auto_retry_failed"`
+	AutoFollowProtected     bool   `json:"autoFollowProtected" db:"auto_follow_protected"`
+	IncludeNestedTweetMedia bool   `json:"includeNestedTweetMedia" db:"include_nested_tweet_media"`
 	// IncrementalArchive 开启后用户/列表/关注归档使用早停游标，从上次成功位置继续，
 	// 节省 X API 配额；默认关闭，每次全量扫描时间线，已存在媒体自动跳过并补齐预览图。
 	IncrementalArchive bool           `json:"incrementalArchive" db:"incremental_archive"`

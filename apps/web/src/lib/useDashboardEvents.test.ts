@@ -4,6 +4,8 @@ import {
   parseDashboardEvent,
   isDashboardJobPayload,
   isDashboardJobList,
+  isStaleJobUpdate,
+  mergeNewerJobs,
   patchDashboardJobCaches,
   applyDashboardMeta,
   applyDashboardEvent,
@@ -195,5 +197,89 @@ describe("applyDashboardEvent", () => {
 
     expect(result).toBe("handled");
     expect(queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot)?.failedTweetCount).toBe(4);
+  });
+});
+
+describe("isStaleJobUpdate", () => {
+  it("flags older updatedAt and tolerates unparsable timestamps", () => {
+    const previous = makeJob({ updatedAt: "2024-01-01T00:00:10Z" });
+    expect(isStaleJobUpdate(previous, makeJob({ updatedAt: "2024-01-01T00:00:05Z" }))).toBe(true);
+    expect(isStaleJobUpdate(previous, makeJob({ updatedAt: "2024-01-01T00:00:20Z" }))).toBe(false);
+    expect(isStaleJobUpdate(previous, makeJob({ updatedAt: "2024-01-01T00:00:10Z" }))).toBe(false);
+    expect(isStaleJobUpdate(previous, makeJob({ updatedAt: "not a date" }))).toBe(false);
+  });
+});
+
+describe("mergeNewerJobs", () => {
+  it("keeps the cached job when the fetched page is older", () => {
+    const cached = makeJobsPage([
+      makeJob({ id: 1, progress: 0.9, updatedAt: "2024-01-01T00:00:10Z" }),
+    ]);
+    const fetched = makeJobsPage([
+      makeJob({ id: 1, progress: 0.2, updatedAt: "2024-01-01T00:00:05Z" }),
+    ]);
+    expect(mergeNewerJobs(cached, fetched).items[0].progress).toBe(0.9);
+  });
+
+  it("takes the fetched job when it is newer and passes through without cache", () => {
+    const cached = makeJobsPage([
+      makeJob({ id: 1, progress: 0.2, updatedAt: "2024-01-01T00:00:05Z" }),
+    ]);
+    const fetched = makeJobsPage([
+      makeJob({ id: 1, progress: 0.9, updatedAt: "2024-01-01T00:00:10Z" }),
+    ]);
+    expect(mergeNewerJobs(cached, fetched).items[0].progress).toBe(0.9);
+    expect(mergeNewerJobs(undefined, fetched)).toBe(fetched);
+  });
+});
+
+describe("patchDashboardJobCaches ordering guard", () => {
+  it("refuses to overwrite a newer cached job with a late event", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const fresh = makeJob({ id: 1, progress: 0.9, updatedAt: "2024-01-01T00:00:10Z" });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20], makeJobsPage([fresh]));
+    queryClient.setQueryData(dashboardMetaQueryRoot, makeMeta([fresh]));
+
+    const late = makeJob({ id: 1, progress: 0.2, updatedAt: "2024-01-01T00:00:05Z" });
+    const result = patchDashboardJobCaches(queryClient, late);
+
+    expect(result.stale).toBe(true);
+    expect(result.found).toBe(false);
+    const page = queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20]);
+    expect(page?.items[0].progress).toBe(0.9);
+  });
+
+  it("discards a late event instead of driving a stats refresh", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const fresh = makeJob({ id: 1, status: "completed", updatedAt: "2024-01-01T00:00:10Z" });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20], makeJobsPage([fresh]));
+
+    const result = applyDashboardEvent(queryClient, {
+      type: "job.updated",
+      payload: makeJob({ id: 1, status: "downloading", updatedAt: "2024-01-01T00:00:05Z" }),
+    });
+
+    expect(result).toBe("handled");
+    expect(queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20])?.items[0].status).toBe("completed");
+  });
+
+  it("asks for a stats refresh when a non-terminal update crosses buckets", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const done = makeJob({ id: 1, status: "completed", updatedAt: "2024-01-01T00:00:05Z" });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20], makeJobsPage([done]));
+    queryClient.setQueryData(dashboardMetaQueryRoot, makeMeta([done]));
+
+    const result = applyDashboardEvent(queryClient, {
+      type: "job.updated",
+      payload: makeJob({ id: 1, status: "downloading", updatedAt: "2024-01-01T00:00:10Z" }),
+    });
+
+    expect(result).toBe("refresh-meta");
   });
 });

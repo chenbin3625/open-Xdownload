@@ -49,6 +49,8 @@ export interface CreateJobModalProps {
   initialKind?: JobKind | "schedule";
 }
 
+const tabKeys: string[] = ["user", "tweet_link", "list", "following"];
+
 function parseLinesToItems(raw: string, kind: JobKind): JobRequest[] {
   const seen = new Set<string>();
   const items: JobRequest[] = [];
@@ -120,6 +122,10 @@ export function CreateJobModal({
         setActiveTab("user");
         setUserInputs(initialInput);
       }
+    } else {
+      // 侧边栏入口没有初始输入，此时若不复位就会停在上一次会话的分页上。
+      // media_url / failed_retry 没有对应分页，统一落回 user。
+      setActiveTab(tabKeys.includes(initialKind) ? initialKind : "user");
     }
     if (initialKind === "schedule") {
       setIsSchedule(true);

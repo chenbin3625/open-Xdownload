@@ -28,14 +28,6 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
 )
 
-type Store interface {
-	ClaimPendingJobs(ctx context.Context, limit int) ([]storage.Job, error)
-	GetJob(ctx context.Context, id int64) (storage.Job, error)
-	UpdateJob(ctx context.Context, job storage.Job) error
-	CreateDownload(ctx context.Context, record storage.DownloadRecord) (storage.DownloadRecord, error)
-	CreateFailedMedia(ctx context.Context, failed storage.FailedMedia) (storage.FailedMedia, error)
-}
-
 type Manager struct {
 	store      *storage.Store
 	parser     *parser.Service
@@ -46,6 +38,9 @@ type Manager struct {
 	mu         sync.Mutex
 	active     map[int64]context.CancelFunc
 	stopCancel context.CancelFunc
+	// runCtx 是调度循环的根上下文。后台任务（如封面回填）从它派生，
+	// 这样 Stop() 才能真正取消它们，而不是只等超时。
+	runCtx     context.Context
 	wg         sync.WaitGroup
 	retryMu    sync.Mutex
 	userMu     sync.Mutex
@@ -97,6 +92,7 @@ func (m *Manager) Start(ctx context.Context) {
 		runCtx, cancel := context.WithCancel(ctx)
 		m.mu.Lock()
 		m.stopCancel = cancel
+		m.runCtx = runCtx
 		m.mu.Unlock()
 		m.wg.Add(1)
 		go func() {
@@ -131,6 +127,17 @@ func (m *Manager) Stop() {
 		m.mu.Unlock()
 		log.Printf("manager.Stop: %d task(s) did not drain within %s: %v", len(ids), managerStopTimeout, ids)
 	}
+}
+
+// backgroundParent 返回后台任务应当派生的父上下文：优先用调度循环的根上下文，
+// 使 Stop() 能取消这些任务；Start() 未被调用时（测试）退回调用方传入的上下文。
+func (m *Manager) backgroundParent(fallback context.Context) context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.runCtx != nil {
+		return m.runCtx
+	}
+	return fallback
 }
 
 func (m *Manager) Notify() {
@@ -1412,7 +1419,11 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 			}
 			// 跳过已下载的媒体，避免重试时把之前已成功的部分再下一遍。
 			if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL); err != nil {
-				if !shouldRetryMediaError(err) {
+				// 只有确实永久失效（404/410/DMCA）才写入 unavailable_media：该表以
+				// media_url 为键且对所有推文生效，一旦写错就永久拦截。X 对过期的
+				// video.twimg.com 签名例行返回裸 403，那是瞬时状态，必须留在失败
+				// 队列里等下次重试，而不是拉黑。
+				if isPermanentlyUnavailableMediaError(err) {
 					if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
 						MediaURL: mediaURL,
 						TweetID:  tweet.ID,
@@ -1779,7 +1790,38 @@ func safeName(name string) string {
 		}
 		builder.WriteRune(ch)
 	}
-	return strings.TrimSpace(builder.String())
+	// 截断之后才做点号与保留名收敛：截断本身可能产出 ".." 或以点结尾的新名字。
+	return sanitizePathSegment(strings.TrimSpace(builder.String()))
+}
+
+// sanitizePathSegment 收敛单个路径段中会改变路径语义的形态。调用方会把返回值
+// 直接 Join 到下载根下，因此这里必须保证结果不会被解释成路径跳转。
+func sanitizePathSegment(name string) string {
+	// 纯点号段（"." / ".." / "..."）会被 filepath.Join 当作路径跳转：显示名为 ".."
+	// 的账号会把媒体写进下载根而不是自己的目录，破坏按用户隔离。
+	if strings.Trim(name, ".") == "" {
+		return "unknown"
+	}
+	// Windows 会静默丢弃结尾的点与空格，导致落盘名与库内记录不一致。
+	name = strings.TrimRight(name, ". ")
+	if strings.Trim(name, ".") == "" {
+		return "unknown"
+	}
+	// Windows 保留设备名：以这些名字建目录会失败。
+	base := name
+	if dot := strings.IndexByte(base, '.'); dot > 0 {
+		base = base[:dot]
+	}
+	switch strings.ToUpper(base) {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return "_" + name
+	}
+	if name == "" {
+		return "unknown"
+	}
+	return name
 }
 
 func syncLink(linkPath string, target string) error {

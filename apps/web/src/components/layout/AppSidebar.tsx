@@ -13,7 +13,6 @@ import {
   Divider,
   Flex,
   Menu,
-  Progress,
   Space,
   Tag,
   Typography,
@@ -195,9 +194,7 @@ export function AppSidebar({
               存储 ({storageType.toUpperCase()})
             </Text>
           </Space>
-          <Badge status="success" text={<Text style={{ fontSize: 11 }}>正常</Text>} />
         </Flex>
-        <Progress percent={65} size="small" showInfo={false} />
         <Text
           type="secondary"
           ellipsis={{ tooltip: storagePath }}

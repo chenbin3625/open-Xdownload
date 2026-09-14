@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import type { DashboardMeta, Job, JobsPage } from "./api";
 import {
@@ -67,9 +67,34 @@ export function sameJob(left: Job, right: Job) {
   );
 }
 
+// 事件与分页响应都可能迟到，updatedAt 更旧的一份不能覆盖已经写入的新状态，
+// 否则进度条会肉眼可见地往回跳。时间戳缺失/不可解析时不做拦截，避免误伤。
+export function isStaleJobUpdate(previous: Job, next: Job) {
+  const previousTime = Date.parse(previous.updatedAt);
+  const nextTime = Date.parse(next.updatedAt);
+  if (Number.isNaN(previousTime) || Number.isNaN(nextTime)) return false;
+  return nextTime < previousTime;
+}
+
+// 800ms 去抖刷新可能在更新的 SSE 补丁之后才落地：逐条比较 updatedAt，保留较新的一份。
+export function mergeNewerJobs(cached: JobsPage | undefined, fetched: JobsPage): JobsPage {
+  if (!cached) return fetched;
+  let changed = false;
+  const items = fetched.items.map((job) => {
+    const previous = cached.items.find((item) => item.id === job.id);
+    if (previous && isStaleJobUpdate(previous, job)) {
+      changed = true;
+      return previous;
+    }
+    return job;
+  });
+  return changed ? { ...fetched, items } : fetched;
+}
+
 export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Job) {
   let found = false;
   let needsFullRefresh = false;
+  let stale = false;
   let previousStatus: Job["status"] | undefined;
 
   queryClient.setQueriesData<JobsPage>({ queryKey: jobsQueryRoot }, (current) => {
@@ -78,8 +103,13 @@ export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Jo
     const jobIndex = current.items.findIndex((job) => job.id === updatedJob.id);
     if (jobIndex === -1) return current;
 
-    found = true;
     const previousJob = current.items[jobIndex];
+    if (isStaleJobUpdate(previousJob, updatedJob)) {
+      stale = true;
+      return current;
+    }
+
+    found = true;
     previousStatus = previousJob.status;
     if (
       jobStatusBucket(previousJob.status) !== jobStatusBucket(updatedJob.status) ||
@@ -104,7 +134,7 @@ export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Jo
     });
   }
 
-  return { found, needsFullRefresh };
+  return { found, needsFullRefresh, stale };
 }
 
 export function prependJobsToCaches(queryClient: QueryClient, jobs: Job[]) {
@@ -159,15 +189,15 @@ export function applyDashboardEvent(
     return false;
   };
   if (event.type === "archive_schedule.updated" || event.type === "archive_schedule.created") {
-    queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot });
+    void queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot });
     return "handled";
   }
   if (event.type === "archive_schedule.ran") {
-    queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot });
+    void queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot });
     return "handled";
   }
   if (event.type === "failed_tweet.deleted" || event.type === "failed_tweets.cleared") {
-    queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot });
+    void queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot });
     return applyEventMeta() ? "handled" : "refresh-meta";
   }
   if (event.type === "jobs.created" && isDashboardJobList(event.payload)) {
@@ -182,10 +212,16 @@ export function applyDashboardEvent(
   }
   if (event.type === "job.updated" && isDashboardJobPayload(event.payload)) {
     const patched = patchDashboardJobCaches(queryClient, event.payload);
+    // 迟到的事件已被丢弃，不能再拿它去驱动统计刷新。
+    if (patched.stale) return "handled";
     if (patched.found) {
       if (isJobTerminal(event.payload.status)) {
-        queryClient.invalidateQueries({ queryKey: [...jobFilesQueryRoot, event.payload.id] });
+        void queryClient.invalidateQueries({ queryKey: [...jobFilesQueryRoot, event.payload.id] });
         return applyEventMeta() ? "handled" : "refresh-files-meta";
+      }
+      // 状态跨桶迁移（如 active → failed）会改变统计分布，必须补一次统计刷新。
+      if (patched.needsFullRefresh) {
+        return applyEventMeta() ? "handled" : "refresh-meta";
       }
       return "handled";
     }
@@ -194,15 +230,24 @@ export function applyDashboardEvent(
   return "refresh-workbench";
 }
 
+// EventSource 只在网络中断时自动重连；服务端返回非 200（订阅数达上限时后端回 503）
+// 会让连接永久停在 CLOSED，界面从此不再更新。这里显式重建，退避上限 30s。
+const sseRetryBaseDelay = 3_000;
+const sseRetryMaxDelay = 30_000;
+
 export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => void, enabled = true) {
   const [sseConnected, setSseConnected] = useState(true);
+  const [epoch, setEpoch] = useState(0);
+  const retryDelayRef = useRef(sseRetryBaseDelay);
 
   useEffect(() => {
     if (!enabled) {
       setSseConnected(true);
+      retryDelayRef.current = sseRetryBaseDelay;
       return;
     }
     const events = new EventSource("/api/events");
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let metaTimer: ReturnType<typeof setTimeout> | null = null;
     let metaController: AbortController | null = null;
@@ -235,11 +280,21 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
 
     events.onopen = () => {
       setSseConnected(true);
+      retryDelayRef.current = sseRetryBaseDelay;
     };
 
     events.onerror = () => {
       setSseConnected(false);
       scheduleRefresh();
+      // CLOSED 表示 EventSource 已放弃重试，只能换一个实例重新连。
+      if (events.readyState === EventSource.CLOSED && !disposed && !retryTimer) {
+        const delay = retryDelayRef.current;
+        retryDelayRef.current = Math.min(delay * 2, sseRetryMaxDelay);
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (!disposed) setEpoch((current) => current + 1);
+        }, delay);
+      }
     };
 
     events.onmessage = (message) => {
@@ -268,9 +323,10 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
       events.close();
       if (timer) clearTimeout(timer);
       if (metaTimer) clearTimeout(metaTimer);
+      if (retryTimer) clearTimeout(retryTimer);
       metaController?.abort();
     };
-  }, [enabled, queryClient, onRefresh]);
+  }, [enabled, epoch, queryClient, onRefresh]);
 
   return { sseConnected };
 }

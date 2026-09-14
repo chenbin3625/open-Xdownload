@@ -35,10 +35,9 @@ import {
   formatDateTime,
   getErrorMessage,
 } from "../common/CommonUI";
-import { dashboardMetaQueryRoot, jobsQueryRoot } from "../../lib/api";
+import { dashboardMetaQueryRoot, failedTweetQueryRoot, jobsQueryRoot } from "../../lib/api";
 
 const { Text } = Typography;
-const failedTweetQueryRoot = ["failed-tweets"] as const;
 
 export function FailedTweetQueue({
   items,

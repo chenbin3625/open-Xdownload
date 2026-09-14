@@ -107,7 +107,14 @@ func (rl *rateLimiter) refund(path string) {
 	}
 }
 
+// maxRetryAfter 限制 Retry-After 的采纳上限。上游（或中间 CDN）可能返回
+// Retry-After: 86400，而 before() 会一直等到该时刻——任务会带着并发槽位阻塞
+// 一整天，表现为永远卡在 resolving。Pool.Select 早已有 maxPoolSelectWait 这类
+// 上界，这里补齐同样的约束。
+const maxRetryAfter = 15 * time.Minute
+
 // parseRetryAfter 解析 Retry-After 响应头（秒数或 HTTP-date），无法解析返回 0。
+// 返回值上限为 maxRetryAfter。
 func parseRetryAfter(header http.Header) time.Duration {
 	raw := header.Get("Retry-After")
 	if raw == "" {
@@ -117,11 +124,11 @@ func parseRetryAfter(header http.Header) time.Duration {
 		if secs < 0 {
 			return 0
 		}
-		return time.Duration(secs) * time.Second
+		return min(time.Duration(secs)*time.Second, maxRetryAfter)
 	}
 	if t, err := http.ParseTime(raw); err == nil {
 		if d := time.Until(t); d > 0 {
-			return d
+			return min(d, maxRetryAfter)
 		}
 	}
 	return 0

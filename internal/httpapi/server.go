@@ -66,6 +66,7 @@ func (s *Server) Routes() http.Handler {
 			next.ServeHTTP(w, req)
 		})
 	})
+	r.Use(guardCrossOrigin)
 	r.Get("/api/health", s.health)
 	r.Get("/api/config", s.getConfig)
 	r.Put("/api/config", s.updateConfig)
@@ -129,6 +130,13 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	validationCfg := mergeSecretPlaceholders(cfg, stored).Normalized()
 	if err := httpx.ValidateProxyURL(validationCfg.ProxyURL); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// 下载目录同时充当 /api/library/file 的沙箱根：若允许改成 "/"，任意媒体文件
+	// 都会变成"下载目录内"从而可被读取。允许根必须取自已存储的配置，用请求里的
+	// 新值会让攻击者自证合法（"/" 的允许根就包含 "/"）。
+	if err := validateDownloadDir(validationCfg.DownloadDir, localDirectoryAllowedRoots(stored)); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -745,7 +753,7 @@ func (s *Server) getPosterBackfillStatus(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListLibraryDownloads(r.Context(), parseLimit(r, storage.MaxLibraryDownloadsLimit))
+	items, err := s.store.ListLibraryDownloads(r.Context(), parseLimit(r, storage.MaxLibraryDownloadsLimit, storage.MaxLibraryDownloadsLimit))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -998,7 +1006,7 @@ func (s *Server) serveDownloadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listFailedMedia(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListFailedMedia(r.Context(), parseLimit(r, 100))
+	items, err := s.store.ListFailedMedia(r.Context(), parseLimit(r, 100, 200))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1040,7 +1048,7 @@ func (s *Server) listFailedTweets(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	items, err := s.store.ListFailedTweetViews(r.Context(), parseLimit(r, 200))
+	items, err := s.store.ListFailedTweetViews(r.Context(), parseLimit(r, 200, 500))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1163,14 +1171,20 @@ func parseID(r *http.Request) (int64, error) {
 	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 }
 
-func parseLimit(r *http.Request, fallback int) int {
+// parseLimit 解析 ?limit=，并就地收敛到 [1, max]。上限约束原本只存在于 storage
+// 层，边界层把原始值（含负数、含 ?limit=-1 这种会被下游放大成上限的输入）直接
+// 透传；由调用方显式声明自己的 max，让"limit 合法"这件事在入口就成立。
+func parseLimit(r *http.Request, fallback int, max int) int {
 	raw := r.URL.Query().Get("limit")
 	if raw == "" {
 		return fallback
 	}
 	limit, err := strconv.Atoi(raw)
-	if err != nil {
+	if err != nil || limit <= 0 {
 		return fallback
+	}
+	if max > 0 && limit > max {
+		return max
 	}
 	return limit
 }
@@ -1307,6 +1321,24 @@ func localDirectoryPath(value string, allowedRoots []string) (string, error) {
 		return "", fmt.Errorf("%s 不是目录", path)
 	}
 	return path, nil
+}
+
+// validateDownloadDir 校验待保存的下载目录：必须是绝对可解析路径，且位于允许根
+// （家目录 / 工作目录 / 当前下载目录）之下。不创建目录——下载流程会按需创建。
+func validateDownloadDir(value string, allowedRoots []string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("下载目录不能为空")
+	}
+	path, err := filepath.Abs(trimmed)
+	if err != nil {
+		return fmt.Errorf("下载目录无效: %w", err)
+	}
+	if !withinAllowedRoot(path, allowedRoots) {
+		return fmt.Errorf("下载目录不允许：仅限家目录、程序工作目录或当前下载目录范围内；" +
+			"如需指向其他位置（例如外置磁盘），请用 OPEN_XDOWNLOAD_DOWNLOAD_DIR 环境变量启动")
+	}
+	return nil
 }
 
 func createLocalDirectoryPath(value string, allowedRoots []string) (string, error) {

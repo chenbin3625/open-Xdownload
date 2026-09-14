@@ -13,6 +13,7 @@ import {
   Spin,
   Tooltip,
   Typography,
+  notification,
 } from "antd";
 import React, { useEffect, useState } from "react";
 import type { JobKind } from "../../lib/api";
@@ -261,6 +262,46 @@ export function PaginatedList<TItem>({
   );
 }
 
+// 明文 HTTP（局域网部署的常态）下 navigator.clipboard 是 undefined，
+// 直接调用会在事件处理里抛 TypeError。这里逐级降级到 execCommand，
+// 并按真实结果提示，不再无条件报“已复制”。
+export async function copyToClipboard(text: string, label = "路径") {
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+  if (!copied) {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      copied = document.execCommand("copy");
+      textarea.remove();
+    } catch {
+      copied = false;
+    }
+  }
+  if (copied) {
+    notification.success({
+      message: "复制成功",
+      description: `已复制${label}到剪贴板`,
+    });
+  } else {
+    notification.warning({
+      message: "复制失败",
+      description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
+    });
+  }
+}
+
 export function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -312,18 +353,21 @@ export function formatIntervalMinutes(minutes: number) {
   return `每 ${minutes} 分钟`;
 }
 
+// 表格每一行、媒体库每张卡片都会调用，formatter 提到模块级只构造一次。
+const dateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 export function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+  return dateTimeFormatter.format(date);
 }
 
 export function clampPercent(value: number) {

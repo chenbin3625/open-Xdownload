@@ -850,6 +850,36 @@ func TestOpenAppliesPerformancePragmas(t *testing.T) {
 	if tempStore != 2 {
 		t.Fatalf("temp_store = %d, want MEMORY(2)", tempStore)
 	}
+
+	// foreign_keys / busy_timeout 也必须断言：DSN 打错字时它们会静默失效
+	// （外键不再级联删除、写锁冲突直接 SQLITE_BUSY），而其余用例全绿。
+	var foreignKeys int
+	if err := store.db.Get(&foreignKeys, `PRAGMA foreign_keys`); err != nil {
+		t.Fatalf("foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("foreign_keys = %d, want 1", foreignKeys)
+	}
+
+	var busyTimeout int
+	if err := store.db.Get(&busyTimeout, `PRAGMA busy_timeout`); err != nil {
+		t.Fatalf("busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
+	}
+
+	// 唯一索引必须在 Open 之后存在：CreateDownload 的 ON CONFLICT 依赖它，
+	// 缺失时每次写入都会失败（见 normalizeDownloadsMediaURL 里的索引重建）。
+	for _, index := range []string{"idx_downloads_tweet_media_unique", "idx_downloads_media_url_unique"} {
+		var count int
+		if err := store.db.Get(&count, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index); err != nil {
+			t.Fatalf("check %s: %v", index, err)
+		}
+		if count != 1 {
+			t.Fatalf("%s exists = %d, want 1", index, count)
+		}
+	}
 }
 
 func TestGetStoredConfigCachesUntilUpdate(t *testing.T) {

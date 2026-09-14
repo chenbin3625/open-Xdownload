@@ -196,7 +196,8 @@ func TestMigrationsRunOnceAfterOpen(t *testing.T) {
 	}
 	defer store.Close()
 
-	for _, name := range []string{"normalize_downloads_media_url", "deduplicate_downloads", "deduplicate_downloads_media_url_only", "dashboard_counters_v1"} {
+	// dashboard_counters_v1 已改为每次 Open 都对账（RecountDashboardCounters），不再登记为一次性迁移。
+	for _, name := range []string{"normalize_downloads_media_url", "deduplicate_downloads", "deduplicate_downloads_media_url_only"} {
 		var count int
 		if err := store.db.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name); err != nil {
 			t.Fatalf("check %s: %v", name, err)

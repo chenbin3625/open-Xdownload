@@ -15,7 +15,7 @@ import {
   notification,
 } from "antd";
 import type { TreeDataNode } from "antd";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   createLocalDirectory,
   listLocalDirectories,
@@ -43,9 +43,10 @@ export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelec
   const [selectedPath, setSelectedPath] = useState(path);
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
   const [treeData, setTreeData] = useState<DirectoryTreeNode[]>([]);
+  const nodeLoadControllerRef = useRef<AbortController | null>(null);
   const listing = useQuery<LocalDirectoryListing>({
     queryKey: ["local-directories", rootPath],
-    queryFn: () => listLocalDirectories(rootPath),
+    queryFn: ({ signal }) => listLocalDirectories(rootPath, signal),
   });
   const createDirectory = useMutation({
     mutationFn: createLocalDirectory,
@@ -72,25 +73,41 @@ export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelec
     setSelectedPath(path);
   }, [path]);
 
+  // 只在解析出的根路径变化时重建树：listing.data 每次 refetch 都是新对象，
+  // 以它为依赖会丢掉懒加载的子节点、把树重新收起，并覆盖用户正在输入的路径。
+  const listingRootPath = listing.data?.path;
+  const listingRef = useRef(listing.data);
+  listingRef.current = listing.data;
   useEffect(() => {
-    if (!listing.data) {
+    const current = listingRef.current;
+    if (!current || listingRootPath === undefined) {
       return;
     }
-    const rootNode = listingToDirectoryTreeRoot(listing.data);
+    const rootNode = listingToDirectoryTreeRoot(current);
     setTreeData([rootNode]);
     setExpandedKeys([rootNode.key]);
     setSelectedPath(rootNode.path);
-  }, [listing.data]);
+  }, [listingRootPath]);
+
+  // 卸载后不再写状态，请求也随之取消，与 lib/api.ts 里其他调用保持一致。
+  useEffect(() => {
+    const controller = new AbortController();
+    nodeLoadControllerRef.current = controller;
+    return () => controller.abort();
+  }, []);
 
   async function loadDirectoryNode(node: DirectoryTreeNode) {
     if (node.children || node.isLeaf) {
       return;
     }
+    const controller = nodeLoadControllerRef.current;
     try {
-      const childListing = await listLocalDirectories(node.path);
+      const childListing = await listLocalDirectories(node.path, controller?.signal);
+      if (controller?.signal.aborted) return;
       const children = childListing.entries.map(directoryEntryToTreeNode);
       setTreeData((current) => updateDirectoryTreeChildren(current, node.key, children));
     } catch (error) {
+      if (controller?.signal.aborted) return;
       notification.error({
         message: "读取目录失败",
         description: getErrorMessage(error),

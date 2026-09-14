@@ -12,10 +12,12 @@ import {
   getJobsPage,
   jobsQueryRoot,
   type DashboardMeta,
+  type JobKind,
   type JobsPage,
 } from "./lib/api";
 import {
   invalidateWorkbenchQueries,
+  mergeNewerJobs,
   useDashboardEvents,
 } from "./lib/useDashboardEvents";
 import { jobStatusBucket } from "./lib/jobStatus";
@@ -81,7 +83,7 @@ export default function App() {
   // 模态框与抽屉状态
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [createInitialInput, setCreateInitialInput] = useState("");
-  const [createInitialKind, setCreateInitialKind] = useState<string>("user");
+  const [createInitialKind, setCreateInitialKind] = useState<JobKind | "schedule">("user");
   const [failedDrawerOpen, setFailedDrawerOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
@@ -107,8 +109,11 @@ export default function App() {
   // 任务分页 Query
   const jobs = useQuery({
     queryKey: [...jobsQueryRoot, jobPage, jobPageSize],
-    queryFn: ({ signal }) =>
-      getJobsPage({ page: jobPage, pageSize: jobPageSize, signal }),
+    queryFn: async ({ queryKey, signal }) => {
+      const page = await getJobsPage({ page: jobPage, pageSize: jobPageSize, signal });
+      // 请求期间可能已有更新的 SSE 补丁落库，逐条比较 updatedAt，别把进度写回旧值。
+      return mergeNewerJobs(queryClient.getQueryData<JobsPage>(queryKey), page);
+    },
     placeholderData: (previousData) => previousData,
     staleTime: 15_000,
     enabled: isWorkbenchActive,
@@ -169,7 +174,7 @@ export default function App() {
     void task.finally(() => setManualRefreshPending(false));
   }
 
-  function openCreateModal(initial = "", kind = "user") {
+  function openCreateModal(initial = "", kind: JobKind | "schedule" = "user") {
     setCreateInitialInput(initial);
     setCreateInitialKind(kind);
     setCreateModalOpen(true);
@@ -349,7 +354,7 @@ export default function App() {
           open={createModalOpen}
           onClose={() => setCreateModalOpen(false)}
           initialInput={createInitialInput}
-          initialKind={createInitialKind as any}
+          initialKind={createInitialKind}
         />
 
         {/* 失败推文重试抽屉 */}

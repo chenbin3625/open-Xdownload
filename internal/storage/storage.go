@@ -46,7 +46,21 @@ const libraryDownloadsCacheTTL = 30 * time.Minute
 // 筛选/计数/搜索，因此总是请求全量；该上限只为超大规模归档约束响应与缓存体积。
 const MaxLibraryDownloadsLimit = 100000
 
-const sqliteOpenOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
+// _txlock=immediate 让所有事务以 BEGIN IMMEDIATE 开始：事务里"先读后写"若用默认的
+// BEGIN DEFERRED，事务先以读者身份启动，写第一条语句时才尝试升级为写者，而
+// busy_timeout 对锁升级不生效，并发写者会立刻返回 SQLITE_BUSY(5)/SQLITE_BUSY_SNAPSHOT(517)
+// 而不是等待。开头就取写锁后，冲突走 busy_timeout 排队。
+const sqliteOpenOptions = "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
+
+// schemaVersion 是当前二进制认识的库结构版本，迁移完成后写入 PRAGMA user_version。
+// 向前迁移是可加、幂等的，但没有版本闸门时，回滚镜像会让旧二进制打开新库并正常启动，
+// 直到某个 SELECT * 撞上未知列才失败（ListDownloads/ListJobs 报
+// "missing destination name ..."），任务列表和媒体库直接不可用且看不出原因。
+// 新增列 / 新表这类结构变更时递增该值。
+const schemaVersion = 1
+
+// ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
+var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
 
 const (
 	MinArchiveScheduleIntervalMinutes = 5
@@ -70,6 +84,10 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := ensureWALMode(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	store := &Store{db: db}
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
@@ -90,7 +108,38 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// ensureWALMode 在启动时把库切到 WAL。journal_mode 是持久化的库属性，只需设置一次，
+// 因此不放在每条连接的 DSN pragma 里：切换 journal_mode 需要短暂的排他锁，而 SQLite
+// 在这一步不会走 busy handler（busy_timeout 无效），多个进程同时启动时建立连接阶段
+// 就会直接返回 SQLITE_BUSY，导致 main.go 在 Open 上 fatal。这里改为启动时设置一次并
+// 短暂重试：只要有任一方切换成功，其余方读到 wal 即视为成功。
+func ensureWALMode(db *sqlx.DB) error {
+	const attempts = 20
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		var mode string
+		if err := db.Get(&mode, `PRAGMA journal_mode`); err != nil {
+			return err
+		}
+		if strings.EqualFold(mode, "wal") {
+			return nil
+		}
+		if err := db.Get(&mode, `PRAGMA journal_mode = WAL`); err != nil {
+			lastErr = err
+		} else if strings.EqualFold(mode, "wal") {
+			return nil
+		} else {
+			lastErr = fmt.Errorf("journal_mode 切换后仍为 %q", mode)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("无法把数据库切换到 WAL 模式: %w", lastErr)
+}
+
 func (s *Store) migrate() error {
+	if err := s.checkSchemaVersion(); err != nil {
+		return err
+	}
 	schema := `
 		CREATE TABLE IF NOT EXISTS app_config (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -296,7 +345,38 @@ END;
 	if err := s.ensureDashboardCounters(); err != nil {
 		return err
 	}
-	return s.addMissingIndexes()
+	if err := s.addMissingIndexes(); err != nil {
+		return err
+	}
+	return s.setSchemaVersion()
+}
+
+// checkSchemaVersion 拒绝打开由更新版本写入的库。降级运行时旧二进制的结构体缺少新列，
+// 约 20 处 SELECT * 会在扫描时失败，因此在迁移之前就明确拒绝，而不是让它带着不完整的
+// 认知去改写结构。user_version 为 0 的旧库视为首次升级，正常向前迁移。
+func (s *Store) checkSchemaVersion() error {
+	var version int
+	if err := s.db.Get(&version, `PRAGMA user_version`); err != nil {
+		return err
+	}
+	if version > schemaVersion {
+		return fmt.Errorf("%w：库为 v%d，当前程序只支持到 v%d。请升级到对应版本的程序，或从升级前的备份恢复该库",
+			ErrSchemaTooNew, version, schemaVersion)
+	}
+	return nil
+}
+
+// setSchemaVersion 在迁移全部成功后写入版本号。PRAGMA 不支持绑定参数，故用常量拼接。
+func (s *Store) setSchemaVersion() error {
+	var version int
+	if err := s.db.Get(&version, `PRAGMA user_version`); err != nil {
+		return err
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	_, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
+	return err
 }
 
 type migrationExecutor interface {
@@ -332,7 +412,16 @@ func (s *Store) runMigrationOnce(name string, fn func(migrationExecutor) error) 
 	return tx.Commit()
 }
 
+// addMissingColumns 补齐历史库缺失的列。"检查列是否存在"与 ALTER TABLE 之间必须原子，
+// 否则多个进程同时首次启动时会有一方撞上 "duplicate column name" 而启动失败，
+// 故整体放进一个事务（DSN 已设 _txlock=immediate，事务开头即取写锁）。
 func (s *Store) addMissingColumns() error {
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // Commit 后为 no-op
+
 	columns := map[string]string{
 		"additional_cookies":         `ALTER TABLE app_config ADD COLUMN additional_cookies TEXT NOT NULL DEFAULT ''`,
 		"auto_follow_protected":      `ALTER TABLE app_config ADD COLUMN auto_follow_protected BOOLEAN NOT NULL DEFAULT 0`,
@@ -344,45 +433,45 @@ func (s *Store) addMissingColumns() error {
 	}
 	for name, statement := range columns {
 		var exists int
-		if err := s.db.Get(&exists, `SELECT COUNT(*) FROM pragma_table_info('app_config') WHERE name = ?`, name); err != nil {
+		if err := tx.Get(&exists, `SELECT COUNT(*) FROM pragma_table_info('app_config') WHERE name = ?`, name); err != nil {
 			return err
 		}
 		if exists == 0 {
-			if _, err := s.db.Exec(statement); err != nil {
+			if _, err := tx.Exec(statement); err != nil {
 				return err
 			}
 		}
 	}
 	// user_entities：增量归档早停游标（可配置开关）
 	var hasLastSeen int
-	if err := s.db.Get(&hasLastSeen, `SELECT COUNT(*) FROM pragma_table_info('user_entities') WHERE name = 'last_seen_tweet_id'`); err != nil {
+	if err := tx.Get(&hasLastSeen, `SELECT COUNT(*) FROM pragma_table_info('user_entities') WHERE name = 'last_seen_tweet_id'`); err != nil {
 		return err
 	}
 	if hasLastSeen == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE user_entities ADD COLUMN last_seen_tweet_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		if _, err := tx.Exec(`ALTER TABLE user_entities ADD COLUMN last_seen_tweet_id TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
 	var hasPreviewURL int
-	if err := s.db.Get(&hasPreviewURL, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'preview_url'`); err != nil {
+	if err := tx.Get(&hasPreviewURL, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'preview_url'`); err != nil {
 		return err
 	}
 	if hasPreviewURL == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE downloads ADD COLUMN preview_url TEXT NOT NULL DEFAULT ''`); err != nil {
+		if _, err := tx.Exec(`ALTER TABLE downloads ADD COLUMN preview_url TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
 	// downloads：媒体身份键（同一媒体内容的稳定键），用于跨推文/跨目录去重与复用。
 	var hasMediaKey int
-	if err := s.db.Get(&hasMediaKey, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'media_key'`); err != nil {
+	if err := tx.Get(&hasMediaKey, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'media_key'`); err != nil {
 		return err
 	}
 	if hasMediaKey == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE downloads ADD COLUMN media_key TEXT NOT NULL DEFAULT ''`); err != nil {
+		if _, err := tx.Exec(`ALTER TABLE downloads ADD COLUMN media_key TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) deduplicateDownloads(exec migrationExecutor) error {
@@ -437,8 +526,7 @@ func (s *Store) normalizeDownloadsMediaURL(exec migrationExecutor) error {
 	if len(pending) == 0 {
 		return nil
 	}
-	// 临时移除唯一索引，避免 UPDATE 触发 (tweet_id, media_url) 约束冲突；
-	// 随后 deduplicateDownloads 清理重复行，addMissingIndexes 重建索引。
+	// 临时移除唯一索引，避免 UPDATE 触发 (tweet_id, media_url) 约束冲突。
 	if _, err := exec.Exec(`DROP INDEX IF EXISTS idx_downloads_tweet_media_unique`); err != nil {
 		return err
 	}
@@ -446,6 +534,21 @@ func (s *Store) normalizeDownloadsMediaURL(exec migrationExecutor) error {
 		if _, err := exec.Exec(`UPDATE downloads SET media_url = ? WHERE id = ?`, downloader.NormalizeMediaURL(r.MediaURL), r.ID); err != nil {
 			return err
 		}
+	}
+	// 去重 + 重建索引必须留在本事务内：索引一旦随事务提交而持久缺失，后续每个
+	// runMigrationOnce 都会各自提交，在 addMissingIndexes 重建之前的这段窗口里，
+	// CreateDownload 的 ON CONFLICT(tweet_id, media_url) 会因为找不到对应唯一约束而
+	// 全部失败（SQL logic error ... does not match any PRIMARY KEY or UNIQUE constraint）。
+	// 规范化只会在 tweet_id <> '' 分组里造成重复，故这里复用 deduplicateDownloads 的清理；
+	// 它是幂等的，随后作为独立迁移再跑一次即为空操作。
+	if err := s.deduplicateDownloads(exec); err != nil {
+		return err
+	}
+	if _, err := exec.Exec(`
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_tweet_media_unique
+	ON downloads (tweet_id, media_url)
+	WHERE tweet_id <> ''`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -586,8 +689,10 @@ func (s *Store) EnsureConfig(ctx context.Context) error {
 		return nil
 	}
 	cfg := config.Default()
+	// OR IGNORE：上面的存在性检查与 INSERT 之间不是原子的，多个进程同时首次启动时
+	// 会有一方撞上 app_config.id 唯一约束并让启动失败。行已存在即跳过，语义不变。
 	_, err := s.db.NamedExecContext(ctx, `
-		INSERT INTO app_config (
+		INSERT OR IGNORE INTO app_config (
 			id, download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 			additional_cookies, auto_retry_failed, auto_follow_protected,
 			include_nested_tweet_media, incremental_archive,
@@ -958,12 +1063,21 @@ RETURNING *`,
 }
 
 func (s *Store) UpdateArchiveSchedule(ctx context.Context, schedule ArchiveSchedule) (ArchiveSchedule, error) {
-	current, err := s.GetArchiveSchedule(ctx, schedule.ID)
+	schedule, err := prepareArchiveScheduleForSave(schedule)
 	if err != nil {
 		return ArchiveSchedule{}, err
 	}
-	schedule, err = prepareArchiveScheduleForSave(schedule)
+	// 与 UpdateConfig 同理：next_run_at 是从当前的 enabled / interval_minutes 推算出来的，
+	// "读当前值 → 推算 → 写回"必须在一个事务里，否则两个并发编辑会各自读到旧值，
+	// 后写入的一方按过期的开关/间隔重算 next_run_at。
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
+		return ArchiveSchedule{}, err
+	}
+	defer tx.Rollback() // Commit 后为 no-op
+
+	current := ArchiveSchedule{}
+	if err := tx.GetContext(ctx, &current, `SELECT * FROM archive_schedules WHERE id = ?`, schedule.ID); err != nil {
 		return ArchiveSchedule{}, err
 	}
 	now := time.Now().UTC()
@@ -974,7 +1088,7 @@ func (s *Store) UpdateArchiveSchedule(ctx context.Context, schedule ArchiveSched
 	if nextRunAt.IsZero() {
 		nextRunAt = nextArchiveScheduleRun(now, schedule.IntervalMinutes)
 	}
-	err = s.db.GetContext(ctx, &schedule, `
+	if err := tx.GetContext(ctx, &schedule, `
 UPDATE archive_schedules SET
 	name = ?,
 	enabled = ?,
@@ -985,8 +1099,10 @@ UPDATE archive_schedules SET
 WHERE id = ?
 RETURNING *`,
 		schedule.Name, schedule.Enabled, schedule.IntervalMinutes, schedule.ItemsJSON,
-		nextRunAt, now, schedule.ID)
-	if err != nil {
+		nextRunAt, now, schedule.ID); err != nil {
+		return ArchiveSchedule{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return ArchiveSchedule{}, err
 	}
 	return hydrateArchiveSchedule(schedule)
@@ -1429,6 +1545,12 @@ func (s *Store) GetDownload(ctx context.Context, id int64) (*DownloadRecord, err
 	return &record, nil
 }
 
+// MaxJobFilesPerKind 是单个任务的文件列表里下载记录 / 失败记录各自返回的条数上限。
+// JobFiles 的结果会被整体序列化进一个 JSON 响应，五万个媒体的归档任务不加限制会产生
+// 极大的响应体。前端不分页、直接展示全部并按数组长度显示"文件数"，因此这里不取其他
+// 列表方法的 100~500，而给一个足够覆盖真实任务规模的上限，只截断异常量级的任务。
+const MaxJobFilesPerKind = 5000
+
 func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []FailedMedia, error) {
 	type jobFileRow struct {
 		SortOrder  int            `db:"sort_order"`
@@ -1444,23 +1566,33 @@ func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []
 		CreatedAt  sql.NullTime   `db:"created_at"`
 	}
 	rows := []jobFileRow{}
+	// 两个明细分支各自限流，而不是给整条 UNION ALL 加一个 LIMIT：后者在下载记录超额时
+	// 会把 failed_media 整段挤掉（排序键 sort_order 让 downloads 永远排在 failed 之前）。
 	err := s.db.SelectContext(ctx, &rows, `
-SELECT 1 AS sort_order, 'download' AS record_kind, id, job_id,
-	tweet_id, media_url, preview_url, file_path, bytes, NULL AS error, created_at
-FROM downloads
-WHERE job_id = ?
+SELECT * FROM (
+	SELECT 1 AS sort_order, 'download' AS record_kind, id, job_id,
+		tweet_id, media_url, preview_url, file_path, bytes, NULL AS error, created_at
+	FROM downloads
+	WHERE job_id = ?
+	ORDER BY created_at DESC
+	LIMIT ?
+)
 UNION ALL
-SELECT 2 AS sort_order, 'failed' AS record_kind, id, job_id,
-	NULL AS tweet_id, media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes, error, created_at
-FROM failed_media
-WHERE job_id = ?
+SELECT * FROM (
+	SELECT 2 AS sort_order, 'failed' AS record_kind, id, job_id,
+		NULL AS tweet_id, media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes, error, created_at
+	FROM failed_media
+	WHERE job_id = ?
+	ORDER BY created_at DESC
+	LIMIT ?
+)
 UNION ALL
 SELECT 0 AS sort_order, 'job' AS record_kind, id, id AS job_id,
 	NULL AS tweet_id, NULL AS media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes,
 	NULL AS error, NULL AS created_at
 FROM jobs
 WHERE id = ?
-ORDER BY sort_order, created_at DESC`, jobID, jobID, jobID)
+ORDER BY sort_order, created_at DESC`, jobID, MaxJobFilesPerKind, jobID, MaxJobFilesPerKind, jobID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1516,9 +1648,24 @@ ORDER BY job_id DESC, created_at DESC`, jobIDs)
 	return items, err
 }
 
+// downloads 的去重键由两个部分唯一索引覆盖：tweet_id 非空走
+// idx_downloads_tweet_media_unique，tweet_id 为空（直接媒体 URL 任务）走
+// idx_downloads_media_url_unique。SQLite 只在查询能"证明"满足部分索引谓词时才会使用
+// 该索引，而绑定参数证明不了，因此下面按 tweet_id 是否为空拆成两条查询，把索引谓词
+// 写成字面量。否则每次查找都退化为 downloads 全表扫描（5 万行约 2.5ms，而归档时每个
+// 媒体文件都要查一次）。tweet_id = ? 已隐含 tweet_id <> ”，语义不变。
+const (
+	downloadByTweetMediaQuery = `SELECT * FROM downloads WHERE tweet_id = ? AND media_url = ? AND tweet_id <> ''`
+	downloadByMediaURLQuery   = `SELECT * FROM downloads WHERE tweet_id = '' AND media_url = ? AND media_url <> ''`
+)
+
 func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, error) {
 	record := DownloadRecord{}
-	err := s.db.GetContext(ctx, &record, `SELECT * FROM downloads WHERE tweet_id = ? AND media_url = ?`, tweetID, mediaURL)
+	query, args := downloadByTweetMediaQuery, []any{tweetID, mediaURL}
+	if tweetID == "" {
+		query, args = downloadByMediaURLQuery, []any{mediaURL}
+	}
+	err := s.db.GetContext(ctx, &record, query, args...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1561,15 +1708,32 @@ type mediaDownloadStateRow struct {
 	CreatedAt   sql.NullTime   `db:"created_at"`
 }
 
-func (s *Store) GetMediaDownloadState(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, bool, error) {
-	row := mediaDownloadStateRow{}
-	err := s.db.GetContext(ctx, &row, `
+// 同 downloadByTweetMediaQuery：JOIN 条件里也必须带上部分索引自己的谓词字面量，
+// 否则 downloads 侧是 SCAN 而不是 SEARCH。
+const (
+	mediaDownloadStateByTweetQuery = `
 SELECT
 	CASE WHEN um.media_url IS NOT NULL THEN 1 ELSE 0 END AS unavailable,
 	d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes, d.created_at
 FROM (SELECT ? AS tweet_id, ? AS media_url) request
 LEFT JOIN unavailable_media um ON um.media_url = request.media_url
-LEFT JOIN downloads d ON d.tweet_id = request.tweet_id AND d.media_url = request.media_url`, tweetID, mediaURL)
+LEFT JOIN downloads d ON d.tweet_id = request.tweet_id AND d.media_url = request.media_url AND d.tweet_id <> ''`
+	mediaDownloadStateByMediaURLQuery = `
+SELECT
+	CASE WHEN um.media_url IS NOT NULL THEN 1 ELSE 0 END AS unavailable,
+	d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes, d.created_at
+FROM (SELECT ? AS media_url) request
+LEFT JOIN unavailable_media um ON um.media_url = request.media_url
+LEFT JOIN downloads d ON d.tweet_id = '' AND d.media_url = request.media_url AND d.media_url <> ''`
+)
+
+func (s *Store) GetMediaDownloadState(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, bool, error) {
+	row := mediaDownloadStateRow{}
+	query, args := mediaDownloadStateByTweetQuery, []any{tweetID, mediaURL}
+	if tweetID == "" {
+		query, args = mediaDownloadStateByMediaURLQuery, []any{mediaURL}
+	}
+	err := s.db.GetContext(ctx, &row, query, args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1881,9 +2045,19 @@ ORDER BY le.parent_dir, le.name, ul.name`, userID)
 	return items, err
 }
 
+const (
+	hasDownloadByTweetMediaQuery = `SELECT COUNT(*) FROM downloads WHERE tweet_id = ? AND media_url = ? AND tweet_id <> ''`
+	hasDownloadByMediaURLQuery   = `SELECT COUNT(*) FROM downloads WHERE tweet_id = '' AND media_url = ? AND media_url <> ''`
+)
+
 func (s *Store) HasDownload(ctx context.Context, tweetID string, mediaURL string) (bool, error) {
 	var count int
-	err := s.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM downloads WHERE tweet_id = ? AND media_url = ?`, tweetID, mediaURL)
+	// 谓词同 downloadByTweetMediaQuery，避免全表扫描。
+	query, args := hasDownloadByTweetMediaQuery, []any{tweetID, mediaURL}
+	if tweetID == "" {
+		query, args = hasDownloadByMediaURLQuery, []any{mediaURL}
+	}
+	err := s.db.GetContext(ctx, &count, query, args...)
 	return count > 0, err
 }
 
@@ -1978,8 +2152,12 @@ func (s *Store) DeleteAllFailedTweets(ctx context.Context) error {
 	return err
 }
 
-// PruneFailedRecords 清理早于 olderThan 的失败推文 / 失败媒体记录（M7 保留策略）。
-// downloads 历史保留：任务文件列表依赖它，不做自动删除。
+// PruneFailedRecords 清理早于 olderThan 的失败推文 / 失败媒体 / 永久不可用媒体记录
+// （M7 保留策略）。downloads 历史保留：任务文件列表依赖它，不做自动删除。
+//
+// unavailable_media 一并老化：命中该表的媒体会被无条件跳过且不再重试，一旦有记录被
+// 误判为永久失败写进去，就永远不会自愈。按 updated_at 老化意味着持续失败的媒体每次
+// 被记录都会续期，只有确实长时间没再出现的记录才会过期。
 func (s *Store) PruneFailedRecords(ctx context.Context, olderThan time.Time) (int, error) {
 	olderThan = olderThan.UTC()
 	var pruned int64
@@ -1988,6 +2166,7 @@ func (s *Store) PruneFailedRecords(ctx context.Context, olderThan time.Time) (in
 	for _, statement := range []string{
 		`DELETE FROM failed_tweets WHERE updated_at < ?`,
 		`DELETE FROM failed_media WHERE created_at < ?`,
+		`DELETE FROM unavailable_media WHERE updated_at < ?`,
 	} {
 		result, err := s.db.ExecContext(ctx, statement, olderThan)
 		if err != nil {

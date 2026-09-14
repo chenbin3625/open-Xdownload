@@ -149,6 +149,15 @@ Available service flags:
 | `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite database directory; the database file is `open-xdownload.db`. |
 | `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | Frontend static file directory; falls back to the built-in Web UI if the directory doesn't exist. |
 | n/a | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | `downloads` in the current directory | Default download directory used when the config is first generated. |
+| `-tls-cert` | `OPEN_XDOWNLOAD_TLS_CERT` | empty | TLS certificate file; enables HTTPS, HTTP/2 and HTTP/3. Must be set together with `-tls-key`. |
+| `-tls-key` | `OPEN_XDOWNLOAD_TLS_KEY` | empty | TLS private key file. |
+| `-tls-auto` | `OPEN_XDOWNLOAD_TLS_AUTO` | off | Issue a self-signed localhost certificate into `<data-dir>/tls` and serve HTTPS. For local use only. |
+| n/a | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | empty (all hosts allowed) | Comma-separated `Host` allowlist. Unset means any `Host` is accepted, which keeps reverse-proxy deployments working. Set it to your real hostnames (e.g. `nas.local,192.168.1.10`) to block DNS-rebinding attacks that resolve an attacker-controlled domain to your machine. |
+| n/a | `OPEN_XDOWNLOAD_PROXY_URL` | empty | Proxy used before a config row exists (first start / auth check). The proxy configured in the Web UI takes precedence afterwards. |
+| n/a | `OPEN_XDOWNLOAD_GUEST_BEARER` | built-in public web token | Overrides the guest bearer token used for unauthenticated endpoints. Only needed if X rotates the public token. |
+| n/a | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | empty | Supplies X credentials via the environment instead of the database. Env-provided values are never persisted and are always redacted in the API. |
+| n/a | `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` | empty | Extra cookies appended to X requests, same format as the browser `Cookie` header. |
+| n/a | `OPEN_XDOWNLOAD_FORCE_CHOWN` | `0` | Docker entrypoint only: set to `1` to force a recursive `chown` of the download directory at startup. |
 
 ## First-Time Setup
 
@@ -457,6 +466,15 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 | `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite 数据库目录，数据库文件为 `open-xdownload.db`。 |
 | `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | 前端静态文件目录；目录不存在时使用二进制内置的 Web UI。 |
 | 无 | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | 当前目录下的 `downloads` | 首次生成配置时使用的默认下载目录。 |
+| `-tls-cert` | `OPEN_XDOWNLOAD_TLS_CERT` | 空 | TLS 证书文件；启用后提供 HTTPS、HTTP/2 与 HTTP/3。需与 `-tls-key` 同时设置。 |
+| `-tls-key` | `OPEN_XDOWNLOAD_TLS_KEY` | 空 | TLS 私钥文件。 |
+| `-tls-auto` | `OPEN_XDOWNLOAD_TLS_AUTO` | 关闭 | 在 `<data-dir>/tls` 下自动签发 localhost 自签证书并启用 HTTPS，仅供本机使用。 |
+| 无 | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | 空（放行全部） | 逗号分隔的 `Host` 白名单。不设置时放行任意 `Host`，以保持反向代理部署可用；填入真实主机名（如 `nas.local,192.168.1.10`）可阻断 DNS rebinding——攻击者把自己的域名解析到你的机器来绕过同源假设。 |
+| 无 | `OPEN_XDOWNLOAD_PROXY_URL` | 空 | 配置记录尚不存在时（首次启动 / 鉴权检查）使用的代理；此后以 Web UI 中配置的代理为准。 |
+| 无 | `OPEN_XDOWNLOAD_GUEST_BEARER` | 内置公开 web token | 覆盖免登录接口使用的 guest bearer。仅当 X 轮换了该公开 token 时才需要设置。 |
+| 无 | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | 空 | 通过环境变量提供 X 凭据，替代存库方式。环境变量提供的值不会写入数据库，且在 API 中始终脱敏。 |
+| 无 | `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` | 空 | 追加到 X 请求上的额外 Cookie，格式同浏览器 `Cookie` 头。 |
+| 无 | `OPEN_XDOWNLOAD_FORCE_CHOWN` | `0` | 仅 Docker entrypoint 使用：设为 `1` 时启动阶段强制递归 `chown` 下载目录。 |
 
 ## 首次配置
 

@@ -37,11 +37,18 @@ func (m *Manager) StartPosterBackfill(ctx context.Context) (PosterBackfillStatus
 	if m.posterBackfillCancel != nil {
 		return m.posterBackfillStatus, errors.New("封面补齐已在进行中")
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	// 从调度循环的根上下文派生，并计入 m.wg：否则 Stop() 既不取消也不等待这些
+	// goroutine，SIGTERM 后 store.Close() 可能在 worker 仍在写库时执行，并残留
+	// .preview-* 临时文件。
+	runCtx, cancel := context.WithCancel(m.backgroundParent(ctx))
 	now := time.Now().UTC()
 	m.posterBackfillCancel = cancel
 	m.posterBackfillStatus = PosterBackfillStatus{Running: true, StartedAt: &now}
-	go m.runPosterBackfill(runCtx, cancel)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.runPosterBackfill(runCtx, cancel)
+	}()
 	return m.posterBackfillStatus, nil
 }
 
@@ -99,14 +106,17 @@ loop:
 		go func(record storage.DownloadRecord) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if r := recover(); r != nil {
-				log.Printf("poster backfill panic for %s: %v", record.FilePath, r)
-				m.updatePosterBackfillStatus(func(status *PosterBackfillStatus) {
-					status.Done++
-					status.Failed++
-				})
-				return
-			}
+			// recover() 只有在被 defer 的函数里直接调用才生效；写成普通语句时
+			// 恒为 nil，panic 会逃出 goroutine 打死整个进程。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("poster backfill panic for %s: %v", record.FilePath, r)
+					m.updatePosterBackfillStatus(func(status *PosterBackfillStatus) {
+						status.Done++
+						status.Failed++
+					})
+				}
+			}()
 			fetched, skipped := m.ensureVideoPoster(ctx, cfg, target, &record, "")
 			m.updatePosterBackfillStatus(func(status *PosterBackfillStatus) {
 				status.Done++

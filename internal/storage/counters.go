@@ -26,7 +26,14 @@ INSERT OR IGNORE INTO dashboard_counters (id) VALUES (1);
 `); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`
+	// DROP + CREATE 必须原子：触发器每次 Open 都重建（以便同步定义变更），多个进程
+	// 同时启动时若交错执行，会有一方撞上 "trigger already exists" 而启动失败。
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // Commit 后为 no-op
+	if _, err := tx.Exec(`
 DROP TRIGGER IF EXISTS trg_jobs_ai;
 DROP TRIGGER IF EXISTS trg_jobs_au;
 DROP TRIGGER IF EXISTS trg_jobs_ad;
@@ -35,7 +42,7 @@ DROP TRIGGER IF EXISTS trg_failed_tweets_ad;
 `); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`
+	if _, err := tx.Exec(`
 CREATE TRIGGER trg_jobs_ai AFTER INSERT ON jobs
 BEGIN
 	UPDATE dashboard_counters SET
@@ -48,15 +55,15 @@ END;
 CREATE TRIGGER trg_jobs_au AFTER UPDATE OF status ON jobs
 BEGIN
 	UPDATE dashboard_counters SET
-		active = active
+		active = MAX(0, active
 			- CASE WHEN OLD.status IN ('pending', 'resolving', 'downloading') THEN 1 ELSE 0 END
-			+ CASE WHEN NEW.status IN ('pending', 'resolving', 'downloading') THEN 1 ELSE 0 END,
-		completed = completed
+			+ CASE WHEN NEW.status IN ('pending', 'resolving', 'downloading') THEN 1 ELSE 0 END),
+		completed = MAX(0, completed
 			- CASE WHEN OLD.status = 'completed' THEN 1 ELSE 0 END
-			+ CASE WHEN NEW.status = 'completed' THEN 1 ELSE 0 END,
-		failed = failed
+			+ CASE WHEN NEW.status = 'completed' THEN 1 ELSE 0 END),
+		failed = MAX(0, failed
 			- CASE WHEN OLD.status IN ('failed', 'completed_with_errors') THEN 1 ELSE 0 END
-			+ CASE WHEN NEW.status IN ('failed', 'completed_with_errors') THEN 1 ELSE 0 END
+			+ CASE WHEN NEW.status IN ('failed', 'completed_with_errors') THEN 1 ELSE 0 END)
 	WHERE id = 1 AND OLD.status != NEW.status;
 END;
 CREATE TRIGGER trg_jobs_ad AFTER DELETE ON jobs
@@ -79,8 +86,19 @@ END;
 `); err != nil {
 		return err
 	}
-	return s.runMigrationOnce("dashboard_counters_v1", func(exec migrationExecutor) error {
-		_, err := exec.Exec(`
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// 每次 Open 都对账一次，而不是只跑一次的 runMigrationOnce：触发器每次启动都重建，
+	// 而 DashboardMeta 只读物化行，一旦计数器被外部改动/在触发器缺失期间发生过写入，
+	// 偏差会永久留下且没有任何自愈路径。对账只是 5 个 COUNT(*)，只在启动时执行。
+	return s.RecountDashboardCounters(context.Background())
+}
+
+// RecountDashboardCounters 用 jobs / failed_tweets 的真实数量重算物化计数器，
+// 修复任何已经产生的偏差。正常运行时触发器不会漂移，这里是启动时的兜底修复路径。
+func (s *Store) RecountDashboardCounters(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
 UPDATE dashboard_counters SET
 	total = (SELECT COUNT(*) FROM jobs),
 	active = (SELECT COUNT(*) FROM jobs WHERE status IN ('pending', 'resolving', 'downloading')),
@@ -88,8 +106,7 @@ UPDATE dashboard_counters SET
 	failed = (SELECT COUNT(*) FROM jobs WHERE status IN ('failed', 'completed_with_errors')),
 	failed_tweet_count = (SELECT COUNT(*) FROM failed_tweets)
 WHERE id = 1`)
-		return err
-	})
+	return err
 }
 
 func (s *Store) DashboardMeta(ctx context.Context) (JobStats, int, error) {

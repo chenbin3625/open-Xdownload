@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -785,5 +785,67 @@ func TestResolveLocalLibraryPath(t *testing.T) {
 	}
 	if _, err := resolveLocalLibraryPath(root, filepath.Join(root, "missing.jpg")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing err = %v, want os.ErrNotExist", err)
+	}
+}
+
+// 回归：下载目录同时是 /api/library/file 的沙箱根，若能被改成 "/"，任意媒体文件
+// 都会落进"下载目录内"从而可读。参见 validateDownloadDir。
+func TestUpdateConfigRejectsDownloadDirOutsideAllowedRoots(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	if err := db.EnsureConfig(context.Background()); err != nil {
+		t.Fatalf("ensure config: %v", err)
+	}
+	handler := NewServer(db, nil, nil, nil).Routes()
+
+	request := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{"downloadDir":"/"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for filesystem-root download dir, got %d: %s", response.Code, response.Body.String())
+	}
+	stored, err := db.GetConfig(context.Background())
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if stored.DownloadDir == "/" {
+		t.Fatal("download dir was persisted as filesystem root")
+	}
+}
+
+// 允许根内的下载目录必须仍然可以保存，否则修复会把正常改目录也堵死。
+func TestUpdateConfigAcceptsDownloadDirWithinAllowedRoots(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.EnsureConfig(ctx); err != nil {
+		t.Fatalf("ensure config: %v", err)
+	}
+	stored, err := db.GetConfig(ctx)
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	target := filepath.Join(stored.DownloadDir, "nested")
+	handler := NewServer(db, nil, nil, nil).Routes()
+
+	body, err := json.Marshal(map[string]string{"downloadDir": target})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(string(body)))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200 for download dir inside allowed root, got %d: %s", response.Code, response.Body.String())
 	}
 }

@@ -45,66 +45,36 @@ import {
   type DownloadRecord,
   type Job,
 } from "../lib/api";
-import { formatDateTime } from "../components/common/CommonUI";
+import { copyToClipboard, formatDateTime } from "../components/common/CommonUI";
 
 const ReactPlayer = lazy(() => import("react-player"));
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
+
+// 预览弹窗按身份定位当前文件：下标会随刷新/搜索输入改变所指的记录，
+// 弹窗开着时会静默把用户正在看的媒体换成另一份。历史记录可能没有 id，回退文件路径。
+function entryKey(item: DownloadRecord) {
+  return item.id > 0 ? String(item.id) : item.filePath;
+}
 
 export interface GalleryPageProps {
   jobs?: Job[];
   downloads?: DownloadRecord[];
 }
 
-const copyToClipboard = async (text: string, label = "路径") => {
-  let copied = false;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      copied = true;
-    }
-  } catch {
-    copied = false;
-  }
-  if (!copied) {
-    try {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      copied = document.execCommand("copy");
-      textarea.remove();
-    } catch {
-      copied = false;
-    }
-  }
-  if (copied) {
-    notification.success({
-      message: "复制成功",
-      description: `已复制${label}到剪贴板`,
-    });
-  } else {
-    notification.warning({
-      message: "复制失败",
-      description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
-    });
-  }
-};
-
-// VideoPoster 依次尝试海报来源：记录里的预览图直链（浏览器直接加载，最快），
-// 失败后回退服务端预览端点（服务端经代理回源并缓存到磁盘，之后命中本地文件），
-// 全部失败才显示占位图标。旧实现失败后仅隐藏图片，历史媒体会永远停在占位图。
+// VideoPoster 依次尝试海报来源：优先服务端预览端点（经配置的代理回源并缓存到磁盘，
+// 之后直接命中本地文件），失败后才回退记录里的预览图直链，全部失败才显示占位图标。
+// 直链指向 twimg，浏览器直接加载会把访客 IP 与 Referer 暴露给 X 的 CDN，
+// 也绕过了用户配置的代理，因此只作为兜底并禁止携带 Referer。
 // 状态保存在单个卡片内，一张海报失败不会触发整页重渲染。
 function VideoPoster({ item, fileName, onOpen }: { item: DownloadRecord; fileName: string; onOpen: () => void }) {
   const sources = useMemo(() => {
-    const list: string[] = [];
-    if (item.previewUrl && !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)) {
-      list.push(item.previewUrl);
-    }
+    const list: { url: string; remote: boolean }[] = [];
     if (item.id > 0) {
-      list.push(`/api/library/downloads/${item.id}/preview`);
+      list.push({ url: `/api/library/downloads/${item.id}/preview`, remote: false });
+    }
+    if (item.previewUrl && !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)) {
+      list.push({ url: item.previewUrl, remote: true });
     }
     return list;
   }, [item.previewUrl, item.id]);
@@ -124,10 +94,11 @@ function VideoPoster({ item, fileName, onOpen }: { item: DownloadRecord; fileNam
         </span>
         {sourceIndex < sources.length && (
           <img
-            src={sources[sourceIndex]}
+            src={sources[sourceIndex].url}
             alt={fileName}
             loading="lazy"
             decoding="async"
+            referrerPolicy={sources[sourceIndex].remote ? "no-referrer" : undefined}
             onError={() => setSourceIndex((current) => current + 1)}
             className="relative z-10 h-full w-full bg-slate-950 object-contain transition-transform group-hover:scale-[1.02]"
           />
@@ -143,14 +114,12 @@ const GalleryCard = React.memo(function GalleryCard({
   item,
   isVideo,
   isPreviewableImage,
-  index,
   onOpen,
 }: {
   item: DownloadRecord;
   isVideo: boolean;
   isPreviewableImage: boolean;
-  index: number;
-  onOpen: (index: number) => void;
+  onOpen: (previewId: string) => void;
 }) {
   const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
   const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
@@ -163,11 +132,16 @@ const GalleryCard = React.memo(function GalleryCard({
       cover={
         <div className="aspect-square relative flex items-center justify-center overflow-hidden" style={{ background: "var(--app-surface-muted)" }}>
           {isVideo ? (
-            <VideoPoster item={item} fileName={fileName} onOpen={() => onOpen(index)} />
+            <VideoPoster item={item} fileName={fileName} onOpen={() => onOpen(entryKey(item))} />
           ) : isPreviewableImage ? (
             // 兜底图标垫在图片下层：文件缺失/加载失败时隐藏 img 露出占位，
-            // 避免出现裂图。
-            <span className="relative block h-full w-full">
+            // 避免出现裂图。用真实 button 承载点击，键盘与读屏可达。
+            <button
+              type="button"
+              className="relative block h-full w-full cursor-pointer border-0 bg-transparent p-0"
+              onClick={() => onOpen(entryKey(item))}
+              aria-label={`预览 ${fileName}`}
+            >
               <span className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-400">
                 <PictureOutlined className="text-3xl" />
                 <span className="text-[11px] font-mono">{ext}</span>
@@ -175,15 +149,14 @@ const GalleryCard = React.memo(function GalleryCard({
               <img
                 src={previewURL}
                 alt={fileName}
-                onClick={() => onOpen(index)}
                 loading="lazy"
                 decoding="async"
                 onError={(event) => {
                   event.currentTarget.style.display = "none";
                 }}
-                className="relative z-10 h-full w-full cursor-pointer object-contain"
+                className="relative z-10 h-full w-full object-contain"
               />
-            </span>
+            </button>
           ) : (
             <div className="flex flex-col items-center gap-1 text-slate-400">
               <PictureOutlined className="text-3xl text-slate-400" />
@@ -252,7 +225,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   const [filterType, setFilterType] = useState<string>("all");
   const [searchFilter, setSearchFilter] = useState<string>("");
   const [userFilter, setUserFilter] = useState<string>("all");
-  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [previewId, setPreviewId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 60;
   const deferredSearchFilter = useDeferredValue(searchFilter);
@@ -382,28 +355,42 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
     [currentPage, filteredEntries],
   );
 
+  // 下标由身份反查，列表变化后仍指向同一个文件；文件被筛掉/删除时关闭弹窗。
+  const previewIndex = useMemo(
+    () => (previewId === null ? -1 : filteredEntries.findIndex((entry) => entryKey(entry.item) === previewId)),
+    [filteredEntries, previewId],
+  );
+  const previewEntry = previewIndex >= 0 ? filteredEntries[previewIndex] : undefined;
+
   useEffect(() => {
-    if (previewIndex !== null && previewIndex >= filteredEntries.length) {
-      setPreviewIndex(null);
+    if (previewId !== null && previewIndex === -1) {
+      setPreviewId(null);
       return;
     }
-    if (previewIndex === null) return;
+    if (previewIndex === -1) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
-        setPreviewIndex((current) => {
-          if (current === null || filteredEntries.length === 0) return current;
-          const delta = event.key === "ArrowRight" ? 1 : -1;
-          return (current + delta + filteredEntries.length) % filteredEntries.length;
-        });
+        if (filteredEntries.length === 0) return;
+        const delta = event.key === "ArrowRight" ? 1 : -1;
+        const nextIndex = (previewIndex + delta + filteredEntries.length) % filteredEntries.length;
+        setPreviewId(entryKey(filteredEntries[nextIndex].item));
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [filteredEntries.length, previewIndex]);
+  }, [filteredEntries, previewId, previewIndex]);
 
   // 稳定的 onOpen 引用是 GalleryCard memo 生效的前提。
-  const openPreview = useCallback((index: number) => setPreviewIndex(index), []);
+  const openPreview = useCallback((nextId: string) => setPreviewId(nextId), []);
+  const stepPreview = useCallback(
+    (delta: number) => {
+      if (filteredEntries.length === 0 || previewIndex === -1) return;
+      const nextIndex = (previewIndex + delta + filteredEntries.length) % filteredEntries.length;
+      setPreviewId(entryKey(filteredEntries[nextIndex].item));
+    },
+    [filteredEntries, previewIndex],
+  );
 
   return (
     <div className="page-stack">
@@ -496,20 +483,16 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
         </Card>
       ) : (
         <Row gutter={[16, 16]}>
-          {visibleEntries.map(({ item, isVideo, isImage, isGif }, visibleIndex) => {
-            const filteredIndex = (currentPage - 1) * pageSize + visibleIndex;
-            return (
-              <Col xs={24} sm={12} md={8} lg={6} xl={4} key={item.id || item.filePath}>
-                <GalleryCard
-                  item={item}
-                  isVideo={isVideo}
-                  isPreviewableImage={isImage || isGif}
-                  index={filteredIndex}
-                  onOpen={openPreview}
-                />
-              </Col>
-            );
-          })}
+          {visibleEntries.map(({ item, isVideo, isImage, isGif }) => (
+            <Col xs={24} sm={12} md={8} lg={6} xl={4} key={item.id || item.filePath}>
+              <GalleryCard
+                item={item}
+                isVideo={isVideo}
+                isPreviewableImage={isImage || isGif}
+                onOpen={openPreview}
+              />
+            </Col>
+          ))}
         </Row>
       )}
 
@@ -527,26 +510,20 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       )}
 
       <Modal
-        open={previewIndex !== null}
-        onCancel={() => setPreviewIndex(null)}
+        open={previewEntry !== undefined}
+        onCancel={() => setPreviewId(null)}
         footer={null}
         width="min(94vw, 1100px)"
         centered
         destroyOnHidden
         title={
-          previewIndex === null
-            ? undefined
-            : (() => {
-                const entry = filteredEntries[previewIndex];
-                const item = entry?.item;
-                return item
-                  ? `${item.userName || "未识别用户"}${item.userScreenName ? `  @${item.userScreenName}` : ""}`
-                  : undefined;
-              })()
+          previewEntry
+            ? `${previewEntry.item.userName || "未识别用户"}${previewEntry.item.userScreenName ? `  @${previewEntry.item.userScreenName}` : ""}`
+            : undefined
         }
       >
-        {previewIndex !== null && filteredEntries[previewIndex] && (() => {
-          const { item, isVideo } = filteredEntries[previewIndex];
+        {previewEntry && (() => {
+          const { item, isVideo } = previewEntry;
           const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
           const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
           return (
@@ -571,7 +548,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
                 <Button
                   shape="circle"
                   icon={<LeftOutlined />}
-                  onClick={() => setPreviewIndex((previewIndex - 1 + filteredEntries.length) % filteredEntries.length)}
+                  onClick={() => stepPreview(-1)}
                   className="!absolute !left-3 !top-1/2 !-translate-y-1/2 !bg-black/60 !text-white !border-white/30"
                   aria-label="上一个文件"
                 />
@@ -580,7 +557,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
                 <Button
                   shape="circle"
                   icon={<RightOutlined />}
-                  onClick={() => setPreviewIndex((previewIndex + 1) % filteredEntries.length)}
+                  onClick={() => stepPreview(1)}
                   className="!absolute !right-3 !top-1/2 !-translate-y-1/2 !bg-black/60 !text-white !border-white/30"
                   aria-label="下一个文件"
                 />

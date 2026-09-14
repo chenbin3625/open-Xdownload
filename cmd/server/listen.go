@@ -39,8 +39,12 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       90 * time.Second,
-		Protocols:         protocols,
+		// 限制读完整个请求体的时间，避免慢速 body 长期占用连接。
+		// 刻意不设 WriteTimeout：SSE（/api/events）与媒体文件下载都是长连接，
+		// 全局写超时会把它们直接掐断；SSE 已在处理器内设置单次写截止时间。
+		ReadTimeout: 60 * time.Second,
+		IdleTimeout: 90 * time.Second,
+		Protocols:   protocols,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			NextProtos: []string{"h2", "http/1.1"},

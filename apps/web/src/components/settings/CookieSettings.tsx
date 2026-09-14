@@ -57,6 +57,7 @@ export const cookieSettingsTips = {
 };
 
 export type BackupCookieRow = {
+  id: string;
   authToken: string;
   csrfToken: string;
 };
@@ -92,7 +93,7 @@ export function CookieSettingsFields({
         <Row gutter={[16, 0]}>
           <Col xs={24} lg={12}>
             <Form.Item label="auth_token" tooltip={cookieSettingsTips.authToken}>
-              <Input
+              <Input.Password
                 aria-label="主 Cookie auth_token"
                 prefix={<KeyOutlined />}
                 suffix={(
@@ -111,7 +112,7 @@ export function CookieSettingsFields({
           </Col>
           <Col xs={24} lg={12}>
             <Form.Item label="ct0" tooltip={cookieSettingsTips.csrfToken}>
-              <Input
+              <Input.Password
                 aria-label="主 Cookie ct0"
                 prefix={<KeyOutlined />}
                 suffix={(
@@ -297,7 +298,7 @@ export function BackupCookieInputs({
           return row;
         }
         if (isRedactedBackupCookieRow(row) && nextValue !== redactedCookieValue) {
-          return { authToken: field === "authToken" ? nextValue : "", csrfToken: field === "csrfToken" ? nextValue : "" };
+          return { id: row.id, authToken: field === "authToken" ? nextValue : "", csrfToken: field === "csrfToken" ? nextValue : "" };
         }
         return { ...row, [field]: nextValue };
       });
@@ -348,9 +349,9 @@ export function BackupCookieInputs({
           const client = aggregateClients ? undefined : clients[index];
           const statusProps = { aggregateClients, checked, checking, client, errorMessage, pairComplete };
           return (
-            <Row key={index} gutter={[8, 8]} align="middle">
+            <Row key={row.id} gutter={[8, 8]} align="middle">
               <Col xs={24} md={11}>
-                <Input
+                <Input.Password
                   aria-label={`备用 Cookie ${index + 1} auth_token`}
                   prefix={<KeyOutlined />}
                   suffix={(
@@ -365,7 +366,7 @@ export function BackupCookieInputs({
                 />
               </Col>
               <Col xs={24} md={11}>
-                <Input
+                <Input.Password
                   aria-label={`备用 Cookie ${index + 1} ct0`}
                   prefix={<KeyOutlined />}
                   suffix={(
@@ -398,8 +399,13 @@ export function BackupCookieInputs({
   );
 }
 
+let backupCookieRowSeq = 0;
+
+// 行需要稳定 id：用数组下标做 key 时，删掉中间一行会让 React 复用错位的输入框，
+// 焦点与输入法状态会落到别的 token 上。
 export function emptyBackupCookieRow(): BackupCookieRow {
-  return { authToken: "", csrfToken: "" };
+  backupCookieRowSeq += 1;
+  return { id: `backup-cookie-${backupCookieRowSeq}`, authToken: "", csrfToken: "" };
 }
 
 export function parseBackupCookieRows(value: string): BackupCookieRow[] {
@@ -408,7 +414,7 @@ export function parseBackupCookieRows(value: string): BackupCookieRow[] {
     return [emptyBackupCookieRow()];
   }
   if (trimmed === "********") {
-    return [{ authToken: "********", csrfToken: "********" }];
+    return [{ ...emptyBackupCookieRow(), authToken: "********", csrfToken: "********" }];
   }
 
   const jsonRows = parseBackupCookieRowsFromJSON(trimmed);
@@ -461,7 +467,7 @@ export function parseBackupCookieRowsFromJSON(value: string): BackupCookieRow[] 
       const record = item as Record<string, unknown>;
       const authToken = firstString(record.authToken, record.auth_token);
       const csrfToken = firstString(record.csrfToken, record.ct0);
-      return authToken || csrfToken ? [{ authToken, csrfToken }] : [];
+      return authToken || csrfToken ? [{ ...emptyBackupCookieRow(), authToken, csrfToken }] : [];
     });
   } catch {
     return [];

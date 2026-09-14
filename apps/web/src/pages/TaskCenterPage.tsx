@@ -14,6 +14,7 @@ import {
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Alert,
   Avatar,
   Badge,
   Button,
@@ -48,6 +49,7 @@ import {
 } from "../lib/api";
 import {
   clampPercent,
+  copyToClipboard,
   formatDateTime,
   getErrorMessage,
   kindLabel,
@@ -165,6 +167,11 @@ export function TaskCenterPage({
       return true;
     });
   }, [jobs, statusFilter, kindFilter, searchKeyword]);
+
+  // 过滤只作用于当前页的 items，服务端总数无法反映筛选结果：
+  // 一旦启用筛选就改用本页命中数驱动分页，避免“显示 2 条 / 共 120 条”的自相矛盾。
+  const hasActiveFilter =
+    statusFilter !== "all" || kindFilter !== "all" || searchKeyword.trim() !== "";
 
   const activeCount = useMemo(
     () => jobs.filter((j) => jobStatusBucket(j.status) === "active").length,
@@ -396,33 +403,35 @@ export function TaskCenterPage({
         styles={{ body: { padding: "12px 16px" } }}
       >
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 flex-wrap">
-          {/* 状态分类 Segmented */}
-          <Segmented
-            value={statusFilter}
-            onChange={(val) => setStatusFilter(val as StatusFilterType)}
-            options={[
-              { label: `全部 (${jobs.length})`, value: "all" },
-              {
-                label: (
-                  <Space orientation="horizontal" size={4}>
-                    {activeCount > 0 && <Badge status="processing" />}
-                    <span>下载中 ({activeCount})</span>
-                  </Space>
-                ),
-                value: "active",
-              },
-              { label: `已完成 (${completedCount})`, value: "completed" },
-              {
-                label: (
-                  <Space orientation="horizontal" size={4}>
-                    {failedCount > 0 && <Badge status="error" />}
-                    <span>失败 / 异常 ({failedCount})</span>
-                  </Space>
-                ),
-                value: "failed",
-              },
-            ]}
-          />
+          {/* 状态分类 Segmented：括号内均为当前页计数，不是全局统计 */}
+          <Tooltip title="括号内为当前页的任务计数，全局统计见侧边栏">
+            <Segmented
+              value={statusFilter}
+              onChange={(val) => setStatusFilter(val as StatusFilterType)}
+              options={[
+                { label: `本页全部 (${jobs.length})`, value: "all" },
+                {
+                  label: (
+                    <Space orientation="horizontal" size={4}>
+                      {activeCount > 0 && <Badge status="processing" />}
+                      <span>本页下载中 ({activeCount})</span>
+                    </Space>
+                  ),
+                  value: "active",
+                },
+                { label: `本页已完成 (${completedCount})`, value: "completed" },
+                {
+                  label: (
+                    <Space orientation="horizontal" size={4}>
+                      {failedCount > 0 && <Badge status="error" />}
+                      <span>本页失败 / 异常 ({failedCount})</span>
+                    </Space>
+                  ),
+                  value: "failed",
+                },
+              ]}
+            />
+          </Tooltip>
 
           {/* 搜索、类型选择与重试操作 */}
           <Space size={10} wrap>
@@ -474,9 +483,9 @@ export function TaskCenterPage({
           scroll={{ x: 860 }}
           loading={tableLoading}
           pagination={{
-            current: pagination.page,
+            current: hasActiveFilter ? 1 : pagination.page,
             pageSize: pagination.pageSize,
-            total: pagination.total,
+            total: hasActiveFilter ? filteredJobs.length : pagination.total,
             showSizeChanger: true,
             pageSizeOptions: ["10", "20", "50", "100"],
             onChange: (page, pageSize) => {
@@ -486,7 +495,10 @@ export function TaskCenterPage({
                 onPageChange(page);
               }
             },
-            showTotal: (total) => `共 ${total} 个任务`,
+            showTotal: (total) =>
+              hasActiveFilter
+                ? `本页命中 ${total} 个任务（筛选仅作用于当前页，第 ${pagination.page} 页）`
+                : `共 ${total} 个任务`,
           }}
           expandable={{
             expandedRowRender: (record) => (
@@ -518,11 +530,6 @@ function ExpandedJobDetails({
 
   const downloads = filesQuery.data?.downloads ?? [];
   const failed = filesQuery.data?.failed ?? [];
-
-  const copyPath = (text: string) => {
-    void navigator.clipboard.writeText(text);
-    notification.success({ message: "已复制到剪贴板", description: text });
-  };
 
   return (
     <div className="p-4 rounded-lg space-y-3 m-2" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)" }}>
@@ -565,6 +572,19 @@ function ExpandedJobDetails({
           <Spin />
           <Typography.Text type="secondary" className="block mt-2" style={{ fontSize: 12 }}>正在获取已下载媒体文件清单...</Typography.Text>
         </div>
+      ) : filesQuery.isError ? (
+        // 请求失败与“任务没有文件”是两回事，必须区分提示，否则无法判断该不该重试。
+        <Alert
+          type="error"
+          showIcon
+          message="读取文件清单失败"
+          description={getErrorMessage(filesQuery.error)}
+          action={
+            <Button size="small" onClick={() => void filesQuery.refetch()}>
+              重试
+            </Button>
+          }
+        />
       ) : downloads.length === 0 && failed.length === 0 ? (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档的文件记录" />
       ) : (
@@ -595,7 +615,7 @@ function ExpandedJobDetails({
                       type="text"
                       size="small"
                       icon={<CopyOutlined />}
-                      onClick={() => copyPath(dl.filePath)}
+                      onClick={() => void copyToClipboard(dl.filePath, "本地路径")}
                     />
                   </Tooltip>
                 </div>
