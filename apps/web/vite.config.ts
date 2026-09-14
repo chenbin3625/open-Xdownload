@@ -97,7 +97,10 @@ export default defineConfig({
     },
   },
   test: {
+    // 默认 node：纯逻辑测试最快。组件测试在文件顶部用
+    // `// @vitest-environment jsdom` 单独切换，避免全局装载 DOM。
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["src/test/setup.ts"],
   },
 });
