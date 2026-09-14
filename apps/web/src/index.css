@@ -1,65 +1,167 @@
 @import "tailwindcss";
 
 /* =========================================================
+   暗色模式：由 <html class="dark"> 驱动，不用 media query，
+   这样用户的显式选择能覆盖系统偏好（见 lib/useTheme.ts）。
+   ========================================================= */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* =========================================================
    设计令牌
-   单一浅色主题；主题色统一为 sky-500 (#0ea5e9)，不再混用 indigo/cyan。
-   间距、圆角、层级都以变量收口，避免各页面各写一套。
+   语义命名（surface / border / text-muted），不是色阶命名。
+   组件只引用语义令牌，明暗两套值在下方 :root / .dark 里各给一份，
+   页面代码因此无需写任何 dark: 变体来处理配色。
    ========================================================= */
 
 @theme {
+  /* 品牌色阶：仅这一处定义，供 bg-brand-500 / text-brand-600 等工具类使用 */
   --color-brand-50: #f0f9ff;
   --color-brand-100: #e0f2fe;
   --color-brand-200: #bae6fd;
+  --color-brand-300: #7dd3fc;
   --color-brand-400: #38bdf8;
   --color-brand-500: #0ea5e9;
   --color-brand-600: #0284c7;
   --color-brand-700: #0369a1;
+  --color-brand-800: #075985;
+  --color-brand-900: #0c4a6e;
+
+  /* 语义色：值来自下方 CSS 变量，随明暗切换 */
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-hover: var(--surface-hover);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-body: var(--fg-body);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  /* 状态色 */
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+
+  /* 字体 */
+  --font-sans: "Inter var", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 圆角与阴影：现代化重构统一收敛到这几档 */
+  --radius-card: 0.75rem;
+  --radius-control: 0.5rem;
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.04), 0 1px 3px rgb(15 23 42 / 0.06);
+  --shadow-raised: 0 6px 20px rgb(15 23 42 / 0.08);
+  --shadow-overlay: 0 16px 48px rgb(15 23 42 / 0.18);
 }
 
 @layer base {
   :root {
-    /* 主题色 */
-    --brand-50: #f0f9ff;
-    --brand-100: #e0f2fe;
-    --brand-200: #bae6fd;
-    --brand-400: #38bdf8;
-    --brand-500: #0ea5e9;
-    --brand-600: #0284c7;
+    --canvas: #f5f7fa;
+    --surface: #ffffff;
+    --surface-muted: #f8fafc;
+    --surface-hover: #f1f5f9;
+    --line: #e5e9f0;
+    --line-strong: #d7dee8;
+    --fg: #0f172a;
+    --fg-body: #334155;
+    --fg-muted: #64748b;
+    --fg-subtle: #94a3b8;
 
-    /* 表面与描边 */
-    --app-bg: #f5f7fa;
-    --app-surface: #ffffff;
-    --app-surface-muted: #f8fafc;
-    --app-border: #e5e9f0;
-    --app-border-strong: #d7dee8;
-    --app-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-    --app-shadow-raised: 0 6px 20px rgba(15, 23, 42, 0.07);
+    --success: #059669;
+    --success-soft: #ecfdf5;
+    --warning: #d97706;
+    --warning-soft: #fffbeb;
+    --danger: #dc2626;
+    --danger-soft: #fef2f2;
+    --info: #0284c7;
+    --info-soft: #f0f9ff;
+  }
 
-    /* 文本层级 */
-    --text-strong: #0f172a;
-    --text-body: #334155;
-    --text-muted: #64748b;
-    --text-subtle: #94a3b8;
+  .dark {
+    /* 暗色不用纯黑：slate-950/900 层级在长时间浏览下更稳定，
+       且卡片与背景需要足够对比才能看出层次。 */
+    --canvas: #0b1120;
+    --surface: #111827;
+    --surface-muted: #172033;
+    --surface-hover: #1e293b;
+    --line: #24304a;
+    --line-strong: #334155;
+    --fg: #f1f5f9;
+    --fg-body: #cbd5e1;
+    --fg-muted: #94a3b8;
+    --fg-subtle: #64748b;
 
-    /* 统一间距节奏：页面块间距 / 主区留白 / 卡片内边距 */
-    --gap-section: 16px;
-    --gap-inline: 8px;
-    --pad-main: 24px;
-    --pad-card: 20px;
-    --radius-card: 12px;
+    /* 暗色下状态色需提亮才够对比，soft 底色改为低透明度叠加 */
+    --success: #34d399;
+    --success-soft: rgb(16 185 129 / 0.12);
+    --warning: #fbbf24;
+    --warning-soft: rgb(245 158 11 / 0.12);
+    --danger: #f87171;
+    --danger-soft: rgb(239 68 68 / 0.12);
+    --info: #38bdf8;
+    --info-soft: rgb(14 165 233 / 0.12);
+
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px rgb(0 0 0 / 0.2);
+    --shadow-raised: 0 6px 20px rgb(0 0 0 / 0.35);
+    --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.5);
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  /* 首屏防闪：CSP 为 script-src 'self'，不能用内联脚本在 CSS 前抢先写类名。
+     这里让「未显式选择过主题」的访客直接按系统偏好上暗色令牌，
+     JS 起来后 useTheme 再写上明确的 .dark / .light 类接管。 */
+  @media (prefers-color-scheme: dark) {
+    html:not(.light):not(.dark) {
+      color-scheme: dark;
+
+      --canvas: #0b1120;
+      --surface: #111827;
+      --surface-muted: #172033;
+      --surface-hover: #1e293b;
+      --line: #24304a;
+      --line-strong: #334155;
+      --fg: #f1f5f9;
+      --fg-body: #cbd5e1;
+      --fg-muted: #94a3b8;
+      --fg-subtle: #64748b;
+
+      --success: #34d399;
+      --success-soft: rgb(16 185 129 / 0.12);
+      --warning: #fbbf24;
+      --warning-soft: rgb(245 158 11 / 0.12);
+      --danger: #f87171;
+      --danger-soft: rgb(239 68 68 / 0.12);
+      --info: #38bdf8;
+      --info-soft: rgb(14 165 233 / 0.12);
+    }
   }
 
   body {
     margin: 0;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--app-bg);
-    color: var(--text-strong);
+    font-family: var(--font-sans);
+    background: var(--canvas);
+    color: var(--fg);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
 
-  code, pre, .font-mono {
-    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  code,
+  pre {
+    font-family: var(--font-mono);
   }
 
   svg {
@@ -67,73 +169,17 @@
   }
 
   ::selection {
-    background-color: var(--brand-500);
+    background-color: var(--color-brand-500);
     color: #ffffff;
   }
-}
 
-/* =========================================================
-   应用骨架
-   ========================================================= */
-
-.app-shell {
-  background: var(--app-bg);
-}
-
-.app-sidebar {
-  background: var(--app-surface);
-  border-right: 1px solid var(--app-border);
-}
-
-.app-header {
-  background: var(--app-surface);
-  border-bottom: 1px solid var(--app-border);
-}
-
-.app-main {
-  background: transparent;
-  padding: var(--pad-main);
-}
-
-.app-content {
-  width: 100%;
-  max-width: 1280px;
-  margin: 0 auto;
-}
-
-/* 页面块之间的统一竖向节奏 */
-.page-stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-section);
-}
-
-/* 页头：标题 + 描述 + 右侧操作，底部一条主题色短线 */
-.page-header {
-  position: relative;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--app-border);
-}
-
-.page-header::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  bottom: -1px;
-  width: 44px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--brand-500);
-}
-
-@media (max-width: 767px) {
-  :root {
-    --pad-main: 16px;
-    --pad-card: 16px;
-  }
-
-  .page-header {
-    padding-bottom: 12px;
+  /* 全局焦点环。此前焦点样式完全由 antd 的 CSS-in-JS 提供，
+     移除 antd 后若不补这一层，键盘用户会彻底失去焦点指示。
+     只用 focus-visible，避免鼠标点击也出现焦点环。 */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: var(--radius-control);
   }
 }
 
@@ -141,26 +187,28 @@
    滚动条
    ========================================================= */
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+@layer base {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
-::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.28);
-  border-radius: 9999px;
-}
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--fg-subtle) 32%, transparent);
+    border-radius: 9999px;
+  }
 
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--fg-subtle) 55%, transparent);
+  }
 }
 
 /* =========================================================
-   全局顶部加载进度条
+   动画
    ========================================================= */
 
 @keyframes global-loading-bar-slide {
@@ -172,40 +220,206 @@
   }
 }
 
-.global-loading-bar-slide {
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes drawer-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes drawer-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.animate-loading-bar {
   animation: global-loading-bar-slide 1.1s ease-in-out infinite;
 }
 
+.animate-overlay-in {
+  animation: overlay-in 160ms ease-out;
+}
+
+.animate-dialog-in {
+  animation: dialog-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-drawer-in-left {
+  animation: drawer-in-left 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-drawer-in-right {
+  animation: drawer-in-right 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-toast-in {
+  animation: toast-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-skeleton {
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+/* 尊重系统的减弱动态偏好：完全停掉装饰性动画，
+   加载条改为静止的柔和脉冲以保留“进行中”的语义。 */
 @media (prefers-reduced-motion: reduce) {
-  .global-loading-bar-slide {
-    animation-duration: 2.5s;
+  .animate-overlay-in,
+  .animate-dialog-in,
+  .animate-drawer-in-left,
+  .animate-drawer-in-right,
+  .animate-toast-in {
+    animation: none;
+  }
+
+  .animate-loading-bar {
+    animation: skeleton-pulse 2s ease-in-out infinite;
+  }
+
+  .animate-skeleton {
+    animation-duration: 3s;
   }
 }
 
 /* =========================================================
-   Ant Design 轻量对齐
-   绝大部分外观交给 ConfigProvider token，这里只补 token 覆盖不到的细节。
+   过渡期兼容层
+   页面骨架类（.page-stack / .page-header 等）与 antd 覆盖规则暂留，
+   使每个阶段的构建都能通过。各页面迁移到 Tailwind 工具类后，
+   这一整块会在收尾阶段删除。
    ========================================================= */
+
+.app-shell {
+  background: var(--canvas);
+}
+
+.app-sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+}
+
+.app-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-main {
+  background: transparent;
+  padding: 1.5rem;
+}
+
+.app-content {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.page-header {
+  position: relative;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.page-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 44px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--color-brand-500);
+}
+
+@media (max-width: 767px) {
+  .app-main {
+    padding: 1rem;
+  }
+
+  .page-header {
+    padding-bottom: 12px;
+  }
+}
+
+/* 旧类名：GlobalLoadingBar 迁移后删除 */
+.global-loading-bar-slide {
+  animation: global-loading-bar-slide 1.1s ease-in-out infinite;
+}
 
 .ant-table-thead > tr > th {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--fg-muted);
 }
 
-/* 设置页分节标题：与卡片标题保持同一字阶 */
 .settings-section .ant-card-head {
   min-height: 52px;
-  padding-inline: var(--pad-card);
+  padding-inline: 1.25rem;
 }
 
 .settings-section .ant-card-body {
-  padding: var(--pad-card);
+  padding: 1.25rem;
 }
 
-/* 表单末行去掉多余底部间距，避免卡片底部留白过大 */
 .settings-section .ant-form-item:last-child {
   margin-bottom: 0;
 }

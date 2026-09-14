@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { hydrateAppQueries, takeAppBootstrap } from "./lib/bootstrap";
 import { readRouteState } from "./lib/useRouteState";
+import { applyTheme, readThemePreference, resolveTheme } from "./lib/useTheme";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,6 +17,9 @@ const queryClient = new QueryClient({
     },
   },
 });
+// 在首次渲染前落定主题类名，避免明暗切换时的闪白。
+applyTheme(resolveTheme(readThemePreference()));
+
 const bootstrap = takeAppBootstrap();
 if (bootstrap) {
   const route = readRouteState();
