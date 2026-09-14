@@ -1,5 +1,6 @@
 import { useIsFetching, useIsMutating } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
+import { cn } from "../../lib/cn";
 
 const SHOW_DELAY_MS = 300;
 
@@ -23,14 +24,18 @@ export function GlobalLoadingBar() {
   return (
     <div
       aria-hidden
-      className={`fixed top-0 left-0 right-0 z-[1200] h-[3px] pointer-events-none overflow-hidden transition-opacity duration-200 ${
-        visible ? "opacity-100" : "opacity-0"
-      }`}
+      className={cn(
+        "pointer-events-none fixed inset-x-0 top-0 z-[1200] h-[3px] overflow-hidden",
+        "transition-opacity duration-200",
+        visible ? "opacity-100" : "opacity-0",
+      )}
     >
       <div
-        className={`h-full w-2/5 rounded-full bg-gradient-to-r from-sky-300 via-sky-500 to-sky-600 ${
-          visible ? "global-loading-bar-slide" : ""
-        }`}
+        className={cn(
+          "h-full w-2/5 rounded-full",
+          "bg-gradient-to-r from-brand-300 via-brand-500 to-brand-600",
+          visible && "animate-loading-bar",
+        )}
       />
     </div>
   );

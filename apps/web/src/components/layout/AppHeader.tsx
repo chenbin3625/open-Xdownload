@@ -1,11 +1,11 @@
-import {
-  MenuOutlined,
-  ReloadOutlined,
-  SearchOutlined,
-  ThunderboltOutlined,
-} from "@ant-design/icons";
-import { Badge, Button, Flex, Input, Tag, Tooltip } from "antd";
+import { Menu, Moon, RefreshCw, Search, Sun, Zap } from "lucide-react";
 import React, { useState } from "react";
+import { cn } from "../../lib/cn";
+import { useTheme } from "../../lib/useTheme";
+import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
+import { Tooltip } from "../ui/Overlay";
+import { StatusDot, Tag } from "../ui/Tag";
 
 export interface AppHeaderProps {
   sseConnected: boolean;
@@ -29,6 +29,7 @@ export function AppHeader({
   showMenuButton = false,
 }: AppHeaderProps) {
   const [quickInput, setQuickInput] = useState("");
+  const { resolved, toggle } = useTheme();
 
   const handleSubmit = () => {
     const trimmed = quickInput.trim();
@@ -38,34 +39,30 @@ export function AppHeader({
   };
 
   return (
-    <header className="app-header shrink-0 sticky top-0 z-20">
-      <Flex
-        align="center"
-        justify="space-between"
-        gap={12}
-        style={{ height: 60, paddingInline: 16 }}
-      >
+    <header className="sticky top-0 z-20 shrink-0 border-b border-line bg-surface">
+      <div className="flex h-15 items-center justify-between gap-3 px-4">
         {showMenuButton && (
           <Button
-            type="text"
-            icon={<MenuOutlined />}
+            variant="text"
+            icon={<Menu className="size-4" />}
             onClick={onToggleMobileMenu}
             aria-label="打开导航菜单"
           />
         )}
 
         {/* 快速解析输入 */}
-        <div style={{ flex: 1, maxWidth: 560, minWidth: 0 }}>
+        <div className="min-w-0 flex-1 md:max-w-140">
           <Input
             value={quickInput}
             onChange={(event) => setQuickInput(event.target.value)}
             onPressEnter={handleSubmit}
             placeholder="粘贴 X 推文链接、@用户名或列表 ID，回车快速解析"
-            prefix={<SearchOutlined style={{ color: "var(--text-subtle)" }} />}
+            aria-label="快速解析输入"
+            prefix={<Search className="size-3.5" />}
             suffix={
               <Button
-                type="primary"
-                size="small"
+                variant="primary"
+                size="sm"
                 disabled={!quickInput.trim()}
                 onClick={handleSubmit}
               >
@@ -75,39 +72,44 @@ export function AppHeader({
           />
         </div>
 
-        {/* 右侧运行状态与刷新 */}
-        <Flex align="center" gap={8} style={{ flexShrink: 0 }}>
+        {/* 右侧运行状态与操作 */}
+        <div className="flex shrink-0 items-center gap-2">
           <Tag
-            color={sseConnected ? "success" : "warning"}
-            className="hidden lg:inline-flex"
-            style={{ margin: 0, alignItems: "center", gap: 6 }}
+            tone={sseConnected ? "success" : "warning"}
+            className="hidden items-center gap-1.5 lg:inline-flex"
           >
-            <Badge status={sseConnected ? "processing" : "warning"} />
+            <StatusDot tone={sseConnected ? "success" : "warning"} pulse={sseConnected} />
             {sseConnected ? "实时连接" : "正在重连"}
           </Tag>
 
-          <Tag
-            className="hidden sm:inline-flex"
-            style={{ margin: 0, alignItems: "center", gap: 6 }}
-          >
-            <ThunderboltOutlined
-              style={{ color: activeCount > 0 ? "#f59e0b" : "var(--text-subtle)" }}
-            />
+          <Tag className="hidden items-center gap-1.5 sm:inline-flex">
+            <Zap className={cn("size-3.5", activeCount > 0 ? "text-warning" : "text-fg-subtle")} />
             <span className="font-mono">
               并发 {activeCount} / {maxConcurrency}
             </span>
           </Tag>
 
+          <Tooltip title={resolved === "dark" ? "切换到浅色模式" : "切换到深色模式"}>
+            <Button
+              variant="text"
+              onClick={toggle}
+              aria-label="切换主题"
+              icon={
+                resolved === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />
+              }
+            />
+          </Tooltip>
+
           <Tooltip title="刷新数据">
             <Button
-              icon={<ReloadOutlined />}
+              icon={<RefreshCw className="size-4" />}
               loading={refreshPending}
               onClick={onRefresh}
               aria-label="刷新数据"
             />
           </Tooltip>
-        </Flex>
-      </Flex>
+        </div>
+      </div>
     </header>
   );
 }

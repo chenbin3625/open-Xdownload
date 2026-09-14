@@ -1,5 +1,3 @@
-import { Alert, ConfigProvider, Drawer, Grid, Skeleton, theme as antdTheme } from "antd";
-import zhCN from "antd/locale/zh_CN";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -21,7 +19,11 @@ import {
   useDashboardEvents,
 } from "./lib/useDashboardEvents";
 import { jobStatusBucket } from "./lib/jobStatus";
+import { useBreakpointUp } from "./lib/useMediaQuery";
 import { useRouteState } from "./lib/useRouteState";
+
+import { Alert, ListSkeleton } from "./components/ui/Feedback";
+import { Drawer } from "./components/ui/Overlay";
 
 import { AppSidebar } from "./components/layout/AppSidebar";
 import { AppHeader } from "./components/layout/AppHeader";
@@ -34,44 +36,13 @@ import { SchedulesPage } from "./pages/SchedulesPage";
 import { GalleryPage } from "./pages/GalleryPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
-// 单一浅色主题：颜色、圆角、控件高度统一由 token 下发，页面里不再各写一套。
-const BRAND = "#0ea5e9";
-
-const antdThemeConfig = {
-  algorithm: antdTheme.defaultAlgorithm,
-  token: {
-    colorPrimary: BRAND,
-    colorInfo: BRAND,
-    colorLink: BRAND,
-    colorBgContainer: "#ffffff",
-    colorBgLayout: "#f5f7fa",
-    colorBorder: "#e5e9f0",
-    colorBorderSecondary: "#eef1f6",
-    colorTextHeading: "#0f172a",
-    colorText: "#334155",
-    colorTextSecondary: "#64748b",
-    colorTextTertiary: "#94a3b8",
-    borderRadius: 8,
-    borderRadiusLG: 12,
-    fontFamily:
-      'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-  },
-  components: {
-    Button: { controlHeight: 36, controlHeightSM: 28, fontWeight: 500 },
-    Card: { paddingLG: 20 },
-    Menu: { itemHeight: 40, itemMarginInline: 0, itemBorderRadius: 8 },
-    Table: { headerBg: "#f8fafc", cellPaddingBlock: 12 },
-    Statistic: { titleFontSize: 12, contentFontSize: 24 },
-  },
-};
-
 // 侧边栏的 overview / workbench / tasks 都指向任务调度中心这一个页面。
 const taskCenterSections = ["overview", "workbench", "tasks"];
 
 export default function App() {
   const queryClient = useQueryClient();
-  const screens = Grid.useBreakpoint();
-  const isCompact = !screens.lg;
+  // 与 Tailwind 的 lg 断点同源，避免 992–1024px 区间里布局与可见性错位。
+  const isCompact = !useBreakpointUp("lg");
 
   const {
     activeSection,
@@ -213,155 +184,149 @@ export default function App() {
   };
 
   return (
-    <ConfigProvider theme={antdThemeConfig} locale={zhCN}>
-      <div className="app-shell flex h-screen w-screen overflow-hidden">
-        {/* 任意接口请求在途时的全局顶部加载进度条 */}
-        <GlobalLoadingBar />
+    <div className="flex h-screen w-screen overflow-hidden bg-canvas">
+      {/* 任意接口请求在途时的全局顶部加载进度条 */}
+      <GlobalLoadingBar />
 
-        {/* 桌面端常驻侧边栏 */}
-        {!isCompact && (
+      {/* 桌面端常驻侧边栏 */}
+      {!isCompact && (
+        <AppSidebar
+          {...sidebarProps}
+          onSectionChange={handleSectionChange}
+          onOpenCreateModal={() => openCreateModal()}
+          onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+        />
+      )}
+
+      {/* 移动端抽屉侧边栏 */}
+      {isCompact && (
+        <Drawer
+          side="left"
+          width="17rem"
+          open={mobileMenuOpen}
+          onClose={() => setMobileMenuOpen(false)}
+        >
           <AppSidebar
             {...sidebarProps}
-            onSectionChange={handleSectionChange}
-            onOpenCreateModal={() => openCreateModal()}
-            onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+            onSectionChange={(section) => {
+              handleSectionChange(section);
+              setMobileMenuOpen(false);
+            }}
+            onOpenCreateModal={() => {
+              setMobileMenuOpen(false);
+              openCreateModal();
+            }}
+            onOpenFailedDrawer={() => {
+              setMobileMenuOpen(false);
+              setFailedDrawerOpen(true);
+            }}
           />
-        )}
+        </Drawer>
+      )}
 
-        {/* 移动端抽屉侧边栏 */}
-        {isCompact && (
-          <Drawer
-            placement="left"
-            open={mobileMenuOpen}
-            onClose={() => setMobileMenuOpen(false)}
-            styles={{ body: { padding: 0 } }}
-            size={272}
-          >
-            <AppSidebar
-              {...sidebarProps}
-              onSectionChange={(section) => {
-                handleSectionChange(section);
-                setMobileMenuOpen(false);
-              }}
-              onOpenCreateModal={() => {
-                setMobileMenuOpen(false);
-                openCreateModal();
-              }}
-              onOpenFailedDrawer={() => {
-                setMobileMenuOpen(false);
-                setFailedDrawerOpen(true);
-              }}
-            />
-          </Drawer>
-        )}
-
-        {/* 右侧主视窗内容流 */}
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          <AppHeader
-            sseConnected={sseConnected}
-            activeCount={currentStats.active}
-            maxConcurrency={config.data?.maxConcurrency ?? 8}
-            refreshPending={manualRefreshPending}
-            onRefresh={handleManualRefresh}
-            onQuickSubmit={(input) => openCreateModal(input)}
-            onToggleMobileMenu={() => setMobileMenuOpen(true)}
-            showMenuButton={isCompact}
-          />
-
-          {/* 页面主内容滚动容器 */}
-          <main className="app-main flex-1 overflow-y-auto">
-            <div className="app-content page-stack">
-              {/* 异常状态提示 */}
-              {isWorkbenchActive && jobs.isError && (
-                <Alert
-                  type="error"
-                  showIcon
-                  message="任务数据加载失败"
-                  description={
-                    jobs.error instanceof Error
-                      ? jobs.error.message
-                      : "请检查后台服务连接"
-                  }
-                />
-              )}
-
-              {activeSection === "settings" && config.isError && (
-                <Alert
-                  type="error"
-                  showIcon
-                  message="配置数据加载失败"
-                  description={
-                    config.error instanceof Error
-                      ? config.error.message
-                      : "请检查后台服务连接"
-                  }
-                />
-              )}
-
-              {/* 初始加载骨架屏（仅任务中心；归档计划与媒体库由页面内部骨架屏负责） */}
-              {isTaskCenterActive && !jobs.data && jobs.isLoading && (
-                <>
-                  <Skeleton active paragraph={{ rows: 4 }} />
-                  <Skeleton active paragraph={{ rows: 6 }} />
-                </>
-              )}
-
-              {/* 视图分发：默认首页即为任务调度中心 */}
-              {isTaskCenterActive && !(jobs.isLoading && !jobs.data) && (
-                <TaskCenterPage
-                  jobs={jobsData}
-                  failedTweetCount={failedTweetCount}
-                  pagination={currentPagination}
-                  tableLoading={jobs.isPlaceholderData}
-                  onPageChange={handleJobPageChange}
-                  onPageSizeChange={handleJobPageSizeChange}
-                  onOpenCreateModal={() => openCreateModal()}
-                  onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
-                />
-              )}
-
-              {activeSection === "schedules" && (
-                <SchedulesPage
-                  schedules={schedules.data ?? []}
-                  loading={schedules.isLoading}
-                  onOpenCreateModal={() => openCreateModal("", "schedule")}
-                />
-              )}
-
-              {activeSection === "gallery" && <GalleryPage jobs={jobsData} />}
-
-              {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
-              {activeSection === "settings" && config.isLoading && (
-                <Skeleton active title paragraph={{ rows: 10 }} />
-              )}
-
-              {activeSection === "settings" && config.data && (
-                <SettingsPage
-                  config={config.data}
-                  onRefresh={handleManualRefresh}
-                  refreshPending={manualRefreshPending}
-                />
-              )}
-            </div>
-          </main>
-        </div>
-
-        {/* 统一新建任务/归档模态框 */}
-        <CreateJobModal
-          open={createModalOpen}
-          onClose={() => setCreateModalOpen(false)}
-          initialInput={createInitialInput}
-          initialKind={createInitialKind}
+      {/* 右侧主视窗内容流 */}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <AppHeader
+          sseConnected={sseConnected}
+          activeCount={currentStats.active}
+          maxConcurrency={config.data?.maxConcurrency ?? 8}
+          refreshPending={manualRefreshPending}
+          onRefresh={handleManualRefresh}
+          onQuickSubmit={(input) => openCreateModal(input)}
+          onToggleMobileMenu={() => setMobileMenuOpen(true)}
+          showMenuButton={isCompact}
         />
 
-        {/* 失败推文重试抽屉 */}
-        <FailedTweetDrawer
-          open={failedDrawerOpen}
-          onClose={() => setFailedDrawerOpen(false)}
-          items={[]}
-          total={failedTweetCount}
-        />
+        {/* 页面主内容滚动容器 */}
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-[100rem] flex-col gap-4 p-4 lg:p-6">
+            {/* 异常状态提示 */}
+            {isWorkbenchActive && jobs.isError && (
+              <Alert
+                type="error"
+                showIcon
+                message="任务数据加载失败"
+                description={
+                  jobs.error instanceof Error
+                    ? jobs.error.message
+                    : "请检查后台服务连接"
+                }
+              />
+            )}
+
+            {activeSection === "settings" && config.isError && (
+              <Alert
+                type="error"
+                showIcon
+                message="配置数据加载失败"
+                description={
+                  config.error instanceof Error
+                    ? config.error.message
+                    : "请检查后台服务连接"
+                }
+              />
+            )}
+
+            {/* 初始加载骨架屏（仅任务中心；归档计划与媒体库由页面内部骨架屏负责） */}
+            {isTaskCenterActive && !jobs.data && jobs.isLoading && (
+              <ListSkeleton rows={6} avatar={false} />
+            )}
+
+            {/* 视图分发：默认首页即为任务调度中心 */}
+            {isTaskCenterActive && !(jobs.isLoading && !jobs.data) && (
+              <TaskCenterPage
+                jobs={jobsData}
+                failedTweetCount={failedTweetCount}
+                pagination={currentPagination}
+                tableLoading={jobs.isPlaceholderData}
+                onPageChange={handleJobPageChange}
+                onPageSizeChange={handleJobPageSizeChange}
+                onOpenCreateModal={() => openCreateModal()}
+                onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+              />
+            )}
+
+            {activeSection === "schedules" && (
+              <SchedulesPage
+                schedules={schedules.data ?? []}
+                loading={schedules.isLoading}
+                onOpenCreateModal={() => openCreateModal("", "schedule")}
+              />
+            )}
+
+            {activeSection === "gallery" && <GalleryPage jobs={jobsData} />}
+
+            {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
+            {activeSection === "settings" && config.isLoading && (
+              <ListSkeleton rows={8} avatar={false} />
+            )}
+
+            {activeSection === "settings" && config.data && (
+              <SettingsPage
+                config={config.data}
+                onRefresh={handleManualRefresh}
+                refreshPending={manualRefreshPending}
+              />
+            )}
+          </div>
+        </main>
       </div>
-    </ConfigProvider>
+
+      {/* 统一新建任务/归档模态框 */}
+      <CreateJobModal
+        open={createModalOpen}
+        onClose={() => setCreateModalOpen(false)}
+        initialInput={createInitialInput}
+        initialKind={createInitialKind}
+      />
+
+      {/* 失败推文重试抽屉 */}
+      <FailedTweetDrawer
+        open={failedDrawerOpen}
+        onClose={() => setFailedDrawerOpen(false)}
+        items={[]}
+        total={failedTweetCount}
+      />
+    </div>
   );
 }
