@@ -33,7 +33,7 @@ import {
   Toolbar,
   failedTweetPageSizeOptions,
   formatDateTime,
-  getErrorMessage,
+  notifyError,
 } from "../common/CommonUI";
 import { dashboardMetaQueryRoot, failedTweetQueryRoot, jobsQueryRoot } from "../../lib/api";
 
@@ -75,12 +75,7 @@ export function FailedTweetQueue({
         description: job.title || "已创建重试任务",
       });
     },
-    onError: (error) => {
-      notification.error({
-        message: "重试失败",
-        description: getErrorMessage(error),
-      });
-    },
+    onError: notifyError("重试失败"),
   });
   const removeOne = useMutation({
     mutationFn: deleteFailedTweet,
@@ -91,12 +86,7 @@ export function FailedTweetQueue({
       refreshFailedTweets();
       notification.success({ message: "失败记录已删除" });
     },
-    onError: (error) => {
-      notification.error({
-        message: "删除失败",
-        description: getErrorMessage(error),
-      });
-    },
+    onError: notifyError("删除失败"),
   });
   const clearAll = useMutation({
     mutationFn: clearFailedTweets,
@@ -105,12 +95,7 @@ export function FailedTweetQueue({
       refreshFailedTweets();
       notification.success({ message: "失败队列已清空" });
     },
-    onError: (error) => {
-      notification.error({
-        message: "清空失败",
-        description: getErrorMessage(error),
-      });
-    },
+    onError: notifyError("清空失败"),
   });
 
   return (

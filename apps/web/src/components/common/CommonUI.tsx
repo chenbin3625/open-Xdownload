@@ -264,31 +264,33 @@ export function PaginatedList<TItem>({
 
 // 明文 HTTP（局域网部署的常态）下 navigator.clipboard 是 undefined，
 // 直接调用会在事件处理里抛 TypeError。这里逐级降级到 execCommand，
-// 并按真实结果提示，不再无条件报“已复制”。
-export async function copyToClipboard(text: string, label = "路径") {
-  let copied = false;
+// 返回真实结果交给调用方提示，不再无条件报“已复制”。
+export async function writeClipboard(text: string) {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
-      copied = true;
+      return true;
     }
   } catch {
-    copied = false;
+    // 权限被拒时继续走 execCommand 兜底
   }
-  if (!copied) {
-    try {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      copied = document.execCommand("copy");
-      textarea.remove();
-    } catch {
-      copied = false;
-    }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied;
+  } catch {
+    return false;
   }
+}
+
+export async function copyToClipboard(text: string, label = "路径") {
+  const copied = await writeClipboard(text);
   if (copied) {
     notification.success({
       message: "复制成功",
@@ -300,30 +302,25 @@ export async function copyToClipboard(text: string, label = "路径") {
       description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
     });
   }
+  return copied;
 }
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
 
+  // 复用 writeClipboard 的降级链：此前这里自带一份实现，
+  // 且无论 execCommand 是否成功都会亮起“已复制”。
   async function handleCopy() {
-    try {
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(value);
-      } else {
-        const textarea = document.createElement("textarea");
-        textarea.value = value;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
+    if (await writeClipboard(value)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      setCopied(false);
+      return;
     }
+    setCopied(false);
+    notification.warning({
+      message: "复制失败",
+      description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
+    });
   }
 
   return (
@@ -406,4 +403,15 @@ export function getErrorMessage(error: unknown) {
     return error;
   }
   return "未知错误";
+}
+
+// 各处 useMutation 的 onError 只有标题不同，正文一律是 getErrorMessage(error)。
+// 用工厂函数下发处理器，调用点写成 onError: notifyError("取消失败")。
+export function notifyError(title: string) {
+  return (error: unknown) => {
+    notification.error({
+      message: title,
+      description: getErrorMessage(error),
+    });
+  };
 }

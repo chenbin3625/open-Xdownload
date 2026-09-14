@@ -1,15 +1,11 @@
 import {
   CheckCircleOutlined,
+  ClockCircleOutlined,
   CloseCircleOutlined,
   CopyOutlined,
   ExclamationCircleOutlined,
-  FileDoneOutlined,
-  LoadingOutlined,
   PlusOutlined,
-  ReloadOutlined,
   RetweetOutlined,
-  SearchOutlined,
-  StopOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -53,6 +49,7 @@ import {
   formatDateTime,
   getErrorMessage,
   kindLabel,
+  notifyError,
 } from "../components/common/CommonUI";
 import {
   cancelableStatuses,
@@ -77,6 +74,25 @@ export interface TaskCenterPageProps {
   onOpenFailedDrawer: () => void;
 }
 
+// 状态标签原先是一串 if / return，pending 会掉进兜底分支被渲染成“已取消”。
+// 改为按状态查表，七种状态都有明确的文案与配色。
+const jobStatusPresentation: Record<
+  Job["status"],
+  { label: string; color?: string; icon?: React.ReactNode }
+> = {
+  pending: { label: "排队中", color: "default", icon: <ClockCircleOutlined /> },
+  resolving: { label: "下载中", color: "processing", icon: <SyncOutlined spin /> },
+  downloading: { label: "下载中", color: "processing", icon: <SyncOutlined spin /> },
+  completed: { label: "已完成", color: "success", icon: <CheckCircleOutlined /> },
+  completed_with_errors: {
+    label: "部分失败",
+    color: "warning",
+    icon: <ExclamationCircleOutlined />,
+  },
+  failed: { label: "失败", color: "error", icon: <CloseCircleOutlined /> },
+  canceled: { label: "已取消" },
+};
+
 export function TaskCenterPage({
   jobs,
   failedTweetCount,
@@ -98,12 +114,7 @@ export function TaskCenterPage({
       void invalidateWorkbenchQueries(queryClient);
       notification.success({ message: "任务已取消" });
     },
-    onError: (err) => {
-      notification.error({
-        message: "取消失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("取消失败"),
   });
 
   const retry = useMutation({
@@ -112,12 +123,7 @@ export function TaskCenterPage({
       void invalidateWorkbenchQueries(queryClient);
       notification.success({ message: `已创建重试任务 #${job.id}` });
     },
-    onError: (err) => {
-      notification.error({
-        message: "重试失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("重试失败"),
   });
 
   const retryAllFailed = useMutation({
@@ -129,42 +135,29 @@ export function TaskCenterPage({
         description: newJob.title || "失败推文已重新加入执行队列",
       });
     },
-    onError: (err) => {
-      notification.error({
-        message: "重试失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("重试失败"),
   });
 
-  // 本地根据当前页 items 进行实时过滤
+  // 本地根据当前页 items 进行实时过滤。
+  // statusFilter 的取值与 jobStatusBucket 的分档一一对应，直接比对分档即可，
+  // 不必在这里重复列举 completed / completed_with_errors 等具体状态。
   const filteredJobs = useMemo(() => {
+    const keyword = searchKeyword.trim().toLowerCase();
     return jobs.filter((job) => {
-      if (statusFilter === "active") {
-        if (jobStatusBucket(job.status) !== "active") return false;
-      } else if (statusFilter === "completed") {
-        if (job.status !== "completed") return false;
-      } else if (statusFilter === "failed") {
-        if (
-          job.status !== "failed" &&
-          job.status !== "completed_with_errors"
-        )
-          return false;
+      if (statusFilter !== "all" && jobStatusBucket(job.status) !== statusFilter) {
+        return false;
       }
-
       if (kindFilter !== "all" && job.kind !== kindFilter) {
         return false;
       }
-
-      if (searchKeyword.trim()) {
-        const kw = searchKeyword.trim().toLowerCase();
-        const matchesTitle = (job.title || "").toLowerCase().includes(kw);
-        const matchesInput = (job.input || "").toLowerCase().includes(kw);
-        const matchesId = String(job.id).includes(kw);
-        if (!matchesTitle && !matchesInput && !matchesId) return false;
+      if (!keyword) {
+        return true;
       }
-
-      return true;
+      return (
+        (job.title || "").toLowerCase().includes(keyword) ||
+        (job.input || "").toLowerCase().includes(keyword) ||
+        String(job.id).includes(keyword)
+      );
     });
   }, [jobs, statusFilter, kindFilter, searchKeyword]);
 
@@ -173,21 +166,16 @@ export function TaskCenterPage({
   const hasActiveFilter =
     statusFilter !== "all" || kindFilter !== "all" || searchKeyword.trim() !== "";
 
-  const activeCount = useMemo(
-    () => jobs.filter((j) => jobStatusBucket(j.status) === "active").length,
-    [jobs],
-  );
-  const completedCount = useMemo(
-    () => jobs.filter((j) => j.status === "completed").length,
-    [jobs],
-  );
-  const failedCount = useMemo(
-    () =>
-      jobs.filter(
-        (j) => j.status === "failed" || j.status === "completed_with_errors",
-      ).length,
-    [jobs],
-  );
+  // 三档计数原先是三次独立 useMemo，各自全量遍历 jobs 并重复一遍状态判定，
+  // 这里一次遍历按分档累加。
+  const bucketCounts = useMemo(() => {
+    const counts = { active: 0, completed: 0, failed: 0 };
+    for (const job of jobs) {
+      const bucket = jobStatusBucket(job.status);
+      if (bucket !== "idle") counts[bucket] += 1;
+    }
+    return counts;
+  }, [jobs]);
 
   const columns: ColumnsType<Job> = [
     {
@@ -236,52 +224,9 @@ export function TaskCenterPage({
       dataIndex: "status",
       key: "status",
       width: 130,
-      render: (status) => {
-        if (status === "resolving" || status === "downloading") {
-          return (
-            <Tag
-              color="processing"
-              icon={<SyncOutlined spin />}
-            >
-              下载中
-            </Tag>
-          );
-        }
-        if (status === "completed") {
-          return (
-            <Tag
-              color="success"
-              icon={<CheckCircleOutlined />}
-            >
-              已完成
-            </Tag>
-          );
-        }
-        if (status === "completed_with_errors") {
-          return (
-            <Tag
-              color="warning"
-              icon={<ExclamationCircleOutlined />}
-            >
-              部分失败
-            </Tag>
-          );
-        }
-        if (status === "failed") {
-          return (
-            <Tag
-              color="error"
-              icon={<CloseCircleOutlined />}
-            >
-              失败
-            </Tag>
-          );
-        }
-        return (
-          <Tag>
-            已取消
-          </Tag>
-        );
+      render: (status: Job["status"]) => {
+        const meta = jobStatusPresentation[status];
+        return <Tag color={meta.color} icon={meta.icon}>{meta.label}</Tag>;
       },
     },
     {
@@ -413,18 +358,18 @@ export function TaskCenterPage({
                 {
                   label: (
                     <Space orientation="horizontal" size={4}>
-                      {activeCount > 0 && <Badge status="processing" />}
-                      <span>本页下载中 ({activeCount})</span>
+                      {bucketCounts.active > 0 && <Badge status="processing" />}
+                      <span>本页下载中 ({bucketCounts.active})</span>
                     </Space>
                   ),
                   value: "active",
                 },
-                { label: `本页已完成 (${completedCount})`, value: "completed" },
+                { label: `本页已完成 (${bucketCounts.completed})`, value: "completed" },
                 {
                   label: (
                     <Space orientation="horizontal" size={4}>
-                      {failedCount > 0 && <Badge status="error" />}
-                      <span>本页失败 / 异常 ({failedCount})</span>
+                      {bucketCounts.failed > 0 && <Badge status="error" />}
+                      <span>本页失败 / 异常 ({bucketCounts.failed})</span>
                     </Space>
                   ),
                   value: "failed",
@@ -457,7 +402,7 @@ export function TaskCenterPage({
               ]}
             />
 
-            {failedCount > 0 && (
+            {bucketCounts.failed > 0 && (
               <Button
                 icon={<RetweetOutlined />}
                 loading={retryAllFailed.isPending}

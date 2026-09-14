@@ -24,7 +24,7 @@ import {
   type AppConfig,
   type AuthCheck,
 } from "../../lib/api";
-import { getErrorMessage } from "../common/CommonUI";
+import { getErrorMessage, notifyError } from "../common/CommonUI";
 import { CookieSettingsFields } from "./CookieSettings";
 import { DownloadSettingsFields } from "./DownloadSettings";
 import { StorageSettings } from "./StorageSettings";
@@ -93,12 +93,7 @@ export function ConfigForm({
       onRefresh?.();
       notification.success({ message: "配置已保存" });
     },
-    onError: (error) => {
-      notification.error({
-        message: "保存失败",
-        description: getErrorMessage(error),
-      });
-    },
+    onError: notifyError("保存失败"),
   });
 
   async function runAuthCheck(submitted: AppConfig, notify: boolean) {

@@ -28,6 +28,7 @@ import {
   Toolbar,
   fullWidthStyle,
   getErrorMessage,
+  notifyError,
 } from "../common/CommonUI";
 
 const { DirectoryTree } = Tree;
@@ -59,12 +60,7 @@ export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelec
       setExpandedKeys([rootNode.key]);
       notification.success({ message: "目录已创建并选择" });
     },
-    onError: (error) => {
-      notification.error({
-        message: "创建目录失败",
-        description: getErrorMessage(error),
-      });
-    },
+    onError: notifyError("创建目录失败"),
   });
   const resolvedPath = listing.data?.path ?? rootPath;
 

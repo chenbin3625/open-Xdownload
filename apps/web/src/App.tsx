@@ -65,6 +65,9 @@ const antdThemeConfig = {
   },
 };
 
+// 侧边栏的 overview / workbench / tasks 都指向任务调度中心这一个页面。
+const taskCenterSections = ["overview", "workbench", "tasks"];
+
 export default function App() {
   const queryClient = useQueryClient();
   const screens = Grid.useBreakpoint();
@@ -93,10 +96,11 @@ export default function App() {
     [queryClient],
   );
 
+  // overview / workbench / tasks 三个入口都渲染任务调度中心，
+  // 判定条件此前在 JSX 里又抄了两遍。
+  const isTaskCenterActive = taskCenterSections.includes(activeSection);
   const isWorkbenchActive =
-    activeSection === "overview" ||
-    activeSection === "workbench" ||
-    activeSection === "tasks" ||
+    isTaskCenterActive ||
     activeSection === "schedules" ||
     activeSection === "gallery";
 
@@ -295,33 +299,26 @@ export default function App() {
               )}
 
               {/* 初始加载骨架屏（仅任务中心；归档计划与媒体库由页面内部骨架屏负责） */}
-              {(activeSection === "overview" ||
-                activeSection === "workbench" ||
-                activeSection === "tasks") &&
-                !jobs.data &&
-                jobs.isLoading && (
-                  <>
-                    <Skeleton active paragraph={{ rows: 4 }} />
-                    <Skeleton active paragraph={{ rows: 6 }} />
-                  </>
-                )}
+              {isTaskCenterActive && !jobs.data && jobs.isLoading && (
+                <>
+                  <Skeleton active paragraph={{ rows: 4 }} />
+                  <Skeleton active paragraph={{ rows: 6 }} />
+                </>
+              )}
 
               {/* 视图分发：默认首页即为任务调度中心 */}
-              {(activeSection === "overview" ||
-                activeSection === "workbench" ||
-                activeSection === "tasks") &&
-                !(jobs.isLoading && !jobs.data) && (
-                  <TaskCenterPage
-                    jobs={jobsData}
-                    failedTweetCount={failedTweetCount}
-                    pagination={currentPagination}
-                    tableLoading={jobs.isPlaceholderData}
-                    onPageChange={handleJobPageChange}
-                    onPageSizeChange={handleJobPageSizeChange}
-                    onOpenCreateModal={() => openCreateModal()}
-                    onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
-                  />
-                )}
+              {isTaskCenterActive && !(jobs.isLoading && !jobs.data) && (
+                <TaskCenterPage
+                  jobs={jobsData}
+                  failedTweetCount={failedTweetCount}
+                  pagination={currentPagination}
+                  tableLoading={jobs.isPlaceholderData}
+                  onPageChange={handleJobPageChange}
+                  onPageSizeChange={handleJobPageSizeChange}
+                  onOpenCreateModal={() => openCreateModal()}
+                  onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+                />
+              )}
 
               {activeSection === "schedules" && (
                 <SchedulesPage

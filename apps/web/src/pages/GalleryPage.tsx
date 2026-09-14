@@ -45,11 +45,27 @@ import {
   type DownloadRecord,
   type Job,
 } from "../lib/api";
-import { copyToClipboard, formatDateTime } from "../components/common/CommonUI";
+import { copyToClipboard, formatDateTime, notifyError } from "../components/common/CommonUI";
 
 const ReactPlayer = lazy(() => import("react-player"));
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
+
+// 判定统一走扩展名表：此前 VideoPoster 里另写了一条正则，
+// 往 VIDEO_EXTENSIONS 里加格式时容易漏改一处。查询串与 hash 先截掉。
+function hasExtension(url: string, extensions: string[]) {
+  const path = url.toLowerCase().split(/[?#]/)[0];
+  return extensions.some((ext) => path.endsWith(ext));
+}
+
+// 文件名与预览地址的推导在卡片、预览弹窗里都要用。
+function displayFileName(item: DownloadRecord) {
+  return item.filePath.split(/[\\/]/).pop() || item.filePath;
+}
+
+function fileURL(item: DownloadRecord) {
+  return item.fileUrl || `/api/library/downloads/${item.id}/file`;
+}
 
 // 预览弹窗按身份定位当前文件：下标会随刷新/搜索输入改变所指的记录，
 // 弹窗开着时会静默把用户正在看的媒体换成另一份。历史记录可能没有 id，回退文件路径。
@@ -73,7 +89,7 @@ function VideoPoster({ item, fileName, onOpen }: { item: DownloadRecord; fileNam
     if (item.id > 0) {
       list.push({ url: `/api/library/downloads/${item.id}/preview`, remote: false });
     }
-    if (item.previewUrl && !/\.(mp4|mov|m4v|webm|ogv)(?:[?#]|$)/i.test(item.previewUrl)) {
+    if (item.previewUrl && !hasExtension(item.previewUrl, VIDEO_EXTENSIONS)) {
       list.push({ url: item.previewUrl, remote: true });
     }
     return list;
@@ -121,9 +137,9 @@ const GalleryCard = React.memo(function GalleryCard({
   isPreviewableImage: boolean;
   onOpen: (previewId: string) => void;
 }) {
-  const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
+  const fileName = displayFileName(item);
   const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
-  const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
+  const previewURL = fileURL(item);
   return (
     <Card
       hoverable
@@ -254,9 +270,7 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: posterBackfillQueryRoot });
     },
-    onError: (error) => {
-      notification.error({ message: "封面补齐启动失败", description: String(error) });
-    },
+    onError: notifyError("封面补齐启动失败"),
   });
 
   const backfillWasRunning = useRef(false);
@@ -286,15 +300,13 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   // Derive file metadata once per response. Filtering and category counters no
   // longer repeat extension parsing for every control update.
   const indexedDownloads = useMemo(
-    () => allDownloads.map((item) => {
-      const lower = item.filePath.toLowerCase().split("?")[0];
-      return {
+    () =>
+      allDownloads.map((item) => ({
         item,
-        isVideo: VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext)),
-        isImage: IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext)),
-        isGif: lower.endsWith(".gif"),
-      };
-    }),
+        isVideo: hasExtension(item.filePath, VIDEO_EXTENSIONS),
+        isImage: hasExtension(item.filePath, IMAGE_EXTENSIONS),
+        isGif: hasExtension(item.filePath, [".gif"]),
+      })),
     [allDownloads],
   );
 
@@ -362,25 +374,6 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
   );
   const previewEntry = previewIndex >= 0 ? filteredEntries[previewIndex] : undefined;
 
-  useEffect(() => {
-    if (previewId !== null && previewIndex === -1) {
-      setPreviewId(null);
-      return;
-    }
-    if (previewIndex === -1) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        event.preventDefault();
-        if (filteredEntries.length === 0) return;
-        const delta = event.key === "ArrowRight" ? 1 : -1;
-        const nextIndex = (previewIndex + delta + filteredEntries.length) % filteredEntries.length;
-        setPreviewId(entryKey(filteredEntries[nextIndex].item));
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [filteredEntries, previewId, previewIndex]);
-
   // 稳定的 onOpen 引用是 GalleryCard memo 生效的前提。
   const openPreview = useCallback((nextId: string) => setPreviewId(nextId), []);
   const stepPreview = useCallback(
@@ -391,6 +384,25 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
     },
     [filteredEntries, previewIndex],
   );
+
+  // 当前预览项被筛掉或删除时关闭弹窗。
+  useEffect(() => {
+    if (previewId !== null && previewIndex === -1) {
+      setPreviewId(null);
+    }
+  }, [previewId, previewIndex]);
+
+  // 左右方向键翻页，翻页逻辑与弹窗内的前后按钮共用 stepPreview。
+  useEffect(() => {
+    if (previewIndex === -1) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      stepPreview(event.key === "ArrowRight" ? 1 : -1);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewIndex, stepPreview]);
 
   return (
     <div className="page-stack">
@@ -524,8 +536,8 @@ export function GalleryPage({ jobs = [], downloads }: GalleryPageProps) {
       >
         {previewEntry && (() => {
           const { item, isVideo } = previewEntry;
-          const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
-          const previewURL = item.fileUrl || `/api/library/downloads/${item.id}/file`;
+          const fileName = displayFileName(item);
+          const previewURL = fileURL(item);
           return (
             <div className="relative flex min-h-[55vh] items-center justify-center bg-slate-950 rounded-lg overflow-hidden">
               {isVideo ? (

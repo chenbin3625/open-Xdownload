@@ -7,7 +7,6 @@ import {
 } from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Badge,
   Button,
   Card,
   Col,
@@ -33,7 +32,7 @@ import {
 import {
   formatDateTime,
   formatIntervalMinutes,
-  getErrorMessage,
+  notifyError,
 } from "../components/common/CommonUI";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 
@@ -65,12 +64,7 @@ export function SchedulesPage({
         description: `计划 “${updated.name}” 状态更新成功`,
       });
     },
-    onError: (err) => {
-      notification.error({
-        message: "更新失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("更新失败"),
   });
 
   const runSchedule = useMutation({
@@ -82,12 +76,7 @@ export function SchedulesPage({
         description: `已生成并排入 ${jobs.length} 个下载任务`,
       });
     },
-    onError: (err) => {
-      notification.error({
-        message: "执行失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("执行失败"),
   });
 
   const removeSchedule = useMutation({
@@ -98,12 +87,7 @@ export function SchedulesPage({
         message: "计划已删除",
       });
     },
-    onError: (err) => {
-      notification.error({
-        message: "删除失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("删除失败"),
   });
 
   return (

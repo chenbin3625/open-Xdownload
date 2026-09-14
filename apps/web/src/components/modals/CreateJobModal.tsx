@@ -1,25 +1,18 @@
 import {
   CloudDownloadOutlined,
-  CopyOutlined,
-  FileTextOutlined,
   LinkOutlined,
-  LoadingOutlined,
   ScheduleOutlined,
-  TeamOutlined,
   UnorderedListOutlined,
   UserAddOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Alert,
-  Badge,
   Button,
   Checkbox,
   Input,
   InputNumber,
   Modal,
-  Select,
   Space,
   Tabs,
   Typography,
@@ -36,7 +29,7 @@ import {
   type JobRequest,
   type TweetData,
 } from "../../lib/api";
-import { getErrorMessage } from "../common/CommonUI";
+import { notifyError } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
 
 const { Text, Paragraph } = Typography;
@@ -50,6 +43,40 @@ export interface CreateJobModalProps {
 }
 
 const tabKeys: string[] = ["user", "tweet_link", "list", "following"];
+
+type BatchKind = Extract<JobKind, "user" | "list" | "following">;
+
+// user / list / following 三个分页的 UI 结构完全一致，只有图标、文案与占位符不同。
+// 结构在 batchTabItems 里写一份，差异留在这张表里。
+const batchTabs: {
+  kind: BatchKind;
+  label: string;
+  icon: React.ReactNode;
+  hint: string;
+  placeholder: string;
+}[] = [
+  {
+    kind: "user",
+    label: "用户归档",
+    icon: <UserOutlined />,
+    hint: "支持用户名、@screen_name 或数字 ID，每行一个",
+    placeholder: "elonmusk\n@sama\n44196397\nhttps://x.com/OpenAI",
+  },
+  {
+    kind: "list",
+    label: "列表归档",
+    icon: <UnorderedListOutlined />,
+    hint: "输入 X 列表 ID 或完整列表 URL，自动获取列表成员推文媒体",
+    placeholder: "1492019283\nhttps://x.com/i/lists/1647289190",
+  },
+  {
+    kind: "following",
+    label: "关注关系归档",
+    icon: <UserAddOutlined />,
+    hint: "输入目标账号，自动获取其关注的所有账号并进行媒体归档",
+    placeholder: "elonmusk\n@OpenAI",
+  },
+];
 
 function parseLinesToItems(raw: string, kind: JobKind): JobRequest[] {
   const seen = new Set<string>();
@@ -93,9 +120,8 @@ export function CreateJobModal({
 
   // 输入状态
   const [tweetUrl, setTweetUrl] = useState("");
-  const [userInputs, setUserInputs] = useState("");
-  const [listInputs, setListInputs] = useState("");
-  const [followingInputs, setFollowingInputs] = useState("");
+  // 三个批量输入框此前是三份彼此独立的 useState，初始化与重置都要各写一遍。
+  const [batchInputs, setBatchInputs] = useState<Partial<Record<BatchKind, string>>>({});
 
   // 单推文解析结果缓存
   const [parsedTweet, setParsedTweet] = useState<TweetData | null>(null);
@@ -117,10 +143,10 @@ export function CreateJobModal({
         setTweetUrl(initialInput);
       } else if (/^\d{5,}$/.test(initialInput.trim())) {
         setActiveTab("list");
-        setListInputs(initialInput);
+        setBatchInputs({ list: initialInput });
       } else {
         setActiveTab("user");
-        setUserInputs(initialInput);
+        setBatchInputs({ user: initialInput });
       }
     } else {
       // 侧边栏入口没有初始输入，此时若不复位就会停在上一次会话的分页上。
@@ -134,17 +160,10 @@ export function CreateJobModal({
 
   // 解析目标项计算
   const currentBatchItems = useMemo(() => {
-    switch (activeTab) {
-      case "user":
-        return parseLinesToItems(userInputs, "user");
-      case "list":
-        return parseLinesToItems(listInputs, "list");
-      case "following":
-        return parseLinesToItems(followingInputs, "following");
-      default:
-        return [];
-    }
-  }, [activeTab, userInputs, listInputs, followingInputs]);
+    const tab = batchTabs.find((item) => item.kind === activeTab);
+    if (!tab) return [];
+    return parseLinesToItems(batchInputs[tab.kind] ?? "", tab.kind);
+  }, [activeTab, batchInputs]);
 
   // 单推文解析 Mutation
   const parseMutation = useMutation({
@@ -156,12 +175,7 @@ export function CreateJobModal({
         description: `包含 ${data.media.length} 个媒体，作者 @${data.author.screenName}`,
       });
     },
-    onError: (err) => {
-      notification.error({
-        message: "解析失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("解析失败"),
   });
 
   // 创建任务 / 批量任务 Mutation
@@ -210,19 +224,12 @@ export function CreateJobModal({
       }
       handleClose();
     },
-    onError: (err) => {
-      notification.error({
-        message: "创建失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("创建失败"),
   });
 
   const handleClose = () => {
     setTweetUrl("");
-    setUserInputs("");
-    setListInputs("");
-    setFollowingInputs("");
+    setBatchInputs({});
     setParsedTweet(null);
     setIsSchedule(false);
     setScheduleName("");
@@ -236,33 +243,38 @@ export function CreateJobModal({
     parseMutation.mutate(trimmed);
   };
 
-  const tabItems = [
-    {
-      key: "user",
-      label: (
-        <span className="flex items-center gap-1.5">
-          <UserOutlined />
-          <span>用户归档</span>
-        </span>
-      ),
-      children: (
-        <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            <span>支持用户名、@screen_name 或数字 ID，每行一个</span>
-            <span className="font-mono" style={{ color: "var(--brand-500)" }}>
-              已识别: {currentBatchItems.length} 个
-            </span>
-          </div>
-          <TextArea
-            rows={6}
-            value={userInputs}
-            onChange={(e) => setUserInputs(e.target.value)}
-            placeholder={"elonmusk\n@sama\n44196397\nhttps://x.com/OpenAI"}
-            className="font-mono" style={{ fontSize: 12 }}
-          />
+  // 批量分页统一由 batchTabs 生成，避免三份只差文案的重复 JSX。
+  const batchTabItems = batchTabs.map((tab) => ({
+    key: tab.kind,
+    label: (
+      <span className="flex items-center gap-1.5">
+        {tab.icon}
+        <span>{tab.label}</span>
+      </span>
+    ),
+    children: (
+      <div className="space-y-3 pt-1">
+        <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
+          <span>{tab.hint}</span>
+          <span className="font-mono" style={{ color: "var(--brand-500)" }}>
+            已识别: {currentBatchItems.length} 个
+          </span>
         </div>
-      ),
-    },
+        <TextArea
+          rows={6}
+          value={batchInputs[tab.kind] ?? ""}
+          onChange={(e) =>
+            setBatchInputs((current) => ({ ...current, [tab.kind]: e.target.value }))
+          }
+          placeholder={tab.placeholder}
+          className="font-mono" style={{ fontSize: 12 }}
+        />
+      </div>
+    ),
+  }));
+
+  const tabItems = [
+    batchTabItems[0],
     {
       key: "tweet_link",
       label: (
@@ -321,58 +333,7 @@ export function CreateJobModal({
         </div>
       ),
     },
-    {
-      key: "list",
-      label: (
-        <span className="flex items-center gap-1.5">
-          <UnorderedListOutlined />
-          <span>列表归档</span>
-        </span>
-      ),
-      children: (
-        <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            <span>输入 X 列表 ID 或完整列表 URL，自动获取列表成员推文媒体</span>
-            <span className="font-mono" style={{ color: "var(--brand-500)" }}>
-              已识别: {currentBatchItems.length} 个
-            </span>
-          </div>
-          <TextArea
-            rows={6}
-            value={listInputs}
-            onChange={(e) => setListInputs(e.target.value)}
-            placeholder={"1492019283\nhttps://x.com/i/lists/1647289190"}
-            className="font-mono" style={{ fontSize: 12 }}
-          />
-        </div>
-      ),
-    },
-    {
-      key: "following",
-      label: (
-        <span className="flex items-center gap-1.5">
-          <UserAddOutlined />
-          <span>关注关系归档</span>
-        </span>
-      ),
-      children: (
-        <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            <span>输入目标账号，自动获取其关注的所有账号并进行媒体归档</span>
-            <span className="font-mono" style={{ color: "var(--brand-500)" }}>
-              已识别: {currentBatchItems.length} 个
-            </span>
-          </div>
-          <TextArea
-            rows={6}
-            value={followingInputs}
-            onChange={(e) => setFollowingInputs(e.target.value)}
-            placeholder={"elonmusk\n@OpenAI"}
-            className="font-mono" style={{ fontSize: 12 }}
-          />
-        </div>
-      ),
-    },
+    ...batchTabItems.slice(1),
   ];
 
   const canSubmit =
