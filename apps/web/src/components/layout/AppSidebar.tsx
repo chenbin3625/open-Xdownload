@@ -13,16 +13,12 @@ import type { SectionKey } from "../../lib/useRouteState";
 import { Button } from "../ui/Button";
 import { Divider } from "../ui/Feedback";
 import { Tooltip } from "../ui/Overlay";
-import { CountBadge, Tag } from "../ui/Tag";
 
 export interface AppSidebarProps {
   activeSection: SectionKey;
   onSectionChange: (section: SectionKey) => void;
   onOpenCreateModal: () => void;
   onOpenFailedDrawer: () => void;
-  totalJobsCount: number;
-  activeJobsCount: number;
-  schedulesCount: number;
   failedTweetCount: number;
   storageType?: string;
   storagePath?: string;
@@ -36,9 +32,6 @@ export function AppSidebar({
   onSectionChange,
   onOpenCreateModal,
   onOpenFailedDrawer,
-  totalJobsCount,
-  activeJobsCount,
-  schedulesCount,
   failedTweetCount,
   storageType = "local",
   storagePath = "/downloads",
@@ -49,24 +42,16 @@ export function AppSidebar({
     key: SectionKey;
     icon: React.ReactNode;
     label: string;
-    badge?: React.ReactNode;
   }[] = [
     {
       key: "tasks",
       icon: <ListChecks className="size-4 shrink-0" />,
       label: "任务调度中心",
-      badge:
-        activeJobsCount > 0 ? (
-          <Tag tone="brand" className="font-mono">{`${activeJobsCount} 运行`}</Tag>
-        ) : totalJobsCount > 0 ? (
-          <Tag className="font-mono">{totalJobsCount}</Tag>
-        ) : null,
     },
     {
       key: "schedules",
       icon: <Clock className="size-4 shrink-0" />,
       label: "自动归档计划",
-      badge: schedulesCount > 0 ? <Tag className="font-mono">{schedulesCount}</Tag> : null,
     },
     {
       key: "gallery",
@@ -124,7 +109,6 @@ export function AppSidebar({
               >
                 <span className={active ? "text-brand-500" : "text-fg-subtle"}>{item.icon}</span>
                 <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
-                {item.badge}
               </button>
             );
           })}
@@ -140,7 +124,6 @@ export function AppSidebar({
                   <TriangleAlert className="size-3.5 text-danger" />
                   失败推文队列
                 </span>
-                <CountBadge count={failedTweetCount} overflowCount={999} />
               </div>
               <Button variant="danger" size="sm" block onClick={onOpenFailedDrawer}>
                 查看并批量重试

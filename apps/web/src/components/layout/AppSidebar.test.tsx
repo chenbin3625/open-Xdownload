@@ -10,9 +10,6 @@ const baseProps: AppSidebarProps = {
   onSectionChange: () => {},
   onOpenCreateModal: () => {},
   onOpenFailedDrawer: () => {},
-  totalJobsCount: 0,
-  activeJobsCount: 0,
-  schedulesCount: 0,
   failedTweetCount: 0,
 };
 
@@ -54,16 +51,15 @@ describe("AppSidebar", () => {
     expect(onSectionChange).toHaveBeenCalledWith("settings");
   });
 
-  it("运行中任务优先显示运行数，否则显示总数", () => {
-    const { unmount } = render(
-      <AppSidebar {...baseProps} totalJobsCount={12} activeJobsCount={3} />,
-    );
-    expect(screen.getByText("3 运行")).not.toBeNull();
-    expect(screen.queryByText("12")).toBeNull();
-    unmount();
+  it("菜单项只展示名称，不展示数量徽标", () => {
+    render(<AppSidebar {...baseProps} failedTweetCount={5} />);
 
-    render(<AppSidebar {...baseProps} totalJobsCount={12} activeJobsCount={0} />);
-    expect(screen.getByText("12")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "任务调度中心" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "自动归档计划" })).not.toBeNull();
+    expect(screen.queryByText("3 运行")).toBeNull();
+    expect(screen.queryByText("12")).toBeNull();
+    expect(screen.queryByText("7")).toBeNull();
+    expect(screen.queryByText("5")).toBeNull();
   });
 
   it("没有失败推文时不渲染失败队列入口", () => {

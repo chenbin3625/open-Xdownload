@@ -171,9 +171,6 @@ export default function App() {
 
   const sidebarProps = {
     activeSection,
-    totalJobsCount: currentStats.total,
-    activeJobsCount: currentStats.active,
-    schedulesCount: schedules.data?.length ?? 0,
     failedTweetCount,
     storageType: config.data?.storageType || "local",
     storagePath: config.data?.downloadDir || "/downloads",
