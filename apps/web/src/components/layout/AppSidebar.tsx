@@ -24,7 +24,7 @@ export interface AppSidebarProps {
   storagePath?: string;
 }
 
-// overview / workbench / tasks 三个 section 都落到「任务调度中心」这一项上。
+// overview / workbench / tasks 三个 section 都落到「任务中心」这一项上。
 const taskCenterSections: SectionKey[] = ["overview", "workbench", "tasks"];
 
 export function AppSidebar({
@@ -46,27 +46,27 @@ export function AppSidebar({
     {
       key: "tasks",
       icon: <ListChecks className="size-4 shrink-0" />,
-      label: "任务调度中心",
+      label: "任务中心",
     },
     {
       key: "schedules",
       icon: <Clock className="size-4 shrink-0" />,
-      label: "自动归档计划",
+      label: "归档计划",
     },
     {
       key: "gallery",
       icon: <Images className="size-4 shrink-0" />,
-      label: "媒体归档库",
+      label: "媒体归档",
     },
     {
       key: "settings",
       icon: <Settings className="size-4 shrink-0" />,
-      label: "系统与存储配置",
+      label: "系统配置",
     },
   ];
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none">
+    <aside className="flex w-48 shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none">
       <div className="p-3">
         {/* 品牌区 */}
         <div className="flex items-center gap-2.5 px-1 pt-1 pb-3">
@@ -86,7 +86,7 @@ export function AppSidebar({
           onClick={onOpenCreateModal}
           className="shadow-sm shadow-brand-500/20"
         >
-          新建下载 / 归档
+          新建任务
         </Button>
 
         {/* 手写导航列表：单选语义用 aria-current 表达，不需要 Menu 的全部键盘模型 */}
@@ -122,11 +122,11 @@ export function AppSidebar({
               <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-xs font-medium text-danger">
                   <TriangleAlert className="size-3.5 text-danger" />
-                  失败推文队列
+                  失败队列
                 </span>
               </div>
               <Button variant="danger" size="sm" block onClick={onOpenFailedDrawer}>
-                查看并批量重试
+                处理失败
               </Button>
             </div>
           </>
