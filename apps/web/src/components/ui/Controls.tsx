@@ -40,7 +40,7 @@ export function Select({
           "inline-flex items-center justify-between gap-2 rounded-control",
           "border border-line bg-surface text-fg transition-colors",
           "hover:border-brand-400 data-[placeholder]:text-fg-subtle",
-          size === "sm" ? "h-7 px-2 text-xs" : "h-9 px-3 text-sm",
+          size === "sm" ? "h-7 px-2.5 text-xs" : "h-9 px-3 text-sm",
           className,
         )}
       >
@@ -172,12 +172,14 @@ export function Segmented({
   value,
   onChange,
   options,
+  size = "sm",
   className,
   ariaLabel,
 }: {
   value: string;
   onChange: (value: string) => void;
   options: SegmentedOption[];
+  size?: "sm" | "md";
   className?: string;
   ariaLabel?: string;
 }) {
@@ -190,7 +192,8 @@ export function Segmented({
       }}
       aria-label={ariaLabel}
       className={cn(
-        "inline-flex items-center gap-0.5 rounded-control border border-line bg-surface-muted p-0.5",
+        "inline-flex items-center rounded-control border border-line bg-surface-muted",
+        size === "sm" ? "h-7 gap-0.5 p-0.5" : "h-9 gap-1 p-1",
         className,
       )}
     >
@@ -199,10 +202,10 @@ export function Segmented({
           key={option.value}
           value={option.value}
           className={cn(
-            "inline-flex cursor-pointer items-center gap-1.5 rounded-[0.375rem] px-2.5 py-1",
-            "text-xs font-medium whitespace-nowrap text-fg-muted transition-colors",
+            "inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-[0.375rem] font-medium whitespace-nowrap text-fg-muted transition-colors select-none",
             "hover:text-fg-body",
             "data-[state=on]:bg-surface data-[state=on]:text-fg data-[state=on]:shadow-xs",
+            size === "sm" ? "h-5.5 px-2.5 text-xs" : "h-7 px-3 text-sm",
           )}
         >
           {option.label}

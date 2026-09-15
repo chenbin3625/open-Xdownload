@@ -202,7 +202,7 @@ export default function App() {
       {isCompact && (
         <Drawer
           side="left"
-          width="17rem"
+          width="14.5rem"
           open={mobileMenuOpen}
           onClose={() => setMobileMenuOpen(false)}
         >
@@ -276,6 +276,7 @@ export default function App() {
             {isTaskCenterActive && !(jobs.isLoading && !jobs.data) && (
               <TaskCenterPage
                 jobs={jobsData}
+                stats={currentStats}
                 failedTweetCount={failedTweetCount}
                 pagination={currentPagination}
                 tableLoading={jobs.isPlaceholderData}

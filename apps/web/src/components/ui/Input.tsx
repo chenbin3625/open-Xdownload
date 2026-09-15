@@ -11,7 +11,7 @@ const affixBase =
   "has-disabled:cursor-not-allowed has-disabled:opacity-60";
 
 const sizeClass = {
-  sm: "h-7 px-2 text-xs",
+  sm: "h-7 px-2.5 text-xs",
   md: "h-9 px-3 text-sm",
 } as const;
 

@@ -365,12 +365,6 @@
   }
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 @keyframes skeleton-pulse {
   0%,
   100% {
@@ -430,29 +424,11 @@
 }
 
 /* =========================================================
-   现代视觉工具类 (Glassmorphism & Glow)
+   现代视觉工具类 (Glassmorphism)
    ========================================================= */
 
 @utility glass-header {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   background-color: color-mix(in srgb, var(--surface) 80%, transparent);
-}
-
-@utility glass-card {
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  background-color: color-mix(in srgb, var(--surface) 85%, transparent);
-}
-
-@utility glow-subtle {
-  box-shadow: 0 0 20px -4px var(--brand-glow);
-}
-
-@utility glow-brand {
-  box-shadow: 0 0 32px -4px var(--brand-glow);
-}
-
-@utility tabular-nums {
-  font-variant-numeric: tabular-nums;
 }

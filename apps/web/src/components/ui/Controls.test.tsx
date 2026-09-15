@@ -144,9 +144,56 @@ describe("SearchSelect", () => {
       "true",
     );
   });
+
+  it("支持 sm 尺寸并渲染对应高度样式", () => {
+    render(<SearchSelect value="all" size="sm" onChange={() => {}} options={options} ariaLabel="小号选择器" />);
+    const trigger = screen.getByRole("combobox", { name: "小号选择器" });
+    expect(trigger.className).toContain("h-7");
+    expect(trigger.className).toContain("text-xs");
+  });
+});
+
+describe("Segmented", () => {
+  it("支持 md 尺寸并渲染对应高度样式", () => {
+    render(
+      <Segmented
+        size="md"
+        value="all"
+        onChange={() => {}}
+        options={[{ label: "全部", value: "all" }, { label: "进行中", value: "active" }]}
+      />,
+    );
+    const item = screen.getByRole("radio", { name: "全部" });
+    expect(item.className).toContain("h-7");
+    expect(item.className).toContain("text-sm");
+  });
 });
 
 describe("Button", () => {
+  it("无文本且带图标的按钮自动应用正方形尺寸样式", () => {
+    const { rerender } = render(
+      <Button size="sm" icon={<span data-testid="icon" />} aria-label="纯图标按钮" />,
+    );
+    const smButton = screen.getByRole("button", { name: "纯图标按钮" });
+    expect(smButton.className).toContain("size-7");
+    expect(smButton.className).toContain("p-0");
+    expect(smButton.className).toContain("rounded-control");
+
+    rerender(
+      <Button size="md" icon={<span data-testid="icon" />} aria-label="中号纯图标按钮" />,
+    );
+    const mdButton = screen.getByRole("button", { name: "中号纯图标按钮" });
+    expect(mdButton.className).toContain("size-9");
+    expect(mdButton.className).toContain("p-0");
+  });
+
+  it("circle 属性渲染 rounded-full", () => {
+    render(<Button circle icon={<span data-testid="icon" />} aria-label="圆按钮" />);
+    const circleBtn = screen.getByRole("button", { name: "圆按钮" });
+    expect(circleBtn.className).toContain("rounded-full");
+    expect(circleBtn.className).toContain("size-9");
+  });
+
   it("loading 时禁用并标记 aria-busy", () => {
     render(<Button loading>提交</Button>);
     const button = screen.getByRole("button", { name: "提交" });

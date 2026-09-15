@@ -13,6 +13,7 @@ export function SearchSelect({
   options,
   placeholder = "请选择",
   searchPlaceholder = "搜索...",
+  size = "md",
   className,
   ariaLabel,
 }: {
@@ -21,6 +22,7 @@ export function SearchSelect({
   options: SelectOption[];
   placeholder?: string;
   searchPlaceholder?: string;
+  size?: "sm" | "md";
   className?: string;
   ariaLabel?: string;
 }) {
@@ -76,9 +78,9 @@ export function SearchSelect({
         aria-controls={open ? listId : undefined}
         aria-label={ariaLabel}
         className={cn(
-          "inline-flex h-9 items-center justify-between gap-2 rounded-control",
-          "border border-line bg-surface px-3 text-sm text-fg transition-colors",
-          "hover:border-brand-400",
+          "inline-flex items-center justify-between gap-2 rounded-control",
+          "border border-line bg-surface text-fg transition-colors hover:border-brand-400",
+          size === "sm" ? "h-7 px-2.5 text-xs" : "h-9 px-3 text-sm",
           className,
         )}
       >

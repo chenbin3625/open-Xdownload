@@ -274,7 +274,6 @@ export function CreateJobModal({
               }}
               onPressEnter={handleParseTweet}
               placeholder="https://x.com/username/status/1234567890"
-              className="text-xs"
             />
             <Button
               variant="primary"
