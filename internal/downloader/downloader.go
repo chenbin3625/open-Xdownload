@@ -2,6 +2,8 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +22,10 @@ import (
 )
 
 type Result struct {
-	Path    string
-	Bytes   int64
-	Skipped bool
+	Path        string
+	Bytes       int64
+	Skipped     bool
+	ContentHash string
 }
 
 type Downloader struct {
@@ -111,7 +114,8 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		_ = os.Remove(tempPath)
 		return Result{}, err
 	}
-	bytes, copyErr := io.Copy(tempFile, response.Body)
+	hasher := sha256.New()
+	bytes, copyErr := io.Copy(io.MultiWriter(tempFile, hasher), response.Body)
 	syncErr := tempFile.Sync()
 	closeErr := tempFile.Close()
 	if copyErr != nil {
@@ -126,11 +130,13 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		_ = os.Remove(tempPath)
 		return Result{}, closeErr
 	}
+	contentHash := hex.EncodeToString(hasher.Sum(nil))
 	result, skipped, err := publishTempFile(tempPath, basePath, bytes, response.ContentLength, maxFilenameLength, replaceExisting)
 	if err != nil {
 		_ = os.Remove(tempPath)
 		return Result{}, err
 	}
+	result.ContentHash = contentHash
 	if !options.ModTime.IsZero() {
 		_ = os.Chtimes(result.Path, time.Now(), options.ModTime)
 	}

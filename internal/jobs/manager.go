@@ -772,24 +772,31 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	}
 	if result.Skipped {
 		if _, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-			JobID:      job.ID,
-			TweetID:    tweetID,
-			MediaURL:   mediaURL,
-			PreviewURL: previewURL,
-			FilePath:   result.Path,
-			Bytes:      result.Bytes,
+			JobID:       job.ID,
+			TweetID:     tweetID,
+			MediaURL:    mediaURL,
+			ContentHash: result.ContentHash,
+			PreviewURL:  previewURL,
+			FilePath:    result.Path,
+			Bytes:       result.Bytes,
 		}); err != nil {
 			return mediaDownloadResult{}, err
 		}
 		return mediaDownloadResult{skipped: true}, nil
 	}
+	if skipped, err := m.skipSameContentMedia(ctx, saveCtx, job, cfg, target, result, mediaURL, tweetID, previewURL); err != nil {
+		return mediaDownloadResult{}, err
+	} else if skipped {
+		return mediaDownloadResult{skipped: true}, nil
+	}
 	_, err = m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-		JobID:      job.ID,
-		TweetID:    tweetID,
-		MediaURL:   mediaURL,
-		PreviewURL: previewURL,
-		FilePath:   result.Path,
-		Bytes:      result.Bytes,
+		JobID:       job.ID,
+		TweetID:     tweetID,
+		MediaURL:    mediaURL,
+		ContentHash: result.ContentHash,
+		PreviewURL:  previewURL,
+		FilePath:    result.Path,
+		Bytes:       result.Bytes,
 	})
 	return mediaDownloadResult{}, err
 }
@@ -835,12 +842,56 @@ func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context
 			continue
 		}
 		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-			JobID:      job.ID,
-			TweetID:    tweetID,
-			MediaURL:   mediaURL,
-			PreviewURL: previewURL,
-			FilePath:   filepath.Clean(path),
-			Bytes:      size,
+			JobID:       job.ID,
+			TweetID:     tweetID,
+			MediaURL:    mediaURL,
+			ContentHash: copy.ContentHash,
+			PreviewURL:  previewURL,
+			FilePath:    filepath.Clean(path),
+			Bytes:       size,
+		})
+		if err != nil {
+			return false, err
+		}
+		m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *Manager) skipSameContentMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, target filestore.Store, result downloader.Result, mediaURL string, tweetID string, previewURL string) (bool, error) {
+	contentHash := strings.TrimSpace(result.ContentHash)
+	if contentHash == "" || strings.TrimSpace(result.Path) == "" {
+		return false, nil
+	}
+	copies, err := m.store.FindDownloadsByContentHash(saveCtx, contentHash, 20)
+	if err != nil {
+		return false, err
+	}
+	resultPath := filepath.Clean(result.Path)
+	for _, copy := range copies {
+		path := strings.TrimSpace(copy.FilePath)
+		if path == "" || filepath.Clean(path) == resultPath {
+			continue
+		}
+		archived, size, err := archivedFileState(path)
+		if err != nil {
+			return false, err
+		}
+		if !archived {
+			continue
+		}
+		if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+			JobID:       job.ID,
+			TweetID:     tweetID,
+			MediaURL:    mediaURL,
+			ContentHash: contentHash,
+			PreviewURL:  previewURL,
+			FilePath:    filepath.Clean(path),
+			Bytes:       size,
 		})
 		if err != nil {
 			return false, err
