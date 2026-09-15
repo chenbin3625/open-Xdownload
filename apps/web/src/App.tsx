@@ -75,11 +75,7 @@ export default function App() {
     activeSection === "schedules" ||
     activeSection === "gallery";
 
-  const { sseConnected } = useDashboardEvents(
-    queryClient,
-    refreshDashboard,
-    isWorkbenchActive,
-  );
+  useDashboardEvents(queryClient, refreshDashboard, isWorkbenchActive);
 
   // 任务分页 Query
   const jobs = useQuery({
@@ -175,9 +171,6 @@ export default function App() {
 
   const sidebarProps = {
     activeSection,
-    totalJobsCount: currentStats.total,
-    activeJobsCount: currentStats.active,
-    schedulesCount: schedules.data?.length ?? 0,
     failedTweetCount,
     storageType: config.data?.storageType || "local",
     storagePath: config.data?.downloadDir || "/downloads",
@@ -193,7 +186,6 @@ export default function App() {
         <AppSidebar
           {...sidebarProps}
           onSectionChange={handleSectionChange}
-          onOpenCreateModal={() => openCreateModal()}
           onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
         />
       )}
@@ -212,10 +204,6 @@ export default function App() {
               handleSectionChange(section);
               setMobileMenuOpen(false);
             }}
-            onOpenCreateModal={() => {
-              setMobileMenuOpen(false);
-              openCreateModal();
-            }}
             onOpenFailedDrawer={() => {
               setMobileMenuOpen(false);
               setFailedDrawerOpen(true);
@@ -227,9 +215,6 @@ export default function App() {
       {/* 右侧主视窗内容流 */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <AppHeader
-          sseConnected={sseConnected}
-          activeCount={currentStats.active}
-          maxConcurrency={config.data?.maxConcurrency ?? 2}
           refreshPending={manualRefreshPending}
           onRefresh={handleManualRefresh}
           onQuickSubmit={(input) => openCreateModal(input)}

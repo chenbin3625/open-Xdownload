@@ -320,13 +320,8 @@ func (m *Manager) enqueueDueArchiveSchedules(ctx context.Context) {
 	}
 }
 
-func (m *Manager) availableSlots(limit int) int {
-	if limit <= 0 {
-		limit = 1
-	}
-	if limit > 64 {
-		limit = 64
-	}
+func (m *Manager) availableSlots(_ int) int {
+	const limit = 1
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return limit - len(m.active)
@@ -711,7 +706,7 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	}
 	// 媒体锁按媒体身份（而不是 URL 字符串）串行化：同一份媒体的不同 URL 写法、以及
 	// tweet_id 为空的直接媒体 URL 任务都落到同一把锁上，避免并发各自下载同一媒体、
-	// 或在同名同大小判定完成前同时落盘出 photo.jpg / photo(1).jpg 两份副本。
+	// 或在已有媒体记录判定完成前同时落盘出 photo.jpg / photo(1).jpg 两份副本。
 	mediaKey := downloader.MediaIdentity(mediaURL)
 	release, err := m.lockMedia(ctx, mediaKey)
 	if err != nil {
@@ -734,9 +729,8 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	if dir == "" {
 		dir = target.Root()
 	}
-	// 磁盘上已经有同一份媒体时直接跳过，不再下载（既不创建硬链接也不复制副本）：
-	// 目标目录下确实存在同名同大小的文件时才算已归档。
-	skipped, err := m.skipArchivedMedia(ctx, saveCtx, job, cfg, target, existing, mediaKey, mediaURL, tweetID, dir, filenameHint, previewURL)
+	// 磁盘上已经有同一份媒体时直接跳过，不再下载（既不创建硬链接也不复制副本）。
+	skipped, err := m.skipArchivedMedia(ctx, saveCtx, job, cfg, target, existing, mediaKey, mediaURL, tweetID, previewURL)
 	if err != nil {
 		return mediaDownloadResult{}, err
 	}
@@ -800,17 +794,16 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	return mediaDownloadResult{}, err
 }
 
-// skipArchivedMedia 判断本次要归档的媒体是否已经存在于目标目录，命中时直接跳过：
+// skipArchivedMedia 判断本次要归档的媒体是否已经存在，命中时直接跳过：
 // 不下载、不创建硬链接、也不复制副本。
 //
 //  1. 本推文+本媒体已有记录且文件仍在 → 已归档，跳过（沿用既有行为）；
 //  2. 同一份媒体的其他副本（转推、引用推文与卡片媒体会复用同一条媒体 URL）中存在
-//     "目标目录下已有同名同大小的文件"时 → 视为已归档，跳过。
+//     仍在磁盘上的文件时 → 视为已归档，跳过。
 //
-// 第 2 步用已知副本作为参照：文件名由本次的文件名提示与副本扩展名推导（与下载落盘
-// 命名规则一致），只有目标目录下确实存在同名且字节数一致的文件才算命中，避免把内容
-// 不同但同名的文件误判为已下载。返回 true 表示本次已跳过。
-func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, target filestore.Store, existing *storage.DownloadRecord, mediaKey string, mediaURL string, tweetID string, dir string, filenameHint string, previewURL string) (bool, error) {
+// 第 2 步按媒体身份键复用既有下载记录的 file_path：同一媒体内容只保留一份本地文件，
+// 新记录指向已有文件路径。返回 true 表示本次已跳过。
+func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, target filestore.Store, existing *storage.DownloadRecord, mediaKey string, mediaURL string, tweetID string, previewURL string) (bool, error) {
 	if existing != nil {
 		if path := strings.TrimSpace(existing.FilePath); path != "" {
 			info, err := os.Stat(path)
@@ -829,65 +822,33 @@ func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context
 	if err != nil {
 		return false, err
 	}
-	inDir, elsewhere := splitCopiesByDir(copies, dir)
-	for _, group := range [][]storage.DownloadRecord{inDir, elsewhere} {
-		for _, copy := range group {
-			archived, size, err := archivedFileState(copy.FilePath)
-			if err != nil {
-				return false, err
-			}
-			if !archived {
-				continue
-			}
-			expectedPath := filepath.Join(dir, downloader.Filename(copy.FilePath, filenameHint, "", cfg.MaxFilenameLength))
-			expected, expectedSize, err := archivedFileState(expectedPath)
-			if err != nil {
-				return false, err
-			}
-			if !expected || expectedSize != size {
-				continue
-			}
-			record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-				JobID:      job.ID,
-				TweetID:    tweetID,
-				MediaURL:   mediaURL,
-				PreviewURL: previewURL,
-				FilePath:   expectedPath,
-				Bytes:      expectedSize,
-			})
-			if err != nil {
-				return false, err
-			}
-			m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// splitCopiesByDir 把同一媒体的历史副本按"是否位于本次目标目录"分成两组，优先用目标
-// 目录内的副本作为同名同大小判定的参照（同目录内的副本最可靠）。
-func splitCopiesByDir(copies []storage.DownloadRecord, dir string) ([]storage.DownloadRecord, []storage.DownloadRecord) {
-	inDir := make([]storage.DownloadRecord, 0, len(copies))
-	elsewhere := make([]storage.DownloadRecord, 0, len(copies))
-	seen := make(map[string]struct{}, len(copies))
 	for _, copy := range copies {
 		path := strings.TrimSpace(copy.FilePath)
 		if path == "" {
 			continue
 		}
-		cleaned := filepath.Clean(path)
-		if _, ok := seen[cleaned]; ok {
+		archived, size, err := archivedFileState(path)
+		if err != nil {
+			return false, err
+		}
+		if !archived {
 			continue
 		}
-		seen[cleaned] = struct{}{}
-		if pathWithinDir(cleaned, dir) {
-			inDir = append(inDir, copy)
-			continue
+		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+			JobID:      job.ID,
+			TweetID:    tweetID,
+			MediaURL:   mediaURL,
+			PreviewURL: previewURL,
+			FilePath:   filepath.Clean(path),
+			Bytes:      size,
+		})
+		if err != nil {
+			return false, err
 		}
-		elsewhere = append(elsewhere, copy)
+		m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
+		return true, nil
 	}
-	return inDir, elsewhere
+	return false, nil
 }
 
 // archivedFileState 报告 path 处是否已经放着普通文件，并返回其字节数。
@@ -903,24 +864,6 @@ func archivedFileState(path string) (bool, int64, error) {
 		return false, 0, nil
 	}
 	return true, info.Size(), nil
-}
-
-// pathWithinDir 报告 path 是否位于 dir 目录内（含 dir 本身），用于判断已有媒体是否
-// 就在本次归档目标目录里；比较时统一按绝对路径与文件分隔符处理。
-func pathWithinDir(path string, dir string) bool {
-	if strings.TrimSpace(dir) == "" {
-		return false
-	}
-	cleanPath := filepath.Clean(path)
-	cleanDir := filepath.Clean(dir)
-	if cleanPath == cleanDir {
-		return false
-	}
-	relative, err := filepath.Rel(cleanDir, cleanPath)
-	if err != nil {
-		return false
-	}
-	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // keyLock 是按 key 串行化的令牌锁，带 waiter 计数（持有者 + 等待者）。在无人持有时从
@@ -986,8 +929,6 @@ type archiveStats struct {
 	Issues     []string
 }
 
-const maxArchiveUserConcurrency = 2
-
 type archiveUserTask struct {
 	index        int
 	order        int
@@ -1039,32 +980,22 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		return stats, nil
 	}
 
-	workerCount := archiveUserConcurrency(cfg, len(tasks))
-	workCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	baseJob := job
 	progressJob := job
 
-	var statsMu sync.Mutex
 	addStats := func(delta archiveStats) {
-		statsMu.Lock()
 		stats.Users += delta.Users
 		stats.Tweets += delta.Tweets
 		stats.Downloaded += delta.Downloaded
 		stats.Skipped += delta.Skipped
 		stats.Failed += delta.Failed
 		stats.Issues = append(stats.Issues, delta.Issues...)
-		statsMu.Unlock()
 	}
 
-	var jobMu sync.Mutex
 	completed := 0
 	lastProgressWrite := time.Time{}
 	// saveProgress 用于进度类中间状态，按 progressWriteInterval 节流（P1），丢弃中间
 	// 更新不会影响正确性：终态由 finishTask/completeArchive 即时写入。
 	saveProgress := func(status storage.JobStatus, message string) {
-		jobMu.Lock()
-		defer jobMu.Unlock()
 		if now := time.Now(); now.Sub(lastProgressWrite) < progressWriteInterval {
 			return
 		} else {
@@ -1079,8 +1010,6 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 	// finishTask 每完成一个用户即时写入：写放大主要来自"每个媒体"的进度保存；
 	// 每用户的完成事件频率低，即时写入可让进度条保持准确。
 	finishTask := func() {
-		jobMu.Lock()
-		defer jobMu.Unlock()
 		completed++
 		progressJob.Status = storage.JobResolving
 		progressJob.Progress = start + (end-start)*float64(completed)/float64(len(tasks))
@@ -1089,75 +1018,22 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		m.save(saveCtx, progressJob)
 	}
 
-	var errMu sync.Mutex
-	var firstErr error
-	setErr := func(err error) {
-		if err == nil {
-			return
-		}
-		errMu.Lock()
-		if firstErr == nil {
-			firstErr = err
-			cancel()
-		}
-		errMu.Unlock()
-	}
-
-	taskCh := make(chan archiveUserTask, max(1, workerCount*2))
-	var wg sync.WaitGroup
-	for worker := 0; worker < workerCount; worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("panic in archiveUsers worker: %v\n%s", r, debug.Stack())
-					setErr(fmt.Errorf("internal panic: %v", r))
-				}
-			}()
-			for task := range taskCh {
-				if workCtx.Err() != nil {
-					setErr(context.Canceled)
-					return
-				}
-				saveProgress(
-					storage.JobResolving,
-					fmt.Sprintf("同步用户 %d/%d @%s", task.order+1, len(tasks), fallbackUserName(task.user)),
-				)
-				delta, err := m.archiveUser(workCtx, saveCtx, baseJob, cfg, pool, task.user, listEntity, func(message string) {
-					saveProgress(storage.JobDownloading, message)
-				})
-				addStats(delta)
-				if err != nil {
-					setErr(err)
-					return
-				}
-				finishTask()
-			}
-		}()
-	}
-
-sendLoop:
 	for _, task := range tasks {
-		select {
-		case taskCh <- task:
-		case <-workCtx.Done():
-			break sendLoop
+		if err := ctx.Err(); err != nil {
+			return stats, err
 		}
-	}
-	close(taskCh)
-	wg.Wait()
-
-	errMu.Lock()
-	err = firstErr
-	errMu.Unlock()
-	if err != nil {
-		return stats, err
-	}
-	// 取消（用户取消或关停）时 firstErr 可能为 nil（worker 经 workCtx.Err() 快路径退出
-	// 未调 setErr）；返回 workCtx.Err() 让调用方的取消判定正常工作。
-	if workCtx.Err() != nil {
-		return stats, workCtx.Err()
+		saveProgress(
+			storage.JobResolving,
+			fmt.Sprintf("同步用户 %d/%d @%s", task.order+1, len(tasks), fallbackUserName(task.user)),
+		)
+		delta, err := m.archiveUser(ctx, saveCtx, job, cfg, pool, task.user, listEntity, func(message string) {
+			saveProgress(storage.JobDownloading, message)
+		})
+		addStats(delta)
+		if err != nil {
+			return stats, err
+		}
+		finishTask()
 	}
 	return stats, nil
 }
@@ -1216,19 +1092,6 @@ func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, us
 		tasks[index].order = index
 	}
 	return tasks, skipped, nil
-}
-
-func archiveUserConcurrency(cfg config.AppConfig, userCount int) int {
-	if userCount <= 1 {
-		return 1
-	}
-	limit := cfg.MaxConcurrency
-	if limit <= 0 {
-		limit = config.Default().MaxConcurrency
-	}
-	limit = min(limit, maxArchiveUserConcurrency)
-	limit = min(limit, userCount)
-	return max(1, limit)
 }
 
 func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, listEntity *storage.ListEntity, updateDownloading func(message string)) (archiveStats, error) {
@@ -1852,14 +1715,7 @@ func archiveIssueSummary(issues []string) string {
 			}
 		} else {
 			if len(g.targets) > 0 {
-				shown := g.targets
-				if len(shown) > 5 {
-					shown = shown[:5]
-				}
-				targetList := strings.Join(shown, "、")
-				if len(g.targets) > 5 {
-					targetList += " 等"
-				}
+				targetList := strings.Join(g.targets, "、")
 				if g.action != "" {
 					lines = append(lines, fmt.Sprintf("%s: %s (共 %d 个账号: %s)", g.action, g.reason, g.count, targetList))
 				} else {

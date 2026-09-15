@@ -83,7 +83,7 @@ type DownloadRecord struct {
 	UserName       string    `json:"userName,omitempty" db:"user_name"`
 	FileURL        string    `json:"fileUrl,omitempty" db:"-"`
 	// MediaKey 是 media_url 的媒体身份键（downloader.MediaIdentity），同一份媒体内容的
-	// 不同 URL 写法共用同一个键，用于跨推文判断"同名同大小已归档"并跳过；不对外暴露。
+	// 不同 URL 写法共用同一个键，用于跨推文判断"已有可用文件"并跳过；不对外暴露。
 	MediaKey string `json:"-" db:"media_key"`
 }
 

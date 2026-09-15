@@ -17,7 +17,7 @@ open-Xdownload is a local-first X / Twitter media downloader. It comes with a bu
 - Batch tasks: Users, lists, and followed accounts can be entered one per line in a single batch — up to 200 tasks at once, with automatic deduplication.
 - Scheduled plans: Save users, lists, or followed accounts as automatic archiving plans, with support for enable, disable, run now, and delete.
 - Incremental archiving: The first run scans a user's full media timeline; later runs resume from the last successful position. Media already downloaded and still present is skipped automatically.
-- Duplicate-download skipping: Retweets, quote posts, and card media reuse the same media URL. When the target archive directory already holds a file with the same name and the same size, the media is skipped outright — no download, no hard link, and no copy. Files with a different name are still downloaded normally.
+- Duplicate-download skipping: Retweets, quote posts, and card media can point to the same media content. Once that media already has a usable local file, later matches are skipped outright — no repeated download, no hard link, and no copy.
 - Workbench task list: Task status, progress, errors, and download records are shown directly in the workbench, with support for cancelling tasks, re-running them, and copying file paths or failed media URLs.
 - Media library: Browse downloaded media by image, video, or GIF category, with counts on each tab and search across file names, media URLs, and post IDs.
 - User grouping and filtering: Archived media shows the author's username and display name, supports filtering by user, and infers users from archive directories for older records.
@@ -165,7 +165,7 @@ After starting the service and opening the Web UI, go to the "Configuration" pag
 
 1. Configure the download directory: browse, type in, or create one; for Docker deployments this is usually `/downloads`.
 2. If you need a proxy to reach X or download media, set a proxy address such as `http://127.0.0.1:7890`.
-3. Set the max concurrency, filename pattern, and max filename length.
+3. Set the filename pattern and max filename length.
 4. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0` (see [Getting the X Cookie](#getting-the-x-cookie)).
 5. If you have cookies for multiple accounts, enter them as groups under "Backup cookies" for rotation during batch archiving.
 6. Click "Save configuration", then "Verify login" to confirm the cookies work.
@@ -279,7 +279,6 @@ Notes:
 | --- | --- |
 | Download directory | Root directory for local storage; can be browsed, entered, or created in the UI. For Docker, map it to a host directory. |
 | Proxy | Used for X API requests and media downloads; leave empty for a direct connection. |
-| Concurrency | Max concurrency for background tasks, range `1-64`. |
 | Filename pattern | Either "post only" or "username + user ID + post". |
 | Max filename length | Range `16-240`. |
 | X Cookie | Primary `auth_token` and `ct0`, used for authenticated APIs; see [Getting the X Cookie](#getting-the-x-cookie) for how to copy them from your browser. |
@@ -332,7 +331,7 @@ open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web
 - 批量任务：用户、列表、关注目标可以一次输入多行，单次最多创建 200 个任务，并会自动去重。
 - 定时计划：可把用户、列表、关注目标保存为自动归档计划，支持启用、停用、立即运行和删除。
 - 全量归档：每次归档都完整扫描用户媒体时间线；已下载过且文件仍在的媒体自动跳过，历史视频缺失的预览图地址与缩略图会在归档途中自动补齐。
-- 重复下载跳过：转推、引用推文与卡片媒体会复用同一条媒体 URL。目标归档目录下已经有同名同大小的文件时直接跳过——不下载、不建硬链接、也不复制副本；文件名不同的仍然正常下载。
+- 重复下载跳过：转推、引用推文与卡片媒体可能指向同一份媒体内容。只要该媒体已经有可用的本地文件，后续命中会直接跳过——不重复下载、不建硬链接、也不复制副本。
 - 增量归档开关（可选）：开启后重复归档使用早停游标从上次成功位置继续，节省 X API 配额；默认关闭，保持全量扫描。
 - 工作台任务列表：任务状态、进度、错误信息和下载记录直接在工作台展示，支持取消任务、重新执行、复制文件路径或失败媒体地址。
 - 媒体归档库：按图片、视频、GIF 分类查看已下载媒体，顶部显示各分类数量，并支持文件名、媒体地址和推文号搜索。
@@ -482,7 +481,7 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 
 1. 配置下载目录：可浏览、直接输入或创建；Docker 部署时通常保持 `/downloads`。
 2. 如访问 X 或下载媒体需要代理，填写代理地址，例如 `http://127.0.0.1:7890`。
-3. 设置最大并发、文件命名方式和最大文件名长度。
+3. 设置文件命名方式和最大文件名长度。
 4. 如需用户、列表、关注归档，填写 X Cookie：`auth_token` 和 `ct0`（获取方式见[获取 X Cookie](#获取-x-cookie)）。
 5. 如有多个账号 Cookie，在“备用 Cookie”中按组填写，用于批量归档时轮换。
 6. 点击“保存配置”，再点击“校验登录”确认 Cookie 可用。
@@ -596,7 +595,6 @@ downloads/
 | --- | --- |
 | 下载目录 | 本地存储根目录，可在界面中浏览、输入或创建。Docker 部署时建议映射到宿主机目录。 |
 | 代理 | 用于 X API 请求和媒体下载。留空则直连。 |
-| 并发 | 后台任务最大并发数，范围 `1-64`。 |
 | 文件名命名 | 可选“仅推文”或“用户名 + 用户 ID + 推文”。 |
 | 最大文件名长度 | 范围 `16-240`。 |
 | X Cookie | 主 `auth_token` 和 `ct0`，用于登录态接口；获取方式见[获取 X Cookie](#获取-x-cookie)。 |

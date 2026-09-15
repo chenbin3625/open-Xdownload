@@ -19,7 +19,6 @@ export const downloadSettingsTips = {
       <div>用户名或密码里的 @、:、/、% 需要 URL 编码；包含账号密码时会随配置保存在本地。</div>
     </div>
   ),
-  concurrency: "后台同时运行的下载任务数，过高可能触发站点限流或增加远程存储压力。",
   maxFilenameLength: "限制保存到磁盘或远程存储的文件名长度，长推文文件名会自动截断。",
   fileNaming: "影响新下载文件的命名方式，已下载文件不会被重命名。",
   autoRetryFailed: "批量归档结束后，自动再次处理失败推文队列。",
@@ -55,7 +54,7 @@ export function DownloadSettingsFields({
   return (
     <div className="space-y-4">
       {/* 基础输入网格 */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <div className="sm:col-span-2">
           <Field
             label="网络代理 (Proxy)"
@@ -67,22 +66,6 @@ export function DownloadSettingsFields({
                 onAuthChange((current) => ({ ...current, proxyUrl: event.target.value }))
               }
               placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
-            />
-          </Field>
-        </div>
-
-        <div>
-          <Field
-            label="最大任务并发"
-            tooltip={<TipIcon content={downloadSettingsTips.concurrency} />}
-          >
-            <NumberInput
-              min={1}
-              max={64}
-              value={draft.maxConcurrency}
-              onChange={(value) =>
-                onChange((current) => ({ ...current, maxConcurrency: value ?? 1 }))
-              }
             />
           </Field>
         </div>

@@ -99,6 +99,18 @@ func TestNormalizedFileNamingDefaultsAndLimits(t *testing.T) {
 	}
 }
 
+func TestNormalizedForcesSerialConcurrency(t *testing.T) {
+	cfg := AppConfig{MaxConcurrency: 32}.Normalized()
+	if cfg.MaxConcurrency != 1 {
+		t.Fatalf("MaxConcurrency = %d, want serial concurrency 1", cfg.MaxConcurrency)
+	}
+
+	cfg = AppConfig{MaxConcurrency: 0}.Normalized()
+	if cfg.MaxConcurrency != 1 {
+		t.Fatalf("default MaxConcurrency = %d, want serial concurrency 1", cfg.MaxConcurrency)
+	}
+}
+
 func TestRedactAndRestoreAdditionalCookies(t *testing.T) {
 	raw := "auth_token=tok1; ct0=csrf1\nauth_token=tok2; ct0=csrf2"
 	redacted := RedactAdditionalCookies(raw)

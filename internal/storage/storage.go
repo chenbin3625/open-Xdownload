@@ -555,7 +555,7 @@ func (s *Store) normalizeDownloadsMediaURL(exec migrationExecutor) error {
 
 // backfillDownloadsMediaKey 为历史 downloads 记录补齐媒体身份键（新增列默认为空）。
 // 身份键在写入入口由 downloader.MediaIdentity 计算，新记录无需回填；一次性执行，
-// 只为让旧记录也能参与"同一媒体同名同大小即跳过"的判定。
+// 只为让旧记录也能参与"同一媒体已有可用文件即跳过"的判定。
 func (s *Store) backfillDownloadsMediaKey(exec migrationExecutor) error {
 	type downloadRow struct {
 		ID       int64  `db:"id"`
@@ -1677,8 +1677,8 @@ func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, med
 
 // FindDownloadsByMediaKey 返回同一媒体身份（downloader.MediaIdentity）的历史下载记录，
 // 按写入顺序升序，最多 limit 条。同一份媒体可能分布在多个归档目录里（转推、引用推文、
-// 卡片媒体会复用同一条媒体 URL），归档时据此判断目标目录下是否已经有同名同大小的文件，
-// 从而跳过重复下载。记录里的文件未必仍然存在，调用方必须自行校验。
+// 卡片媒体会复用同一条媒体 URL），归档时据此判断是否已有可用文件，从而跳过重复下载。
+// 记录里的文件未必仍然存在，调用方必须自行校验。
 func (s *Store) FindDownloadsByMediaKey(ctx context.Context, mediaKey string, limit int) ([]DownloadRecord, error) {
 	mediaKey = strings.TrimSpace(mediaKey)
 	if mediaKey == "" {

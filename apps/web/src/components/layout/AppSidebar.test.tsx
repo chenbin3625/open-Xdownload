@@ -8,23 +8,32 @@ import { AppSidebar, type AppSidebarProps } from "./AppSidebar";
 const baseProps: AppSidebarProps = {
   activeSection: "tasks",
   onSectionChange: () => {},
-  onOpenCreateModal: () => {},
   onOpenFailedDrawer: () => {},
-  totalJobsCount: 0,
-  activeJobsCount: 0,
-  schedulesCount: 0,
   failedTweetCount: 0,
 };
 
 describe("AppSidebar", () => {
+  it("使用更窄的侧边栏宽度", () => {
+    const { container } = render(<AppSidebar {...baseProps} />);
+
+    expect(container.querySelector("aside")?.className).toContain("w-48");
+  });
+
+  it("品牌区不展示版本号", () => {
+    render(<AppSidebar {...baseProps} />);
+
+    expect(screen.getByText("open-Xdownload")).not.toBeNull();
+    expect(screen.queryByText(`v${__APP_VERSION__}`)).toBeNull();
+  });
+
   it("用 aria-current 标记当前导航项", () => {
     render(<AppSidebar {...baseProps} activeSection="gallery" />);
 
-    expect(screen.getByRole("button", { name: /媒体归档库/ }).getAttribute("aria-current")).toBe(
+    expect(screen.getByRole("button", { name: /媒体归档/ }).getAttribute("aria-current")).toBe(
       "page",
     );
     expect(
-      screen.getByRole("button", { name: /任务调度中心/ }).hasAttribute("aria-current"),
+      screen.getByRole("button", { name: /任务中心/ }).hasAttribute("aria-current"),
     ).toBe(false);
   });
 
@@ -32,7 +41,7 @@ describe("AppSidebar", () => {
     for (const section of ["overview", "workbench", "tasks"] as const) {
       const { unmount } = render(<AppSidebar {...baseProps} activeSection={section} />);
       expect(
-        screen.getByRole("button", { name: /任务调度中心/ }).getAttribute("aria-current"),
+        screen.getByRole("button", { name: /任务中心/ }).getAttribute("aria-current"),
       ).toBe("page");
       unmount();
     }
@@ -43,20 +52,27 @@ describe("AppSidebar", () => {
     const onSectionChange = vi.fn();
     render(<AppSidebar {...baseProps} onSectionChange={onSectionChange} />);
 
-    await user.click(screen.getByRole("button", { name: /系统与存储配置/ }));
+    await user.click(screen.getByRole("button", { name: /系统配置/ }));
     expect(onSectionChange).toHaveBeenCalledWith("settings");
   });
 
-  it("运行中任务优先显示运行数，否则显示总数", () => {
-    const { unmount } = render(
-      <AppSidebar {...baseProps} totalJobsCount={12} activeJobsCount={3} />,
-    );
-    expect(screen.getByText("3 运行")).not.toBeNull();
-    expect(screen.queryByText("12")).toBeNull();
-    unmount();
+  it("菜单项只展示统一字数的名称，不展示数量徽标", () => {
+    render(<AppSidebar {...baseProps} failedTweetCount={5} />);
 
-    render(<AppSidebar {...baseProps} totalJobsCount={12} activeJobsCount={0} />);
-    expect(screen.getByText("12")).not.toBeNull();
+    for (const label of ["任务中心", "归档计划", "媒体归档", "系统配置"]) {
+      expect(label.length).toBe(4);
+      expect(screen.getByRole("button", { name: label })).not.toBeNull();
+    }
+    expect(screen.queryByText("3 运行")).toBeNull();
+    expect(screen.queryByText("12")).toBeNull();
+    expect(screen.queryByText("7")).toBeNull();
+    expect(screen.queryByText("5")).toBeNull();
+  });
+
+  it("不在侧边栏展示新建下载按钮", () => {
+    render(<AppSidebar {...baseProps} />);
+
+    expect(screen.queryByRole("button", { name: /新建任务|新建下载/ })).toBeNull();
   });
 
   it("没有失败推文时不渲染失败队列入口", () => {
@@ -65,7 +81,7 @@ describe("AppSidebar", () => {
     unmount();
 
     render(<AppSidebar {...baseProps} failedTweetCount={5} />);
-    expect(screen.getByText("失败推文队列")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "查看并批量重试" })).not.toBeNull();
+    expect(screen.getByText("失败队列")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "处理失败" })).not.toBeNull();
   });
 });

@@ -98,7 +98,7 @@ type AuthCookie struct {
 func Default() AppConfig {
 	return AppConfig{
 		DownloadDir:       defaultDownloadDir(),
-		MaxConcurrency:    2,
+		MaxConcurrency:    1,
 		AutoRetryFailed:   true,
 		FileNamingMode:    FileNamingTweetText,
 		MaxFilenameLength: DefaultMaxFilenameLength,
@@ -110,12 +110,7 @@ func (cfg AppConfig) Normalized() AppConfig {
 	if cfg.DownloadDir == "" {
 		cfg.DownloadDir = defaultDownloadDir()
 	}
-	if cfg.MaxConcurrency <= 0 {
-		cfg.MaxConcurrency = Default().MaxConcurrency
-	}
-	if cfg.MaxConcurrency > 64 {
-		cfg.MaxConcurrency = 64
-	}
+	cfg.MaxConcurrency = 1
 	switch cfg.FileNamingMode {
 	case FileNamingTweetText, FileNamingUserTweet:
 	case legacyFileNamingTweetID, legacyFileNamingTweetIDText:

@@ -2,7 +2,6 @@ import {
   Clock,
   FolderOpen,
   Images,
-  Plus,
   Settings,
   TriangleAlert,
   ListChecks,
@@ -13,32 +12,23 @@ import type { SectionKey } from "../../lib/useRouteState";
 import { Button } from "../ui/Button";
 import { Divider } from "../ui/Feedback";
 import { Tooltip } from "../ui/Overlay";
-import { CountBadge, Tag } from "../ui/Tag";
 
 export interface AppSidebarProps {
   activeSection: SectionKey;
   onSectionChange: (section: SectionKey) => void;
-  onOpenCreateModal: () => void;
   onOpenFailedDrawer: () => void;
-  totalJobsCount: number;
-  activeJobsCount: number;
-  schedulesCount: number;
   failedTweetCount: number;
   storageType?: string;
   storagePath?: string;
 }
 
-// overview / workbench / tasks 三个 section 都落到「任务调度中心」这一项上。
+// overview / workbench / tasks 三个 section 都落到「任务中心」这一项上。
 const taskCenterSections: SectionKey[] = ["overview", "workbench", "tasks"];
 
 export function AppSidebar({
   activeSection,
   onSectionChange,
-  onOpenCreateModal,
   onOpenFailedDrawer,
-  totalJobsCount,
-  activeJobsCount,
-  schedulesCount,
   failedTweetCount,
   storageType = "local",
   storagePath = "/downloads",
@@ -49,39 +39,31 @@ export function AppSidebar({
     key: SectionKey;
     icon: React.ReactNode;
     label: string;
-    badge?: React.ReactNode;
   }[] = [
     {
       key: "tasks",
       icon: <ListChecks className="size-4 shrink-0" />,
-      label: "任务调度中心",
-      badge:
-        activeJobsCount > 0 ? (
-          <Tag tone="brand" className="font-mono">{`${activeJobsCount} 运行`}</Tag>
-        ) : totalJobsCount > 0 ? (
-          <Tag className="font-mono">{totalJobsCount}</Tag>
-        ) : null,
+      label: "任务中心",
     },
     {
       key: "schedules",
       icon: <Clock className="size-4 shrink-0" />,
-      label: "自动归档计划",
-      badge: schedulesCount > 0 ? <Tag className="font-mono">{schedulesCount}</Tag> : null,
+      label: "归档计划",
     },
     {
       key: "gallery",
       icon: <Images className="size-4 shrink-0" />,
-      label: "媒体归档库",
+      label: "媒体归档",
     },
     {
       key: "settings",
       icon: <Settings className="size-4 shrink-0" />,
-      label: "系统与存储配置",
+      label: "系统配置",
     },
   ];
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none">
+    <aside className="flex w-48 shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none">
       <div className="p-3">
         {/* 品牌区 */}
         <div className="flex items-center gap-2.5 px-1 pt-1 pb-3">
@@ -89,28 +71,13 @@ export function AppSidebar({
             𝕏
           </span>
           <div className="min-w-0">
-            <div className="flex items-center gap-1">
-              <span className="text-sm font-bold tracking-tight text-fg truncate">open-Xdownload</span>
-              <Tag tone="brand" className="font-mono text-[10px] px-1 py-0">
-                v{__APP_VERSION__}
-              </Tag>
-            </div>
+            <div className="truncate text-sm font-bold tracking-tight text-fg">open-Xdownload</div>
             <p className="text-[11px] text-fg-muted font-medium truncate">推文多媒体归档工作台</p>
           </div>
         </div>
 
-        <Button
-          variant="primary"
-          block
-          icon={<Plus className="size-4" />}
-          onClick={onOpenCreateModal}
-          className="shadow-sm shadow-brand-500/20"
-        >
-          新建下载 / 归档
-        </Button>
-
         {/* 手写导航列表：单选语义用 aria-current 表达，不需要 Menu 的全部键盘模型 */}
-        <nav aria-label="主导航" className="mt-3 flex flex-col gap-1">
+        <nav aria-label="主导航" className="mt-1 flex flex-col gap-1">
           {navItems.map((item) => {
             const active = item.key === currentKey;
             return (
@@ -129,7 +96,6 @@ export function AppSidebar({
               >
                 <span className={active ? "text-brand-500" : "text-fg-subtle"}>{item.icon}</span>
                 <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
-                {item.badge}
               </button>
             );
           })}
@@ -143,12 +109,11 @@ export function AppSidebar({
               <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-xs font-medium text-danger">
                   <TriangleAlert className="size-3.5 text-danger" />
-                  失败推文队列
+                  失败队列
                 </span>
-                <CountBadge count={failedTweetCount} overflowCount={999} />
               </div>
               <Button variant="danger" size="sm" block onClick={onOpenFailedDrawer}>
-                查看并批量重试
+                处理失败
               </Button>
             </div>
           </>
