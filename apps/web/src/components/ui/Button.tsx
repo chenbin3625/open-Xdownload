@@ -88,17 +88,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
     >
       {/* asChild 时 Slot 只接受单个元素子节点，图标与 children 并列会报错。
           用 Slottable 圈出真正要被合并的那个子节点，图标留在外层。 */}
-      {asChild ? (
-        <>
-          {showIcon}
-          <Slot.Slottable>{children}</Slot.Slottable>
-        </>
-      ) : (
-        <>
-          {showIcon}
-          {children}
-        </>
-      )}
+      {showIcon}
+      {asChild ? <Slot.Slottable>{children}</Slot.Slottable> : children}
     </Component>
   );
 });
