@@ -6,8 +6,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppHeader } from "./AppHeader";
 
 const baseProps = {
-  sseConnected: true,
-  activeCount: 0,
   refreshPending: false,
   onRefresh: () => {},
   onQuickSubmit: () => {},
@@ -55,13 +53,13 @@ describe("AppHeader", () => {
     expect(onQuickSubmit).not.toHaveBeenCalled();
   });
 
-  it("按连接状态切换标签文案", () => {
-    const { unmount } = render(<AppHeader {...baseProps} sseConnected />);
-    expect(screen.getByText("实时连接")).not.toBeNull();
-    unmount();
+  it("右上角展示版本并移除运行状态标签", () => {
+    render(<AppHeader {...baseProps} />);
 
-    render(<AppHeader {...baseProps} sseConnected={false} />);
-    expect(screen.getByText("正在重连")).not.toBeNull();
+    expect(screen.getByText(`v${__APP_VERSION__}`)).not.toBeNull();
+    expect(screen.queryByText("实时连接")).toBeNull();
+    expect(screen.queryByText("正在重连")).toBeNull();
+    expect(screen.queryByText(/运行中/)).toBeNull();
   });
 
   it("主题按钮切换 html 上的类名", async () => {

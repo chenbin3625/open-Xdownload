@@ -75,11 +75,7 @@ export default function App() {
     activeSection === "schedules" ||
     activeSection === "gallery";
 
-  const { sseConnected } = useDashboardEvents(
-    queryClient,
-    refreshDashboard,
-    isWorkbenchActive,
-  );
+  useDashboardEvents(queryClient, refreshDashboard, isWorkbenchActive);
 
   // 任务分页 Query
   const jobs = useQuery({
@@ -227,8 +223,6 @@ export default function App() {
       {/* 右侧主视窗内容流 */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <AppHeader
-          sseConnected={sseConnected}
-          activeCount={currentStats.active}
           refreshPending={manualRefreshPending}
           onRefresh={handleManualRefresh}
           onQuickSubmit={(input) => openCreateModal(input)}

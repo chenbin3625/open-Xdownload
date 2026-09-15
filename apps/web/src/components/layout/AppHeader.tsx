@@ -1,15 +1,13 @@
-import { Check, Menu, Moon, Palette, RefreshCw, Search, Sun, Zap } from "lucide-react";
+import { Check, Menu, Moon, Palette, RefreshCw, Search, Sun } from "lucide-react";
 import React, { useState } from "react";
 import { cn } from "../../lib/cn";
 import { THEME_ACCENTS, useTheme } from "../../lib/useTheme";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { SimplePopover, Tooltip } from "../ui/Overlay";
-import { StatusDot, Tag } from "../ui/Tag";
+import { Tag } from "../ui/Tag";
 
 export interface AppHeaderProps {
-  sseConnected: boolean;
-  activeCount: number;
   refreshPending: boolean;
   onRefresh: () => void;
   onQuickSubmit: (input: string) => void;
@@ -18,8 +16,6 @@ export interface AppHeaderProps {
 }
 
 export function AppHeader({
-  sseConnected,
-  activeCount,
   refreshPending,
   onRefresh,
   onQuickSubmit,
@@ -85,19 +81,8 @@ export function AppHeader({
 
         {/* 右侧运行状态与操作 */}
         <div className="flex shrink-0 items-center gap-2">
-          <Tag
-            tone={sseConnected ? "success" : "warning"}
-            className="hidden items-center gap-1.5 lg:inline-flex shadow-2xs"
-          >
-            <StatusDot tone={sseConnected ? "success" : "warning"} pulse={sseConnected} />
-            {sseConnected ? "实时连接" : "正在重连"}
-          </Tag>
-
-          <Tag className="hidden items-center gap-1.5 sm:inline-flex shadow-2xs">
-            <Zap className={cn("size-3.5", activeCount > 0 ? "text-warning" : "text-fg-subtle")} />
-            <span className="font-mono">
-              运行中 {activeCount}
-            </span>
+          <Tag tone="brand" className="hidden font-mono text-[11px] shadow-2xs sm:inline-flex">
+            v{__APP_VERSION__}
           </Tag>
 
           {/* 主题强调色选择器 */}

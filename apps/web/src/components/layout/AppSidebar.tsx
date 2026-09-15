@@ -89,12 +89,7 @@ export function AppSidebar({
             𝕏
           </span>
           <div className="min-w-0">
-            <div className="flex items-center gap-1">
-              <span className="text-sm font-bold tracking-tight text-fg truncate">open-Xdownload</span>
-              <Tag tone="brand" className="font-mono text-[10px] px-1 py-0">
-                v{__APP_VERSION__}
-              </Tag>
-            </div>
+            <div className="truncate text-sm font-bold tracking-tight text-fg">open-Xdownload</div>
             <p className="text-[11px] text-fg-muted font-medium truncate">推文多媒体归档工作台</p>
           </div>
         </div>

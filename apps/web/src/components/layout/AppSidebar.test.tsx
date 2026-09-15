@@ -17,6 +17,13 @@ const baseProps: AppSidebarProps = {
 };
 
 describe("AppSidebar", () => {
+  it("品牌区不展示版本号", () => {
+    render(<AppSidebar {...baseProps} />);
+
+    expect(screen.getByText("open-Xdownload")).not.toBeNull();
+    expect(screen.queryByText(`v${__APP_VERSION__}`)).toBeNull();
+  });
+
   it("用 aria-current 标记当前导航项", () => {
     render(<AppSidebar {...baseProps} activeSection="gallery" />);
 
