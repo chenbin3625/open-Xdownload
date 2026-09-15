@@ -532,6 +532,14 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 	// 仅在配置开启增量归档时才会传入 StopAtTweetID；为空时全程翻页（全量扫描）。
 	reachedStop := false
 	for page := 0; page < 1000 && !reachedStop; page++ {
+		if page > 0 {
+			// 翻页间微小间隔，防止连续高频请求触发 X 接口短时限流与 WAF
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
 		values := url.Values{}
 		values.Set("variables", fmt.Sprintf(`{"userId":%q,"count":100,"cursor":%q,"includePromotedContent":false,"withClientEventToken":false,"withBirdwatchNotes":false,"withVoice":true,"withV2Timeline":true}`, user.ID, cursor))
 		values.Set("features", timelineFeatures)

@@ -659,9 +659,9 @@ func TestArchiveUserConcurrency(t *testing.T) {
 		want      int
 	}{
 		{name: "single user stays serial", cfg: config.AppConfig{MaxConcurrency: 8}, userCount: 1, want: 1},
-		{name: "uses configured limit", cfg: config.AppConfig{MaxConcurrency: 3}, userCount: 20, want: 3},
+		{name: "uses configured limit", cfg: config.AppConfig{MaxConcurrency: 2}, userCount: 20, want: 2},
 		{name: "caps at backend limit", cfg: config.AppConfig{MaxConcurrency: 64}, userCount: 20, want: maxArchiveUserConcurrency},
-		{name: "caps at user count", cfg: config.AppConfig{MaxConcurrency: 10}, userCount: 3, want: 3},
+		{name: "caps at user count", cfg: config.AppConfig{MaxConcurrency: 10}, userCount: 1, want: 1},
 		{name: "falls back to default", cfg: config.AppConfig{}, userCount: 20, want: defaultLimit},
 	}
 

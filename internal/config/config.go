@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -99,7 +98,7 @@ type AuthCookie struct {
 func Default() AppConfig {
 	return AppConfig{
 		DownloadDir:       defaultDownloadDir(),
-		MaxConcurrency:    min(8, max(2, runtime.GOMAXPROCS(0))),
+		MaxConcurrency:    2,
 		AutoRetryFailed:   true,
 		FileNamingMode:    FileNamingTweetText,
 		MaxFilenameLength: DefaultMaxFilenameLength,

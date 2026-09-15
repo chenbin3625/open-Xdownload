@@ -229,7 +229,7 @@ export default function App() {
         <AppHeader
           sseConnected={sseConnected}
           activeCount={currentStats.active}
-          maxConcurrency={config.data?.maxConcurrency ?? 8}
+          maxConcurrency={config.data?.maxConcurrency ?? 2}
           refreshPending={manualRefreshPending}
           onRefresh={handleManualRefresh}
           onQuickSubmit={(input) => openCreateModal(input)}

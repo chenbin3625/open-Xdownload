@@ -986,7 +986,7 @@ type archiveStats struct {
 	Issues     []string
 }
 
-const maxArchiveUserConcurrency = 8
+const maxArchiveUserConcurrency = 2
 
 type archiveUserTask struct {
 	index        int
