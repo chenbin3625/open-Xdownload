@@ -1,12 +1,20 @@
 import React from "react";
 import { cn } from "../../lib/cn";
 
-export type Tone = "default" | "brand" | "success" | "warning" | "danger" | "info";
+export type Tone =
+  | "default"
+  | "neutral"
+  | "brand"
+  | "success"
+  | "warning"
+  | "danger"
+  | "info";
 
 // 语义色 → 配色三元组（底色/文字/描边）。暗色下的 soft 底色在
 // index.css 里已改为低透明度叠加，因此这里不需要写 dark: 变体。
 const toneClass: Record<Tone, string> = {
   default: "bg-surface-muted text-fg-muted border-line",
+  neutral: "bg-surface-muted text-fg-muted border-line",
   brand: "bg-brand-50 text-brand-700 border-brand-200 dark:bg-brand-500/12 dark:text-brand-300 dark:border-brand-500/30",
   success: "bg-success-soft text-success border-success/30",
   warning: "bg-warning-soft text-warning border-warning/30",
@@ -18,19 +26,22 @@ export function Tag({
   children,
   tone = "default",
   icon,
+  size = "md",
   className,
   ...rest
 }: {
   children?: React.ReactNode;
   tone?: Tone;
   icon?: React.ReactNode;
+  size?: "sm" | "md";
   className?: string;
 } & React.HTMLAttributes<HTMLSpanElement>) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5",
-        "text-[11px] leading-4 font-medium whitespace-nowrap",
+        "inline-flex items-center gap-1 rounded-md border",
+        size === "sm" ? "px-1 py-0.2 text-[10px] leading-3.5" : "px-1.5 py-0.5 text-[11px] leading-4",
+        "font-medium whitespace-nowrap",
         toneClass[tone],
         className,
       )}
@@ -44,6 +55,7 @@ export function Tag({
 
 const dotClass: Record<Tone, string> = {
   default: "bg-fg-subtle",
+  neutral: "bg-fg-subtle",
   brand: "bg-brand-500",
   success: "bg-success",
   warning: "bg-warning",
@@ -91,6 +103,7 @@ export function CountBadge({
   if (count <= 0) return null;
   const toneStyle: Record<Tone, string> = {
     default: "bg-surface-hover text-fg-muted",
+    neutral: "bg-surface-hover text-fg-muted",
     brand: "bg-brand-500 text-white",
     success: "bg-success text-white",
     warning: "bg-warning text-white",

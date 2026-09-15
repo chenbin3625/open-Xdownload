@@ -1,20 +1,5 @@
-import {
-  FolderOpenOutlined,
-  ReloadOutlined,
-} from "@ant-design/icons";
+import { ArrowUp, Folder, FolderPlus, RefreshCw } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import {
-  Alert,
-  Button,
-  Card,
-  Input,
-  Space,
-  Spin,
-  Tooltip,
-  Tree,
-  notification,
-} from "antd";
-import type { TreeDataNode } from "antd";
 import React, { useEffect, useRef, useState } from "react";
 import {
   createLocalDirectory,
@@ -26,29 +11,41 @@ import {
   EllipsisText,
   Stack,
   Toolbar,
-  fullWidthStyle,
   getErrorMessage,
   notifyError,
 } from "../common/CommonUI";
+import { Button } from "../ui/Button";
+import { Card } from "../ui/Card";
+import { Alert } from "../ui/Feedback";
+import { Input } from "../ui/Input";
+import { Tooltip } from "../ui/Overlay";
+import { Spinner } from "../ui/Spinner";
+import { toast } from "../ui/Toast";
+import { Tree, type TreeNode } from "../ui/Tree";
 
-const { DirectoryTree } = Tree;
-
-export type DirectoryTreeNode = TreeDataNode & {
-  key: string;
+export type DirectoryTreeNode = TreeNode & {
   path: string;
   children?: DirectoryTreeNode[];
 };
 
-export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelect: (path: string) => void }) {
+export function LocalDirectoryPicker({
+  path,
+  onSelect,
+}: {
+  path: string;
+  onSelect: (path: string) => void;
+}) {
   const [rootPath, setRootPath] = useState(path);
   const [selectedPath, setSelectedPath] = useState(path);
-  const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [treeData, setTreeData] = useState<DirectoryTreeNode[]>([]);
   const nodeLoadControllerRef = useRef<AbortController | null>(null);
+
   const listing = useQuery<LocalDirectoryListing>({
     queryKey: ["local-directories", rootPath],
     queryFn: ({ signal }) => listLocalDirectories(rootPath, signal),
   });
+
   const createDirectory = useMutation({
     mutationFn: createLocalDirectory,
     onSuccess: (data) => {
@@ -58,10 +55,11 @@ export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelec
       const rootNode = listingToDirectoryTreeRoot(data);
       setTreeData([rootNode]);
       setExpandedKeys([rootNode.key]);
-      notification.success({ message: "目录已创建并选择" });
+      toast.success({ message: "目录已创建并选择" });
     },
     onError: notifyError("创建目录失败"),
   });
+
   const resolvedPath = listing.data?.path ?? rootPath;
 
   useEffect(() => {
@@ -69,11 +67,10 @@ export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelec
     setSelectedPath(path);
   }, [path]);
 
-  // 只在解析出的根路径变化时重建树：listing.data 每次 refetch 都是新对象，
-  // 以它为依赖会丢掉懒加载的子节点、把树重新收起，并覆盖用户正在输入的路径。
   const listingRootPath = listing.data?.path;
   const listingRef = useRef(listing.data);
   listingRef.current = listing.data;
+
   useEffect(() => {
     const current = listingRef.current;
     if (!current || listingRootPath === undefined) {
@@ -85,26 +82,26 @@ export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelec
     setSelectedPath(rootNode.path);
   }, [listingRootPath]);
 
-  // 卸载后不再写状态，请求也随之取消，与 lib/api.ts 里其他调用保持一致。
   useEffect(() => {
     const controller = new AbortController();
     nodeLoadControllerRef.current = controller;
     return () => controller.abort();
   }, []);
 
-  async function loadDirectoryNode(node: DirectoryTreeNode) {
-    if (node.children || node.isLeaf) {
+  async function loadDirectoryNode(node: TreeNode) {
+    const dirNode = node as DirectoryTreeNode;
+    if (dirNode.children || dirNode.isLeaf) {
       return;
     }
     const controller = nodeLoadControllerRef.current;
     try {
-      const childListing = await listLocalDirectories(node.path, controller?.signal);
+      const childListing = await listLocalDirectories(dirNode.path, controller?.signal);
       if (controller?.signal.aborted) return;
       const children = childListing.entries.map(directoryEntryToTreeNode);
-      setTreeData((current) => updateDirectoryTreeChildren(current, node.key, children));
+      setTreeData((current) => updateDirectoryTreeChildren(current, dirNode.key, children));
     } catch (error) {
       if (controller?.signal.aborted) return;
-      notification.error({
+      toast.error({
         message: "读取目录失败",
         description: getErrorMessage(error),
       });
@@ -125,67 +122,97 @@ export function LocalDirectoryPicker({ path, onSelect }: { path: string; onSelec
 
   return (
     <Stack size={10}>
-      <Space.Compact style={fullWidthStyle}>
-        <Input
-          prefix={<FolderOpenOutlined />}
-          value={selectedPath}
-          onChange={(event) => setSelectedPath(event.target.value)}
-          onPressEnter={openSelectedPath}
-        />
-        <Button onClick={openSelectedPath} disabled={!selectedPath.trim() || listing.isLoading}>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-[240px] flex-1">
+          <Input
+            prefix={<Folder className="size-4 text-fg-subtle" />}
+            value={selectedPath}
+            onChange={(event) => setSelectedPath(event.target.value)}
+            onPressEnter={openSelectedPath}
+            placeholder="/path/to/downloads"
+          />
+        </div>
+        <Button
+          variant="secondary"
+          onClick={openSelectedPath}
+          disabled={!selectedPath.trim() || listing.isLoading}
+        >
           打开
         </Button>
-        <Button onClick={createSelectedPath} loading={createDirectory.isPending} disabled={!selectedPath.trim()}>
+        <Button
+          variant="secondary"
+          icon={<FolderPlus className="size-3.5" />}
+          onClick={createSelectedPath}
+          loading={createDirectory.isPending}
+          disabled={!selectedPath.trim()}
+        >
           创建
         </Button>
-        <Button type="primary" onClick={() => onSelect(selectedPath.trim())} disabled={!selectedPath.trim()}>
+        <Button
+          variant="primary"
+          onClick={() => onSelect(selectedPath.trim())}
+          disabled={!selectedPath.trim()}
+        >
           选择此目录
         </Button>
-      </Space.Compact>
+      </div>
 
-      <Card size="small">
+      <Card size="sm" bodyClassName="p-3">
         <Stack size={8}>
           <Toolbar>
             <Button
-              icon={<FolderOpenOutlined />}
+              size="sm"
+              variant="secondary"
+              icon={<ArrowUp className="size-3.5" />}
               disabled={!listing.data?.parent || listing.isLoading}
               onClick={() => listing.data?.parent && setRootPath(listing.data.parent)}
             >
-              上级
+              上级目录
             </Button>
-            <EllipsisText title={resolvedPath} style={{ flex: "1 1 220px", minWidth: 0 }}>
+            <EllipsisText
+              title={resolvedPath}
+              className="flex-1 text-xs font-mono text-fg-muted px-2 min-w-0"
+            >
               {resolvedPath}
             </EllipsisText>
-            <Tooltip title="刷新目录">
+            <Tooltip content="刷新目录">
               <Button
-                icon={<ReloadOutlined />}
-                loading={listing.isFetching}
+                size="sm"
+                variant="ghost"
+                circle
+                icon={<RefreshCw className={`size-3.5 ${listing.isFetching ? "animate-spin" : ""}`} />}
                 onClick={() => listing.refetch()}
+                aria-label="刷新目录"
               />
             </Tooltip>
           </Toolbar>
 
-          {listing.isError ? (
-            <Alert type="error" showIcon message="读取目录失败" description={listing.error.message} />
-          ) : null}
+          {listing.isError && (
+            <Alert
+              type="error"
+              message="读取目录失败"
+              description={listing.error.message}
+            />
+          )}
 
-          <Spin spinning={listing.isLoading}>
-            {treeData.length > 0 ? (
-              <DirectoryTree<DirectoryTreeNode>
-                blockNode
-                height={280}
-                expandAction="doubleClick"
+          <div className="relative min-h-[140px] rounded-control border border-line bg-surface p-1">
+            {listing.isLoading && treeData.length === 0 ? (
+              <div className="flex h-32 items-center justify-center">
+                <Spinner className="size-5" />
+              </div>
+            ) : treeData.length > 0 ? (
+              <Tree
+                nodes={treeData}
                 expandedKeys={expandedKeys}
-                loadData={(node) => loadDirectoryNode(node as DirectoryTreeNode)}
-                selectedKeys={selectedPath ? [selectedPath] : []}
-                treeData={treeData}
-                onExpand={(keys) => setExpandedKeys([...keys])}
-                onSelect={(_, info) => setSelectedPath((info.node as DirectoryTreeNode).path)}
+                selectedKey={selectedPath}
+                onExpandedChange={setExpandedKeys}
+                onSelect={(node) => setSelectedPath((node as DirectoryTreeNode).path)}
+                loadChildren={loadDirectoryNode}
               />
             ) : (
               <AppEmpty description="没有子目录" />
             )}
-          </Spin>
+          </div>
         </Stack>
       </Card>
     </Stack>
@@ -197,25 +224,25 @@ export function listingToDirectoryTreeRoot(listing: LocalDirectoryListing): Dire
     key: listing.path,
     path: listing.path,
     title: listing.path,
-    icon: <FolderOpenOutlined />,
     children: listing.entries.map(directoryEntryToTreeNode),
     isLeaf: listing.entries.length === 0,
   };
 }
 
-export function directoryEntryToTreeNode(entry: LocalDirectoryListing["entries"][number]): DirectoryTreeNode {
+export function directoryEntryToTreeNode(
+  entry: LocalDirectoryListing["entries"][number],
+): DirectoryTreeNode {
   return {
     key: entry.path,
     path: entry.path,
     title: entry.name,
-    icon: <FolderOpenOutlined />,
     isLeaf: !entry.hasChildren,
   };
 }
 
 export function updateDirectoryTreeChildren(
   nodes: DirectoryTreeNode[],
-  targetKey: React.Key,
+  targetKey: string,
   children: DirectoryTreeNode[],
 ): DirectoryTreeNode[] {
   return nodes.map((node) => {

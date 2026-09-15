@@ -1,7 +1,8 @@
-import { CloseCircleOutlined } from "@ant-design/icons";
-import { Drawer, Grid, Space, Tag, Typography } from "antd";
+import { AlertCircle } from "lucide-react";
 import React from "react";
 import type { FailedTweet } from "../../lib/api";
+import { Drawer } from "../ui/Overlay";
+import { Tag } from "../ui/Tag";
 import { FailedTweetQueue } from "../jobs/FailedTweetQueue";
 
 export interface FailedTweetDrawerProps {
@@ -17,25 +18,24 @@ export function FailedTweetDrawer({
   items,
   total,
 }: FailedTweetDrawerProps) {
-  const screens = Grid.useBreakpoint();
-
   return (
     <Drawer
-      destroyOnHidden
       open={open}
+      onClose={onClose}
+      width="44rem"
       title={
-        <Space size={8}>
-          <CloseCircleOutlined style={{ color: "#ef4444" }} />
-          <Typography.Text strong>失败推文队列</Typography.Text>
-          <Tag color="error" style={{ margin: 0 }} className="font-mono">
+        <div className="flex items-center gap-2">
+          <AlertCircle className="size-4 text-danger shrink-0" />
+          <span className="font-semibold text-fg">失败推文队列</span>
+          <Tag tone="danger" className="font-mono">
             {total}
           </Tag>
-        </Space>
+        </div>
       }
-      size={screens.md ? 760 : "100%"}
-      onClose={onClose}
     >
-      <FailedTweetQueue items={items} total={total} />
+      <div className="p-4">
+        <FailedTweetQueue items={items} total={total} />
+      </div>
     </Drawer>
   );
 }

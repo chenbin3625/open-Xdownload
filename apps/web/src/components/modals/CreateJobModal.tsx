@@ -1,23 +1,14 @@
 import {
-  CloudDownloadOutlined,
-  LinkOutlined,
-  ScheduleOutlined,
-  UnorderedListOutlined,
-  UserAddOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
+  Clock,
+  Download,
+  Link as LinkIcon,
+  List as ListIcon,
+  Plus,
+  Sparkles,
+  User,
+  UserPlus,
+} from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  Button,
-  Checkbox,
-  Input,
-  InputNumber,
-  Modal,
-  Space,
-  Tabs,
-  Typography,
-  notification,
-} from "antd";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   createArchiveSchedule,
@@ -31,9 +22,12 @@ import {
 } from "../../lib/api";
 import { notifyError } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
-
-const { Text, Paragraph } = Typography;
-const { TextArea } = Input;
+import { Button } from "../ui/Button";
+import { Checkbox, Tabs, type TabItem } from "../ui/Controls";
+import { Input, NumberInput, Textarea } from "../ui/Input";
+import { Modal } from "../ui/Overlay";
+import { Spinner } from "../ui/Spinner";
+import { toast } from "../ui/Toast";
 
 export interface CreateJobModalProps {
   open: boolean;
@@ -46,8 +40,6 @@ const tabKeys: string[] = ["user", "tweet_link", "list", "following"];
 
 type BatchKind = Extract<JobKind, "user" | "list" | "following">;
 
-// user / list / following 三个分页的 UI 结构完全一致，只有图标、文案与占位符不同。
-// 结构在 batchTabItems 里写一份，差异留在这张表里。
 const batchTabs: {
   kind: BatchKind;
   label: string;
@@ -58,21 +50,21 @@ const batchTabs: {
   {
     kind: "user",
     label: "用户归档",
-    icon: <UserOutlined />,
+    icon: <User className="size-4" />,
     hint: "支持用户名、@screen_name 或数字 ID，每行一个",
     placeholder: "elonmusk\n@sama\n44196397\nhttps://x.com/OpenAI",
   },
   {
     kind: "list",
     label: "列表归档",
-    icon: <UnorderedListOutlined />,
+    icon: <ListIcon className="size-4" />,
     hint: "输入 X 列表 ID 或完整列表 URL，自动获取列表成员推文媒体",
     placeholder: "1492019283\nhttps://x.com/i/lists/1647289190",
   },
   {
     kind: "following",
     label: "关注关系归档",
-    icon: <UserAddOutlined />,
+    icon: <UserPlus className="size-4" />,
     hint: "输入目标账号，自动获取其关注的所有账号并进行媒体归档",
     placeholder: "elonmusk\n@OpenAI",
   },
@@ -118,15 +110,11 @@ export function CreateJobModal({
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<string>("user");
 
-  // 输入状态
   const [tweetUrl, setTweetUrl] = useState("");
-  // 三个批量输入框此前是三份彼此独立的 useState，初始化与重置都要各写一遍。
   const [batchInputs, setBatchInputs] = useState<Partial<Record<BatchKind, string>>>({});
 
-  // 单推文解析结果缓存
   const [parsedTweet, setParsedTweet] = useState<TweetData | null>(null);
 
-  // 定时计划开关与参数
   const [isSchedule, setIsSchedule] = useState(false);
   const [scheduleName, setScheduleName] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState(360);
@@ -149,8 +137,6 @@ export function CreateJobModal({
         setBatchInputs({ user: initialInput });
       }
     } else {
-      // 侧边栏入口没有初始输入，此时若不复位就会停在上一次会话的分页上。
-      // media_url / failed_retry 没有对应分页，统一落回 user。
       setActiveTab(tabKeys.includes(initialKind) ? initialKind : "user");
     }
     if (initialKind === "schedule") {
@@ -158,19 +144,17 @@ export function CreateJobModal({
     }
   }, [open, initialInput, initialKind]);
 
-  // 解析目标项计算
   const currentBatchItems = useMemo(() => {
-    const tab = batchTabs.find((item) => item.kind === activeTab);
-    if (!tab) return [];
-    return parseLinesToItems(batchInputs[tab.kind] ?? "", tab.kind);
+    if (activeTab === "tweet_link") return [];
+    const raw = batchInputs[activeTab as BatchKind] ?? "";
+    return parseLinesToItems(raw, activeTab as JobKind);
   }, [activeTab, batchInputs]);
 
-  // 单推文解析 Mutation
   const parseMutation = useMutation({
     mutationFn: parseTweetLink,
     onSuccess: (data) => {
       setParsedTweet(data);
-      notification.success({
+      toast.success({
         message: "推文解析成功",
         description: `包含 ${data.media.length} 个媒体，作者 @${data.author.screenName}`,
       });
@@ -178,7 +162,6 @@ export function CreateJobModal({
     onError: notifyError("解析失败"),
   });
 
-  // 创建任务 / 批量任务 Mutation
   const createJobsMutation = useMutation({
     mutationFn: async () => {
       if (activeTab === "tweet_link") {
@@ -212,12 +195,12 @@ export function CreateJobModal({
     onSuccess: (jobs) => {
       void invalidateWorkbenchQueries(queryClient);
       if (isSchedule) {
-        notification.success({
+        toast.success({
           message: "定时归档计划已保存",
           description: `执行频率: 每 ${intervalMinutes} 分钟`,
         });
       } else {
-        notification.success({
+        toast.success({
           message: "任务创建成功",
           description: `已成功入库 ${jobs.length} 个任务并开始后台下载`,
         });
@@ -243,43 +226,40 @@ export function CreateJobModal({
     parseMutation.mutate(trimmed);
   };
 
-  // 批量分页统一由 batchTabs 生成，避免三份只差文案的重复 JSX。
-  const batchTabItems = batchTabs.map((tab) => ({
-    key: tab.kind,
-    label: (
-      <span className="flex items-center gap-1.5">
-        {tab.icon}
-        <span>{tab.label}</span>
-      </span>
-    ),
-    children: (
-      <div className="space-y-3 pt-1">
-        <div className="flex items-center justify-between" style={{ fontSize: 12, color: "var(--text-muted)" }}>
-          <span>{tab.hint}</span>
-          <span className="font-mono" style={{ color: "var(--brand-500)" }}>
-            已识别: {currentBatchItems.length} 个
-          </span>
+  const tabItems: TabItem[] = [
+    ...batchTabs.map((tab) => ({
+      key: tab.kind,
+      label: (
+        <span className="flex items-center gap-1.5">
+          {tab.icon}
+          <span>{tab.label}</span>
+        </span>
+      ),
+      children: (
+        <div className="space-y-3 pt-1">
+          <div className="flex items-center justify-between text-xs text-fg-muted">
+            <span>{tab.hint}</span>
+            <span className="font-mono font-medium text-brand-600 dark:text-brand-400">
+              已识别: {currentBatchItems.length} 个
+            </span>
+          </div>
+          <Textarea
+            rows={6}
+            value={batchInputs[tab.kind] ?? ""}
+            onChange={(e) =>
+              setBatchInputs((current) => ({ ...current, [tab.kind]: e.target.value }))
+            }
+            placeholder={tab.placeholder}
+            className="font-mono text-xs"
+          />
         </div>
-        <TextArea
-          rows={6}
-          value={batchInputs[tab.kind] ?? ""}
-          onChange={(e) =>
-            setBatchInputs((current) => ({ ...current, [tab.kind]: e.target.value }))
-          }
-          placeholder={tab.placeholder}
-          className="font-mono" style={{ fontSize: 12 }}
-        />
-      </div>
-    ),
-  }));
-
-  const tabItems = [
-    batchTabItems[0],
+      ),
+    })),
     {
       key: "tweet_link",
       label: (
         <span className="flex items-center gap-1.5">
-          <LinkOutlined />
+          <LinkIcon className="size-4" />
           <span>单条推文</span>
         </span>
       ),
@@ -294,10 +274,10 @@ export function CreateJobModal({
               }}
               onPressEnter={handleParseTweet}
               placeholder="https://x.com/username/status/1234567890"
-              style={{ fontSize: 12 }}
+              className="text-xs"
             />
             <Button
-              type="primary"
+              variant="primary"
               disabled={!tweetUrl.trim()}
               loading={parseMutation.isPending}
               onClick={handleParseTweet}
@@ -308,22 +288,19 @@ export function CreateJobModal({
           </div>
 
           {parsedTweet && (
-            <div className="p-3 rounded-lg space-y-2" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)", fontSize: 12 }}>
+            <div className="rounded-card border border-line bg-surface-muted/60 p-3.5 space-y-2 text-xs">
               <div className="flex items-center justify-between">
-                <span style={{ fontWeight: 600 }}>
+                <span className="font-semibold text-fg">
                   @{parsedTweet.author.screenName} ({parsedTweet.author.name})
                 </span>
-                <span style={{ color: "#10b981", fontWeight: 500 }}>
+                <span className="font-medium text-success">
                   {parsedTweet.media.length} 个可用媒体
                 </span>
               </div>
-              <Paragraph
-                ellipsis={{ rows: 2 }}
-                style={{ fontSize: 12 }}
-              >
+              <p className="line-clamp-2 text-fg-body">
                 {parsedTweet.text || "无正文"}
-              </Paragraph>
-              <div className="flex items-center gap-2" style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              </p>
+              <div className="flex items-center gap-2 text-[11px] text-fg-subtle">
                 <span>推文 ID: {parsedTweet.id}</span>
                 <span>·</span>
                 <span>发布于: {parsedTweet.createdAt || "未知"}</span>
@@ -333,7 +310,6 @@ export function CreateJobModal({
         </div>
       ),
     },
-    ...batchTabItems.slice(1),
   ];
 
   const canSubmit =
@@ -344,28 +320,56 @@ export function CreateJobModal({
   return (
     <Modal
       open={open}
-      onCancel={handleClose}
-      footer={null}
-      width={680}
+      onClose={handleClose}
+      className="w-[min(92vw,44rem)]"
       title={
-        <div className="flex items-center gap-2.5 py-1">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "var(--brand-100)", color: "var(--brand-600)", fontWeight: 700 }}>
-            +
+        <div className="flex items-center gap-3">
+          <div className="flex size-8 items-center justify-center rounded-control bg-brand-50 text-brand-600 font-bold dark:bg-brand-500/12">
+            <Plus className="size-4" />
           </div>
           <div>
-            <div style={{ fontWeight: 600, fontSize: 16 }}>
+            <div className="text-base font-semibold text-fg">
               新建下载任务 / 归档计划
             </div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 400 }}>
+            <div className="text-xs text-fg-muted font-normal">
               支持单条推文、批量用户时间线、列表与关注关系媒体高速入库
             </div>
           </div>
         </div>
       }
+      footer={
+        <div className="flex w-full items-center justify-between">
+          <span className="text-xs text-fg-subtle">
+            {activeTab === "tweet_link"
+              ? "解析后点击立即下载入库"
+              : isSchedule
+              ? `将保存为包含 ${currentBatchItems.length} 个目标的定时计划`
+              : `将同时创建 ${currentBatchItems.length} 个后台下载任务`}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={handleClose}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              disabled={!canSubmit}
+              loading={createJobsMutation.isPending}
+              onClick={() => createJobsMutation.mutate()}
+              icon={<Download className="size-4" />}
+            >
+              {isSchedule
+                ? "保存定时计划"
+                : activeTab === "tweet_link"
+                ? "立即下载"
+                : `批量下载 (${currentBatchItems.length})`}
+            </Button>
+          </div>
+        </div>
+      }
     >
-      <div className="py-2 space-y-4">
+      <div className="space-y-4 py-1">
         <Tabs
-          activeKey={activeTab}
+          value={activeTab}
           onChange={(key) => {
             setActiveTab(key);
             setParsedTweet(null);
@@ -375,79 +379,46 @@ export function CreateJobModal({
 
         {/* 存为定时归档计划选项 (单条推文除外) */}
         {activeTab !== "tweet_link" && (
-          <div className="p-3.5 rounded-lg space-y-3" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)" }}>
+          <div className="space-y-3 rounded-card border border-line bg-surface-muted/50 p-3.5">
             <div className="flex items-center justify-between">
-              <span className="flex items-center gap-1.5" style={{ fontSize: 12, fontWeight: 600 }}>
-                <ScheduleOutlined style={{ color: "var(--brand-500)" }} />
-                是否保存为自动归档计划（定期抓取）？
-              </span>
+              <div className="flex items-center gap-2">
+                <Clock className="size-4 text-brand-500" />
+                <span className="text-xs font-semibold text-fg">
+                  是否保存为自动归档计划（定期抓取）？
+                </span>
+              </div>
               <Checkbox
                 checked={isSchedule}
-                onChange={(e) => setIsSchedule(e.target.checked)}
+                onChange={(checked) => setIsSchedule(checked)}
               />
             </div>
 
             {isSchedule && (
-              <div className="pt-2 grid grid-cols-1 sm:grid-cols-2 gap-3" style={{ borderTop: "1px solid var(--app-border)", fontSize: 12 }}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-line text-xs">
                 <div>
-                  <div className="mb-1" style={{ color: "var(--text-muted)" }}>
-                    计划名称
-                  </div>
+                  <div className="mb-1 text-fg-muted font-medium">计划名称</div>
                   <Input
                     value={scheduleName}
                     onChange={(e) => setScheduleName(e.target.value)}
                     placeholder="例如：重点博主媒体日常归档"
-                    size="small"
-                    
+                    size="sm"
                   />
                 </div>
                 <div>
-                  <div className="mb-1" style={{ color: "var(--text-muted)" }}>
-                    调度频率 (分钟)
-                  </div>
-                  <InputNumber
+                  <div className="mb-1 text-fg-muted font-medium">调度频率 (分钟)</div>
+                  <NumberInput
                     min={5}
                     max={43200}
                     value={intervalMinutes}
                     onChange={(val) => setIntervalMinutes(val ?? 360)}
-                    size="small"
+                    size="sm"
                     addonAfter="分钟"
-                    style={{ width: "100%" }}
                   />
                 </div>
               </div>
             )}
           </div>
         )}
-
-        {/* 底部按钮栏 */}
-        <div className="flex items-center justify-between pt-3" style={{ borderTop: "1px solid var(--app-border)" }}>
-          <span style={{ fontSize: 12, color: "var(--text-subtle)" }}>
-            {activeTab === "tweet_link"
-              ? "解析后点击立即下载入库"
-              : isSchedule
-              ? `将保存为包含 ${currentBatchItems.length} 个目标的定时计划`
-              : `将同时创建 ${currentBatchItems.length} 个后台下载任务`}
-          </span>
-          <Space size={8}>
-            <Button onClick={handleClose}>
-              取消
-            </Button>
-            <Button
-              type="primary"
-              disabled={!canSubmit}
-              loading={createJobsMutation.isPending}
-              onClick={() => createJobsMutation.mutate()}
-              icon={<CloudDownloadOutlined />}
-            >
-              {isSchedule
-                ? "保存定时计划"
-                : activeTab === "tweet_link"
-                ? "立即下载"
-                : `批量下载 (${currentBatchItems.length})`}
-            </Button>
-          </Space>
-        </div>
       </div>
     </Modal>
   );

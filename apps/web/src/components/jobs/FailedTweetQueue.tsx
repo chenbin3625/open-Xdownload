@@ -1,18 +1,5 @@
-import {
-  CloseCircleOutlined,
-  DeleteOutlined,
-  RetweetOutlined,
-} from "@ant-design/icons";
+import { AlertCircle, RotateCcw, Trash2 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button,
-  List,
-  Popconfirm,
-  Space,
-  Tag,
-  Typography,
-  notification,
-} from "antd";
 import React, { useState } from "react";
 import {
   clearFailedTweets,
@@ -35,9 +22,11 @@ import {
   formatDateTime,
   notifyError,
 } from "../common/CommonUI";
+import { Button } from "../ui/Button";
+import { Popconfirm } from "../ui/Overlay";
+import { Tag } from "../ui/Tag";
+import { toast } from "../ui/Toast";
 import { dashboardMetaQueryRoot, failedTweetQueryRoot, jobsQueryRoot } from "../../lib/api";
-
-const { Text } = Typography;
 
 export function FailedTweetQueue({
   items,
@@ -49,34 +38,40 @@ export function FailedTweetQueue({
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+
   const failedTweetsQuery = useQuery({
     queryKey: [...failedTweetQueryRoot, page, pageSize],
     queryFn: ({ signal }) => getFailedTweets({ page, pageSize, signal }),
   });
+
   const fallbackPagination: Dashboard["pagination"] = {
     page,
     pageSize,
     total,
     totalPages: total > 0 ? Math.ceil(total / pageSize) : 0,
   };
+
   const pageItems = failedTweetsQuery.data?.items ?? (page === 1 ? items.slice(0, pageSize) : []);
   const pagination = failedTweetsQuery.data?.pagination ?? fallbackPagination;
+
   const refreshFailedTweets = () => {
     queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot });
     queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot });
     queryClient.invalidateQueries({ queryKey: jobsQueryRoot });
   };
+
   const retryAll = useMutation({
     mutationFn: retryFailedTweets,
     onSuccess: (job) => {
       refreshFailedTweets();
-      notification.success({
+      toast.success({
         message: "失败推文已加入重试",
         description: job.title || "已创建重试任务",
       });
     },
     onError: notifyError("重试失败"),
   });
+
   const removeOne = useMutation({
     mutationFn: deleteFailedTweet,
     onSuccess: () => {
@@ -84,28 +79,32 @@ export function FailedTweetQueue({
         setPage(page - 1);
       }
       refreshFailedTweets();
-      notification.success({ message: "失败记录已删除" });
+      toast.success({ message: "失败记录已删除" });
     },
     onError: notifyError("删除失败"),
   });
+
   const clearAll = useMutation({
     mutationFn: clearFailedTweets,
     onSuccess: () => {
       setPage(1);
       refreshFailedTweets();
-      notification.success({ message: "失败队列已清空" });
+      toast.success({ message: "失败队列已清空" });
     },
     onError: notifyError("清空失败"),
   });
 
   return (
-    <Stack size={10}>
+    <Stack size={12}>
       <Toolbar>
-        <Text type="secondary">{pagination.total > 0 ? `共 ${pagination.total} 条失败记录` : "暂无失败记录"}</Text>
-        <Space size={8} wrap>
+        <span className="text-xs text-fg-muted">
+          {pagination.total > 0 ? `共 ${pagination.total} 条失败记录` : "暂无失败记录"}
+        </span>
+        <div className="flex items-center gap-2">
           <Button
-            size="small"
-            icon={<RetweetOutlined />}
+            size="sm"
+            variant="secondary"
+            icon={<RotateCcw className="size-3.5" />}
             loading={retryAll.isPending}
             disabled={pagination.total === 0}
             onClick={() => retryAll.mutate()}
@@ -121,16 +120,16 @@ export function FailedTweetQueue({
             onConfirm={() => clearAll.mutate()}
           >
             <Button
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
+              size="sm"
+              variant="danger"
+              icon={<Trash2 className="size-3.5" />}
               loading={clearAll.isPending}
               disabled={pagination.total === 0}
             >
               清空
             </Button>
           </Popconfirm>
-        </Space>
+        </div>
       </Toolbar>
 
       {failedTweetsQuery.isLoading && pageItems.length === 0 ? (
@@ -139,16 +138,36 @@ export function FailedTweetQueue({
         <AppEmpty description="暂无失败推文" />
       ) : (
         <LoadingSurface loading={failedTweetsQuery.isFetching}>
-          <List
-            bordered
-            dataSource={pageItems}
-            locale={{ emptyText: <AppEmpty description="暂无失败推文" /> }}
-            renderItem={(item) => (
-              <List.Item
-                actions={[
-                  <CopyButton key="copy" value={item.tweetId} label="复制推文 ID" />,
+          <div className="divide-y divide-line rounded-card border border-line bg-surface">
+            {pageItems.map((item) => (
+              <div key={item.id} className="flex items-start justify-between gap-3 p-3 transition-colors hover:bg-surface-hover">
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-danger-soft text-danger">
+                    <AlertCircle className="size-4" />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-fg truncate">
+                        {item.jobTitle || item.tweetId}
+                      </span>
+                      <Tag tone="neutral" className="font-mono">
+                        {item.userScreenName ? `@${item.userScreenName}` : item.userId || "未知用户"}
+                      </Tag>
+                    </div>
+                    <EllipsisText type="danger" title={item.error} className="text-xs">
+                      {item.error || "未知错误"}
+                    </EllipsisText>
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
+                      <span className="font-mono">推文 {item.tweetId}</span>
+                      <span>{formatDateTime(item.updatedAt || item.createdAt)}</span>
+                      {item.entityName && <span>{item.entityName}</span>}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <CopyButton value={item.tweetId} label="复制推文 ID" />
                   <Popconfirm
-                    key="delete"
                     title="删除失败记录"
                     description="确认删除这条失败记录？"
                     okText="删除"
@@ -156,42 +175,20 @@ export function FailedTweetQueue({
                     onConfirm={() => removeOne.mutate(item.id)}
                   >
                     <Button
-                      size="small"
-                      danger
-                      type="text"
-                      icon={<DeleteOutlined />}
+                      size="sm"
+                      variant="ghost"
+                      icon={<Trash2 className="size-3.5 text-danger" />}
                       loading={removeOne.isPending && removeOne.variables === item.id}
+                      aria-label="删除此条记录"
                     />
-                  </Popconfirm>,
-                ]}
-              >
-                <List.Item.Meta
-                  avatar={<Text type="danger"><CloseCircleOutlined /></Text>}
-                  title={
-                    <Space size={8} wrap>
-                      <Text strong>{item.jobTitle || item.tweetId}</Text>
-                      <Tag>{item.userScreenName ? `@${item.userScreenName}` : item.userId || "未知用户"}</Tag>
-                    </Space>
-                  }
-                  description={
-                    <Stack size={4}>
-                      <EllipsisText type="danger" title={item.error}>
-                        {item.error || "未知错误"}
-                      </EllipsisText>
-                      <Space size={10} wrap>
-                        <Text type="secondary">推文 {item.tweetId}</Text>
-                        <Text type="secondary">{formatDateTime(item.updatedAt || item.createdAt)}</Text>
-                        {item.entityName ? <Text type="secondary">{item.entityName}</Text> : null}
-                      </Space>
-                    </Stack>
-                  }
-                />
-              </List.Item>
-            )}
-            size="small"
-          />
+                  </Popconfirm>
+                </div>
+              </div>
+            ))}
+          </div>
         </LoadingSurface>
       )}
+
       <AppPagination
         current={pagination.page}
         itemName="条记录"

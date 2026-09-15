@@ -1,27 +1,11 @@
 import {
-  ClockCircleOutlined,
-  DeleteOutlined,
-  PlayCircleOutlined,
-  PlusOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
+  Clock,
+  Play,
+  Plus,
+  Trash2,
+  Users,
+} from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  Button,
-  Card,
-  Col,
-  Descriptions,
-  Empty,
-  Flex,
-  Popconfirm,
-  Row,
-  Skeleton,
-  Space,
-  Switch,
-  Tag,
-  Typography,
-  notification,
-} from "antd";
 import React from "react";
 import {
   deleteArchiveSchedule,
@@ -35,6 +19,13 @@ import {
   notifyError,
 } from "../components/common/CommonUI";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
+import { Button } from "../components/ui/Button";
+import { Card } from "../components/ui/Card";
+import { Switch } from "../components/ui/Controls";
+import { Empty, Skeleton } from "../components/ui/Feedback";
+import { Popconfirm } from "../components/ui/Overlay";
+import { Tag } from "../components/ui/Tag";
+import { toast } from "../components/ui/Toast";
 
 export interface SchedulesPageProps {
   schedules: ArchiveSchedule[];
@@ -59,7 +50,7 @@ export function SchedulesPage({
       }),
     onSuccess: (updated) => {
       void invalidateWorkbenchQueries(queryClient);
-      notification.success({
+      toast.success({
         message: updated.enabled ? "定时计划已启用" : "定时计划已暂停",
         description: `计划 “${updated.name}” 状态更新成功`,
       });
@@ -71,7 +62,7 @@ export function SchedulesPage({
     mutationFn: (id: number) => runArchiveSchedule(id),
     onSuccess: (jobs) => {
       void invalidateWorkbenchQueries(queryClient);
-      notification.success({
+      toast.success({
         message: "计划运行已触发",
         description: `已生成并排入 ${jobs.length} 个下载任务`,
       });
@@ -83,7 +74,7 @@ export function SchedulesPage({
     mutationFn: (id: number) => deleteArchiveSchedule(id),
     onSuccess: () => {
       void invalidateWorkbenchQueries(queryClient);
-      notification.success({
+      toast.success({
         message: "计划已删除",
       });
     },
@@ -91,182 +82,163 @@ export function SchedulesPage({
   });
 
   return (
-    <div className="page-stack">
+    <div className="flex flex-col gap-4">
       {/* 顶部标题与行动 */}
-      <Flex
-        className="page-header"
-        align="center"
-        justify="space-between"
-        gap={16}
-        wrap="wrap"
-      >
+      <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
         <div>
-          <Typography.Title level={4} style={{ margin: 0 }}>
-            自动归档计划
-          </Typography.Title>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <h1 className="text-xl font-bold tracking-tight text-fg">自动归档计划</h1>
+          <p className="mt-0.5 text-xs text-fg-muted">
             配置定时轮询任务，定时扫描指定用户时间线、列表或关注成员，自动同步最新媒体
-          </Typography.Text>
+          </p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={onOpenCreateModal}>
+        <Button
+          variant="primary"
+          icon={<Plus className="size-4" />}
+          onClick={onOpenCreateModal}
+        >
           新建归档计划
         </Button>
-      </Flex>
+      </div>
 
       {loading && schedules.length === 0 ? (
-        <Row gutter={[16, 16]}>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 3 }, (_, index) => (
-            <Col xs={24} md={12} lg={8} key={index}>
-              <Card>
-                <Skeleton active paragraph={{ rows: 5 }} />
-              </Card>
-            </Col>
+            <Card key={index} size="sm">
+              <div className="space-y-3 p-1">
+                <Skeleton className="h-5 w-3/5" />
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-4/5" />
+                <Skeleton className="h-8 w-full mt-4" />
+              </div>
+            </Card>
           ))}
-        </Row>
+        </div>
       ) : schedules.length === 0 ? (
-        <Card style={{ textAlign: "center", padding: 24 }}>
+        <Card className="text-center py-8">
           <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={
-              <div className="space-y-1">
-                <Typography.Text strong className="block text-sm">
-                  暂无定时归档计划
-                </Typography.Text>
-                <Typography.Text type="secondary" className="block text-xs max-w-md mx-auto">
-                  您可以把常用关注的 X
-                  博主、列表或推文账号加入自动计划，系统将按设置的频率自动同步最新媒体，免去手动重复输入的繁琐。
-                </Typography.Text>
+              <div className="space-y-1.5">
+                <div className="font-semibold text-sm text-fg">暂无定时归档计划</div>
+                <p className="text-xs text-fg-muted max-w-md mx-auto">
+                  您可以把常用关注的 X 博主、列表或推文账号加入自动计划，系统将按设置的频率自动同步最新媒体，免去手动重复输入的繁琐。
+                </p>
               </div>
             }
           >
-            <Button type="primary" onClick={onOpenCreateModal}>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Plus className="size-3.5" />}
+              onClick={onOpenCreateModal}
+              className="mt-2"
+            >
               立即创建第一个计划
             </Button>
           </Empty>
         </Card>
       ) : (
-        <Row gutter={[16, 16]}>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {schedules.map((schedule) => (
-            <Col xs={24} md={12} lg={8} key={schedule.id}>
-              <Card
-                hoverable
-                title={
-                  <Space size={6} className="max-w-[70%]">
-                    <ClockCircleOutlined style={{ color: "var(--brand-500)" }} />
-                    <Typography.Text strong ellipsis className="text-sm">
-                      {schedule.name}
-                    </Typography.Text>
-                  </Space>
-                }
-                extra={
+            <Card
+              key={schedule.id}
+              hoverable
+              size="sm"
+              title={
+                <div className="flex items-center gap-2 max-w-[80%]">
+                  <Clock className="size-4 shrink-0 text-brand-500" />
+                  <span className="truncate font-semibold text-sm text-fg" title={schedule.name}>
+                    {schedule.name}
+                  </span>
+                </div>
+              }
+              extra={
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-fg-muted font-normal">
+                    {schedule.enabled ? "运行中" : "已暂停"}
+                  </span>
                   <Switch
                     checked={schedule.enabled}
-                    loading={
-                      toggleEnabled.isPending &&
-                      toggleEnabled.variables?.id === schedule.id
-                    }
+                    loading={toggleEnabled.isPending && toggleEnabled.variables?.id === schedule.id}
                     onChange={() => toggleEnabled.mutate(schedule)}
+                    ariaLabel={`切换计划 ${schedule.name} 状态`}
                   />
-                }
-                actions={[
+                </div>
+              }
+              bodyClassName="space-y-3"
+            >
+              {/* 核心参数 */}
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded-control bg-surface-muted/60 p-2 border border-line/60">
+                  <span className="text-fg-subtle block text-[11px]">执行周期</span>
+                  <span className="font-medium text-fg mt-0.5 block">
+                    {formatIntervalMinutes(schedule.intervalMinutes)}
+                  </span>
+                </div>
+                <div className="rounded-control bg-surface-muted/60 p-2 border border-line/60">
+                  <span className="text-fg-subtle block text-[11px]">下次运行</span>
+                  <span className="font-mono text-fg mt-0.5 block truncate" title={schedule.nextRunAt}>
+                    {schedule.nextRunAt ? formatDateTime(schedule.nextRunAt) : "计算中"}
+                  </span>
+                </div>
+              </div>
+
+              {/* 目标列表标签 */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] text-fg-subtle">
+                  <span>目标清单</span>
+                  <span>{schedule.items.length} 个目标</span>
+                </div>
+                <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
+                  {schedule.items.map((item, idx) => (
+                    <span
+                      key={idx}
+                      className="inline-flex items-center gap-1 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-[11px] text-fg-body border border-line/60 truncate max-w-[180px]"
+                      title={item.input}
+                    >
+                      <Users className="size-3 text-fg-subtle shrink-0" />
+                      <span className="truncate">{item.input}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* 上次运行与操作栏 */}
+              <div className="flex items-center justify-between pt-2 border-t border-line text-xs">
+                <span className="text-[11px] text-fg-subtle font-mono truncate max-w-[150px]">
+                  上次: {schedule.lastRunAt ? formatDateTime(schedule.lastRunAt) : "从未"}
+                </span>
+
+                <div className="flex items-center gap-1.5">
                   <Popconfirm
-                    key="delete"
-                    title="删除计划"
-                    description="确定要删除这个自动归档计划吗？已下载的文件不会被删除。"
+                    title="删除定时计划"
+                    description={`确定删除计划 “${schedule.name}”？已下载的媒体文件不受影响。`}
                     okText="删除"
                     cancelText="取消"
                     onConfirm={() => removeSchedule.mutate(schedule.id)}
                   >
                     <Button
-                      type="text"
-                      danger
-                      size="small"
-                      icon={<DeleteOutlined />}
-                      loading={
-                        removeSchedule.isPending &&
-                        removeSchedule.variables === schedule.id
-                      }
-                      
-                    >
-                      删除
-                    </Button>
-                  </Popconfirm>,
-                  <Button
-                    key="run"
-                    type="link"
-                    size="small"
-                    icon={<PlayCircleOutlined />}
-                    loading={
-                      runSchedule.isPending &&
-                      runSchedule.variables === schedule.id
-                    }
-                    onClick={() => runSchedule.mutate(schedule.id)}
-                    
-                  >
-                    立即运行
-                  </Button>,
-                ]}
-              >
-                <div className="space-y-3">
-                  {/* 目标列表 Tags */}
-                  <div>
-                    <Typography.Text type="secondary" className="block mb-1" style={{ fontSize: 11 }}>
-                      归档目标 ({schedule.items.length} 个):
-                    </Typography.Text>
-                    <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto">
-                      {schedule.items.map((item, idx) => (
-                        <Tag
-                          key={idx}
-                          icon={<UserOutlined />}
-                          style={{ margin: 0, fontSize: 11 }}
-                        >
-                          {item.title || item.input}
-                        </Tag>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* 调度信息 Descriptions */}
-                  <div className="p-2.5 rounded-lg" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)" }}>
-                    <Descriptions
-                      size="small"
-                      column={1}
-                      items={[
-                        {
-                          key: "freq",
-                          label: "执行频率",
-                          children: (
-                            <Typography.Text strong style={{ color: "var(--brand-600)" }}>
-                              {formatIntervalMinutes(schedule.intervalMinutes)}
-                            </Typography.Text>
-                          ),
-                        },
-                        {
-                          key: "last",
-                          label: "上次执行",
-                          children: (
-                            <span className="font-mono" style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                              {schedule.lastRunAt ? formatDateTime(schedule.lastRunAt) : "尚未执行"}
-                            </span>
-                          ),
-                        },
-                        {
-                          key: "next",
-                          label: "下次触发",
-                          children: (
-                            <Typography.Text strong type="success" className="font-mono" style={{ fontSize: 12 }}>
-                              {formatDateTime(schedule.nextRunAt)}
-                            </Typography.Text>
-                          ),
-                        },
-                      ]}
+                      variant="text"
+                      size="sm"
+                      icon={<Trash2 className="size-3.5 text-danger" />}
+                      loading={removeSchedule.isPending && removeSchedule.variables === schedule.id}
+                      aria-label="删除计划"
                     />
-                  </div>
+                  </Popconfirm>
+
+                  <Button
+                    variant="default"
+                    size="sm"
+                    icon={<Play className="size-3" />}
+                    loading={runSchedule.isPending && runSchedule.variables === schedule.id}
+                    onClick={() => runSchedule.mutate(schedule.id)}
+                  >
+                    立即执行
+                  </Button>
                 </div>
-              </Card>
-            </Col>
+              </div>
+            </Card>
           ))}
-        </Row>
+        </div>
       )}
     </div>
   );

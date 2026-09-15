@@ -167,14 +167,17 @@ export function TooltipProvider({ children }: { children: React.ReactNode }) {
 
 export function Tooltip({
   title,
+  content,
   children,
   side = "top",
 }: {
-  title: React.ReactNode;
+  title?: React.ReactNode;
+  content?: React.ReactNode;
   children: React.ReactNode;
   side?: "top" | "right" | "bottom" | "left";
 }) {
-  if (!title) return <>{children}</>;
+  const displayTitle = title ?? content;
+  if (!displayTitle) return <>{children}</>;
   return (
     <RadixTooltip.Root>
       {/* asChild 把触发行为附加到子元素上，不额外包一层 DOM */}
@@ -183,15 +186,13 @@ export function Tooltip({
         <RadixTooltip.Content
           side={side}
           sideOffset={6}
-          collisionPadding={8}
           className={cn(
-            "z-[1250] max-w-72 rounded-control bg-slate-900 px-2.5 py-1.5",
-            "text-xs leading-relaxed text-slate-50 shadow-overlay",
-            "dark:bg-slate-700",
+            "z-[1300] max-w-xs rounded-control bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 shadow-md",
+            "dark:bg-slate-100 dark:text-slate-900",
           )}
         >
-          {title}
-          <RadixTooltip.Arrow className="fill-slate-900 dark:fill-slate-700" />
+          {displayTitle}
+          <RadixTooltip.Arrow className="fill-slate-900 dark:fill-slate-100" />
         </RadixTooltip.Content>
       </RadixTooltip.Portal>
     </RadixTooltip.Root>

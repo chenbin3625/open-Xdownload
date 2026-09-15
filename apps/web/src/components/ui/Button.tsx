@@ -3,7 +3,14 @@ import React from "react";
 import { cn } from "../../lib/cn";
 import { Spinner } from "./Spinner";
 
-export type ButtonVariant = "primary" | "default" | "text" | "link" | "danger";
+export type ButtonVariant =
+  | "primary"
+  | "default"
+  | "secondary"
+  | "text"
+  | "ghost"
+  | "link"
+  | "danger";
 export type ButtonSize = "sm" | "md";
 
 // 变体表集中管理配色，调用方只传语义名。
@@ -13,7 +20,10 @@ const variantClass: Record<ButtonVariant, string> = {
     "bg-brand-500 text-white border border-brand-500 shadow-xs hover:bg-brand-600 hover:border-brand-600 active:bg-brand-700",
   default:
     "bg-surface text-fg-body border border-line hover:border-brand-400 hover:text-brand-600",
+  secondary:
+    "bg-surface text-fg-body border border-line hover:border-brand-400 hover:text-brand-600",
   text: "bg-transparent text-fg-body border border-transparent hover:bg-surface-hover",
+  ghost: "bg-transparent text-fg-body border border-transparent hover:bg-surface-hover",
   link: "bg-transparent text-brand-600 border border-transparent hover:text-brand-700 hover:underline",
   danger:
     "bg-surface text-danger border border-danger/40 hover:bg-danger hover:text-white hover:border-danger",

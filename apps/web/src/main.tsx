@@ -1,5 +1,4 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import "antd/dist/reset.css";
 import "./index.css";
 import React from "react";
 import { createRoot } from "react-dom/client";

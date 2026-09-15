@@ -1,34 +1,23 @@
 import {
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  DeleteOutlined,
-  ExclamationCircleOutlined,
-  KeyOutlined,
-  LoadingOutlined,
-  PauseCircleOutlined,
-  PlusOutlined,
-} from "@ant-design/icons";
-import {
-  Alert,
-  Button,
-  Col,
-  Form,
-  Input,
-  Row,
-  Space,
-  Tag,
-  Tooltip,
-  Typography,
-} from "antd";
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
+  HelpCircle,
+  Key,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import React, { useEffect, useState } from "react";
 import type { AppConfig, AuthCheck, ClientStatus } from "../../lib/api";
-import { Stack } from "../common/CommonUI";
-
-const { Text } = Typography;
+import { Button } from "../ui/Button";
+import { Alert } from "../ui/Feedback";
+import { Field, PasswordInput } from "../ui/Input";
+import { Tooltip } from "../ui/Overlay";
+import { Tag, type Tone } from "../ui/Tag";
 
 export type CookieClientStatus = ClientStatus;
 
-// 获取步骤与注意事项同时用于配置页提示，保持文案单一来源，便于后续随浏览器界面调整。
 export const cookieHelpSteps = [
   "在浏览器中登录 x.com，建议使用独立浏览器配置或无痕窗口，避免影响日常登录状态。",
   "打开开发者工具：F12，或 macOS 上 Cmd+Option+I、Windows / Linux 上 Ctrl+Shift+I。",
@@ -48,13 +37,23 @@ export const cookieSettingsTips = {
   authToken: "X/Twitter 登录 Cookie 中的 auth_token，用于鉴权。位置：开发者工具「应用 → Cookies → https://x.com」，需与 ct0 来自同一账号。",
   csrfToken: "X/Twitter 登录 Cookie 中的 ct0（CSRF Token），与 auth_token 对应。位置同上，取 Cookies 面板中 ct0 一行的 Value。",
   backupCookie: (
-    <Space orientation="vertical" size={2}>
-      <Text>用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。</Text>
-      <Text>支持每行一个账号，格式为 auth_token=xxx; ct0=yyy。</Text>
-      <Text>已保存的 Cookie 在此界面会以 ******** 脱敏显示，新增或修改不受影响。</Text>
-    </Space>
+    <div className="space-y-1 text-xs">
+      <div>用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。</div>
+      <div>支持每行一个账号，格式为 auth_token=xxx; ct0=yyy。</div>
+      <div>已保存的 Cookie 在此界面会以 ******** 脱敏显示，新增或修改不受影响。</div>
+    </div>
   ),
 };
+
+function TipIcon({ content }: { content: React.ReactNode }) {
+  return (
+    <Tooltip content={content}>
+      <span className="inline-flex cursor-help text-fg-subtle hover:text-fg-muted">
+        <HelpCircle className="size-3.5" />
+      </span>
+    </Tooltip>
+  );
+}
 
 export type BackupCookieRow = {
   id: string;
@@ -86,82 +85,113 @@ export function CookieSettingsFields({
   };
 
   return (
-    <Stack size={16}>
+    <div className="space-y-5">
       <CookieHelpAlert />
-      <Stack size={8}>
-        <Text strong>主 Cookie</Text>
-        <Row gutter={[16, 0]}>
-          <Col xs={24} lg={12}>
-            <Form.Item label="auth_token" tooltip={cookieSettingsTips.authToken}>
-              <Input.Password
-                aria-label="主 Cookie auth_token"
-                prefix={<KeyOutlined />}
-                suffix={(
-                  <CookieTokenStatus
-                    {...sharedStatus}
-                    client={primaryClient}
-                    hasValue={Boolean((draft.authToken ?? "").trim())}
-                    pairComplete={primaryComplete}
-                  />
-                )}
-                value={draft.authToken ?? ""}
-                onChange={(event) => onChange((current) => ({ ...current, authToken: event.target.value }))}
-                placeholder="输入 auth_token"
-              />
-            </Form.Item>
-          </Col>
-          <Col xs={24} lg={12}>
-            <Form.Item label="ct0" tooltip={cookieSettingsTips.csrfToken}>
-              <Input.Password
-                aria-label="主 Cookie ct0"
-                prefix={<KeyOutlined />}
-                suffix={(
-                  <CookieTokenStatus
-                    {...sharedStatus}
-                    client={primaryClient}
-                    hasValue={Boolean((draft.csrfToken ?? "").trim())}
-                    pairComplete={primaryComplete}
-                  />
-                )}
-                value={draft.csrfToken ?? ""}
-                onChange={(event) => onChange((current) => ({ ...current, csrfToken: event.target.value }))}
-                placeholder="输入 ct0"
-              />
-            </Form.Item>
-          </Col>
-        </Row>
-      </Stack>
-      <BackupCookieInputs
-        clients={backupClients}
-        {...sharedStatus}
-        value={draft.additionalCookies ?? ""}
-        onChange={(additionalCookies) => onChange((current) => ({ ...current, additionalCookies }))}
-      />
-    </Stack>
+
+      {/* 主 Cookie */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold text-fg">主账号 Cookie (Primary)</span>
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field
+            label="auth_token"
+            tooltip={<TipIcon content={cookieSettingsTips.authToken} />}
+          >
+            <PasswordInput
+              aria-label="主 Cookie auth_token"
+              prefix={<Key className="size-3.5 text-fg-subtle" />}
+              suffix={
+                <CookieTokenStatus
+                  {...sharedStatus}
+                  client={primaryClient}
+                  hasValue={Boolean((draft.authToken ?? "").trim())}
+                  pairComplete={primaryComplete}
+                />
+              }
+              value={draft.authToken ?? ""}
+              onChange={(event) =>
+                onChange((current) => ({ ...current, authToken: event.target.value }))
+              }
+              placeholder="输入 auth_token"
+            />
+          </Field>
+
+          <Field
+            label="ct0 (CSRF Token)"
+            tooltip={<TipIcon content={cookieSettingsTips.csrfToken} />}
+          >
+            <PasswordInput
+              aria-label="主 Cookie ct0"
+              prefix={<Key className="size-3.5 text-fg-subtle" />}
+              suffix={
+                <CookieTokenStatus
+                  {...sharedStatus}
+                  client={primaryClient}
+                  hasValue={Boolean((draft.csrfToken ?? "").trim())}
+                  pairComplete={primaryComplete}
+                />
+              }
+              value={draft.csrfToken ?? ""}
+              onChange={(event) =>
+                onChange((current) => ({ ...current, csrfToken: event.target.value }))
+              }
+              placeholder="输入 ct0"
+            />
+          </Field>
+        </div>
+      </div>
+
+      {/* 备用 Cookie 账号池 */}
+      <div className="pt-3 border-t border-line">
+        <BackupCookieInputs
+          clients={backupClients}
+          {...sharedStatus}
+          value={draft.additionalCookies ?? ""}
+          onChange={(additionalCookies) =>
+            onChange((current) => ({ ...current, additionalCookies }))
+          }
+        />
+      </div>
+    </div>
   );
 }
 
 export function CookieHelpAlert() {
+  const [open, setOpen] = useState(false);
   return (
-    <Alert
-      type="info"
-      showIcon
-      message="如何获取 X Cookie（auth_token / ct0）"
-      description={
-        <Stack size={6}>
-          <ol style={{ margin: 0, paddingLeft: 20 }}>
+    <div className="rounded-card border border-info/30 bg-info-soft/60 p-3.5 text-xs text-fg-body">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 font-medium text-fg">
+          <HelpCircle className="size-4 text-info" />
+          <span>如何获取 X Cookie（auth_token / ct0）？</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen((c) => !c)}
+          className="cursor-pointer text-xs font-medium text-brand-600 dark:text-brand-400 hover:underline"
+        >
+          {open ? "收起指引" : "展开指引"}
+        </button>
+      </div>
+
+      {open && (
+        <div className="mt-3 space-y-2 border-t border-info/20 pt-3">
+          <ol className="list-decimal pl-4 space-y-1">
             {cookieHelpSteps.map((step) => (
               <li key={step}>{step}</li>
             ))}
           </ol>
-          {cookieHelpNotes.map((note) => (
-            <Text key={note} type="secondary" style={{ display: "block", fontSize: 12 }}>
-              · {note}
-            </Text>
-          ))}
-        </Stack>
-      }
-    />
+          <div className="space-y-1 text-fg-muted pt-1">
+            {cookieHelpNotes.map((note) => (
+              <p key={note} className="text-[11px]">
+                · {note}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -182,10 +212,10 @@ export function CookieTokenStatus({
   hasValue: boolean;
   pairComplete: boolean;
 }) {
-  let tone = "neutral";
+  let tone: Tone = "neutral";
   let label = "待检测";
   let detail = "保存或输入 Cookie 后可进行检测";
-  let icon: React.ReactNode = <PauseCircleOutlined />;
+  let icon: React.ReactNode = null;
 
   if (!hasValue) {
     label = "待配置";
@@ -194,65 +224,64 @@ export function CookieTokenStatus({
     tone = "warning";
     label = "待补全";
     detail = "auth_token 与 ct0 需要成对填写";
-    icon = <ExclamationCircleOutlined />;
+    icon = <AlertTriangle className="size-3" />;
   } else if (checking) {
-    tone = "checking";
+    tone = "brand";
     label = "检测中";
     detail = "正在检查 Cookie 状态";
-    icon = <LoadingOutlined spin />;
+    icon = <RefreshCw className="size-3 animate-spin" />;
   } else if (aggregateClients?.length) {
     const available = aggregateClients.filter((item) => item.ok).length;
     const hasTransientError = aggregateClients.some((item) => item.ok && item.error);
-    tone = available === aggregateClients.length && !hasTransientError
-      ? "success"
-      : available === 0
-        ? "error"
+    tone =
+      available === aggregateClients.length && !hasTransientError
+        ? "success"
+        : available === 0
+        ? "danger"
         : "warning";
     label = `${available}/${aggregateClients.length} 可用`;
-    detail = aggregateClients
-      .map((item) => cookieClientStatusDetail(item))
-      .join("；");
-    icon = tone === "success"
-      ? <CheckCircleOutlined />
-      : tone === "error"
-        ? <CloseCircleOutlined />
-        : <ExclamationCircleOutlined />;
+    detail = aggregateClients.map((item) => cookieClientStatusDetail(item)).join("；");
+    icon =
+      tone === "success" ? (
+        <CheckCircle2 className="size-3" />
+      ) : tone === "danger" ? (
+        <AlertCircle className="size-3" />
+      ) : (
+        <AlertTriangle className="size-3" />
+      );
   } else if (client) {
     if (!client.ok || client.disabled) {
-      tone = "error";
+      tone = "danger";
       label = "异常";
-      icon = <CloseCircleOutlined />;
+      icon = <AlertCircle className="size-3" />;
     } else if (client.error) {
       tone = "warning";
       label = "暂时受限";
-      icon = <ExclamationCircleOutlined />;
+      icon = <AlertTriangle className="size-3" />;
     } else {
       tone = "success";
       label = "有效";
-      icon = <CheckCircleOutlined />;
+      icon = <CheckCircle2 className="size-3" />;
     }
     detail = cookieClientStatusDetail(client);
   } else if (errorMessage) {
-    tone = "error";
+    tone = "danger";
     label = "检测失败";
     detail = errorMessage;
-    icon = <CloseCircleOutlined />;
+    icon = <AlertCircle className="size-3" />;
   } else if (checked) {
     tone = "neutral";
     label = "未检测";
     detail = "此 Cookie 未进入检测队列，可能未填写完整或与其他 Cookie 重复";
   }
 
-  const color = {
-    checking: "processing",
-    error: "error",
-    success: "success",
-    warning: "warning",
-  }[tone];
-
   return (
-    <Tooltip title={detail}>
-      <Tag color={color} icon={icon} aria-label={detail}>{label}</Tag>
+    <Tooltip content={detail}>
+      <span>
+        <Tag tone={tone} size="sm" icon={icon} aria-label={detail}>
+          {label}
+        </Tag>
+      </span>
     </Tooltip>
   );
 }
@@ -298,7 +327,11 @@ export function BackupCookieInputs({
           return row;
         }
         if (isRedactedBackupCookieRow(row) && nextValue !== redactedCookieValue) {
-          return { id: row.id, authToken: field === "authToken" ? nextValue : "", csrfToken: field === "csrfToken" ? nextValue : "" };
+          return {
+            id: row.id,
+            authToken: field === "authToken" ? nextValue : "",
+            csrfToken: field === "csrfToken" ? nextValue : "",
+          };
         }
         return { ...row, [field]: nextValue };
       });
@@ -325,84 +358,98 @@ export function BackupCookieInputs({
   }
 
   return (
-    <Form.Item
-      tooltip={cookieSettingsTips.backupCookie}
-      label={
-        <Space>
-          <Text strong>备用 Cookie</Text>
-          <Tooltip title="添加备用 Cookie">
-            <Button
-              aria-label="添加备用 Cookie"
-              size="small"
-              type="text"
-              icon={<PlusOutlined />}
-              onClick={addRow}
-            />
-          </Tooltip>
-        </Space>
-      }
-    >
-      <Stack size={8}>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm font-semibold text-fg">备用 Cookie 多账号池</span>
+          <TipIcon content={cookieSettingsTips.backupCookie} />
+        </div>
+        <Button
+          size="sm"
+          variant="secondary"
+          icon={<Plus className="size-3.5" />}
+          onClick={addRow}
+        >
+          添加备用账号
+        </Button>
+      </div>
+
+      <div className="space-y-2.5">
         {rows.map((row, index) => {
           const pairComplete = Boolean(row.authToken.trim() && row.csrfToken.trim());
-          const aggregateClients = isRedactedBackupCookieRow(row) && clients.length > 1 ? clients : undefined;
+          const aggregateClients =
+            isRedactedBackupCookieRow(row) && clients.length > 1 ? clients : undefined;
           const client = aggregateClients ? undefined : clients[index];
-          const statusProps = { aggregateClients, checked, checking, client, errorMessage, pairComplete };
+          const statusProps = {
+            aggregateClients,
+            checked,
+            checking,
+            client,
+            errorMessage,
+            pairComplete,
+          };
+
           return (
-            <Row key={row.id} gutter={[8, 8]} align="middle">
-              <Col xs={24} md={11}>
-                <Input.Password
+            <div
+              key={row.id}
+              className="flex flex-col gap-2 rounded-control border border-line bg-surface-muted/40 p-2.5 sm:flex-row sm:items-center"
+            >
+              <div className="flex-1">
+                <PasswordInput
                   aria-label={`备用 Cookie ${index + 1} auth_token`}
-                  prefix={<KeyOutlined />}
-                  suffix={(
+                  prefix={<Key className="size-3.5 text-fg-subtle" />}
+                  suffix={
                     <CookieTokenStatus
                       {...statusProps}
                       hasValue={Boolean(row.authToken.trim())}
                     />
-                  )}
+                  }
                   value={row.authToken}
                   onChange={(event) => updateRow(index, "authToken", event.target.value)}
                   placeholder={`备用 ${index + 1} auth_token`}
+                  size="sm"
                 />
-              </Col>
-              <Col xs={24} md={11}>
-                <Input.Password
+              </div>
+
+              <div className="flex-1">
+                <PasswordInput
                   aria-label={`备用 Cookie ${index + 1} ct0`}
-                  prefix={<KeyOutlined />}
-                  suffix={(
+                  prefix={<Key className="size-3.5 text-fg-subtle" />}
+                  suffix={
                     <CookieTokenStatus
                       {...statusProps}
                       hasValue={Boolean(row.csrfToken.trim())}
                     />
-                  )}
+                  }
                   value={row.csrfToken}
                   onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
                   placeholder={`备用 ${index + 1} ct0`}
+                  size="sm"
                 />
-              </Col>
-              <Col xs={24} md={2}>
-                <Tooltip title="删除备用 Cookie">
+              </div>
+
+              <div className="flex shrink-0 items-center justify-end">
+                <Tooltip content="删除此备用 Cookie">
                   <Button
-                    aria-label={`删除备用 Cookie ${index + 1}`}
-                    danger
-                    type="text"
-                    icon={<DeleteOutlined />}
+                    size="sm"
+                    variant="ghost"
+                    circle
+                    icon={<Trash2 className="size-3.5 text-danger" />}
                     onClick={() => removeRow(index)}
+                    aria-label={`删除备用 Cookie ${index + 1}`}
                   />
                 </Tooltip>
-              </Col>
-            </Row>
+              </div>
+            </div>
           );
         })}
-      </Stack>
-    </Form.Item>
+      </div>
+    </div>
   );
 }
 
 let backupCookieRowSeq = 0;
 
-// 行需要稳定 id：用数组下标做 key 时，删掉中间一行会让 React 复用错位的输入框，
-// 焦点与输入法状态会落到别的 token 上。
 export function emptyBackupCookieRow(): BackupCookieRow {
   backupCookieRowSeq += 1;
   return { id: `backup-cookie-${backupCookieRowSeq}`, authToken: "", csrfToken: "" };
@@ -516,10 +563,14 @@ export function normalizeBackupCookieRows(rows: BackupCookieRow[]) {
   return rows
     .map((row) => ({ authToken: row.authToken.trim(), csrfToken: row.csrfToken.trim() }))
     .filter((row) => Boolean(row.authToken || row.csrfToken))
-    .map((row) => [
-      row.authToken ? `auth_token=${row.authToken}` : "",
-      row.csrfToken ? `ct0=${row.csrfToken}` : "",
-    ].filter(Boolean).join("; "))
+    .map((row) =>
+      [
+        row.authToken ? `auth_token=${row.authToken}` : "",
+        row.csrfToken ? `ct0=${row.csrfToken}` : "",
+      ]
+        .filter(Boolean)
+        .join("; "),
+    )
     .join("\n");
 }
 
