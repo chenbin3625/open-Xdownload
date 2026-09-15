@@ -706,7 +706,7 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	}
 	// 媒体锁按媒体身份（而不是 URL 字符串）串行化：同一份媒体的不同 URL 写法、以及
 	// tweet_id 为空的直接媒体 URL 任务都落到同一把锁上，避免并发各自下载同一媒体、
-	// 或在同名同大小判定完成前同时落盘出 photo.jpg / photo(1).jpg 两份副本。
+	// 或在已有媒体记录判定完成前同时落盘出 photo.jpg / photo(1).jpg 两份副本。
 	mediaKey := downloader.MediaIdentity(mediaURL)
 	release, err := m.lockMedia(ctx, mediaKey)
 	if err != nil {
@@ -729,9 +729,8 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	if dir == "" {
 		dir = target.Root()
 	}
-	// 磁盘上已经有同一份媒体时直接跳过，不再下载（既不创建硬链接也不复制副本）：
-	// 目标目录下确实存在同名同大小的文件时才算已归档。
-	skipped, err := m.skipArchivedMedia(ctx, saveCtx, job, cfg, target, existing, mediaKey, mediaURL, tweetID, dir, filenameHint, previewURL)
+	// 磁盘上已经有同一份媒体时直接跳过，不再下载（既不创建硬链接也不复制副本）。
+	skipped, err := m.skipArchivedMedia(ctx, saveCtx, job, cfg, target, existing, mediaKey, mediaURL, tweetID, previewURL)
 	if err != nil {
 		return mediaDownloadResult{}, err
 	}
@@ -795,17 +794,16 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	return mediaDownloadResult{}, err
 }
 
-// skipArchivedMedia 判断本次要归档的媒体是否已经存在于目标目录，命中时直接跳过：
+// skipArchivedMedia 判断本次要归档的媒体是否已经存在，命中时直接跳过：
 // 不下载、不创建硬链接、也不复制副本。
 //
 //  1. 本推文+本媒体已有记录且文件仍在 → 已归档，跳过（沿用既有行为）；
 //  2. 同一份媒体的其他副本（转推、引用推文与卡片媒体会复用同一条媒体 URL）中存在
-//     "目标目录下已有同名同大小的文件"时 → 视为已归档，跳过。
+//     仍在磁盘上的文件时 → 视为已归档，跳过。
 //
-// 第 2 步用已知副本作为参照：文件名由本次的文件名提示与副本扩展名推导（与下载落盘
-// 命名规则一致），只有目标目录下确实存在同名且字节数一致的文件才算命中，避免把内容
-// 不同但同名的文件误判为已下载。返回 true 表示本次已跳过。
-func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, target filestore.Store, existing *storage.DownloadRecord, mediaKey string, mediaURL string, tweetID string, dir string, filenameHint string, previewURL string) (bool, error) {
+// 第 2 步按媒体身份键复用既有下载记录的 file_path：同一媒体内容只保留一份本地文件，
+// 新记录指向已有文件路径。返回 true 表示本次已跳过。
+func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, target filestore.Store, existing *storage.DownloadRecord, mediaKey string, mediaURL string, tweetID string, previewURL string) (bool, error) {
 	if existing != nil {
 		if path := strings.TrimSpace(existing.FilePath); path != "" {
 			info, err := os.Stat(path)
@@ -824,65 +822,33 @@ func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context
 	if err != nil {
 		return false, err
 	}
-	inDir, elsewhere := splitCopiesByDir(copies, dir)
-	for _, group := range [][]storage.DownloadRecord{inDir, elsewhere} {
-		for _, copy := range group {
-			archived, size, err := archivedFileState(copy.FilePath)
-			if err != nil {
-				return false, err
-			}
-			if !archived {
-				continue
-			}
-			expectedPath := filepath.Join(dir, downloader.Filename(copy.FilePath, filenameHint, "", cfg.MaxFilenameLength))
-			expected, expectedSize, err := archivedFileState(expectedPath)
-			if err != nil {
-				return false, err
-			}
-			if !expected || expectedSize != size {
-				continue
-			}
-			record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-				JobID:      job.ID,
-				TweetID:    tweetID,
-				MediaURL:   mediaURL,
-				PreviewURL: previewURL,
-				FilePath:   expectedPath,
-				Bytes:      expectedSize,
-			})
-			if err != nil {
-				return false, err
-			}
-			m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// splitCopiesByDir 把同一媒体的历史副本按"是否位于本次目标目录"分成两组，优先用目标
-// 目录内的副本作为同名同大小判定的参照（同目录内的副本最可靠）。
-func splitCopiesByDir(copies []storage.DownloadRecord, dir string) ([]storage.DownloadRecord, []storage.DownloadRecord) {
-	inDir := make([]storage.DownloadRecord, 0, len(copies))
-	elsewhere := make([]storage.DownloadRecord, 0, len(copies))
-	seen := make(map[string]struct{}, len(copies))
 	for _, copy := range copies {
 		path := strings.TrimSpace(copy.FilePath)
 		if path == "" {
 			continue
 		}
-		cleaned := filepath.Clean(path)
-		if _, ok := seen[cleaned]; ok {
+		archived, size, err := archivedFileState(path)
+		if err != nil {
+			return false, err
+		}
+		if !archived {
 			continue
 		}
-		seen[cleaned] = struct{}{}
-		if pathWithinDir(cleaned, dir) {
-			inDir = append(inDir, copy)
-			continue
+		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+			JobID:      job.ID,
+			TweetID:    tweetID,
+			MediaURL:   mediaURL,
+			PreviewURL: previewURL,
+			FilePath:   filepath.Clean(path),
+			Bytes:      size,
+		})
+		if err != nil {
+			return false, err
 		}
-		elsewhere = append(elsewhere, copy)
+		m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
+		return true, nil
 	}
-	return inDir, elsewhere
+	return false, nil
 }
 
 // archivedFileState 报告 path 处是否已经放着普通文件，并返回其字节数。
@@ -898,24 +864,6 @@ func archivedFileState(path string) (bool, int64, error) {
 		return false, 0, nil
 	}
 	return true, info.Size(), nil
-}
-
-// pathWithinDir 报告 path 是否位于 dir 目录内（含 dir 本身），用于判断已有媒体是否
-// 就在本次归档目标目录里；比较时统一按绝对路径与文件分隔符处理。
-func pathWithinDir(path string, dir string) bool {
-	if strings.TrimSpace(dir) == "" {
-		return false
-	}
-	cleanPath := filepath.Clean(path)
-	cleanDir := filepath.Clean(dir)
-	if cleanPath == cleanDir {
-		return false
-	}
-	relative, err := filepath.Rel(cleanDir, cleanPath)
-	if err != nil {
-		return false
-	}
-	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // keyLock 是按 key 串行化的令牌锁，带 waiter 计数（持有者 + 等待者）。在无人持有时从
