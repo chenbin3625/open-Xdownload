@@ -630,7 +630,7 @@ func TestArchiveIssueSummaryAggregation(t *testing.T) {
 				"读取 @user7 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
 			},
 			want: []string{
-				"读取媒体时间线失败: X 客户端暂时全部限流，请稍后重试 (共 7 个账号: @user1、@user2、@user3、@user4、@user5 等)",
+				"读取媒体时间线失败: X 客户端暂时全部限流，请稍后重试 (共 7 个账号: @user1、@user2、@user3、@user4、@user5、@user6、@user7)",
 			},
 		},
 		{
