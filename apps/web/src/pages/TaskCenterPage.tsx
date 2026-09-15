@@ -15,16 +15,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
 import {
   cancelJob,
+  formatBytes,
   getJobFiles,
   jobFilesQueryRoot,
   retryFailedTweets,
   retryJob,
   type DashboardPagination,
+  type DashboardStats,
   type DownloadRecord,
   type FailedMedia,
   type Job,
 } from "../lib/api";
 import {
+  PaginatedList,
   clampPercent,
   copyToClipboard,
   formatDateTime,
@@ -41,7 +44,7 @@ import {
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
-import { Segmented, Select } from "../components/ui/Controls";
+import { Segmented, Select, Tabs } from "../components/ui/Controls";
 import { Alert, Descriptions, Empty, Progress } from "../components/ui/Feedback";
 import { SearchInput } from "../components/ui/Input";
 import { Tooltip } from "../components/ui/Overlay";
@@ -50,11 +53,13 @@ import { Spinner } from "../components/ui/Spinner";
 import { Table, type TableColumn } from "../components/ui/Table";
 import { Avatar, StatusDot, Tag, type Tone } from "../components/ui/Tag";
 import { toast } from "../components/ui/Toast";
+import { cn } from "../lib/cn";
 
 export type StatusFilterType = "all" | "active" | "completed" | "failed";
 
 export interface TaskCenterPageProps {
   jobs: Job[];
+  stats?: DashboardStats;
   downloads?: DownloadRecord[];
   failed?: FailedMedia[];
   failedTweetCount: number;
@@ -85,6 +90,7 @@ const jobStatusPresentation: Record<
 
 export function TaskCenterPage({
   jobs,
+  stats,
   failedTweetCount,
   pagination,
   tableLoading = false,
@@ -97,6 +103,11 @@ export function TaskCenterPage({
   const [statusFilter, setStatusFilter] = useState<StatusFilterType>("all");
   const [kindFilter, setKindFilter] = useState<string>("all");
   const [searchKeyword, setSearchKeyword] = useState<string>("");
+
+  const isJobFailed = (job: Job) =>
+    job.status === "failed" ||
+    job.status === "completed_with_errors" ||
+    Boolean(job.error);
 
   const cancel = useMutation({
     mutationFn: cancelJob,
@@ -131,7 +142,13 @@ export function TaskCenterPage({
   const filteredJobs = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase();
     return jobs.filter((job) => {
-      if (statusFilter !== "all" && jobStatusBucket(job.status) !== statusFilter) {
+      if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
+        return false;
+      }
+      if (statusFilter === "completed" && (job.status !== "completed" || Boolean(job.error))) {
+        return false;
+      }
+      if (statusFilter === "failed" && !isJobFailed(job)) {
         return false;
       }
       if (kindFilter !== "all" && job.kind !== kindFilter) {
@@ -143,7 +160,9 @@ export function TaskCenterPage({
       return (
         (job.title || "").toLowerCase().includes(keyword) ||
         (job.input || "").toLowerCase().includes(keyword) ||
-        String(job.id).includes(keyword)
+        String(job.id).includes(keyword) ||
+        (job.error || "").toLowerCase().includes(keyword) ||
+        (job.message || "").toLowerCase().includes(keyword)
       );
     });
   }, [jobs, statusFilter, kindFilter, searchKeyword]);
@@ -154,11 +173,23 @@ export function TaskCenterPage({
   const bucketCounts = useMemo(() => {
     const counts = { active: 0, completed: 0, failed: 0 };
     for (const job of jobs) {
-      const bucket = jobStatusBucket(job.status);
-      if (bucket !== "idle") counts[bucket] += 1;
+      if (isJobFailed(job)) {
+        counts.failed += 1;
+      } else if (jobStatusBucket(job.status) === "active") {
+        counts.active += 1;
+      } else if (job.status === "completed") {
+        counts.completed += 1;
+      }
     }
     return counts;
   }, [jobs]);
+
+  const displayStats = {
+    active: stats ? stats.active : bucketCounts.active,
+    completed: stats ? stats.completed : bucketCounts.completed,
+    failed: stats ? stats.failed : bucketCounts.failed,
+    total: stats ? stats.total : pagination.total,
+  };
 
   const columns: TableColumn<Job>[] = [
     {
@@ -211,21 +242,40 @@ export function TaskCenterPage({
       render: (record) => {
         const percent = clampPercent(record.progress);
         const pStatus = progressStatus(record);
+        const hasError = isJobFailed(record);
+        const displayMsg =
+          record.error || record.message || (hasError ? "任务失败" : "执行中...");
+
         return (
           <div className="space-y-1 py-0.5">
-            <div className="flex justify-between font-mono text-xs text-fg-muted">
-              <span className="truncate max-w-[130px]">{record.message || "执行中..."}</span>
-              <span className="font-semibold text-brand-600 dark:text-brand-400">{percent}%</span>
+            <div className="flex justify-between font-mono text-xs">
+              <span
+                className={cn(
+                  "truncate max-w-[140px]",
+                  hasError ? "font-medium text-danger" : "text-fg-muted",
+                )}
+                title={displayMsg}
+              >
+                {displayMsg}
+              </span>
+              <span
+                className={cn(
+                  "font-semibold",
+                  hasError ? "text-danger" : "text-brand-600 dark:text-brand-400",
+                )}
+              >
+                {percent}%
+              </span>
             </div>
             <Progress
               percent={percent}
               status={
-                pStatus === "active"
+                hasError || pStatus === "exception"
+                  ? "exception"
+                  : pStatus === "active"
                   ? "active"
                   : pStatus === "success"
                   ? "success"
-                  : pStatus === "exception"
-                  ? "exception"
                   : "normal"
               }
             />
@@ -321,11 +371,11 @@ export function TaskCenterPage({
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">下载中任务</span>
             <div className="flex size-6.5 items-center justify-center rounded-lg bg-brand-500/10">
-              <StatusDot tone={bucketCounts.active > 0 ? "brand" : "default"} pulse={bucketCounts.active > 0} />
+              <StatusDot tone={displayStats.active > 0 ? "brand" : "default"} pulse={displayStats.active > 0} />
             </div>
           </div>
           <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
-            {bucketCounts.active}
+            {displayStats.active}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">当前正在排队与拉取</p>
         </Card>
@@ -341,7 +391,7 @@ export function TaskCenterPage({
             </div>
           </div>
           <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
-            {bucketCounts.completed}
+            {displayStats.completed}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">媒体已全部入库</p>
         </Card>
@@ -357,7 +407,7 @@ export function TaskCenterPage({
             </div>
           </div>
           <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
-            {bucketCounts.failed}
+            {displayStats.failed}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">包含部分失败与致命失败</p>
         </Card>
@@ -373,7 +423,7 @@ export function TaskCenterPage({
             </div>
           </div>
           <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
-            {pagination.total}
+            {displayStats.total}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">库内已记录的任务总规模</p>
         </Card>
@@ -417,7 +467,7 @@ export function TaskCenterPage({
           {/* 搜索与类型选择 */}
           <div className="flex flex-wrap items-center gap-2">
             <SearchInput
-              placeholder="按标题、用户名或 ID 搜索..."
+              placeholder="按标题、用户名、错误信息或 ID 搜索..."
               value={searchKeyword}
               onChange={(e) => setSearchKeyword(e.target.value)}
               allowClear
@@ -438,7 +488,7 @@ export function TaskCenterPage({
               ]}
             />
 
-            {bucketCounts.failed > 0 && (
+            {(displayStats.failed > 0 || bucketCounts.failed > 0) && (
               <Button
                 variant="default"
                 size="sm"
@@ -504,9 +554,136 @@ function ExpandedJobDetails({
 
   const downloads = filesQuery.data?.downloads ?? [];
   const failed = filesQuery.data?.failed ?? [];
+  const hasJobError =
+    Boolean(job.error) ||
+    job.status === "failed" ||
+    job.status === "completed_with_errors";
+
+  const [activeTab, setActiveTab] = useState<string>(
+    failed.length > 0 && downloads.length === 0 ? "failed" : "downloads",
+  );
+
+  React.useEffect(() => {
+    if (downloads.length === 0 && failed.length > 0) {
+      setActiveTab("failed");
+    } else if (downloads.length > 0 && failed.length === 0) {
+      setActiveTab("downloads");
+    }
+  }, [downloads.length, failed.length]);
+
+  const renderDownloadsList = () => (
+    <PaginatedList<DownloadRecord>
+      items={downloads}
+      pageSize={6}
+      itemName="个文件"
+      emptyDescription="暂无下载文件记录"
+      renderItem={(item) => {
+        const fileName = item.filePath.split("/").pop() || item.filePath;
+        const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
+        return (
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <div className="flex min-w-0 flex-1 items-start gap-2.5">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded bg-brand-500/10 font-mono text-[10px] font-bold text-brand-600 dark:text-brand-400">
+                {ext}
+              </span>
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="truncate font-medium text-fg" title={fileName}>
+                    {fileName}
+                  </span>
+                  {item.bytes > 0 && (
+                    <span className="shrink-0 font-mono text-[11px] text-fg-subtle">
+                      {formatBytes(item.bytes)}
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-fg-muted">
+                  <span
+                    className="truncate max-w-sm sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
+                    title={item.filePath}
+                  >
+                    {item.filePath}
+                  </span>
+                  {item.mediaUrl && (
+                    <span
+                      className="truncate max-w-xs text-fg-subtle/70"
+                      title={item.mediaUrl}
+                    >
+                      · {item.mediaUrl}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Tooltip title="复制文件完整本地路径">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  circle
+                  icon={<Copy className="size-3.5" />}
+                  onClick={() => void copyToClipboard(item.filePath, "本地路径")}
+                  aria-label="复制本地路径"
+                />
+              </Tooltip>
+            </div>
+          </div>
+        );
+      }}
+    />
+  );
+
+  const renderFailedList = () => (
+    <PaginatedList<FailedMedia>
+      items={failed}
+      pageSize={6}
+      itemName="条失败记录"
+      emptyDescription="暂无失败媒体记录"
+      renderItem={(item) => (
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <div className="flex min-w-0 flex-1 items-start gap-2.5">
+            <div className="flex size-7 shrink-0 items-center justify-center rounded bg-danger-soft text-danger">
+              <AlertCircle className="size-4" />
+            </div>
+            <div className="min-w-0 flex-1 space-y-0.5">
+              <div className="font-medium text-danger break-all">
+                {item.error || "媒体下载失败"}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-fg-muted">
+                <span
+                  className="truncate max-w-sm sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
+                  title={item.mediaUrl}
+                >
+                  {item.mediaUrl}
+                </span>
+                {item.createdAt && (
+                  <span className="text-fg-subtle/70">
+                    · {formatDateTime(item.createdAt)}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            <Tooltip title="复制媒体地址">
+              <Button
+                variant="ghost"
+                size="sm"
+                circle
+                icon={<Copy className="size-3.5" />}
+                onClick={() => void copyToClipboard(item.mediaUrl, "媒体地址")}
+                aria-label="复制媒体地址"
+              />
+            </Tooltip>
+          </div>
+        </div>
+      )}
+    />
+  );
 
   return (
     <div className="space-y-3 rounded-card border border-line bg-surface-muted/50 p-4">
+      {/* 顶部元信息与操作栏 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Descriptions
           columns={3}
@@ -534,18 +711,48 @@ function ExpandedJobDetails({
                       失败 {failed.length}
                     </Tag>
                   )}
+                  {hasJobError && failed.length === 0 && (
+                    <Tag tone="danger">
+                      异常
+                    </Tag>
+                  )}
                 </div>
               ),
             },
           ]}
         />
-        {failed.length > 0 && (
-          <Button variant="text" size="sm" onClick={onRetry}>
+        {retryableStatuses.includes(job.status) && (
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<RotateCcw className="size-3.5" />}
+            onClick={onRetry}
+          >
             重试此任务
           </Button>
         )}
       </div>
 
+      {/* 错误提示横幅：彻底解决错误任务在详情中隐匿的问题 */}
+      {hasJobError && (
+        <Alert
+          type="error"
+          showIcon
+          message={job.status === "failed" ? "任务执行失败" : "任务处理存在异常或部分失败"}
+          description={
+            <div className="mt-1 space-y-1">
+              <div className="font-mono text-xs break-all text-danger font-medium">
+                {job.error || job.message || "未知异常，任务未能成功完成"}
+              </div>
+              {job.error && job.message && job.message !== job.error && (
+                <div className="text-xs text-fg-muted">状态描述: {job.message}</div>
+              )}
+            </div>
+          }
+        />
+      )}
+
+      {/* 文件与媒体清单：恢复为结构清晰的列表 */}
       {filesQuery.isLoading ? (
         <div className="py-6 text-center">
           <Spinner className="size-5 mx-auto" />
@@ -563,50 +770,65 @@ function ExpandedJobDetails({
           }
         />
       ) : downloads.length === 0 && failed.length === 0 ? (
-        <Empty description="暂无已归档的文件记录" />
+        hasJobError ? (
+          <Empty description="任务未生成已下载文件记录" />
+        ) : job.status === "pending" || job.status === "resolving" || job.status === "downloading" ? (
+          <div className="py-6 text-center text-xs text-fg-muted">
+            任务正在执行中，等待媒体拉取入库...
+          </div>
+        ) : (
+          <Empty description="暂无已归档的文件记录" />
+        )
+      ) : downloads.length > 0 && failed.length > 0 ? (
+        <div className="pt-2 border-t border-line">
+          <Tabs
+            value={activeTab}
+            onChange={setActiveTab}
+            items={[
+              {
+                key: "downloads",
+                label: (
+                  <span className="flex items-center gap-1.5">
+                    <span>已下载文件</span>
+                    <Tag tone="success" className="font-mono text-[10px] px-1 py-0">
+                      {downloads.length}
+                    </Tag>
+                  </span>
+                ),
+                children: renderDownloadsList(),
+              },
+              {
+                key: "failed",
+                label: (
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-danger">失败媒体</span>
+                    <Tag tone="danger" className="font-mono text-[10px] px-1 py-0">
+                      {failed.length}
+                    </Tag>
+                  </span>
+                ),
+                children: renderFailedList(),
+              },
+            ]}
+          />
+        </div>
+      ) : downloads.length > 0 ? (
+        <div className="space-y-2 pt-2 border-t border-line">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-fg-muted">
+              已下载文件 ({downloads.length})
+            </span>
+          </div>
+          {renderDownloadsList()}
+        </div>
       ) : (
-        <div className="grid grid-cols-2 gap-2 pt-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 border-t border-line">
-          {downloads.map((dl) => {
-            const fileName = dl.filePath.split("/").pop() || dl.filePath;
-            const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
-            return (
-              <div
-                key={dl.id}
-                className="flex items-center justify-between gap-1.5 rounded-control border border-line bg-surface p-2 text-xs shadow-xs"
-              >
-                <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
-                  <span className="rounded bg-surface-muted px-1 py-0.5 font-mono text-[10px] text-fg-muted">
-                    {ext}
-                  </span>
-                  <span className="truncate text-fg-body font-medium" title={fileName}>
-                    {fileName}
-                  </span>
-                </div>
-                <Tooltip title="复制文件本地完整路径">
-                  <Button
-                    variant="text"
-                    size="sm"
-                    circle
-                    icon={<Copy className="size-3" />}
-                    onClick={() => void copyToClipboard(dl.filePath, "本地路径")}
-                    aria-label="复制本地路径"
-                  />
-                </Tooltip>
-              </div>
-            );
-          })}
-
-          {failed.map((fl) => (
-            <div
-              key={fl.id}
-              className="rounded-control border border-danger/30 bg-danger-soft p-2 text-xs"
-            >
-              <span className="block font-medium text-danger truncate">下载失败</span>
-              <span className="block text-[11px] text-fg-muted truncate" title={fl.error || fl.mediaUrl}>
-                {fl.error || fl.mediaUrl}
-              </span>
-            </div>
-          ))}
+        <div className="space-y-2 pt-2 border-t border-line">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-danger">
+              失败媒体 ({failed.length})
+            </span>
+          </div>
+          {renderFailedList()}
         </div>
       )}
     </div>

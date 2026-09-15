@@ -276,6 +276,7 @@ export default function App() {
             {isTaskCenterActive && !(jobs.isLoading && !jobs.data) && (
               <TaskCenterPage
                 jobs={jobsData}
+                stats={currentStats}
                 failedTweetCount={failedTweetCount}
                 pagination={currentPagination}
                 tableLoading={jobs.isPlaceholderData}
