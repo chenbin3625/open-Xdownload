@@ -314,45 +314,65 @@ export function TaskCenterPage({
 
       {/* 核心指标统计卡片 (现代玻璃风格) */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Card size="sm" className="relative overflow-hidden">
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-brand-500 bg-gradient-to-b from-brand-500/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">下载中任务</span>
-            <StatusDot tone={bucketCounts.active > 0 ? "brand" : "default"} pulse={bucketCounts.active > 0} />
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-brand-500/10">
+              <StatusDot tone={bucketCounts.active > 0 ? "brand" : "default"} pulse={bucketCounts.active > 0} />
+            </div>
           </div>
-          <div className="mt-2 text-2xl font-bold tracking-tight text-fg">
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
             {bucketCounts.active}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">当前正在排队与拉取</p>
         </Card>
 
-        <Card size="sm">
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-success bg-gradient-to-b from-success/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">已完成</span>
-            <CheckCircle2 className="size-4 text-success" />
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-success-soft">
+              <CheckCircle2 className="size-3.5 text-success" />
+            </div>
           </div>
-          <div className="mt-2 text-2xl font-bold tracking-tight text-fg">
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
             {bucketCounts.completed}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">媒体已全部入库</p>
         </Card>
 
-        <Card size="sm">
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-danger bg-gradient-to-b from-danger/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">异常 / 失败</span>
-            <AlertCircle className="size-4 text-danger" />
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-danger-soft">
+              <AlertCircle className="size-3.5 text-danger" />
+            </div>
           </div>
-          <div className="mt-2 text-2xl font-bold tracking-tight text-fg">
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
             {bucketCounts.failed}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">包含部分失败与致命失败</p>
         </Card>
 
-        <Card size="sm">
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-line-strong bg-gradient-to-b from-surface-muted/50 to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">任务总数</span>
-            <FolderCheck className="size-4 text-brand-500" />
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-surface-muted border border-line">
+              <FolderCheck className="size-3.5 text-brand-500" />
+            </div>
           </div>
-          <div className="mt-2 text-2xl font-bold tracking-tight text-fg">
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
             {pagination.total}
           </div>
           <p className="mt-0.5 text-[11px] text-fg-subtle">库内已记录的任务总规模</p>

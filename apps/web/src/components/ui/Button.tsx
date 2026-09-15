@@ -17,16 +17,16 @@ export type ButtonSize = "sm" | "md";
 // 焦点环由全局 :focus-visible 提供，这里不重复定义。
 const variantClass: Record<ButtonVariant, string> = {
   primary:
-    "bg-brand-500 text-white border border-brand-500 shadow-xs hover:bg-brand-600 hover:border-brand-600 active:bg-brand-700",
+    "bg-gradient-to-b from-brand-500 to-brand-600 text-white border border-brand-400/25 shadow-xs shadow-brand-500/20 hover:from-brand-400 hover:to-brand-500 hover:shadow-brand-500/35 active:from-brand-600 active:to-brand-700",
   default:
-    "bg-surface text-fg-body border border-line hover:border-brand-400 hover:text-brand-600",
+    "bg-surface text-fg-body border border-line shadow-xs hover:border-brand-400/40 hover:text-fg hover:bg-surface-hover",
   secondary:
-    "bg-surface text-fg-body border border-line hover:border-brand-400 hover:text-brand-600",
-  text: "bg-transparent text-fg-body border border-transparent hover:bg-surface-hover",
-  ghost: "bg-transparent text-fg-body border border-transparent hover:bg-surface-hover",
-  link: "bg-transparent text-brand-600 border border-transparent hover:text-brand-700 hover:underline",
+    "bg-surface text-fg-body border border-line shadow-xs hover:border-brand-400/40 hover:text-fg hover:bg-surface-hover",
+  text: "bg-transparent text-fg-body border border-transparent hover:bg-surface-hover hover:text-fg",
+  ghost: "bg-transparent text-fg-body border border-transparent hover:bg-surface-hover hover:text-fg",
+  link: "bg-transparent text-brand-500 border border-transparent hover:text-brand-600 hover:underline",
   danger:
-    "bg-surface text-danger border border-danger/40 hover:bg-danger hover:text-white hover:border-danger",
+    "bg-danger-soft text-danger border border-danger/30 hover:bg-danger hover:text-white hover:border-danger",
 };
 
 const sizeClass: Record<ButtonSize, string> = {
@@ -76,8 +76,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
       aria-busy={loading || undefined}
       className={cn(
         "inline-flex shrink-0 items-center justify-center rounded-control font-medium",
-        "transition-colors duration-150 select-none",
-        "disabled:cursor-not-allowed disabled:opacity-50",
+        "transition-all duration-150 select-none cursor-pointer active:scale-[0.98]",
+        "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
         variantClass[variant],
         sizeClass[size],
         circle && (size === "sm" ? "size-7 rounded-full px-0" : "size-9 rounded-full px-0"),

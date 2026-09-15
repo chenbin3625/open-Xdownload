@@ -258,3 +258,39 @@ export function Popconfirm({
     </Popover.Root>
   );
 }
+
+export function SimplePopover({
+  trigger,
+  children,
+  side = "bottom",
+  align = "end",
+  className,
+}: {
+  trigger: React.ReactNode;
+  children: React.ReactNode;
+  side?: "top" | "right" | "bottom" | "left";
+  align?: "start" | "center" | "end";
+  className?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>{trigger}</Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side={side}
+          align={align}
+          sideOffset={8}
+          collisionPadding={12}
+          className={cn(
+            "z-[1250] rounded-card border border-line bg-surface/95 p-3 shadow-overlay backdrop-blur-xl",
+            "animate-overlay-in",
+            className,
+          )}
+        >
+          {typeof children === "function" ? (children as (close: () => void) => React.ReactNode)(() => setOpen(false)) : children}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}

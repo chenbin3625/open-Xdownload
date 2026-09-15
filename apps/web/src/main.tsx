@@ -7,7 +7,13 @@ import { TooltipProvider } from "./components/ui/Overlay";
 import { Toaster } from "./components/ui/Toast";
 import { hydrateAppQueries, takeAppBootstrap } from "./lib/bootstrap";
 import { readRouteState } from "./lib/useRouteState";
-import { applyTheme, readThemePreference, resolveTheme } from "./lib/useTheme";
+import {
+  applyAccent,
+  applyTheme,
+  readAccentPreference,
+  readThemePreference,
+  resolveTheme,
+} from "./lib/useTheme";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -18,8 +24,9 @@ const queryClient = new QueryClient({
     },
   },
 });
-// 在首次渲染前落定主题类名，避免明暗切换时的闪白。
+// 在首次渲染前落定主题类名与主题色，避免明暗切换时的闪白。
 applyTheme(resolveTheme(readThemePreference()));
+applyAccent(readAccentPreference());
 
 const bootstrap = takeAppBootstrap();
 if (bootstrap) {

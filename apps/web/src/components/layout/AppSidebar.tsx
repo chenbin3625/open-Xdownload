@@ -81,30 +81,36 @@ export function AppSidebar({
   ];
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col justify-between border-r border-line bg-surface select-none">
-      <div className="p-3">
+    <aside className="flex w-64 shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none">
+      <div className="p-3.5">
         {/* 品牌区 */}
-        <div className="flex items-center gap-2.5 px-2 pt-1.5 pb-3">
-          <span className="flex size-8.5 shrink-0 items-center justify-center rounded-[0.625rem] bg-brand-500 text-base font-bold text-white">
+        <div className="flex items-center gap-3 px-2 pt-1 pb-4">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 text-lg font-bold text-white shadow-sm shadow-brand-500/30">
             𝕏
           </span>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="text-sm font-semibold text-fg">open-Xdownload</span>
-              <Tag tone="brand" className="font-mono text-[10px]">
+              <span className="text-sm font-bold tracking-tight text-fg">open-Xdownload</span>
+              <Tag tone="brand" className="font-mono text-[10px] px-1 py-0">
                 v{__APP_VERSION__}
               </Tag>
             </div>
-            <p className="text-[11px] text-fg-muted">推文多媒体下载控制台</p>
+            <p className="text-[11px] text-fg-muted font-medium">推文多媒体归档工作台</p>
           </div>
         </div>
 
-        <Button variant="primary" block icon={<Plus className="size-4" />} onClick={onOpenCreateModal}>
+        <Button
+          variant="primary"
+          block
+          icon={<Plus className="size-4" />}
+          onClick={onOpenCreateModal}
+          className="shadow-sm shadow-brand-500/20"
+        >
           新建下载 / 归档
         </Button>
 
         {/* 手写导航列表：单选语义用 aria-current 表达，不需要 Menu 的全部键盘模型 */}
-        <nav aria-label="主导航" className="mt-3 flex flex-col gap-0.5">
+        <nav aria-label="主导航" className="mt-4 flex flex-col gap-1">
           {navItems.map((item) => {
             const active = item.key === currentKey;
             return (
@@ -114,14 +120,14 @@ export function AppSidebar({
                 aria-current={active ? "page" : undefined}
                 onClick={() => onSectionChange(item.key)}
                 className={cn(
-                  "flex h-10 cursor-pointer items-center gap-2.5 rounded-control px-2.5",
-                  "text-sm transition-colors",
+                  "flex h-10 cursor-pointer items-center gap-3 rounded-control px-3",
+                  "text-sm transition-all duration-150 relative",
                   active
-                    ? "bg-brand-50 font-medium text-brand-700"
-                    : "text-fg-body hover:bg-surface-hover hover:text-fg",
+                    ? "bg-brand-500/10 font-semibold text-brand-500 border border-brand-500/20 shadow-2xs"
+                    : "text-fg-body hover:bg-surface-hover hover:text-fg border border-transparent",
                 )}
               >
-                <span className={active ? "text-brand-600" : "text-fg-subtle"}>{item.icon}</span>
+                <span className={active ? "text-brand-500" : "text-fg-subtle"}>{item.icon}</span>
                 <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
                 {item.badge}
               </button>
@@ -132,10 +138,10 @@ export function AppSidebar({
         {/* 失败推文入口 */}
         {failedTweetCount > 0 && (
           <>
-            <Divider />
-            <div className="flex flex-col gap-2">
+            <Divider className="my-3.5" />
+            <div className="flex flex-col gap-2 rounded-control border border-danger/25 bg-danger-soft/50 p-2.5">
               <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-1.5 text-xs text-fg-body">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-danger">
                   <TriangleAlert className="size-3.5 text-danger" />
                   失败推文队列
                 </span>
@@ -150,13 +156,18 @@ export function AppSidebar({
       </div>
 
       {/* 底部存储状态 */}
-      <div className="border-t border-line bg-surface-muted p-3">
-        <div className="mb-1.5 flex items-center gap-1.5">
-          <FolderOpen className="size-3.5 text-fg-subtle" />
-          <span className="text-xs text-fg-muted">存储 ({storageType.toUpperCase()})</span>
+      <div className="border-t border-line/80 bg-surface-muted/60 p-3.5">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <FolderOpen className="size-3.5 text-brand-500" />
+            <span className="text-xs font-medium text-fg">本地存储</span>
+          </div>
+          <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-mono text-fg-muted border border-line">
+            {storageType.toUpperCase()}
+          </span>
         </div>
         <Tooltip title={storagePath}>
-          <p className="truncate font-mono text-[11px] text-fg-muted">
+          <p className="truncate font-mono text-[11px] text-fg-muted hover:text-fg transition-colors">
             {storagePath || "/downloads"}
           </p>
         </Tooltip>

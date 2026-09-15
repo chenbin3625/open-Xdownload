@@ -137,6 +137,7 @@ const GalleryCard = React.memo(function GalleryCard({
     <Card
       hoverable
       size="sm"
+      className="group rounded-2xl border-line/80 hover:border-brand-500/40 hover:-translate-y-1 transition-all duration-300 shadow-xs hover:shadow-raised"
       bodyClassName="p-3"
       cover={
         <div className="aspect-square relative flex items-center justify-center overflow-hidden bg-surface-muted border-b border-line">
@@ -145,7 +146,7 @@ const GalleryCard = React.memo(function GalleryCard({
           ) : isPreviewableImage ? (
             <button
               type="button"
-              className="group relative block h-full w-full cursor-pointer border-0 bg-transparent p-0 overflow-hidden"
+              className="group/img relative block h-full w-full cursor-pointer border-0 bg-transparent p-0 overflow-hidden"
               onClick={() => onOpen(entryKey(item))}
               aria-label={`查看图片 ${fileName}`}
             >
@@ -161,7 +162,7 @@ const GalleryCard = React.memo(function GalleryCard({
                 onError={(event) => {
                   event.currentTarget.style.display = "none";
                 }}
-                className="relative z-10 h-full w-full object-contain transition-transform duration-200 group-hover:scale-105"
+                className="relative z-10 h-full w-full object-contain transition-transform duration-300 group-hover/img:scale-105"
               />
             </button>
           ) : (
@@ -171,25 +172,26 @@ const GalleryCard = React.memo(function GalleryCard({
             </div>
           )}
 
-          <span className="pointer-events-none absolute top-2 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-mono text-white backdrop-blur-xs">
+          <span className="pointer-events-none absolute top-2 right-2 z-20 rounded-md bg-black/75 px-1.5 py-0.5 text-[10px] font-mono text-white/90 backdrop-blur-md border border-white/10 shadow-xs">
             {ext} · {formatBytes(item.bytes)}
           </span>
         </div>
       }
     >
       <div className="space-y-1.5">
-        <div className="truncate text-xs font-semibold text-fg" title={fileName}>
+        <div className="truncate text-xs font-semibold text-fg tracking-tight" title={fileName}>
           {fileName}
         </div>
 
-        <div className="truncate font-mono text-[11px] text-fg-muted">
-          {item.userScreenName
-            ? `${item.userName || item.userScreenName}  @${item.userScreenName}`
-            : "未识别用户"}
+        <div className="truncate font-mono text-[11px] text-fg-muted flex items-center gap-1">
+          <span className="truncate">{item.userName || "未识别用户"}</span>
+          {item.userScreenName && (
+            <span className="text-brand-500 font-medium shrink-0">@{item.userScreenName}</span>
+          )}
         </div>
 
-        <div className="flex items-center justify-between pt-2 border-t border-line text-[11px] text-fg-subtle">
-          <span className="font-mono">{formatDateTime(item.createdAt)}</span>
+        <div className="flex items-center justify-between pt-2 border-t border-line/70 text-[11px] text-fg-subtle">
+          <span className="font-mono tabular-nums text-[10px]">{formatDateTime(item.createdAt)}</span>
           <div className="flex items-center gap-1">
             <Tooltip title="复制本地路径">
               <Button

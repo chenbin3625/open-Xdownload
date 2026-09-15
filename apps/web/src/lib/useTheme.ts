@@ -2,11 +2,63 @@ import { useCallback, useEffect, useState } from "react";
 
 export type ThemePreference = "light" | "dark" | "system";
 export type ResolvedTheme = "light" | "dark";
+export type ThemeAccent = "x-blue" | "titanium" | "indigo" | "emerald" | "amber";
 
 const STORAGE_KEY = "open-xdownload-theme";
+const ACCENT_STORAGE_KEY = "open-xdownload-accent";
+
+export interface ThemeAccentOption {
+  id: ThemeAccent;
+  name: string;
+  color: string;
+  dotColor: string;
+  description: string;
+}
+
+export const THEME_ACCENTS: readonly ThemeAccentOption[] = [
+  {
+    id: "x-blue",
+    name: "𝕏 电光蓝",
+    color: "#1d9bf0",
+    dotColor: "bg-[#1d9bf0]",
+    description: "经典 Twitter / X 原生电光蓝",
+  },
+  {
+    id: "titanium",
+    name: "Titanium 钛金",
+    color: "#71717a",
+    dotColor: "bg-[#71717a] dark:bg-[#e4e4e7]",
+    description: "Linear 风格纯黑钛极简",
+  },
+  {
+    id: "indigo",
+    name: "Cyber 极光紫",
+    color: "#6366f1",
+    dotColor: "bg-[#6366f1]",
+    description: "Raycast 极客科技感",
+  },
+  {
+    id: "emerald",
+    name: "Emerald 极光绿",
+    color: "#10b981",
+    dotColor: "bg-[#10b981]",
+    description: "清新醒目信号绿",
+  },
+  {
+    id: "amber",
+    name: "Amber 琥珀金",
+    color: "#f59e0b",
+    dotColor: "bg-[#f59e0b]",
+    description: "暖调温润琥珀金",
+  },
+] as const;
 
 function isThemePreference(value: unknown): value is ThemePreference {
   return value === "light" || value === "dark" || value === "system";
+}
+
+function isThemeAccent(value: unknown): value is ThemeAccent {
+  return THEME_ACCENTS.some((a) => a.id === value);
 }
 
 export function readThemePreference(): ThemePreference {
@@ -17,6 +69,16 @@ export function readThemePreference(): ThemePreference {
   } catch {
     // 隐私模式下 localStorage 可能抛异常，回退到跟随系统
     return "system";
+  }
+}
+
+export function readAccentPreference(): ThemeAccent {
+  if (typeof window === "undefined") return "x-blue";
+  try {
+    const stored = window.localStorage.getItem(ACCENT_STORAGE_KEY);
+    return isThemeAccent(stored) ? (stored as ThemeAccent) : "x-blue";
+  } catch {
+    return "x-blue";
   }
 }
 
@@ -40,9 +102,15 @@ export function applyTheme(resolved: ResolvedTheme) {
   root.classList.toggle("light", resolved === "light");
 }
 
+export function applyAccent(accent: ThemeAccent) {
+  if (typeof document === "undefined") return;
+  document.documentElement.setAttribute("data-accent", accent);
+}
+
 export function useTheme() {
   const [preference, setPreference] = useState<ThemePreference>(readThemePreference);
   const [resolved, setResolved] = useState<ResolvedTheme>(() => resolveTheme(readThemePreference()));
+  const [accent, setAccentState] = useState<ThemeAccent>(readAccentPreference);
 
   useEffect(() => {
     const next = resolveTheme(preference);
@@ -54,6 +122,15 @@ export function useTheme() {
       // 写入失败不影响当前会话的显示
     }
   }, [preference]);
+
+  useEffect(() => {
+    applyAccent(accent);
+    try {
+      window.localStorage.setItem(ACCENT_STORAGE_KEY, accent);
+    } catch {
+      // 写入失败不影响当前会话的显示
+    }
+  }, [accent]);
 
   // 仅在跟随系统时监听系统切换；用户显式选择后系统变化不应覆盖其选择。
   useEffect(() => {
@@ -73,5 +150,9 @@ export function useTheme() {
     setPreference(resolveTheme(readThemePreference()) === "dark" ? "light" : "dark");
   }, []);
 
-  return { preference, resolved, setPreference, toggle };
+  const setAccent = useCallback((nextAccent: ThemeAccent) => {
+    setAccentState(nextAccent);
+  }, []);
+
+  return { preference, resolved, setPreference, toggle, accent, setAccent };
 }

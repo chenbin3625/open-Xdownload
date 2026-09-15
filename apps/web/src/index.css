@@ -14,19 +14,20 @@
    ========================================================= */
 
 @theme {
-  /* 品牌色阶：仅这一处定义，供 bg-brand-500 / text-brand-600 等工具类使用 */
-  --color-brand-50: #f0f9ff;
-  --color-brand-100: #e0f2fe;
-  --color-brand-200: #bae6fd;
-  --color-brand-300: #7dd3fc;
-  --color-brand-400: #38bdf8;
-  --color-brand-500: #0ea5e9;
-  --color-brand-600: #0284c7;
-  --color-brand-700: #0369a1;
-  --color-brand-800: #075985;
-  --color-brand-900: #0c4a6e;
+  /* 品牌色阶由 CSS 变量控制，支持动态主题切换 */
+  --color-brand-50: var(--color-brand-50);
+  --color-brand-100: var(--color-brand-100);
+  --color-brand-200: var(--color-brand-200);
+  --color-brand-300: var(--color-brand-300);
+  --color-brand-400: var(--color-brand-400);
+  --color-brand-500: var(--color-brand-500);
+  --color-brand-600: var(--color-brand-600);
+  --color-brand-700: var(--color-brand-700);
+  --color-brand-800: var(--color-brand-800);
+  --color-brand-900: var(--color-brand-900);
+  --color-brand-glow: var(--brand-glow);
 
-  /* 语义色：值来自下方 CSS 变量，随明暗切换 */
+  /* 语义表面色 */
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
   --color-surface-muted: var(--surface-muted);
@@ -53,23 +54,96 @@
     Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* 圆角与阴影：现代化重构统一收敛到这几档 */
-  --radius-card: 0.75rem;
-  --radius-control: 0.5rem;
-  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.04), 0 1px 3px rgb(15 23 42 / 0.06);
-  --shadow-raised: 0 6px 20px rgb(15 23 42 / 0.08);
-  --shadow-overlay: 0 16px 48px rgb(15 23 42 / 0.18);
+  /* 圆角与阴影：升级至精致大圆角与高级光影 */
+  --radius-card: 1rem;
+  --radius-control: 0.625rem;
+  --shadow-card: var(--shadow-card);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-overlay: var(--shadow-overlay);
 }
 
 @layer base {
+  /* 默认主题色：𝕏 电光蓝 */
+  :root,
+  [data-accent="x-blue"] {
+    --color-brand-50: #f0f9ff;
+    --color-brand-100: #e0f2fe;
+    --color-brand-200: #bae6fd;
+    --color-brand-300: #7dd3fc;
+    --color-brand-400: #38bdf8;
+    --color-brand-500: #1d9bf0;
+    --color-brand-600: #0c87d8;
+    --color-brand-700: #0369a1;
+    --color-brand-800: #075985;
+    --color-brand-900: #0c4a6e;
+    --brand-glow: rgba(29, 155, 240, 0.18);
+  }
+
+  [data-accent="titanium"] {
+    --color-brand-50: #fafafa;
+    --color-brand-100: #f4f4f5;
+    --color-brand-200: #e4e4e7;
+    --color-brand-300: #d4d4d8;
+    --color-brand-400: #a1a1aa;
+    --color-brand-500: #71717a;
+    --color-brand-600: #52525b;
+    --color-brand-700: #3f3f46;
+    --color-brand-800: #27272a;
+    --color-brand-900: #18181b;
+    --brand-glow: rgba(113, 113, 122, 0.2);
+  }
+
+  [data-accent="indigo"] {
+    --color-brand-50: #eef2ff;
+    --color-brand-100: #e0e7ff;
+    --color-brand-200: #c7d2fe;
+    --color-brand-300: #a5b4fc;
+    --color-brand-400: #818cf8;
+    --color-brand-500: #6366f1;
+    --color-brand-600: #4f46e5;
+    --color-brand-700: #4338ca;
+    --color-brand-800: #3730a3;
+    --color-brand-900: #312e81;
+    --brand-glow: rgba(99, 102, 241, 0.2);
+  }
+
+  [data-accent="emerald"] {
+    --color-brand-50: #ecfdf5;
+    --color-brand-100: #d1fae5;
+    --color-brand-200: #a7f3d0;
+    --color-brand-300: #6ee7b7;
+    --color-brand-400: #34d399;
+    --color-brand-500: #10b981;
+    --color-brand-600: #059669;
+    --color-brand-700: #047857;
+    --color-brand-800: #065f46;
+    --color-brand-900: #064e3b;
+    --brand-glow: rgba(16, 185, 129, 0.2);
+  }
+
+  [data-accent="amber"] {
+    --color-brand-50: #fffbeb;
+    --color-brand-100: #fef3c7;
+    --color-brand-200: #fde68a;
+    --color-brand-300: #fcd34d;
+    --color-brand-400: #fbbf24;
+    --color-brand-500: #f59e0b;
+    --color-brand-600: #d97706;
+    --color-brand-700: #b45309;
+    --color-brand-800: #92400e;
+    --color-brand-900: #78350f;
+    --brand-glow: rgba(245, 158, 11, 0.2);
+  }
+
+  /* 基础浅色模式画布与表面 */
   :root {
-    --canvas: #f5f7fa;
+    --canvas: #f8fafc;
     --surface: #ffffff;
-    --surface-muted: #f8fafc;
-    --surface-hover: #f1f5f9;
-    --line: #e5e9f0;
-    --line-strong: #d7dee8;
-    --fg: #0f172a;
+    --surface-muted: #f1f5f9;
+    --surface-hover: #e2e8f0;
+    --line: #e2e8f0;
+    --line-strong: #cbd5e1;
+    --fg: #09090b;
     --fg-body: #334155;
     --fg-muted: #64748b;
     --fg-subtle: #94a3b8;
@@ -82,35 +156,53 @@
     --danger-soft: #fef2f2;
     --info: #0284c7;
     --info-soft: #f0f9ff;
+
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+    --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.06), 0 8px 10px -6px rgb(0 0 0 / 0.04);
+    --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.15);
   }
 
+  /* 基础暗色模式：黑曜石沉浸视觉 */
   .dark {
-    /* 暗色不用纯黑：slate-950/900 层级在长时间浏览下更稳定，
-       且卡片与背景需要足够对比才能看出层次。 */
-    --canvas: #0b1120;
-    --surface: #111827;
-    --surface-muted: #172033;
-    --surface-hover: #1e293b;
-    --line: #24304a;
-    --line-strong: #334155;
-    --fg: #f1f5f9;
-    --fg-body: #cbd5e1;
-    --fg-muted: #94a3b8;
-    --fg-subtle: #64748b;
+    --canvas: #09090b;
+    --surface: #111114;
+    --surface-muted: #18181c;
+    --surface-hover: #222228;
+    --line: #26262e;
+    --line-strong: #383844;
+    --fg: #f4f4f6;
+    --fg-body: #d1d1d6;
+    --fg-muted: #8e8e98;
+    --fg-subtle: #5c5c66;
 
-    /* 暗色下状态色需提亮才够对比，soft 底色改为低透明度叠加 */
-    --success: #34d399;
-    --success-soft: rgb(16 185 129 / 0.12);
-    --warning: #fbbf24;
-    --warning-soft: rgb(245 158 11 / 0.12);
-    --danger: #f87171;
-    --danger-soft: rgb(239 68 68 / 0.12);
-    --info: #38bdf8;
-    --info-soft: rgb(14 165 233 / 0.12);
+    --success: #10b981;
+    --success-soft: rgb(16 185 129 / 0.14);
+    --warning: #f59e0b;
+    --warning-soft: rgb(245 158 11 / 0.14);
+    --danger: #ef4444;
+    --danger-soft: rgb(239 68 68 / 0.14);
+    --info: #0ea5e9;
+    --info-soft: rgb(14 165 233 / 0.14);
 
-    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px rgb(0 0 0 / 0.2);
-    --shadow-raised: 0 6px 20px rgb(0 0 0 / 0.35);
-    --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.5);
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
+    --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.5), 0 8px 10px -6px rgb(0 0 0 / 0.5);
+    --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.7);
+  }
+
+  /* 钛金暗色特别优化：暗色下主文字提亮 */
+  .dark[data-accent="titanium"],
+  .dark [data-accent="titanium"] {
+    --color-brand-50: #18181b;
+    --color-brand-100: #27272a;
+    --color-brand-200: #3f3f46;
+    --color-brand-300: #52525b;
+    --color-brand-400: #a1a1aa;
+    --color-brand-500: #f4f4f5;
+    --color-brand-600: #ffffff;
+    --color-brand-700: #ffffff;
+    --color-brand-800: #fafafa;
+    --color-brand-900: #ffffff;
+    --brand-glow: rgba(255, 255, 255, 0.15);
   }
 
   html {
@@ -128,32 +220,39 @@
     html:not(.light):not(.dark) {
       color-scheme: dark;
 
-      --canvas: #0b1120;
-      --surface: #111827;
-      --surface-muted: #172033;
-      --surface-hover: #1e293b;
-      --line: #24304a;
-      --line-strong: #334155;
-      --fg: #f1f5f9;
-      --fg-body: #cbd5e1;
-      --fg-muted: #94a3b8;
-      --fg-subtle: #64748b;
+      --canvas: #09090b;
+      --surface: #111114;
+      --surface-muted: #18181c;
+      --surface-hover: #222228;
+      --line: #26262e;
+      --line-strong: #383844;
+      --fg: #f4f4f6;
+      --fg-body: #d1d1d6;
+      --fg-muted: #8e8e98;
+      --fg-subtle: #5c5c66;
 
-      --success: #34d399;
-      --success-soft: rgb(16 185 129 / 0.12);
-      --warning: #fbbf24;
-      --warning-soft: rgb(245 158 11 / 0.12);
-      --danger: #f87171;
-      --danger-soft: rgb(239 68 68 / 0.12);
-      --info: #38bdf8;
-      --info-soft: rgb(14 165 233 / 0.12);
+      --success: #10b981;
+      --success-soft: rgb(16 185 129 / 0.14);
+      --warning: #f59e0b;
+      --warning-soft: rgb(245 158 11 / 0.14);
+      --danger: #ef4444;
+      --danger-soft: rgb(239 68 68 / 0.14);
+      --info: #0ea5e9;
+      --info-soft: rgb(14 165 233 / 0.14);
     }
   }
 
   body {
     margin: 0;
     font-family: var(--font-sans);
-    background: var(--canvas);
+    background-color: var(--canvas);
+    background-image: radial-gradient(
+      ellipse 80% 50% at 50% -20%,
+      var(--brand-glow),
+      transparent 70%
+    );
+    background-repeat: no-repeat;
+    background-attachment: fixed;
     color: var(--fg);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -173,9 +272,6 @@
     color: #ffffff;
   }
 
-  /* 全局焦点环。此前焦点样式完全由 antd 的 CSS-in-JS 提供，
-     移除 antd 后若不补这一层，键盘用户会彻底失去焦点指示。
-     只用 focus-visible，避免鼠标点击也出现焦点环。 */
   :focus-visible {
     outline: 2px solid var(--color-brand-500);
     outline-offset: 2px;
@@ -334,58 +430,29 @@
 }
 
 /* =========================================================
-   过渡期兼容层
-   仅剩尚未迁移的页面（任务中心 / 归档计划 / 媒体库 / 设置）用到的
-   .page-stack / .page-header 与 antd 覆盖规则。布局壳层已改为
-   Tailwind 工具类，对应旧类名已删除。各页面迁移完成后整块移除。
+   现代视觉工具类 (Glassmorphism & Glow)
    ========================================================= */
 
-.page-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+@utility glass-header {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  background-color: color-mix(in srgb, var(--surface) 80%, transparent);
 }
 
-.page-header {
-  position: relative;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--line);
+@utility glass-card {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background-color: color-mix(in srgb, var(--surface) 85%, transparent);
 }
 
-.page-header::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  bottom: -1px;
-  width: 44px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--color-brand-500);
+@utility glow-subtle {
+  box-shadow: 0 0 20px -4px var(--brand-glow);
 }
 
-@media (max-width: 767px) {
-  .page-header {
-    padding-bottom: 12px;
-  }
+@utility glow-brand {
+  box-shadow: 0 0 32px -4px var(--brand-glow);
 }
 
-.ant-table-thead > tr > th {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--fg-muted);
-}
-
-.settings-section .ant-card-head {
-  min-height: 52px;
-  padding-inline: 1.25rem;
-}
-
-.settings-section .ant-card-body {
-  padding: 1.25rem;
-}
-
-.settings-section .ant-form-item:last-child {
-  margin-bottom: 0;
+@utility tabular-nums {
+  font-variant-numeric: tabular-nums;
 }

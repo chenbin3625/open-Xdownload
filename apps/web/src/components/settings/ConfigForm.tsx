@@ -2,9 +2,13 @@ import {
   Check,
   Download,
   HardDrive,
+  Monitor,
+  Moon,
+  Palette,
   RefreshCw,
   Save,
   ShieldCheck,
+  Sun,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useRef, useState } from "react";
@@ -15,6 +19,8 @@ import {
   type AppConfig,
   type AuthCheck,
 } from "../../lib/api";
+import { THEME_ACCENTS, useTheme } from "../../lib/useTheme";
+import { cn } from "../../lib/cn";
 import { getErrorMessage, notifyError } from "../common/CommonUI";
 import { Button } from "../ui/Button";
 import { SectionCard } from "../ui/Card";
@@ -219,7 +225,84 @@ export function ConfigForm({
           onChange={updateAuthDraft}
         />
       </SectionCard>
+
+      <ThemeSettingsSection />
     </div>
+  );
+}
+
+function ThemeSettingsSection() {
+  const { preference, setPreference, accent, setAccent } = useTheme();
+
+  return (
+    <SectionCard
+      icon={<Palette className="size-4 text-brand-500" />}
+      title="界面外观与个性化主题"
+      description="定制系统的明暗视觉风格与强调色，设置即刻生效并持久保存在本地"
+    >
+      <div className="space-y-4">
+        <div>
+          <label className="text-xs font-semibold text-fg">明暗主题模式</label>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {[
+              { id: "system", label: "跟随系统偏好", icon: <Monitor className="size-3.5" /> },
+              { id: "light", label: "浅色明亮模式", icon: <Sun className="size-3.5" /> },
+              { id: "dark", label: "深色黑曜石模式 (OLED)", icon: <Moon className="size-3.5" /> },
+            ].map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => setPreference(mode.id as any)}
+                className={cn(
+                  "flex items-center gap-2 rounded-control border px-3.5 py-2 text-xs font-medium cursor-pointer transition-all",
+                  preference === mode.id
+                    ? "border-brand-500 bg-brand-500/10 text-brand-500 shadow-2xs"
+                    : "border-line bg-surface text-fg-body hover:bg-surface-hover hover:border-line-strong",
+                )}
+              >
+                {mode.icon}
+                <span>{mode.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-fg">主题强调色 (Theme Accent)</label>
+          <div className="mt-2 grid grid-cols-2 gap-2.5 sm:grid-cols-5">
+            {THEME_ACCENTS.map((opt) => {
+              const active = accent === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setAccent(opt.id)}
+                  className={cn(
+                    "flex flex-col items-center gap-1.5 rounded-control border p-3 text-center cursor-pointer transition-all",
+                    active
+                      ? "border-brand-500 bg-brand-500/10 shadow-2xs"
+                      : "border-line bg-surface hover:bg-surface-hover hover:border-line-strong",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "size-6 rounded-full border border-black/10 dark:border-white/20 shadow-xs flex items-center justify-center text-white",
+                      opt.dotColor,
+                    )}
+                  >
+                    {active && <Check className="size-3.5 stroke-[3]" />}
+                  </span>
+                  <span className="text-xs font-semibold text-fg">{opt.name}</span>
+                  <span className="text-[10px] text-fg-subtle truncate max-w-full">
+                    {opt.description}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </SectionCard>
   );
 }
 
