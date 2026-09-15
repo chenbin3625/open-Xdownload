@@ -208,6 +208,26 @@ func TestPoolEarliestBlockedWaitUsesSoonestClient(t *testing.T) {
 	}
 }
 
+func TestPoolSelectAllRateLimitedErrorIsClassified(t *testing.T) {
+	oldWait := maxPoolSelectWait
+	oldStep := maxPoolSelectWaitStep
+	maxPoolSelectWait = 5 * time.Millisecond
+	maxPoolSelectWaitStep = 5 * time.Millisecond
+	t.Cleanup(func() {
+		maxPoolSelectWait = oldWait
+		maxPoolSelectWaitStep = oldStep
+	})
+
+	limiter := newRateLimiter()
+	limiter.limits["/x"] = rateLimitState{remaining: 0, limit: 20, reset: time.Now().Add(time.Hour), ready: true}
+	pool := &Pool{clients: []*Client{{limiter: limiter, retryBackoff: func(int) time.Duration { return 0 }}}}
+
+	_, err := pool.Select(context.Background(), "/x")
+	if !IsAllClientsRateLimited(err) {
+		t.Fatalf("Select error = %v, want classified all-clients rate limit", err)
+	}
+}
+
 func TestPoolSelectErrorsWhenAllClientsDisabled(t *testing.T) {
 	pool := &Pool{clients: []*Client{
 		{disabled: true},

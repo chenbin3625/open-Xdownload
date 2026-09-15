@@ -1143,6 +1143,9 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		if isCancellation(ctx, err) {
 			return stats, err
 		}
+		if shouldAbortArchiveUsers(err) {
+			return stats, err
+		}
 		stats.Failed++
 		stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的媒体时间线失败: %v", fallbackUserName(user), err))
 		return stats, nil
@@ -1312,6 +1315,10 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 
 func parserOptionsFromConfig(cfg config.AppConfig) parser.ParseOptions {
 	return parser.ParseOptions{IncludeNestedTweets: cfg.IncludeNestedTweetMedia}
+}
+
+func shouldAbortArchiveUsers(err error) bool {
+	return xclient.IsAllClientsRateLimited(err)
 }
 
 func shouldRetryMediaError(err error) bool {

@@ -52,6 +52,12 @@ const (
 	requestMaxAttempts = 5
 )
 
+var ErrAllClientsRateLimited = errors.New("X 客户端暂时全部限流，请稍后重试")
+
+func IsAllClientsRateLimited(err error) bool {
+	return errors.Is(err, ErrAllClientsRateLimited)
+}
+
 const (
 	apiErrDependency      = 0
 	apiErrTimeout         = 29
@@ -251,12 +257,12 @@ func (p *Pool) Next() *Client {
 	return client
 }
 
-// maxPoolSelectWait 限制 Select 因"所有客户端限流"而阻塞等待的总时长：超过后立即返回错误，
-// 让归档把该次请求落到失败/重试队列，而不是在限流窗口上无限挂死（M5）。
-const maxPoolSelectWait = 2 * time.Minute
+// maxPoolSelectWait 限制 Select 因"所有客户端限流"而阻塞等待的总时长。X GraphQL
+// 常见窗口接近 15 分钟，等待预算必须覆盖这个窗口，否则任务会在复位前批量失败。
+var maxPoolSelectWait = maxRetryAfter + 10*time.Second
 
 // maxPoolSelectWaitStep 单次等待上限：若最早复位时间很远，只等待一个上限时长后重新评估。
-const maxPoolSelectWaitStep = 60 * time.Second
+var maxPoolSelectWaitStep = 60 * time.Second
 
 func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 	if p == nil || len(p.clients) == 0 {
@@ -299,7 +305,7 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 			wait = maxPoolSelectWaitStep
 		}
 		if waited+wait > maxPoolSelectWait {
-			return nil, errors.New("X 客户端暂时全部限流，请稍后重试")
+			return nil, ErrAllClientsRateLimited
 		}
 		waited += wait
 		timer := time.NewTimer(wait)
