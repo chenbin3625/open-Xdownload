@@ -158,7 +158,7 @@ export function ConfigForm({
         <div>
           <h1 className="text-xl font-bold tracking-tight text-fg">系统与存储配置</h1>
           <p className="mt-0.5 text-xs text-fg-muted">
-            存储位置、下载并发与 X Cookie 集中管理，修改后点击右上角统一保存
+            存储位置、网络代理与 X Cookie 集中管理，修改后点击右上角统一保存
           </p>
         </div>
 
@@ -203,7 +203,7 @@ export function ConfigForm({
       <SectionCard
         icon={<Download className="size-4" />}
         title="网络与下载调度"
-        description="控制代理连接、下载并发与文件命名方式"
+        description="控制代理连接、文件命名方式与下载相关开关"
       >
         <DownloadSettingsFields
           draft={draft}
@@ -309,6 +309,7 @@ function ThemeSettingsSection() {
 export function normalizeConfig(config: AppConfig): AppConfig {
   return {
     ...config,
+    maxConcurrency: 1,
     includeNestedTweetMedia: config.includeNestedTweetMedia ?? false,
     incrementalArchive: config.incrementalArchive ?? false,
     storageType: config.storageType ?? "local",

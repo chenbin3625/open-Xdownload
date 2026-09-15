@@ -165,7 +165,7 @@ After starting the service and opening the Web UI, go to the "Configuration" pag
 
 1. Configure the download directory: browse, type in, or create one; for Docker deployments this is usually `/downloads`.
 2. If you need a proxy to reach X or download media, set a proxy address such as `http://127.0.0.1:7890`.
-3. Set the max concurrency, filename pattern, and max filename length.
+3. Set the filename pattern and max filename length.
 4. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0` (see [Getting the X Cookie](#getting-the-x-cookie)).
 5. If you have cookies for multiple accounts, enter them as groups under "Backup cookies" for rotation during batch archiving.
 6. Click "Save configuration", then "Verify login" to confirm the cookies work.
@@ -279,7 +279,6 @@ Notes:
 | --- | --- |
 | Download directory | Root directory for local storage; can be browsed, entered, or created in the UI. For Docker, map it to a host directory. |
 | Proxy | Used for X API requests and media downloads; leave empty for a direct connection. |
-| Concurrency | Max concurrency for background tasks, range `1-64`. |
 | Filename pattern | Either "post only" or "username + user ID + post". |
 | Max filename length | Range `16-240`. |
 | X Cookie | Primary `auth_token` and `ct0`, used for authenticated APIs; see [Getting the X Cookie](#getting-the-x-cookie) for how to copy them from your browser. |
@@ -482,7 +481,7 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 
 1. 配置下载目录：可浏览、直接输入或创建；Docker 部署时通常保持 `/downloads`。
 2. 如访问 X 或下载媒体需要代理，填写代理地址，例如 `http://127.0.0.1:7890`。
-3. 设置最大并发、文件命名方式和最大文件名长度。
+3. 设置文件命名方式和最大文件名长度。
 4. 如需用户、列表、关注归档，填写 X Cookie：`auth_token` 和 `ct0`（获取方式见[获取 X Cookie](#获取-x-cookie)）。
 5. 如有多个账号 Cookie，在“备用 Cookie”中按组填写，用于批量归档时轮换。
 6. 点击“保存配置”，再点击“校验登录”确认 Cookie 可用。
@@ -596,7 +595,6 @@ downloads/
 | --- | --- |
 | 下载目录 | 本地存储根目录，可在界面中浏览、输入或创建。Docker 部署时建议映射到宿主机目录。 |
 | 代理 | 用于 X API 请求和媒体下载。留空则直连。 |
-| 并发 | 后台任务最大并发数，范围 `1-64`。 |
 | 文件名命名 | 可选“仅推文”或“用户名 + 用户 ID + 推文”。 |
 | 最大文件名长度 | 范围 `16-240`。 |
 | X Cookie | 主 `auth_token` 和 `ct0`，用于登录态接口；获取方式见[获取 X Cookie](#获取-x-cookie)。 |

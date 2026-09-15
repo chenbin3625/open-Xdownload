@@ -10,7 +10,6 @@ import { StatusDot, Tag } from "../ui/Tag";
 export interface AppHeaderProps {
   sseConnected: boolean;
   activeCount: number;
-  maxConcurrency?: number;
   refreshPending: boolean;
   onRefresh: () => void;
   onQuickSubmit: (input: string) => void;
@@ -21,7 +20,6 @@ export interface AppHeaderProps {
 export function AppHeader({
   sseConnected,
   activeCount,
-  maxConcurrency = 8,
   refreshPending,
   onRefresh,
   onQuickSubmit,
@@ -98,7 +96,7 @@ export function AppHeader({
           <Tag className="hidden items-center gap-1.5 sm:inline-flex shadow-2xs">
             <Zap className={cn("size-3.5", activeCount > 0 ? "text-warning" : "text-fg-subtle")} />
             <span className="font-mono">
-              并发 {activeCount} / {maxConcurrency}
+              运行中 {activeCount}
             </span>
           </Tag>
 

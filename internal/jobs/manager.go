@@ -320,13 +320,8 @@ func (m *Manager) enqueueDueArchiveSchedules(ctx context.Context) {
 	}
 }
 
-func (m *Manager) availableSlots(limit int) int {
-	if limit <= 0 {
-		limit = 1
-	}
-	if limit > 64 {
-		limit = 64
-	}
+func (m *Manager) availableSlots(_ int) int {
+	const limit = 1
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return limit - len(m.active)
@@ -986,8 +981,6 @@ type archiveStats struct {
 	Issues     []string
 }
 
-const maxArchiveUserConcurrency = 2
-
 type archiveUserTask struct {
 	index        int
 	order        int
@@ -1039,32 +1032,22 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		return stats, nil
 	}
 
-	workerCount := archiveUserConcurrency(cfg, len(tasks))
-	workCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	baseJob := job
 	progressJob := job
 
-	var statsMu sync.Mutex
 	addStats := func(delta archiveStats) {
-		statsMu.Lock()
 		stats.Users += delta.Users
 		stats.Tweets += delta.Tweets
 		stats.Downloaded += delta.Downloaded
 		stats.Skipped += delta.Skipped
 		stats.Failed += delta.Failed
 		stats.Issues = append(stats.Issues, delta.Issues...)
-		statsMu.Unlock()
 	}
 
-	var jobMu sync.Mutex
 	completed := 0
 	lastProgressWrite := time.Time{}
 	// saveProgress 用于进度类中间状态，按 progressWriteInterval 节流（P1），丢弃中间
 	// 更新不会影响正确性：终态由 finishTask/completeArchive 即时写入。
 	saveProgress := func(status storage.JobStatus, message string) {
-		jobMu.Lock()
-		defer jobMu.Unlock()
 		if now := time.Now(); now.Sub(lastProgressWrite) < progressWriteInterval {
 			return
 		} else {
@@ -1079,8 +1062,6 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 	// finishTask 每完成一个用户即时写入：写放大主要来自"每个媒体"的进度保存；
 	// 每用户的完成事件频率低，即时写入可让进度条保持准确。
 	finishTask := func() {
-		jobMu.Lock()
-		defer jobMu.Unlock()
 		completed++
 		progressJob.Status = storage.JobResolving
 		progressJob.Progress = start + (end-start)*float64(completed)/float64(len(tasks))
@@ -1089,75 +1070,22 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		m.save(saveCtx, progressJob)
 	}
 
-	var errMu sync.Mutex
-	var firstErr error
-	setErr := func(err error) {
-		if err == nil {
-			return
-		}
-		errMu.Lock()
-		if firstErr == nil {
-			firstErr = err
-			cancel()
-		}
-		errMu.Unlock()
-	}
-
-	taskCh := make(chan archiveUserTask, max(1, workerCount*2))
-	var wg sync.WaitGroup
-	for worker := 0; worker < workerCount; worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("panic in archiveUsers worker: %v\n%s", r, debug.Stack())
-					setErr(fmt.Errorf("internal panic: %v", r))
-				}
-			}()
-			for task := range taskCh {
-				if workCtx.Err() != nil {
-					setErr(context.Canceled)
-					return
-				}
-				saveProgress(
-					storage.JobResolving,
-					fmt.Sprintf("同步用户 %d/%d @%s", task.order+1, len(tasks), fallbackUserName(task.user)),
-				)
-				delta, err := m.archiveUser(workCtx, saveCtx, baseJob, cfg, pool, task.user, listEntity, func(message string) {
-					saveProgress(storage.JobDownloading, message)
-				})
-				addStats(delta)
-				if err != nil {
-					setErr(err)
-					return
-				}
-				finishTask()
-			}
-		}()
-	}
-
-sendLoop:
 	for _, task := range tasks {
-		select {
-		case taskCh <- task:
-		case <-workCtx.Done():
-			break sendLoop
+		if err := ctx.Err(); err != nil {
+			return stats, err
 		}
-	}
-	close(taskCh)
-	wg.Wait()
-
-	errMu.Lock()
-	err = firstErr
-	errMu.Unlock()
-	if err != nil {
-		return stats, err
-	}
-	// 取消（用户取消或关停）时 firstErr 可能为 nil（worker 经 workCtx.Err() 快路径退出
-	// 未调 setErr）；返回 workCtx.Err() 让调用方的取消判定正常工作。
-	if workCtx.Err() != nil {
-		return stats, workCtx.Err()
+		saveProgress(
+			storage.JobResolving,
+			fmt.Sprintf("同步用户 %d/%d @%s", task.order+1, len(tasks), fallbackUserName(task.user)),
+		)
+		delta, err := m.archiveUser(ctx, saveCtx, job, cfg, pool, task.user, listEntity, func(message string) {
+			saveProgress(storage.JobDownloading, message)
+		})
+		addStats(delta)
+		if err != nil {
+			return stats, err
+		}
+		finishTask()
 	}
 	return stats, nil
 }
@@ -1216,19 +1144,6 @@ func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, us
 		tasks[index].order = index
 	}
 	return tasks, skipped, nil
-}
-
-func archiveUserConcurrency(cfg config.AppConfig, userCount int) int {
-	if userCount <= 1 {
-		return 1
-	}
-	limit := cfg.MaxConcurrency
-	if limit <= 0 {
-		limit = config.Default().MaxConcurrency
-	}
-	limit = min(limit, maxArchiveUserConcurrency)
-	limit = min(limit, userCount)
-	return max(1, limit)
 }
 
 func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, listEntity *storage.ListEntity, updateDownloading func(message string)) (archiveStats, error) {
