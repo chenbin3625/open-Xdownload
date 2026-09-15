@@ -8,7 +8,6 @@ import { AppSidebar, type AppSidebarProps } from "./AppSidebar";
 const baseProps: AppSidebarProps = {
   activeSection: "tasks",
   onSectionChange: () => {},
-  onOpenCreateModal: () => {},
   onOpenFailedDrawer: () => {},
   failedTweetCount: 0,
 };
@@ -68,6 +67,12 @@ describe("AppSidebar", () => {
     expect(screen.queryByText("12")).toBeNull();
     expect(screen.queryByText("7")).toBeNull();
     expect(screen.queryByText("5")).toBeNull();
+  });
+
+  it("不在侧边栏展示新建下载按钮", () => {
+    render(<AppSidebar {...baseProps} />);
+
+    expect(screen.queryByRole("button", { name: /新建任务|新建下载/ })).toBeNull();
   });
 
   it("没有失败推文时不渲染失败队列入口", () => {

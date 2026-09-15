@@ -186,7 +186,6 @@ export default function App() {
         <AppSidebar
           {...sidebarProps}
           onSectionChange={handleSectionChange}
-          onOpenCreateModal={() => openCreateModal()}
           onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
         />
       )}
@@ -204,10 +203,6 @@ export default function App() {
             onSectionChange={(section) => {
               handleSectionChange(section);
               setMobileMenuOpen(false);
-            }}
-            onOpenCreateModal={() => {
-              setMobileMenuOpen(false);
-              openCreateModal();
             }}
             onOpenFailedDrawer={() => {
               setMobileMenuOpen(false);

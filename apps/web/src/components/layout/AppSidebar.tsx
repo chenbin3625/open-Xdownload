@@ -2,7 +2,6 @@ import {
   Clock,
   FolderOpen,
   Images,
-  Plus,
   Settings,
   TriangleAlert,
   ListChecks,
@@ -17,7 +16,6 @@ import { Tooltip } from "../ui/Overlay";
 export interface AppSidebarProps {
   activeSection: SectionKey;
   onSectionChange: (section: SectionKey) => void;
-  onOpenCreateModal: () => void;
   onOpenFailedDrawer: () => void;
   failedTweetCount: number;
   storageType?: string;
@@ -30,7 +28,6 @@ const taskCenterSections: SectionKey[] = ["overview", "workbench", "tasks"];
 export function AppSidebar({
   activeSection,
   onSectionChange,
-  onOpenCreateModal,
   onOpenFailedDrawer,
   failedTweetCount,
   storageType = "local",
@@ -79,18 +76,8 @@ export function AppSidebar({
           </div>
         </div>
 
-        <Button
-          variant="primary"
-          block
-          icon={<Plus className="size-4" />}
-          onClick={onOpenCreateModal}
-          className="shadow-sm shadow-brand-500/20"
-        >
-          新建任务
-        </Button>
-
         {/* 手写导航列表：单选语义用 aria-current 表达，不需要 Menu 的全部键盘模型 */}
-        <nav aria-label="主导航" className="mt-3 flex flex-col gap-1">
+        <nav aria-label="主导航" className="mt-1 flex flex-col gap-1">
           {navItems.map((item) => {
             const active = item.key === currentKey;
             return (
