@@ -1852,14 +1852,7 @@ func archiveIssueSummary(issues []string) string {
 			}
 		} else {
 			if len(g.targets) > 0 {
-				shown := g.targets
-				if len(shown) > 5 {
-					shown = shown[:5]
-				}
-				targetList := strings.Join(shown, "、")
-				if len(g.targets) > 5 {
-					targetList += " 等"
-				}
+				targetList := strings.Join(g.targets, "、")
 				if g.action != "" {
 					lines = append(lines, fmt.Sprintf("%s: %s (共 %d 个账号: %s)", g.action, g.reason, g.count, targetList))
 				} else {
