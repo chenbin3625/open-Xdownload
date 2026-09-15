@@ -202,7 +202,7 @@ export default function App() {
       {isCompact && (
         <Drawer
           side="left"
-          width="17rem"
+          width="14.5rem"
           open={mobileMenuOpen}
           onClose={() => setMobileMenuOpen(false)}
         >
