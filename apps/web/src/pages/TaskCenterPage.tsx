@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   AlertTriangle,
+  Check,
   CheckCircle2,
   Clock,
   Copy,
@@ -13,6 +14,7 @@ import {
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
+import { getJobProgressDisplay, parseAggregatedErrors } from "../lib/jobErrors";
 import {
   cancelJob,
   formatBytes,
@@ -242,9 +244,7 @@ export function TaskCenterPage({
       render: (record) => {
         const percent = clampPercent(record.progress);
         const pStatus = progressStatus(record);
-        const hasError = isJobFailed(record);
-        const displayMsg =
-          record.error || record.message || (hasError ? "任务失败" : "执行中...");
+        const { displayMsg, tooltip, hasError } = getJobProgressDisplay(record);
 
         return (
           <div className="space-y-1 py-0.5">
@@ -254,7 +254,7 @@ export function TaskCenterPage({
                   "truncate max-w-[140px]",
                   hasError ? "font-medium text-danger" : "text-fg-muted",
                 )}
-                title={displayMsg}
+                title={tooltip}
               >
                 {displayMsg}
               </span>
@@ -540,6 +540,141 @@ export function TaskCenterPage({
   );
 }
 
+function JobErrorAlert({ job }: { job: Job }) {
+  const groups = useMemo(() => parseAggregatedErrors(job.error), [job.error]);
+  const [copied, setCopied] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+
+  const toggleExpand = (id: string) => {
+    setExpandedGroups((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const handleCopy = () => {
+    const textToCopy = [
+      `任务 ID: #${job.id}`,
+      `任务状态: ${job.status}`,
+      job.message ? `状态描述: ${job.message}` : "",
+      job.error ? `错误详情:\n${job.error}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    void navigator.clipboard.writeText(textToCopy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const title = job.status === "failed" ? "任务执行失败" : "任务处理存在异常或部分失败";
+
+  return (
+    <Alert
+      type="error"
+      showIcon
+      className="border-danger/30"
+      message={
+        <div className="flex items-center justify-between gap-2">
+          <span>{title}</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-[11px] text-danger hover:text-danger-600 hover:bg-danger/10"
+            onClick={handleCopy}
+            icon={copied ? <Check className="size-3 text-success" /> : <Copy className="size-3" />}
+          >
+            {copied ? "已复制诊断信息" : "复制错误信息"}
+          </Button>
+        </div>
+      }
+      description={
+        <div className="mt-2 space-y-2.5">
+          {groups.length === 0 ? (
+            <div className="font-mono text-xs text-danger font-medium break-all">
+              {job.error || job.message || "未知异常，任务未能成功完成"}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {groups.map((group) => {
+                const isExpanded = expandedGroups[group.id] ?? false;
+                const visibleTargets = isExpanded ? group.targets : group.targets.slice(0, 8);
+                const hasMoreTargets = group.targets.length > 8;
+                const hiddenCount =
+                  group.count > group.targets.length ? group.count - group.targets.length : 0;
+
+                return (
+                  <div
+                    key={group.id}
+                    className="rounded-card border border-danger/20 bg-surface/90 dark:bg-surface-elevated/90 p-2.5 shadow-xs space-y-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <AlertCircle className="size-3.5 text-danger shrink-0" />
+                        <span className="text-xs font-semibold text-danger break-all">
+                          {group.reason}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {group.action && (
+                          <Tag size="sm" tone="neutral">
+                            {group.action}
+                          </Tag>
+                        )}
+                        <Tag size="sm" tone="danger" className="font-medium">
+                          {group.count} 个失败
+                        </Tag>
+                      </div>
+                    </div>
+
+                    {group.targets.length > 0 && (
+                      <div className="space-y-1.5 pt-1.5 border-t border-line/50">
+                        <div className="flex items-center justify-between text-[11px] text-fg-muted">
+                          <span>受影响账号 ({group.targets.length}):</span>
+                          {hasMoreTargets && (
+                            <button
+                              type="button"
+                              onClick={() => toggleExpand(group.id)}
+                              className="text-[11px] text-brand-600 dark:text-brand-400 hover:underline cursor-pointer"
+                            >
+                              {isExpanded ? "收起" : `展开更多 (+${group.targets.length - 8})`}
+                            </button>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {visibleTargets.map((target) => (
+                            <Tag
+                              key={target}
+                              size="sm"
+                              tone="neutral"
+                              className="font-mono text-fg-subtle bg-surface-muted/80 border-line/70"
+                            >
+                              {target}
+                            </Tag>
+                          ))}
+                          {hiddenCount > 0 && (
+                            <Tag size="sm" tone="warning" className="font-mono">
+                              另有 {hiddenCount} 个账号（相同原因已聚合）
+                            </Tag>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {job.message && (
+            <div className="pt-1 text-xs text-fg-muted flex items-center gap-1.5 border-t border-danger/15">
+              <span className="font-medium text-fg-subtle">状态概况:</span>
+              <span>{job.message}</span>
+            </div>
+          )}
+        </div>
+      }
+    />
+  );
+}
+
 function ExpandedJobDetails({
   job,
   onRetry,
@@ -734,24 +869,8 @@ function ExpandedJobDetails({
         )}
       </div>
 
-      {/* 错误提示横幅：彻底解决错误任务在详情中隐匿的问题 */}
-      {hasJobError && (
-        <Alert
-          type="error"
-          showIcon
-          message={job.status === "failed" ? "任务执行失败" : "任务处理存在异常或部分失败"}
-          description={
-            <div className="mt-1 space-y-1">
-              <div className="font-mono text-xs break-all text-danger font-medium">
-                {job.error || job.message || "未知异常，任务未能成功完成"}
-              </div>
-              {job.error && job.message && job.message !== job.error && (
-                <div className="text-xs text-fg-muted">状态描述: {job.message}</div>
-              )}
-            </div>
-          }
-        />
-      )}
+      {/* 错误提示横幅：结构化聚合相同报错并展示受影响账号 */}
+      {hasJobError && <JobErrorAlert job={job} />}
 
       {/* 文件与媒体清单：恢复为结构清晰的列表 */}
       {filesQuery.isLoading ? (

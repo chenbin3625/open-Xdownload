@@ -1758,17 +1758,128 @@ func completionMessage(stats archiveStats, retried int) string {
 	return "归档完成：" + strings.Join(parts, "，")
 }
 
+func isUsernameChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
 func archiveIssueSummary(issues []string) string {
-	const limit = 8
 	if len(issues) == 0 {
 		return ""
 	}
-	visible := min(len(issues), limit)
-	result := strings.Join(issues[:visible], "\n")
-	if len(issues) > visible {
-		result += fmt.Sprintf("\n另有 %d 个错误", len(issues)-visible)
+	if len(issues) == 1 {
+		return issues[0]
 	}
-	return result
+
+	type issueGroup struct {
+		action  string
+		reason  string
+		targets []string
+		count   int
+	}
+
+	var groups []issueGroup
+	groupIndex := make(map[string]int)
+
+	for _, issue := range issues {
+		issue = strings.TrimSpace(issue)
+		if issue == "" {
+			continue
+		}
+
+		var action string
+		var target string
+		reason := issue
+
+		idx := strings.Index(issue, ": ")
+		if idx != -1 {
+			prefix := strings.TrimSpace(issue[:idx])
+			reason = strings.TrimSpace(issue[idx+2:])
+
+			if atIdx := strings.Index(prefix, "@"); atIdx != -1 {
+				end := atIdx + 1
+				for end < len(prefix) && isUsernameChar(prefix[end]) {
+					end++
+				}
+				target = prefix[atIdx:end]
+				before := strings.TrimSpace(prefix[:atIdx])
+				after := strings.TrimSpace(prefix[end:])
+				after = strings.TrimPrefix(after, "的")
+				after = strings.TrimSpace(after)
+				action = strings.TrimSpace(before + after)
+			} else {
+				action = prefix
+			}
+		}
+
+		key := action + "::: " + reason
+		if pos, ok := groupIndex[key]; ok {
+			groups[pos].count++
+			if target != "" {
+				groups[pos].targets = append(groups[pos].targets, target)
+			}
+		} else {
+			groupIndex[key] = len(groups)
+			var targets []string
+			if target != "" {
+				targets = append(targets, target)
+			}
+			groups = append(groups, issueGroup{
+				action:  action,
+				reason:  reason,
+				targets: targets,
+				count:   1,
+			})
+		}
+	}
+
+	if len(groups) == 0 {
+		return ""
+	}
+
+	const maxVisibleGroups = 5
+	limit := min(len(groups), maxVisibleGroups)
+	var lines []string
+
+	for i := 0; i < limit; i++ {
+		g := groups[i]
+		if g.count == 1 {
+			if len(g.targets) == 1 && g.action != "" {
+				lines = append(lines, fmt.Sprintf("%s (%s): %s", g.action, g.targets[0], g.reason))
+			} else if g.action != "" {
+				lines = append(lines, fmt.Sprintf("%s: %s", g.action, g.reason))
+			} else {
+				lines = append(lines, g.reason)
+			}
+		} else {
+			if len(g.targets) > 0 {
+				shown := g.targets
+				if len(shown) > 5 {
+					shown = shown[:5]
+				}
+				targetList := strings.Join(shown, "、")
+				if len(g.targets) > 5 {
+					targetList += " 等"
+				}
+				if g.action != "" {
+					lines = append(lines, fmt.Sprintf("%s: %s (共 %d 个账号: %s)", g.action, g.reason, g.count, targetList))
+				} else {
+					lines = append(lines, fmt.Sprintf("%s (共 %d 个账号: %s)", g.reason, g.count, targetList))
+				}
+			} else {
+				if g.action != "" {
+					lines = append(lines, fmt.Sprintf("%s: %s (共 %d 次)", g.action, g.reason, g.count))
+				} else {
+					lines = append(lines, fmt.Sprintf("%s (共 %d 次)", g.reason, g.count))
+				}
+			}
+		}
+	}
+
+	if len(groups) > limit {
+		lines = append(lines, fmt.Sprintf("另有 %d 种其他异常", len(groups)-limit))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 var unsupportedPathChars = regexp.MustCompile(`[/\\:*?"<>\|]`)

@@ -587,6 +587,69 @@ func TestCompleteArchivePersistsUserIssueDetails(t *testing.T) {
 	}
 }
 
+func TestArchiveIssueSummaryAggregation(t *testing.T) {
+	tests := []struct {
+		name   string
+		issues []string
+		want   []string
+	}{
+		{
+			name:   "empty",
+			issues: nil,
+			want:   nil,
+		},
+		{
+			name:   "single issue",
+			issues: []string{"读取 @alice 的媒体时间线失败: timeout"},
+			want:   []string{"读取 @alice 的媒体时间线失败: timeout"},
+		},
+		{
+			name: "multiple identical rate limits aggregated",
+			issues: []string{
+				"读取 @user1 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user2 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user3 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user4 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user5 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user6 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user7 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+			},
+			want: []string{
+				"读取媒体时间线失败: X 客户端暂时全部限流，请稍后重试 (共 7 个账号: @user1、@user2、@user3、@user4、@user5 等)",
+			},
+		},
+		{
+			name: "distinct errors kept in separate lines",
+			issues: []string{
+				"读取 @user1 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user2 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试",
+				"读取 @user3 的媒体时间线失败: 404 Not Found",
+			},
+			want: []string{
+				"读取媒体时间线失败: X 客户端暂时全部限流，请稍后重试 (共 2 个账号: @user1、@user2)",
+				"读取媒体时间线失败 (@user3): 404 Not Found",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := archiveIssueSummary(tt.issues)
+			if len(tt.want) == 0 {
+				if got != "" {
+					t.Fatalf("archiveIssueSummary() = %q, want empty", got)
+				}
+				return
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Fatalf("archiveIssueSummary() = %q, want to contain %q", got, w)
+				}
+			}
+		})
+	}
+}
+
 func TestArchiveUserConcurrency(t *testing.T) {
 	defaultLimit := min(config.Default().MaxConcurrency, maxArchiveUserConcurrency)
 	tests := []struct {

@@ -247,4 +247,64 @@ describe("TaskCenterPage", () => {
     expect(screen.getByText("用户 failed_user")).not.toBeNull();
     expect(screen.queryByText("推文 456")).toBeNull();
   });
+
+  it("聚合展示多账号相同报错，提供账号标签云与诊断信息复制能力", async () => {
+    const user = userEvent.setup();
+    const mockAggregatedJob: Job = {
+      id: 320,
+      kind: "following",
+      status: "completed_with_errors",
+      input: "@chenbin3625",
+      title: "关注 @chenbin3625",
+      progress: 100,
+      message: "归档完成：用户 262，推文 8794，下载 101，跳过 10893，失败 31",
+      error:
+        "读取 @ld98625239830 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试 " +
+        "读取 @Finngangpao 的媒体时间线失败: X 客户端暂时全部限流，请稍后重试 " +
+        "另有 29 个错误",
+      createdAt: "2026-09-15T15:13:00Z",
+      updatedAt: "2026-09-15T15:22:00Z",
+    };
+
+    vi.mocked(api.getJobFiles).mockResolvedValue({
+      downloads: [],
+      failed: [],
+    });
+
+    renderWithClient(
+      <TaskCenterPage
+        jobs={[mockAggregatedJob]}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 1, totalPages: 1 }}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+
+    // 验证表格进度列中展示聚合后的错误原因与数量提示，而非长字符串截断
+    expect(
+      screen.getByText("X 客户端暂时全部限流，请稍后重试 (31项)"),
+    ).not.toBeNull();
+
+    // 展开详情
+    const expandBtn = screen.getByLabelText("展开详情");
+    await user.click(expandBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("任务处理存在异常或部分失败")).not.toBeNull();
+    });
+
+    // 验证聚合卡片与受影响账号标签
+    expect(screen.getByText("31 个失败")).not.toBeNull();
+    expect(screen.getByText("读取媒体时间线失败")).not.toBeNull();
+    expect(screen.getByText("@ld98625239830")).not.toBeNull();
+    expect(screen.getByText("@Finngangpao")).not.toBeNull();
+    expect(
+      screen.getByText("另有 29 个账号（相同原因已聚合）"),
+    ).not.toBeNull();
+    expect(screen.getByRole("button", { name: "复制错误信息" })).not.toBeNull();
+  });
 });
+
