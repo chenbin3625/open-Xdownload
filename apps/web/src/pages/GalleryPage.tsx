@@ -7,6 +7,7 @@ import {
   Image as ImageIcon,
   PictureInPicture,
   RefreshCw,
+  Trash2,
   Video,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -20,6 +21,7 @@ import React, {
 } from "react";
 import {
   formatBytes,
+  cleanupLibraryDownloads,
   getLibraryDownloads,
   getPosterBackfillStatus,
   libraryDownloadsLimit,
@@ -226,6 +228,7 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
   const [userFilter, setUserFilter] = useState<string>("all");
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
+  const [cleanupSummary, setCleanupSummary] = useState("");
   const pageSize = 60;
   const deferredSearchFilter = useDeferredValue(searchFilter);
 
@@ -254,6 +257,25 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
     },
     onError: (error) => {
       toast.error({ message: "封面补齐启动失败", description: String(error) });
+    },
+  });
+
+  const cleanupMutation = useMutation({
+    mutationFn: cleanupLibraryDownloads,
+    onSuccess: (result) => {
+      const summary = `已清理缺失记录 ${result.missingRecords} 条、重复记录 ${result.duplicateRecords} 条`;
+      setCleanupSummary(summary);
+      toast.success({
+        message: "媒体库清理完成",
+        description:
+          result.missingRecords + result.duplicateRecords + result.duplicateFiles > 0
+            ? `${summary}，释放 ${formatBytes(result.bytesFreed)}`
+            : `已扫描 ${result.scanned} 条记录，未发现需要清理的项目`,
+      });
+      void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+    },
+    onError: (error) => {
+      toast.error({ message: "媒体库清理失败", description: String(error) });
     },
   });
 
@@ -445,8 +467,25 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
                 : "补齐视频封面"}
             </Button>
           </Tooltip>
+
+          <Tooltip title="扫描媒体归档记录，删除本地文件已不存在的记录，并清除历史重复媒体文件">
+            <Button
+              variant="default"
+              icon={<Trash2 className="size-4" />}
+              loading={cleanupMutation.isPending}
+              onClick={() => cleanupMutation.mutate()}
+            >
+              检测清理
+            </Button>
+          </Tooltip>
         </div>
       </div>
+
+      {cleanupSummary && (
+        <div className="rounded-control border border-line bg-surface-muted px-3 py-2 text-xs text-fg-muted">
+          {cleanupSummary}
+        </div>
+      )}
 
       {/* 媒体内容流展示 */}
       {!downloads && libraryQuery.isLoading ? (

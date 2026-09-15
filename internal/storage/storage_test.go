@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1009,5 +1010,87 @@ func TestFindDownloadsByMediaKeyFindsEquivalentURLs(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Fatalf("empty key matched %d records, want 0", len(empty))
+	}
+}
+
+func TestCleanupLibraryDownloadsRemovesMissingAndDuplicateContent(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindList, "list-1", "列表")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	root := t.TempDir()
+	keeperPath := filepath.Join(root, "video-a.mp4")
+	duplicatePath := filepath.Join(root, "video-a(1).mp4")
+	uniquePath := filepath.Join(root, "video-b.mp4")
+	missingPath := filepath.Join(root, "missing.mp4")
+	for path, body := range map[string]string{
+		keeperPath:    "same video body",
+		duplicatePath: "same video body",
+		uniquePath:    "unique video body",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	for index, item := range []struct {
+		tweetID  string
+		mediaURL string
+		path     string
+	}{
+		{"tweet-1", "https://video.twimg.com/a.mp4", keeperPath},
+		{"tweet-2", "https://video.twimg.com/b.mp4", duplicatePath},
+		{"tweet-3", "https://video.twimg.com/c.mp4", uniquePath},
+		{"tweet-4", "https://video.twimg.com/d.mp4", missingPath},
+	} {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{
+			JobID:    job.ID,
+			TweetID:  item.tweetID,
+			MediaURL: item.mediaURL,
+			FilePath: item.path,
+			Bytes:    int64(index + 1),
+		}); err != nil {
+			t.Fatalf("create download %s: %v", item.tweetID, err)
+		}
+	}
+
+	result, err := store.CleanupLibraryDownloads(ctx, root)
+	if err != nil {
+		t.Fatalf("cleanup library downloads: %v", err)
+	}
+	if result.Scanned != 4 || result.MissingRecords != 1 || result.DuplicateRecords != 1 || result.DuplicateFiles != 1 {
+		t.Fatalf("cleanup result = %+v, want scanned=4 missing=1 duplicateRecords=1 duplicateFiles=1", result)
+	}
+	if result.BytesFreed != int64(len("same video body")) {
+		t.Fatalf("bytes freed = %d, want duplicate file size", result.BytesFreed)
+	}
+	if _, err := os.Stat(duplicatePath); !os.IsNotExist(err) {
+		t.Fatalf("duplicate file still exists or unexpected error: %v", err)
+	}
+	if _, err := os.Stat(keeperPath); err != nil {
+		t.Fatalf("keeper missing: %v", err)
+	}
+	if _, err := os.Stat(uniquePath); err != nil {
+		t.Fatalf("unique missing: %v", err)
+	}
+	items, err := store.ListDownloads(ctx, 10)
+	if err != nil {
+		t.Fatalf("list downloads: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("downloads count = %d, want 2", len(items))
+	}
+	for _, item := range items {
+		if item.ContentHash == "" {
+			t.Fatalf("content hash was not backfilled for %+v", item)
+		}
+		if item.FilePath == missingPath || item.FilePath == duplicatePath {
+			t.Fatalf("stale record still present: %+v", item)
+		}
 	}
 }

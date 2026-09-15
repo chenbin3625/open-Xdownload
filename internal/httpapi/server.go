@@ -91,6 +91,7 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/library/downloads/{id}/file", s.serveDownloadFile)
 	r.Get("/api/library/downloads/{id}/preview", s.serveDownloadPreview)
 	r.Get("/api/library/file", s.serveLibraryFile)
+	r.Post("/api/library/cleanup", s.cleanupLibraryDownloads)
 	r.Post("/api/library/posters/backfill", s.startPosterBackfill)
 	r.Get("/api/library/posters/backfill", s.getPosterBackfillStatus)
 	r.Get("/api/logs", s.listFailedMedia)
@@ -764,6 +765,20 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) cleanupLibraryDownloads(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	result, err := s.store.CleanupLibraryDownloads(r.Context(), cfg.DownloadDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {

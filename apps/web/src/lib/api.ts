@@ -126,6 +126,14 @@ export interface DownloadRecord {
   fileUrl?: string;
 }
 
+export interface LibraryCleanupResult {
+  scanned: number;
+  missingRecords: number;
+  duplicateRecords: number;
+  duplicateFiles: number;
+  bytesFreed: number;
+}
+
 export interface FailedMedia {
   id: number;
   jobId: number;
@@ -284,6 +292,9 @@ export const getConfig = (signal?: AbortSignal) => api<AppConfig>("/api/config",
 export const getJobFiles = (id: number, signal?: AbortSignal) => api<JobFiles>(`/api/jobs/${id}/files`, { signal });
 export const getLibraryDownloads = (limit = 100, signal?: AbortSignal) =>
   api<DownloadRecord[]>(`/api/library/downloads?limit=${limit}`, { signal });
+
+export const cleanupLibraryDownloads = () =>
+  api<LibraryCleanupResult>("/api/library/cleanup", { method: "POST" });
 
 export interface PosterBackfillStatus {
   running: boolean;
