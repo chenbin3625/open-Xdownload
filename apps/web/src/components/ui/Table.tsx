@@ -106,7 +106,7 @@ export function Table<T>({
                               aria-label={isOpen ? "收起详情" : "展开详情"}
                               onClick={() => toggle(key)}
                               className={cn(
-                                "flex size-6 cursor-pointer items-center justify-center rounded",
+                                "flex size-7 cursor-pointer items-center justify-center rounded-control",
                                 "text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg-body",
                               )}
                             >

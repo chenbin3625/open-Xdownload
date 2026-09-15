@@ -404,6 +404,7 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
 
         <div className="flex flex-wrap items-center gap-2.5">
           <Segmented
+            size="md"
             value={filterType}
             onChange={(val) => setFilterType(val)}
             options={[
@@ -434,7 +435,7 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
           <Tooltip title="扫描媒体库，为缺失封面的视频/GIF 重新拉取预览图并保存到本地；已有封面的记录会自动跳过">
             <Button
               variant="default"
-              icon={<RefreshCw className={`size-3.5 ${backfillRunning ? "animate-spin" : ""}`} />}
+              icon={<RefreshCw className={`size-4 ${backfillRunning ? "animate-spin" : ""}`} />}
               loading={backfillMutation.isPending}
               disabled={backfillRunning}
               onClick={() => backfillMutation.mutate()}

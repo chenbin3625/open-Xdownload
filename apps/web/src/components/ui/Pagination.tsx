@@ -31,6 +31,7 @@ export function Pagination({
   onPageChange,
   onPageSizeChange,
   totalLabel,
+  size = "md",
   className,
 }: {
   page: number;
@@ -39,16 +40,22 @@ export function Pagination({
   onPageChange: (page: number) => void;
   onPageSizeChange?: (pageSize: number) => void;
   totalLabel?: (total: number) => React.ReactNode;
+  size?: "sm" | "md";
   className?: string;
 }) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const current = Math.min(Math.max(1, page), totalPages);
 
+  const isSmall = size === "sm";
+  const itemSizeClass = isSmall ? "size-7 text-xs" : "size-8 text-xs";
+  const iconSizeClass = isSmall ? "size-3.5" : "size-4";
+
   const stepClass = cn(
-    "inline-flex size-8 items-center justify-center rounded-control border border-line",
+    "inline-flex items-center justify-center rounded-control border border-line",
     "text-fg-muted transition-colors",
     "enabled:cursor-pointer enabled:hover:border-brand-400 enabled:hover:text-brand-600",
     "disabled:cursor-not-allowed disabled:opacity-40",
+    itemSizeClass,
   );
 
   return (
@@ -65,14 +72,14 @@ export function Pagination({
           onClick={() => onPageChange(current - 1)}
           className={stepClass}
         >
-          <ChevronLeft className="size-4" />
+          <ChevronLeft className={iconSizeClass} />
         </button>
         {buildPageItems(current, totalPages).map((item, index) =>
           item === "gap" ? (
             <span
               key={`gap-${index}`}
               aria-hidden="true"
-              className="inline-flex size-8 items-center justify-center text-xs text-fg-subtle"
+              className={cn("inline-flex items-center justify-center text-fg-subtle select-none", itemSizeClass)}
             >
               …
             </span>
@@ -84,8 +91,9 @@ export function Pagination({
               aria-current={item === current ? "page" : undefined}
               onClick={() => onPageChange(item)}
               className={cn(
-                "inline-flex size-8 cursor-pointer items-center justify-center rounded-control",
-                "border text-xs font-medium transition-colors",
+                "inline-flex cursor-pointer items-center justify-center rounded-control",
+                "border font-medium transition-colors leading-none",
+                itemSizeClass,
                 item === current
                   ? "border-brand-500 bg-brand-500 text-white"
                   : "border-line text-fg-body hover:border-brand-400 hover:text-brand-600",
@@ -102,7 +110,7 @@ export function Pagination({
           onClick={() => onPageChange(current + 1)}
           className={stepClass}
         >
-          <ChevronRight className="size-4" />
+          <ChevronRight className={iconSizeClass} />
         </button>
         {onPageSizeChange && (
           <Select
@@ -110,11 +118,11 @@ export function Pagination({
             ariaLabel="每页条数"
             value={String(pageSize)}
             onChange={(next) => onPageSizeChange(Number(next))}
-            options={PAGE_SIZE_OPTIONS.map((size) => ({
-              value: String(size),
-              label: `${size} 条/页`,
+            options={PAGE_SIZE_OPTIONS.map((optSize) => ({
+              value: String(optSize),
+              label: `${optSize} 条/页`,
             }))}
-            className="ml-1 w-[6.5rem]"
+            className={cn("ml-1 w-[6.5rem]", !isSmall && "h-8 text-xs")}
           />
         )}
       </div>

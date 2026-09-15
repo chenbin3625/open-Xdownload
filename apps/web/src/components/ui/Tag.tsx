@@ -39,9 +39,8 @@ export function Tag({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-md border",
-        size === "sm" ? "px-1 py-0.2 text-[10px] leading-3.5" : "px-1.5 py-0.5 text-[11px] leading-4",
-        "font-medium whitespace-nowrap",
+        "inline-flex items-center gap-1 rounded-md border font-medium whitespace-nowrap select-none",
+        size === "sm" ? "h-5 px-1.5 text-[10px] leading-none" : "h-6 px-2 text-xs leading-none",
         toneClass[tone],
         className,
       )}

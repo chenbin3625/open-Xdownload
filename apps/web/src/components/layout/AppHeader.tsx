@@ -75,7 +75,7 @@ export function AppHeader({
                     size="sm"
                     disabled={!quickInput.trim()}
                     onClick={handleSubmit}
-                    className="h-6.5 px-2.5 text-xs font-medium shadow-xs"
+                    className="shadow-xs"
                   >
                     解析
                   </Button>

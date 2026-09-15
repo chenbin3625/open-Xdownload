@@ -228,7 +228,7 @@ export function SchedulesPage({
                   <Button
                     variant="default"
                     size="sm"
-                    icon={<Play className="size-3" />}
+                    icon={<Play className="size-3.5" />}
                     loading={runSchedule.isPending && runSchedule.variables === schedule.id}
                     onClick={() => runSchedule.mutate(schedule.id)}
                   >

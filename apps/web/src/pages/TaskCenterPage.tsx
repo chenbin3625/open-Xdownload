@@ -370,7 +370,7 @@ export function TaskCenterPage({
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">下载中任务</span>
-            <div className="flex size-6.5 items-center justify-center rounded-lg bg-brand-500/10">
+            <div className="flex size-7 items-center justify-center rounded-lg bg-brand-500/10">
               <StatusDot tone={displayStats.active > 0 ? "brand" : "default"} pulse={displayStats.active > 0} />
             </div>
           </div>
@@ -386,7 +386,7 @@ export function TaskCenterPage({
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">已完成</span>
-            <div className="flex size-6.5 items-center justify-center rounded-lg bg-success-soft">
+            <div className="flex size-7 items-center justify-center rounded-lg bg-success-soft">
               <CheckCircle2 className="size-3.5 text-success" />
             </div>
           </div>
@@ -402,7 +402,7 @@ export function TaskCenterPage({
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">异常 / 失败</span>
-            <div className="flex size-6.5 items-center justify-center rounded-lg bg-danger-soft">
+            <div className="flex size-7 items-center justify-center rounded-lg bg-danger-soft">
               <AlertCircle className="size-3.5 text-danger" />
             </div>
           </div>
@@ -418,7 +418,7 @@ export function TaskCenterPage({
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">任务总数</span>
-            <div className="flex size-6.5 items-center justify-center rounded-lg bg-surface-muted border border-line">
+            <div className="flex size-7 items-center justify-center rounded-lg bg-surface-muted border border-line">
               <FolderCheck className="size-3.5 text-brand-500" />
             </div>
           </div>
@@ -436,6 +436,7 @@ export function TaskCenterPage({
           <Tooltip title="括号内为当前页的任务计数，全局统计见侧边栏与上方卡片">
             <div>
               <Segmented
+                size="md"
                 value={statusFilter}
                 onChange={(val) => setStatusFilter(val as StatusFilterType)}
                 options={[
@@ -491,8 +492,8 @@ export function TaskCenterPage({
             {(displayStats.failed > 0 || bucketCounts.failed > 0) && (
               <Button
                 variant="default"
-                size="sm"
-                icon={<RotateCcw className="size-3.5" />}
+                size="md"
+                icon={<RotateCcw className="size-4" />}
                 loading={retryAllFailed.isPending}
                 onClick={() => retryAllFailed.mutate()}
               >
