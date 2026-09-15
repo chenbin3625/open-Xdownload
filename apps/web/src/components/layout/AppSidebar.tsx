@@ -1,26 +1,19 @@
 import {
-  ClockCircleOutlined,
-  ExclamationCircleOutlined,
-  FolderOpenOutlined,
-  PictureOutlined,
-  PlusOutlined,
-  SettingOutlined,
-  UnorderedListOutlined,
-} from "@ant-design/icons";
-import {
-  Badge,
-  Button,
-  Divider,
-  Flex,
-  Menu,
-  Space,
-  Tag,
-  Typography,
-} from "antd";
+  Clock,
+  FolderOpen,
+  Images,
+  Plus,
+  Settings,
+  TriangleAlert,
+  ListChecks,
+} from "lucide-react";
 import React from "react";
+import { cn } from "../../lib/cn";
 import type { SectionKey } from "../../lib/useRouteState";
-
-const { Text } = Typography;
+import { Button } from "../ui/Button";
+import { Divider } from "../ui/Feedback";
+import { Tooltip } from "../ui/Overlay";
+import { CountBadge, Tag } from "../ui/Tag";
 
 export interface AppSidebarProps {
   activeSection: SectionKey;
@@ -35,6 +28,9 @@ export interface AppSidebarProps {
   storagePath?: string;
 }
 
+// overview / workbench / tasks 三个 section 都落到「任务调度中心」这一项上。
+const taskCenterSections: SectionKey[] = ["overview", "workbench", "tasks"];
+
 export function AppSidebar({
   activeSection,
   onSectionChange,
@@ -47,162 +43,134 @@ export function AppSidebar({
   storageType = "local",
   storagePath = "/downloads",
 }: AppSidebarProps) {
-  const currentKey =
-    activeSection === "overview" ||
-    activeSection === "workbench" ||
-    activeSection === "tasks"
-      ? "tasks"
-      : activeSection;
+  const currentKey = taskCenterSections.includes(activeSection) ? "tasks" : activeSection;
 
-  // 计数统一用 Tag 呈现，避免同一位置出现多种自绘徽标样式。
-  const countTag = (text: React.ReactNode, highlight = false) => (
-    <Tag
-      color={highlight ? "processing" : undefined}
-      style={{ margin: 0, fontSize: 11 }}
-      className="font-mono"
-    >
-      {text}
-    </Tag>
-  );
-
-  const menuItems = [
+  const navItems: {
+    key: SectionKey;
+    icon: React.ReactNode;
+    label: string;
+    badge?: React.ReactNode;
+  }[] = [
     {
       key: "tasks",
-      icon: <UnorderedListOutlined />,
-      label: (
-        <Flex align="center" justify="space-between" gap={8}>
-          <span>任务调度中心</span>
-          {activeJobsCount > 0
-            ? countTag(`${activeJobsCount} 运行`, true)
-            : totalJobsCount > 0
-              ? countTag(totalJobsCount)
-              : null}
-        </Flex>
-      ),
+      icon: <ListChecks className="size-4 shrink-0" />,
+      label: "任务调度中心",
+      badge:
+        activeJobsCount > 0 ? (
+          <Tag tone="brand" className="font-mono">{`${activeJobsCount} 运行`}</Tag>
+        ) : totalJobsCount > 0 ? (
+          <Tag className="font-mono">{totalJobsCount}</Tag>
+        ) : null,
     },
     {
       key: "schedules",
-      icon: <ClockCircleOutlined />,
-      label: (
-        <Flex align="center" justify="space-between" gap={8}>
-          <span>自动归档计划</span>
-          {schedulesCount > 0 ? countTag(schedulesCount) : null}
-        </Flex>
-      ),
+      icon: <Clock className="size-4 shrink-0" />,
+      label: "自动归档计划",
+      badge: schedulesCount > 0 ? <Tag className="font-mono">{schedulesCount}</Tag> : null,
     },
     {
       key: "gallery",
-      icon: <PictureOutlined />,
+      icon: <Images className="size-4 shrink-0" />,
       label: "媒体归档库",
     },
     {
       key: "settings",
-      icon: <SettingOutlined />,
+      icon: <Settings className="size-4 shrink-0" />,
       label: "系统与存储配置",
     },
   ];
 
   return (
-    <aside className="app-sidebar w-64 shrink-0 flex flex-col justify-between select-none">
-      <div style={{ padding: 12 }}>
+    <aside className="flex w-64 shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none">
+      <div className="p-3.5">
         {/* 品牌区 */}
-        <Flex align="center" gap={10} style={{ padding: "6px 8px 12px" }}>
-          <Flex
-            align="center"
-            justify="center"
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: 10,
-              background: "var(--brand-500)",
-              color: "#fff",
-              fontSize: 16,
-              fontWeight: 700,
-              flexShrink: 0,
-            }}
-          >
+        <div className="flex items-center gap-3 px-2 pt-1 pb-4">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 text-lg font-bold text-white shadow-sm shadow-brand-500/30">
             𝕏
-          </Flex>
-          <div style={{ minWidth: 0 }}>
-            <Flex align="center" gap={6}>
-              <Text strong style={{ fontSize: 14 }}>
-                open-Xdownload
-              </Text>
-              <Tag
-                color="processing"
-                style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}
-                className="font-mono"
-              >
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-bold tracking-tight text-fg">open-Xdownload</span>
+              <Tag tone="brand" className="font-mono text-[10px] px-1 py-0">
                 v{__APP_VERSION__}
               </Tag>
-            </Flex>
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              推文多媒体下载控制台
-            </Text>
+            </div>
+            <p className="text-[11px] text-fg-muted font-medium">推文多媒体归档工作台</p>
           </div>
-        </Flex>
+        </div>
 
         <Button
-          type="primary"
+          variant="primary"
           block
-          icon={<PlusOutlined />}
+          icon={<Plus className="size-4" />}
           onClick={onOpenCreateModal}
+          className="shadow-sm shadow-brand-500/20"
         >
           新建下载 / 归档
         </Button>
 
-        <Menu
-          mode="inline"
-          items={menuItems}
-          selectedKeys={[currentKey]}
-          onClick={({ key }) => onSectionChange(key as SectionKey)}
-          style={{ border: "none", marginTop: 12, background: "transparent" }}
-        />
+        {/* 手写导航列表：单选语义用 aria-current 表达，不需要 Menu 的全部键盘模型 */}
+        <nav aria-label="主导航" className="mt-4 flex flex-col gap-1">
+          {navItems.map((item) => {
+            const active = item.key === currentKey;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                aria-current={active ? "page" : undefined}
+                onClick={() => onSectionChange(item.key)}
+                className={cn(
+                  "flex h-10 cursor-pointer items-center gap-3 rounded-control px-3",
+                  "text-sm transition-all duration-150 relative",
+                  active
+                    ? "bg-brand-500/10 font-semibold text-brand-500 border border-brand-500/20 shadow-2xs"
+                    : "text-fg-body hover:bg-surface-hover hover:text-fg border border-transparent",
+                )}
+              >
+                <span className={active ? "text-brand-500" : "text-fg-subtle"}>{item.icon}</span>
+                <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
+                {item.badge}
+              </button>
+            );
+          })}
+        </nav>
 
         {/* 失败推文入口 */}
         {failedTweetCount > 0 && (
           <>
-            <Divider style={{ margin: "12px 0" }} />
-            <Flex vertical gap={8}>
-              <Flex align="center" justify="space-between">
-                <Space size={6}>
-                  <ExclamationCircleOutlined style={{ color: "#ef4444" }} />
-                  <Text style={{ fontSize: 12 }}>失败推文队列</Text>
-                </Space>
-                <Badge count={failedTweetCount} overflowCount={999} />
-              </Flex>
-              <Button danger size="small" block onClick={onOpenFailedDrawer}>
+            <Divider className="my-3.5" />
+            <div className="flex flex-col gap-2 rounded-control border border-danger/25 bg-danger-soft/50 p-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-xs font-medium text-danger">
+                  <TriangleAlert className="size-3.5 text-danger" />
+                  失败推文队列
+                </span>
+                <CountBadge count={failedTweetCount} overflowCount={999} />
+              </div>
+              <Button variant="danger" size="sm" block onClick={onOpenFailedDrawer}>
                 查看并批量重试
               </Button>
-            </Flex>
+            </div>
           </>
         )}
       </div>
 
       {/* 底部存储状态 */}
-      <div
-        style={{
-          padding: 12,
-          borderTop: "1px solid var(--app-border)",
-          background: "var(--app-surface-muted)",
-        }}
-      >
-        <Flex align="center" justify="space-between" style={{ marginBottom: 6 }}>
-          <Space size={6}>
-            <FolderOpenOutlined style={{ color: "var(--text-subtle)" }} />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              存储 ({storageType.toUpperCase()})
-            </Text>
-          </Space>
-        </Flex>
-        <Text
-          type="secondary"
-          ellipsis={{ tooltip: storagePath }}
-          className="font-mono"
-          style={{ fontSize: 11, display: "block" }}
-        >
-          {storagePath || "/downloads"}
-        </Text>
+      <div className="border-t border-line/80 bg-surface-muted/60 p-3.5">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <FolderOpen className="size-3.5 text-brand-500" />
+            <span className="text-xs font-medium text-fg">本地存储</span>
+          </div>
+          <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-mono text-fg-muted border border-line">
+            {storageType.toUpperCase()}
+          </span>
+        </div>
+        <Tooltip title={storagePath}>
+          <p className="truncate font-mono text-[11px] text-fg-muted hover:text-fg transition-colors">
+            {storagePath || "/downloads"}
+          </p>
+        </Tooltip>
       </div>
     </aside>
   );

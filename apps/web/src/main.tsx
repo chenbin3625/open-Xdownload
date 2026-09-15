@@ -1,11 +1,19 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import "antd/dist/reset.css";
 import "./index.css";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { TooltipProvider } from "./components/ui/Overlay";
+import { Toaster } from "./components/ui/Toast";
 import { hydrateAppQueries, takeAppBootstrap } from "./lib/bootstrap";
 import { readRouteState } from "./lib/useRouteState";
+import {
+  applyAccent,
+  applyTheme,
+  readAccentPreference,
+  readThemePreference,
+  resolveTheme,
+} from "./lib/useTheme";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,6 +24,10 @@ const queryClient = new QueryClient({
     },
   },
 });
+// 在首次渲染前落定主题类名与主题色，避免明暗切换时的闪白。
+applyTheme(resolveTheme(readThemePreference()));
+applyAccent(readAccentPreference());
+
 const bootstrap = takeAppBootstrap();
 if (bootstrap) {
   const route = readRouteState();
@@ -25,7 +37,12 @@ if (bootstrap) {
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      {/* Tooltip 的延迟与分组行为需要一个全局 Provider；
+          Toaster 只挂一次，命令式 toast.* 由它统一渲染。 */}
+      <TooltipProvider>
+        <App />
+        <Toaster />
+      </TooltipProvider>
     </QueryClientProvider>
   </React.StrictMode>,
 );

@@ -1,65 +1,266 @@
 @import "tailwindcss";
 
 /* =========================================================
+   暗色模式：由 <html class="dark"> 驱动，不用 media query，
+   这样用户的显式选择能覆盖系统偏好（见 lib/useTheme.ts）。
+   ========================================================= */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* =========================================================
    设计令牌
-   单一浅色主题；主题色统一为 sky-500 (#0ea5e9)，不再混用 indigo/cyan。
-   间距、圆角、层级都以变量收口，避免各页面各写一套。
+   语义命名（surface / border / text-muted），不是色阶命名。
+   组件只引用语义令牌，明暗两套值在下方 :root / .dark 里各给一份，
+   页面代码因此无需写任何 dark: 变体来处理配色。
    ========================================================= */
 
 @theme {
-  --color-brand-50: #f0f9ff;
-  --color-brand-100: #e0f2fe;
-  --color-brand-200: #bae6fd;
-  --color-brand-400: #38bdf8;
-  --color-brand-500: #0ea5e9;
-  --color-brand-600: #0284c7;
-  --color-brand-700: #0369a1;
+  /* 品牌色阶由 CSS 变量控制，支持动态主题切换 */
+  --color-brand-50: var(--color-brand-50);
+  --color-brand-100: var(--color-brand-100);
+  --color-brand-200: var(--color-brand-200);
+  --color-brand-300: var(--color-brand-300);
+  --color-brand-400: var(--color-brand-400);
+  --color-brand-500: var(--color-brand-500);
+  --color-brand-600: var(--color-brand-600);
+  --color-brand-700: var(--color-brand-700);
+  --color-brand-800: var(--color-brand-800);
+  --color-brand-900: var(--color-brand-900);
+  --color-brand-glow: var(--brand-glow);
+
+  /* 语义表面色 */
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-hover: var(--surface-hover);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-body: var(--fg-body);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  /* 状态色 */
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+
+  /* 字体 */
+  --font-sans: "Inter var", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 圆角与阴影：升级至精致大圆角与高级光影 */
+  --radius-card: 1rem;
+  --radius-control: 0.625rem;
+  --shadow-card: var(--shadow-card);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-overlay: var(--shadow-overlay);
 }
 
 @layer base {
+  /* 默认主题色：𝕏 电光蓝 */
+  :root,
+  [data-accent="x-blue"] {
+    --color-brand-50: #f0f9ff;
+    --color-brand-100: #e0f2fe;
+    --color-brand-200: #bae6fd;
+    --color-brand-300: #7dd3fc;
+    --color-brand-400: #38bdf8;
+    --color-brand-500: #1d9bf0;
+    --color-brand-600: #0c87d8;
+    --color-brand-700: #0369a1;
+    --color-brand-800: #075985;
+    --color-brand-900: #0c4a6e;
+    --brand-glow: rgba(29, 155, 240, 0.18);
+  }
+
+  [data-accent="titanium"] {
+    --color-brand-50: #fafafa;
+    --color-brand-100: #f4f4f5;
+    --color-brand-200: #e4e4e7;
+    --color-brand-300: #d4d4d8;
+    --color-brand-400: #a1a1aa;
+    --color-brand-500: #71717a;
+    --color-brand-600: #52525b;
+    --color-brand-700: #3f3f46;
+    --color-brand-800: #27272a;
+    --color-brand-900: #18181b;
+    --brand-glow: rgba(113, 113, 122, 0.2);
+  }
+
+  [data-accent="indigo"] {
+    --color-brand-50: #eef2ff;
+    --color-brand-100: #e0e7ff;
+    --color-brand-200: #c7d2fe;
+    --color-brand-300: #a5b4fc;
+    --color-brand-400: #818cf8;
+    --color-brand-500: #6366f1;
+    --color-brand-600: #4f46e5;
+    --color-brand-700: #4338ca;
+    --color-brand-800: #3730a3;
+    --color-brand-900: #312e81;
+    --brand-glow: rgba(99, 102, 241, 0.2);
+  }
+
+  [data-accent="emerald"] {
+    --color-brand-50: #ecfdf5;
+    --color-brand-100: #d1fae5;
+    --color-brand-200: #a7f3d0;
+    --color-brand-300: #6ee7b7;
+    --color-brand-400: #34d399;
+    --color-brand-500: #10b981;
+    --color-brand-600: #059669;
+    --color-brand-700: #047857;
+    --color-brand-800: #065f46;
+    --color-brand-900: #064e3b;
+    --brand-glow: rgba(16, 185, 129, 0.2);
+  }
+
+  [data-accent="amber"] {
+    --color-brand-50: #fffbeb;
+    --color-brand-100: #fef3c7;
+    --color-brand-200: #fde68a;
+    --color-brand-300: #fcd34d;
+    --color-brand-400: #fbbf24;
+    --color-brand-500: #f59e0b;
+    --color-brand-600: #d97706;
+    --color-brand-700: #b45309;
+    --color-brand-800: #92400e;
+    --color-brand-900: #78350f;
+    --brand-glow: rgba(245, 158, 11, 0.2);
+  }
+
+  /* 基础浅色模式画布与表面 */
   :root {
-    /* 主题色 */
-    --brand-50: #f0f9ff;
-    --brand-100: #e0f2fe;
-    --brand-200: #bae6fd;
-    --brand-400: #38bdf8;
-    --brand-500: #0ea5e9;
-    --brand-600: #0284c7;
+    --canvas: #f8fafc;
+    --surface: #ffffff;
+    --surface-muted: #f1f5f9;
+    --surface-hover: #e2e8f0;
+    --line: #e2e8f0;
+    --line-strong: #cbd5e1;
+    --fg: #09090b;
+    --fg-body: #334155;
+    --fg-muted: #64748b;
+    --fg-subtle: #94a3b8;
 
-    /* 表面与描边 */
-    --app-bg: #f5f7fa;
-    --app-surface: #ffffff;
-    --app-surface-muted: #f8fafc;
-    --app-border: #e5e9f0;
-    --app-border-strong: #d7dee8;
-    --app-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-    --app-shadow-raised: 0 6px 20px rgba(15, 23, 42, 0.07);
+    --success: #059669;
+    --success-soft: #ecfdf5;
+    --warning: #d97706;
+    --warning-soft: #fffbeb;
+    --danger: #dc2626;
+    --danger-soft: #fef2f2;
+    --info: #0284c7;
+    --info-soft: #f0f9ff;
 
-    /* 文本层级 */
-    --text-strong: #0f172a;
-    --text-body: #334155;
-    --text-muted: #64748b;
-    --text-subtle: #94a3b8;
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+    --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.06), 0 8px 10px -6px rgb(0 0 0 / 0.04);
+    --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.15);
+  }
 
-    /* 统一间距节奏：页面块间距 / 主区留白 / 卡片内边距 */
-    --gap-section: 16px;
-    --gap-inline: 8px;
-    --pad-main: 24px;
-    --pad-card: 20px;
-    --radius-card: 12px;
+  /* 基础暗色模式：黑曜石沉浸视觉 */
+  .dark {
+    --canvas: #09090b;
+    --surface: #111114;
+    --surface-muted: #18181c;
+    --surface-hover: #222228;
+    --line: #26262e;
+    --line-strong: #383844;
+    --fg: #f4f4f6;
+    --fg-body: #d1d1d6;
+    --fg-muted: #8e8e98;
+    --fg-subtle: #5c5c66;
+
+    --success: #10b981;
+    --success-soft: rgb(16 185 129 / 0.14);
+    --warning: #f59e0b;
+    --warning-soft: rgb(245 158 11 / 0.14);
+    --danger: #ef4444;
+    --danger-soft: rgb(239 68 68 / 0.14);
+    --info: #0ea5e9;
+    --info-soft: rgb(14 165 233 / 0.14);
+
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
+    --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.5), 0 8px 10px -6px rgb(0 0 0 / 0.5);
+    --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.7);
+  }
+
+  /* 钛金暗色特别优化：暗色下主文字提亮 */
+  .dark[data-accent="titanium"],
+  .dark [data-accent="titanium"] {
+    --color-brand-50: #18181b;
+    --color-brand-100: #27272a;
+    --color-brand-200: #3f3f46;
+    --color-brand-300: #52525b;
+    --color-brand-400: #a1a1aa;
+    --color-brand-500: #f4f4f5;
+    --color-brand-600: #ffffff;
+    --color-brand-700: #ffffff;
+    --color-brand-800: #fafafa;
+    --color-brand-900: #ffffff;
+    --brand-glow: rgba(255, 255, 255, 0.15);
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  /* 首屏防闪：CSP 为 script-src 'self'，不能用内联脚本在 CSS 前抢先写类名。
+     这里让「未显式选择过主题」的访客直接按系统偏好上暗色令牌，
+     JS 起来后 useTheme 再写上明确的 .dark / .light 类接管。 */
+  @media (prefers-color-scheme: dark) {
+    html:not(.light):not(.dark) {
+      color-scheme: dark;
+
+      --canvas: #09090b;
+      --surface: #111114;
+      --surface-muted: #18181c;
+      --surface-hover: #222228;
+      --line: #26262e;
+      --line-strong: #383844;
+      --fg: #f4f4f6;
+      --fg-body: #d1d1d6;
+      --fg-muted: #8e8e98;
+      --fg-subtle: #5c5c66;
+
+      --success: #10b981;
+      --success-soft: rgb(16 185 129 / 0.14);
+      --warning: #f59e0b;
+      --warning-soft: rgb(245 158 11 / 0.14);
+      --danger: #ef4444;
+      --danger-soft: rgb(239 68 68 / 0.14);
+      --info: #0ea5e9;
+      --info-soft: rgb(14 165 233 / 0.14);
+    }
   }
 
   body {
     margin: 0;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--app-bg);
-    color: var(--text-strong);
+    font-family: var(--font-sans);
+    background-color: var(--canvas);
+    background-image: radial-gradient(
+      ellipse 80% 50% at 50% -20%,
+      var(--brand-glow),
+      transparent 70%
+    );
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+    color: var(--fg);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
 
-  code, pre, .font-mono {
-    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  code,
+  pre {
+    font-family: var(--font-mono);
   }
 
   svg {
@@ -67,73 +268,14 @@
   }
 
   ::selection {
-    background-color: var(--brand-500);
+    background-color: var(--color-brand-500);
     color: #ffffff;
   }
-}
 
-/* =========================================================
-   应用骨架
-   ========================================================= */
-
-.app-shell {
-  background: var(--app-bg);
-}
-
-.app-sidebar {
-  background: var(--app-surface);
-  border-right: 1px solid var(--app-border);
-}
-
-.app-header {
-  background: var(--app-surface);
-  border-bottom: 1px solid var(--app-border);
-}
-
-.app-main {
-  background: transparent;
-  padding: var(--pad-main);
-}
-
-.app-content {
-  width: 100%;
-  max-width: 1280px;
-  margin: 0 auto;
-}
-
-/* 页面块之间的统一竖向节奏 */
-.page-stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-section);
-}
-
-/* 页头：标题 + 描述 + 右侧操作，底部一条主题色短线 */
-.page-header {
-  position: relative;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--app-border);
-}
-
-.page-header::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  bottom: -1px;
-  width: 44px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--brand-500);
-}
-
-@media (max-width: 767px) {
-  :root {
-    --pad-main: 16px;
-    --pad-card: 16px;
-  }
-
-  .page-header {
-    padding-bottom: 12px;
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: var(--radius-control);
   }
 }
 
@@ -141,26 +283,28 @@
    滚动条
    ========================================================= */
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+@layer base {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
-::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.28);
-  border-radius: 9999px;
-}
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--fg-subtle) 32%, transparent);
+    border-radius: 9999px;
+  }
 
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.45);
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--fg-subtle) 55%, transparent);
+  }
 }
 
 /* =========================================================
-   全局顶部加载进度条
+   动画
    ========================================================= */
 
 @keyframes global-loading-bar-slide {
@@ -172,40 +316,143 @@
   }
 }
 
-.global-loading-bar-slide {
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes drawer-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes drawer-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.animate-loading-bar {
   animation: global-loading-bar-slide 1.1s ease-in-out infinite;
 }
 
+.animate-overlay-in {
+  animation: overlay-in 160ms ease-out;
+}
+
+.animate-dialog-in {
+  animation: dialog-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-drawer-in-left {
+  animation: drawer-in-left 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-drawer-in-right {
+  animation: drawer-in-right 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-toast-in {
+  animation: toast-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-skeleton {
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+/* 尊重系统的减弱动态偏好：完全停掉装饰性动画，
+   加载条改为静止的柔和脉冲以保留“进行中”的语义。 */
 @media (prefers-reduced-motion: reduce) {
-  .global-loading-bar-slide {
-    animation-duration: 2.5s;
+  .animate-overlay-in,
+  .animate-dialog-in,
+  .animate-drawer-in-left,
+  .animate-drawer-in-right,
+  .animate-toast-in {
+    animation: none;
+  }
+
+  .animate-loading-bar {
+    animation: skeleton-pulse 2s ease-in-out infinite;
+  }
+
+  .animate-skeleton {
+    animation-duration: 3s;
   }
 }
 
 /* =========================================================
-   Ant Design 轻量对齐
-   绝大部分外观交给 ConfigProvider token，这里只补 token 覆盖不到的细节。
+   现代视觉工具类 (Glassmorphism & Glow)
    ========================================================= */
 
-.ant-table-thead > tr > th {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+@utility glass-header {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  background-color: color-mix(in srgb, var(--surface) 80%, transparent);
 }
 
-/* 设置页分节标题：与卡片标题保持同一字阶 */
-.settings-section .ant-card-head {
-  min-height: 52px;
-  padding-inline: var(--pad-card);
+@utility glass-card {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background-color: color-mix(in srgb, var(--surface) 85%, transparent);
 }
 
-.settings-section .ant-card-body {
-  padding: var(--pad-card);
+@utility glow-subtle {
+  box-shadow: 0 0 20px -4px var(--brand-glow);
 }
 
-/* 表单末行去掉多余底部间距，避免卡片底部留白过大 */
-.settings-section .ant-form-item:last-child {
-  margin-bottom: 0;
+@utility glow-brand {
+  box-shadow: 0 0 32px -4px var(--brand-glow);
+}
+
+@utility tabular-nums {
+  font-variant-numeric: tabular-nums;
 }

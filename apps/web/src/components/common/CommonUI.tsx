@@ -1,24 +1,13 @@
-import {
-  CheckCircleOutlined,
-  CopyOutlined,
-} from "@ant-design/icons";
-import {
-  Button,
-  Empty,
-  Flex,
-  List,
-  Pagination,
-  Skeleton,
-  Space,
-  Spin,
-  Tooltip,
-  Typography,
-  notification,
-} from "antd";
+import { Check, Copy } from "lucide-react";
 import React, { useEffect, useState } from "react";
 import type { JobKind } from "../../lib/api";
-
-const { Text } = Typography;
+import { cn } from "../../lib/cn";
+import { Button } from "../ui/Button";
+import { Empty as UiEmpty, ListSkeleton as UiListSkeleton } from "../ui/Feedback";
+import { Tooltip } from "../ui/Overlay";
+import { Pagination as UiPagination } from "../ui/Pagination";
+import { LoadingOverlay } from "../ui/Spinner";
+import { toast } from "../ui/Toast";
 
 export type TextTone = "secondary" | "success" | "warning" | "danger";
 
@@ -28,24 +17,12 @@ export const defaultListPageSizeOptions = [5, 10, 20, 50];
 export const tablePageSizeOptions = [10, 20, 50, 100];
 export const failedTweetPageSizeOptions = [10, 20, 50];
 
-export function AppEmpty({ description }: { description: string }) {
-  return <Empty style={{ margin: "8px 0" }} image={Empty.PRESENTED_IMAGE_SIMPLE} description={description} />;
+export function AppEmpty({ description, className }: { description: string; className?: string }) {
+  return <UiEmpty description={description} className={cn("my-2", className)} />;
 }
 
-export function ListSkeleton({ rows = 4 }: { rows?: number }) {
-  return (
-    <Space orientation="vertical" size={10} style={fullWidthStyle}>
-      {Array.from({ length: rows }, (_, index) => (
-        <Skeleton
-          active
-          avatar
-          key={index}
-          paragraph={{ rows: 2 }}
-          title={{ width: index % 2 === 0 ? "42%" : "58%" }}
-        />
-      ))}
-    </Space>
-  );
+export function ListSkeleton({ rows = 4, avatar = true }: { rows?: number; avatar?: boolean }) {
+  return <UiListSkeleton rows={rows} avatar={avatar} />;
 }
 
 export function LoadingSurface({
@@ -58,9 +35,9 @@ export function LoadingSurface({
   tip?: string;
 }) {
   return (
-    <Spin spinning={!!loading} tip={loading ? tip : undefined}>
-      <div style={{ minWidth: 0 }}>{children}</div>
-    </Spin>
+    <LoadingOverlay loading={!!loading} tip={tip}>
+      <div className="min-w-0">{children}</div>
+    </LoadingOverlay>
   );
 }
 
@@ -68,23 +45,28 @@ export function Stack({
   children,
   size = 12,
   style,
+  className,
 }: {
   children: React.ReactNode;
   size?: number;
   style?: React.CSSProperties;
+  className?: string;
 }) {
   return (
-    <Space orientation="vertical" size={size} style={{ ...fullWidthStyle, ...style }}>
+    <div
+      style={{ gap: `${size}px`, ...style }}
+      className={cn("flex w-full flex-col", className)}
+    >
       {children}
-    </Space>
+    </div>
   );
 }
 
-export function Toolbar({ children }: { children: React.ReactNode }) {
+export function Toolbar({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <Flex align="center" justify="space-between" gap={10} wrap="wrap" style={fullWidthStyle}>
+    <div className={cn("flex w-full flex-wrap items-center justify-between gap-2.5", className)}>
       {children}
-    </Flex>
+    </div>
   );
 }
 
@@ -94,29 +76,34 @@ export function EllipsisText({
   style,
   title,
   type,
+  className,
 }: {
   children: React.ReactNode;
   code?: boolean;
   style?: React.CSSProperties;
   title?: string;
   type?: TextTone;
+  className?: string;
 }) {
+  const toneClass = {
+    secondary: "text-fg-muted",
+    success: "text-success",
+    warning: "text-warning",
+    danger: "text-danger",
+  };
   return (
-    <Text
-      code={code}
-      type={type}
+    <span
       title={title}
-      style={{
-        display: "block",
-        maxWidth: "100%",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-        ...style,
-      }}
+      style={style}
+      className={cn(
+        "block max-w-full truncate",
+        code && "font-mono text-xs rounded bg-surface-muted px-1 py-0.5",
+        type ? toneClass[type] : "text-fg-body",
+        className,
+      )}
     >
       {children}
-    </Text>
+    </span>
   );
 }
 
@@ -157,8 +144,8 @@ export function AppPagination({
   itemName,
   onChange,
   pageSize,
-  pageSizeOptions = defaultListPageSizeOptions,
-  simple = false,
+  pageSizeOptions: _pageSizeOptions,
+  simple,
   total,
 }: {
   current: number;
@@ -170,28 +157,21 @@ export function AppPagination({
   total: number;
 }) {
   return (
-    <Flex justify="flex-end" style={fullWidthStyle}>
-      <Pagination
-        current={current}
-        disabled={total === 0}
+    <div className="flex w-full justify-end">
+      <UiPagination
+        page={current}
         pageSize={pageSize}
-        pageSizeOptions={pageSizeOptions.map(String)}
-        showSizeChanger={!simple}
-        showTotal={simple ? undefined : (totalCount, range) =>
-          totalCount > 0
-            ? `共 ${totalCount} ${itemName}，当前 ${range[0]}-${range[1]}`
-            : `共 0 ${itemName}`}
-        simple={simple}
-        size="small"
         total={total}
-        onChange={onChange}
+        totalLabel={(t) => (simple ? undefined : `共 ${t} ${itemName}`)}
+        onPageChange={(p) => onChange(p, pageSize)}
+        onPageSizeChange={(ps) => onChange(1, ps)}
       />
-    </Flex>
+    </div>
   );
 }
 
 export function PaginatedList<TItem>({
-  bordered,
+  bordered = true,
   emptyDescription,
   itemName,
   items,
@@ -201,7 +181,6 @@ export function PaginatedList<TItem>({
   renderItem,
   simplePagination = false,
   skeletonRows = pageSize,
-  size = "default",
 }: {
   bordered?: boolean;
   emptyDescription: string;
@@ -216,7 +195,6 @@ export function PaginatedList<TItem>({
   size?: "small" | "default" | "large";
 }) {
   const pagination = useClientPagination(items, pageSize);
-  const listStyle = maxHeight ? { maxHeight, overflow: "auto" } : undefined;
 
   if (loading && items.length === 0) {
     return <ListSkeleton rows={skeletonRows} />;
@@ -241,14 +219,19 @@ export function PaginatedList<TItem>({
   return (
     <LoadingSurface loading={loading}>
       <Stack size={8}>
-        <List
-          bordered={bordered}
-          dataSource={pagination.items}
-          locale={{ emptyText: <AppEmpty description={emptyDescription} /> }}
-          renderItem={renderItem}
-          size={size}
-          style={listStyle}
-        />
+        <div
+          style={maxHeight ? { maxHeight, overflow: "auto" } : undefined}
+          className={cn(
+            "flex flex-col divide-y divide-line rounded-card",
+            bordered && "border border-line bg-surface",
+          )}
+        >
+          {pagination.items.map((item, index) => (
+            <div key={index} className="p-3 transition-colors hover:bg-surface-hover">
+              {renderItem(item)}
+            </div>
+          ))}
+        </div>
         <AppPagination
           current={pagination.page}
           itemName={itemName}
@@ -264,75 +247,71 @@ export function PaginatedList<TItem>({
 
 // 明文 HTTP（局域网部署的常态）下 navigator.clipboard 是 undefined，
 // 直接调用会在事件处理里抛 TypeError。这里逐级降级到 execCommand，
-// 并按真实结果提示，不再无条件报“已复制”。
-export async function copyToClipboard(text: string, label = "路径") {
-  let copied = false;
+// 返回真实结果交给调用方提示，不再无条件报“已复制”。
+export async function writeClipboard(text: string) {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
-      copied = true;
+      return true;
     }
   } catch {
-    copied = false;
+    // 权限被拒时继续走 execCommand 兜底
   }
-  if (!copied) {
-    try {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      copied = document.execCommand("copy");
-      textarea.remove();
-    } catch {
-      copied = false;
-    }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied;
+  } catch {
+    return false;
   }
+}
+
+export async function copyToClipboard(text: string, label = "路径") {
+  const copied = await writeClipboard(text);
   if (copied) {
-    notification.success({
+    toast.success({
       message: "复制成功",
       description: `已复制${label}到剪贴板`,
     });
   } else {
-    notification.warning({
+    toast.warning({
       message: "复制失败",
       description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
     });
   }
+  return copied;
 }
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
-    try {
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(value);
-      } else {
-        const textarea = document.createElement("textarea");
-        textarea.value = value;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-      }
+    if (await writeClipboard(value)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      setCopied(false);
+      return;
     }
+    setCopied(false);
+    toast.warning({
+      message: "复制失败",
+      description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
+    });
   }
 
   return (
-    <Tooltip title={copied ? "已复制" : label}>
+    <Tooltip content={copied ? "已复制" : label}>
       <Button
-        size="small"
-        type={copied ? "primary" : "text"}
-        icon={copied ? <CheckCircleOutlined /> : <CopyOutlined />}
+        size="sm"
+        variant={copied ? "primary" : "ghost"}
+        icon={copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
         onClick={handleCopy}
+        aria-label={label}
       />
     </Tooltip>
   );
@@ -406,4 +385,13 @@ export function getErrorMessage(error: unknown) {
     return error;
   }
   return "未知错误";
+}
+
+export function notifyError(title: string) {
+  return (error: unknown) => {
+    toast.error({
+      message: title,
+      description: getErrorMessage(error),
+    });
+  };
 }

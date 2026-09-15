@@ -5,7 +5,7 @@ import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:z
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
-import webPackage from "./package.json";
+import webPackage from "./package.json" with { type: "json" };
 
 const compressibleExt = new Set([
   ".js",
@@ -83,8 +83,8 @@ export default defineConfig({
           ) return "player";
           if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react";
           if (id.includes("/@tanstack/")) return "query";
-          if (id.includes("/@ant-design/icons/")) return "icons";
-          if (id.includes("/antd/")) return "antd";
+          if (id.includes("/lucide-react/")) return "icons";
+          if (id.includes("/radix-ui/") || id.includes("/@radix-ui/")) return "radix";
           return "vendor";
         },
       },
@@ -97,7 +97,10 @@ export default defineConfig({
     },
   },
   test: {
+    // 默认 node：纯逻辑测试最快。组件测试在文件顶部用
+    // `// @vitest-environment jsdom` 单独切换，避免全局装载 DOM。
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["src/test/setup.ts"],
   },
 });

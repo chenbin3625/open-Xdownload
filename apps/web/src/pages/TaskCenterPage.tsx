@@ -1,40 +1,17 @@
 import {
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  CopyOutlined,
-  ExclamationCircleOutlined,
-  FileDoneOutlined,
-  LoadingOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-  RetweetOutlined,
-  SearchOutlined,
-  StopOutlined,
-  SyncOutlined,
-} from "@ant-design/icons";
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  Copy,
+  FolderCheck,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Sparkles,
+  XCircle,
+} from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Avatar,
-  Badge,
-  Button,
-  Card,
-  Descriptions,
-  Empty,
-  Flex,
-  Input,
-  Progress,
-  Segmented,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-  notification,
-} from "antd";
-import type { ColumnsType } from "antd/es/table";
 import React, { useMemo, useState } from "react";
 import {
   cancelJob,
@@ -53,6 +30,7 @@ import {
   formatDateTime,
   getErrorMessage,
   kindLabel,
+  notifyError,
 } from "../components/common/CommonUI";
 import {
   cancelableStatuses,
@@ -61,6 +39,17 @@ import {
   retryableStatuses,
 } from "../lib/jobStatus";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
+import { Button } from "../components/ui/Button";
+import { Card } from "../components/ui/Card";
+import { Segmented, Select } from "../components/ui/Controls";
+import { Alert, Descriptions, Empty, Progress } from "../components/ui/Feedback";
+import { SearchInput } from "../components/ui/Input";
+import { Tooltip } from "../components/ui/Overlay";
+import { Pagination } from "../components/ui/Pagination";
+import { Spinner } from "../components/ui/Spinner";
+import { Table, type TableColumn } from "../components/ui/Table";
+import { Avatar, StatusDot, Tag, type Tone } from "../components/ui/Tag";
+import { toast } from "../components/ui/Toast";
 
 export type StatusFilterType = "all" | "active" | "completed" | "failed";
 
@@ -76,6 +65,23 @@ export interface TaskCenterPageProps {
   onOpenCreateModal: () => void;
   onOpenFailedDrawer: () => void;
 }
+
+const jobStatusPresentation: Record<
+  Job["status"],
+  { label: string; tone: Tone; icon?: React.ReactNode }
+> = {
+  pending: { label: "排队中", tone: "default", icon: <Clock className="size-3" /> },
+  resolving: { label: "解析中", tone: "brand", icon: <RefreshCw className="size-3 animate-spin" /> },
+  downloading: { label: "下载中", tone: "brand", icon: <RefreshCw className="size-3 animate-spin" /> },
+  completed: { label: "已完成", tone: "success", icon: <CheckCircle2 className="size-3" /> },
+  completed_with_errors: {
+    label: "部分失败",
+    tone: "warning",
+    icon: <AlertTriangle className="size-3" />,
+  },
+  failed: { label: "失败", tone: "danger", icon: <XCircle className="size-3" /> },
+  canceled: { label: "已取消", tone: "default" },
+};
 
 export function TaskCenterPage({
   jobs,
@@ -96,249 +102,164 @@ export function TaskCenterPage({
     mutationFn: cancelJob,
     onSuccess: () => {
       void invalidateWorkbenchQueries(queryClient);
-      notification.success({ message: "任务已取消" });
+      toast.success({ message: "任务已取消" });
     },
-    onError: (err) => {
-      notification.error({
-        message: "取消失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("取消失败"),
   });
 
   const retry = useMutation({
     mutationFn: retryJob,
     onSuccess: (job) => {
       void invalidateWorkbenchQueries(queryClient);
-      notification.success({ message: `已创建重试任务 #${job.id}` });
+      toast.success({ message: `已创建重试任务 #${job.id}` });
     },
-    onError: (err) => {
-      notification.error({
-        message: "重试失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("重试失败"),
   });
 
   const retryAllFailed = useMutation({
     mutationFn: retryFailedTweets,
     onSuccess: (newJob) => {
       void invalidateWorkbenchQueries(queryClient);
-      notification.success({
+      toast.success({
         message: "已创建重试任务",
         description: newJob.title || "失败推文已重新加入执行队列",
       });
     },
-    onError: (err) => {
-      notification.error({
-        message: "重试失败",
-        description: getErrorMessage(err),
-      });
-    },
+    onError: notifyError("重试失败"),
   });
 
-  // 本地根据当前页 items 进行实时过滤
   const filteredJobs = useMemo(() => {
+    const keyword = searchKeyword.trim().toLowerCase();
     return jobs.filter((job) => {
-      if (statusFilter === "active") {
-        if (jobStatusBucket(job.status) !== "active") return false;
-      } else if (statusFilter === "completed") {
-        if (job.status !== "completed") return false;
-      } else if (statusFilter === "failed") {
-        if (
-          job.status !== "failed" &&
-          job.status !== "completed_with_errors"
-        )
-          return false;
+      if (statusFilter !== "all" && jobStatusBucket(job.status) !== statusFilter) {
+        return false;
       }
-
       if (kindFilter !== "all" && job.kind !== kindFilter) {
         return false;
       }
-
-      if (searchKeyword.trim()) {
-        const kw = searchKeyword.trim().toLowerCase();
-        const matchesTitle = (job.title || "").toLowerCase().includes(kw);
-        const matchesInput = (job.input || "").toLowerCase().includes(kw);
-        const matchesId = String(job.id).includes(kw);
-        if (!matchesTitle && !matchesInput && !matchesId) return false;
+      if (!keyword) {
+        return true;
       }
-
-      return true;
+      return (
+        (job.title || "").toLowerCase().includes(keyword) ||
+        (job.input || "").toLowerCase().includes(keyword) ||
+        String(job.id).includes(keyword)
+      );
     });
   }, [jobs, statusFilter, kindFilter, searchKeyword]);
 
-  // 过滤只作用于当前页的 items，服务端总数无法反映筛选结果：
-  // 一旦启用筛选就改用本页命中数驱动分页，避免“显示 2 条 / 共 120 条”的自相矛盾。
   const hasActiveFilter =
     statusFilter !== "all" || kindFilter !== "all" || searchKeyword.trim() !== "";
 
-  const activeCount = useMemo(
-    () => jobs.filter((j) => jobStatusBucket(j.status) === "active").length,
-    [jobs],
-  );
-  const completedCount = useMemo(
-    () => jobs.filter((j) => j.status === "completed").length,
-    [jobs],
-  );
-  const failedCount = useMemo(
-    () =>
-      jobs.filter(
-        (j) => j.status === "failed" || j.status === "completed_with_errors",
-      ).length,
-    [jobs],
-  );
+  const bucketCounts = useMemo(() => {
+    const counts = { active: 0, completed: 0, failed: 0 };
+    for (const job of jobs) {
+      const bucket = jobStatusBucket(job.status);
+      if (bucket !== "idle") counts[bucket] += 1;
+    }
+    return counts;
+  }, [jobs]);
 
-  const columns: ColumnsType<Job> = [
+  const columns: TableColumn<Job>[] = [
     {
-      title: "任务信息 / 目标",
-      dataIndex: "title",
       key: "title",
+      title: "任务目标 / 描述",
       width: 280,
-      render: (_, record) => (
-        <div className="flex items-center gap-3 py-1">
-          <Avatar
-            className="shrink-0" style={{ background: "var(--brand-100)", color: "var(--brand-600)", fontWeight: 700 }}
-            size={32}
-          >
+      render: (record) => (
+        <div className="flex items-center gap-2.5 py-0.5">
+          <Avatar>
             {record.kind === "user" ? "@" : "𝕏"}
           </Avatar>
-          <div className="overflow-hidden max-w-xs md:max-w-md">
-            <Typography.Text
-              strong
-              className="block truncate" style={{ fontSize: 13 }}
-            >
+          <div className="min-w-0 max-w-xs md:max-w-md">
+            <div className="truncate text-sm font-medium text-fg">
               {record.title || kindLabel(record.kind)}
-            </Typography.Text>
-            <Typography.Text
-              type="secondary"
-              className="font-mono block truncate" style={{ fontSize: 11 }}
-            >
+            </div>
+            <div className="truncate font-mono text-xs text-fg-muted">
               目标: {record.input} · #JOB-{record.id}
-            </Typography.Text>
+            </div>
           </div>
         </div>
       ),
     },
     {
-      title: "类型",
-      dataIndex: "kind",
       key: "kind",
-      width: 110,
-      render: (kind) => (
-        <Tag color="processing">
-          {kindLabel(kind)}
+      title: "类型",
+      width: 100,
+      render: (record) => (
+        <Tag tone="default">
+          {kindLabel(record.kind)}
         </Tag>
       ),
     },
     {
-      title: "当前状态",
-      dataIndex: "status",
       key: "status",
-      width: 130,
-      render: (status) => {
-        if (status === "resolving" || status === "downloading") {
-          return (
-            <Tag
-              color="processing"
-              icon={<SyncOutlined spin />}
-            >
-              下载中
-            </Tag>
-          );
-        }
-        if (status === "completed") {
-          return (
-            <Tag
-              color="success"
-              icon={<CheckCircleOutlined />}
-            >
-              已完成
-            </Tag>
-          );
-        }
-        if (status === "completed_with_errors") {
-          return (
-            <Tag
-              color="warning"
-              icon={<ExclamationCircleOutlined />}
-            >
-              部分失败
-            </Tag>
-          );
-        }
-        if (status === "failed") {
-          return (
-            <Tag
-              color="error"
-              icon={<CloseCircleOutlined />}
-            >
-              失败
-            </Tag>
-          );
-        }
+      title: "当前状态",
+      width: 120,
+      render: (record) => {
+        const meta = jobStatusPresentation[record.status];
         return (
-          <Tag>
-            已取消
+          <Tag tone={meta.tone} icon={meta.icon}>
+            {meta.label}
           </Tag>
         );
       },
     },
     {
-      title: "执行进度",
-      dataIndex: "progress",
       key: "progress",
+      title: "执行进度",
       width: 220,
-      render: (progress, record) => (
-        <div className="space-y-1 py-1">
-          <div className="flex justify-between font-mono" style={{ fontSize: 11, color: "var(--text-muted)" }}>
-            <span className="truncate max-w-[130px]">
-              {record.message || "执行中..."}
-            </span>
-            <span style={{ fontWeight: 600, color: "var(--brand-500)" }}>
-              {clampPercent(progress)}%
-            </span>
+      render: (record) => {
+        const percent = clampPercent(record.progress);
+        const pStatus = progressStatus(record);
+        return (
+          <div className="space-y-1 py-0.5">
+            <div className="flex justify-between font-mono text-xs text-fg-muted">
+              <span className="truncate max-w-[130px]">{record.message || "执行中..."}</span>
+              <span className="font-semibold text-brand-600 dark:text-brand-400">{percent}%</span>
+            </div>
+            <Progress
+              percent={percent}
+              status={
+                pStatus === "active"
+                  ? "active"
+                  : pStatus === "success"
+                  ? "success"
+                  : pStatus === "exception"
+                  ? "exception"
+                  : "normal"
+              }
+            />
           </div>
-          <Progress
-            percent={clampPercent(progress)}
-            size="small"
-            status={progressStatus(record)}
-            strokeColor="#0ea5e9"
-            showInfo={false}
-          />
-        </div>
-      ),
+        );
+      },
     },
     {
-      title: "更新时间",
-      dataIndex: "updatedAt",
       key: "updatedAt",
-      width: 160,
-      render: (time) => (
-        <span className="font-mono" style={{ fontSize: 12, color: "var(--text-muted)" }}>
-          {formatDateTime(time)}
+      title: "更新时间",
+      width: 140,
+      render: (record) => (
+        <span className="font-mono text-xs text-fg-subtle">
+          {formatDateTime(record.updatedAt)}
         </span>
       ),
     },
     {
-      title: "操作",
       key: "action",
-      width: 140,
+      title: "操作",
+      width: 130,
       align: "right",
-      render: (_, record) => {
+      render: (record) => {
         const canCancel = cancelableStatuses.includes(record.status);
         const canRetry = retryableStatuses.includes(record.status);
-        const isCanceling =
-          cancel.isPending && cancel.variables === record.id;
-        const isRetrying =
-          retry.isPending && retry.variables === record.id;
+        const isCanceling = cancel.isPending && cancel.variables === record.id;
+        const isRetrying = retry.isPending && retry.variables === record.id;
 
         return (
-          <Space size={6}>
+          <div className="flex items-center justify-end gap-1.5">
             {canCancel && (
               <Button
-                danger
-                size="small"
+                variant="danger"
+                size="sm"
                 loading={isCanceling}
                 onClick={() => cancel.mutate(record.id)}
               >
@@ -347,106 +268,166 @@ export function TaskCenterPage({
             )}
             {canRetry && (
               <Button
-                size="small"
+                variant="default"
+                size="sm"
                 loading={isRetrying}
                 onClick={() => retry.mutate(record.id)}
               >
                 重试
               </Button>
             )}
-          </Space>
+          </div>
         );
       },
     },
   ];
 
   return (
-    <div className="page-stack">
-      {/* 顶部页头与操作 */}
-      <Flex
-        className="page-header"
-        align="center"
-        justify="space-between"
-        gap={16}
-        wrap="wrap"
-      >
+    <div className="flex flex-col gap-4">
+      {/* 顶部标题与操作栏 */}
+      <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
         <div>
-          <Typography.Title level={4} style={{ margin: 0 }}>
-            任务调度中心
-          </Typography.Title>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <h1 className="text-xl font-bold tracking-tight text-fg">任务调度中心</h1>
+          <p className="mt-0.5 text-xs text-fg-muted">
             监控所有已创建的推文与归档任务、过滤检索并查看下载文件记录
-          </Typography.Text>
+          </p>
         </div>
-        <Space wrap>
+        <div className="flex flex-wrap items-center gap-2.5">
           {failedTweetCount > 0 && (
             <Button
-              danger
-              icon={<CloseCircleOutlined />}
+              variant="danger"
+              icon={<AlertCircle className="size-4" />}
               onClick={onOpenFailedDrawer}
             >
-              查看失败项 ({failedTweetCount})
+              失败记录 ({failedTweetCount})
             </Button>
           )}
           <Button
-            type="primary"
-            icon={<PlusOutlined />}
+            variant="primary"
+            icon={<Plus className="size-4" />}
             onClick={onOpenCreateModal}
           >
-            新建任务
+            新建下载 / 归档
           </Button>
-        </Space>
-      </Flex>
+        </div>
+      </div>
 
-      {/* 过滤筛选工具栏 (纯 Ant Design 交互控件) */}
-      <Card
-        styles={{ body: { padding: "12px 16px" } }}
-      >
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 flex-wrap">
-          {/* 状态分类 Segmented：括号内均为当前页计数，不是全局统计 */}
-          <Tooltip title="括号内为当前页的任务计数，全局统计见侧边栏">
-            <Segmented
-              value={statusFilter}
-              onChange={(val) => setStatusFilter(val as StatusFilterType)}
-              options={[
-                { label: `本页全部 (${jobs.length})`, value: "all" },
-                {
-                  label: (
-                    <Space orientation="horizontal" size={4}>
-                      {activeCount > 0 && <Badge status="processing" />}
-                      <span>本页下载中 ({activeCount})</span>
-                    </Space>
-                  ),
-                  value: "active",
-                },
-                { label: `本页已完成 (${completedCount})`, value: "completed" },
-                {
-                  label: (
-                    <Space orientation="horizontal" size={4}>
-                      {failedCount > 0 && <Badge status="error" />}
-                      <span>本页失败 / 异常 ({failedCount})</span>
-                    </Space>
-                  ),
-                  value: "failed",
-                },
-              ]}
-            />
+      {/* 核心指标统计卡片 (现代玻璃风格) */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-brand-500 bg-gradient-to-b from-brand-500/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-fg-muted">下载中任务</span>
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-brand-500/10">
+              <StatusDot tone={bucketCounts.active > 0 ? "brand" : "default"} pulse={bucketCounts.active > 0} />
+            </div>
+          </div>
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+            {bucketCounts.active}
+          </div>
+          <p className="mt-0.5 text-[11px] text-fg-subtle">当前正在排队与拉取</p>
+        </Card>
+
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-success bg-gradient-to-b from-success/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-fg-muted">已完成</span>
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-success-soft">
+              <CheckCircle2 className="size-3.5 text-success" />
+            </div>
+          </div>
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+            {bucketCounts.completed}
+          </div>
+          <p className="mt-0.5 text-[11px] text-fg-subtle">媒体已全部入库</p>
+        </Card>
+
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-danger bg-gradient-to-b from-danger/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-fg-muted">异常 / 失败</span>
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-danger-soft">
+              <AlertCircle className="size-3.5 text-danger" />
+            </div>
+          </div>
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+            {bucketCounts.failed}
+          </div>
+          <p className="mt-0.5 text-[11px] text-fg-subtle">包含部分失败与致命失败</p>
+        </Card>
+
+        <Card
+          size="sm"
+          className="relative overflow-hidden border-t-2 border-t-line-strong bg-gradient-to-b from-surface-muted/50 to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-fg-muted">任务总数</span>
+            <div className="flex size-6.5 items-center justify-center rounded-lg bg-surface-muted border border-line">
+              <FolderCheck className="size-3.5 text-brand-500" />
+            </div>
+          </div>
+          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+            {pagination.total}
+          </div>
+          <p className="mt-0.5 text-[11px] text-fg-subtle">库内已记录的任务总规模</p>
+        </Card>
+      </div>
+
+      {/* 过滤筛选工具栏 */}
+      <Card size="sm" bodyClassName="p-3">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between flex-wrap">
+          {/* 状态分类 Segmented */}
+          <Tooltip title="括号内为当前页的任务计数，全局统计见侧边栏与上方卡片">
+            <div>
+              <Segmented
+                value={statusFilter}
+                onChange={(val) => setStatusFilter(val as StatusFilterType)}
+                options={[
+                  { label: `全部 (${jobs.length})`, value: "all" },
+                  {
+                    label: (
+                      <span className="flex items-center gap-1.5">
+                        {bucketCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
+                        <span>下载中 ({bucketCounts.active})</span>
+                      </span>
+                    ),
+                    value: "active",
+                  },
+                  { label: `已完成 (${bucketCounts.completed})`, value: "completed" },
+                  {
+                    label: (
+                      <span className="flex items-center gap-1.5">
+                        {bucketCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
+                        <span>失败/异常 ({bucketCounts.failed})</span>
+                      </span>
+                    ),
+                    value: "failed",
+                  },
+                ]}
+              />
+            </div>
           </Tooltip>
 
-          {/* 搜索、类型选择与重试操作 */}
-          <Space size={10} wrap>
-            <Input.Search
-              placeholder="按标题、用户名或任务 ID 搜索..."
+          {/* 搜索与类型选择 */}
+          <div className="flex flex-wrap items-center gap-2">
+            <SearchInput
+              placeholder="按标题、用户名或 ID 搜索..."
               value={searchKeyword}
               onChange={(e) => setSearchKeyword(e.target.value)}
               allowClear
-              style={{ width: 240 }}
+              className="w-56"
             />
 
             <Select
               value={kindFilter}
               onChange={setKindFilter}
-              style={{ width: 150 }}
+              className="w-36"
               options={[
                 { value: "all", label: "全部任务类型" },
                 { value: "tweet_link", label: "单条推文" },
@@ -457,58 +438,51 @@ export function TaskCenterPage({
               ]}
             />
 
-            {failedCount > 0 && (
+            {bucketCounts.failed > 0 && (
               <Button
-                icon={<RetweetOutlined />}
+                variant="default"
+                size="sm"
+                icon={<RotateCcw className="size-3.5" />}
                 loading={retryAllFailed.isPending}
                 onClick={() => retryAllFailed.mutate()}
               >
-                重试失败
+                重试全部失败
               </Button>
             )}
-          </Space>
+          </div>
         </div>
       </Card>
 
-      {/* 任务核心数据表格 (纯 Ant Design Table) */}
-      <Card
-        style={{ overflow: "hidden" }}
-        styles={{ body: { padding: 0 } }}
-      >
+      {/* 任务核心数据表格 */}
+      <Card size="sm" bodyClassName="p-0">
         <Table<Job>
           columns={columns}
-          dataSource={filteredJobs}
-          rowKey="id"
-          size="middle"
-          scroll={{ x: 860 }}
+          data={filteredJobs}
+          rowKey={(r) => r.id}
           loading={tableLoading}
-          pagination={{
-            current: hasActiveFilter ? 1 : pagination.page,
-            pageSize: pagination.pageSize,
-            total: hasActiveFilter ? filteredJobs.length : pagination.total,
-            showSizeChanger: true,
-            pageSizeOptions: ["10", "20", "50", "100"],
-            onChange: (page, pageSize) => {
-              if (pageSize !== pagination.pageSize) {
-                onPageSizeChange(pageSize);
-              } else {
-                onPageChange(page);
-              }
-            },
-            showTotal: (total) =>
-              hasActiveFilter
-                ? `本页命中 ${total} 个任务（筛选仅作用于当前页，第 ${pagination.page} 页）`
-                : `共 ${total} 个任务`,
-          }}
-          expandable={{
-            expandedRowRender: (record) => (
-              <ExpandedJobDetails
-                job={record}
-                onRetry={() => retry.mutate(record.id)}
+          minWidth={860}
+          expandedRowRender={(record) => (
+            <ExpandedJobDetails
+              job={record}
+              onRetry={() => retry.mutate(record.id)}
+            />
+          )}
+          footer={
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-fg-muted">
+                {hasActiveFilter
+                  ? `本页匹配 ${filteredJobs.length} 条（筛选仅作用于当前第 ${pagination.page} 页）`
+                  : `共 ${pagination.total} 个下载任务`}
+              </span>
+              <Pagination
+                page={hasActiveFilter ? 1 : pagination.page}
+                pageSize={pagination.pageSize}
+                total={hasActiveFilter ? filteredJobs.length : pagination.total}
+                onPageChange={(page) => onPageChange(page)}
+                onPageSizeChange={(size) => onPageSizeChange(size)}
               />
-            ),
-            rowExpandable: () => true,
-          }}
+            </div>
+          }
         />
       </Card>
     </div>
@@ -532,11 +506,10 @@ function ExpandedJobDetails({
   const failed = filesQuery.data?.failed ?? [];
 
   return (
-    <div className="p-4 rounded-lg space-y-3 m-2" style={{ background: "var(--app-surface-muted)", border: "1px solid var(--app-border)" }}>
-      <div className="flex items-center justify-between flex-wrap gap-2">
+    <div className="space-y-3 rounded-card border border-line bg-surface-muted/50 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <Descriptions
-          size="small"
-          column={{ xs: 1, sm: 2, md: 3 }}
+          columns={3}
           items={[
             {
               key: "id",
@@ -552,16 +525,22 @@ function ExpandedJobDetails({
               key: "mediaCount",
               label: "入库文件",
               children: (
-                <Space>
-                  <Tag color="success">成功 {downloads.length}</Tag>
-                  {failed.length > 0 && <Tag color="error">失败 {failed.length}</Tag>}
-                </Space>
+                <div className="flex items-center gap-2">
+                  <Tag tone="success">
+                    成功 {downloads.length}
+                  </Tag>
+                  {failed.length > 0 && (
+                    <Tag tone="danger">
+                      失败 {failed.length}
+                    </Tag>
+                  )}
+                </div>
               ),
             },
           ]}
         />
         {failed.length > 0 && (
-          <Button size="small" type="link" onClick={onRetry}>
+          <Button variant="text" size="sm" onClick={onRetry}>
             重试此任务
           </Button>
         )}
@@ -569,74 +548,64 @@ function ExpandedJobDetails({
 
       {filesQuery.isLoading ? (
         <div className="py-6 text-center">
-          <Spin />
-          <Typography.Text type="secondary" className="block mt-2" style={{ fontSize: 12 }}>正在获取已下载媒体文件清单...</Typography.Text>
+          <Spinner className="size-5 mx-auto" />
+          <p className="mt-2 text-xs text-fg-muted">正在获取已下载媒体文件清单...</p>
         </div>
       ) : filesQuery.isError ? (
-        // 请求失败与“任务没有文件”是两回事，必须区分提示，否则无法判断该不该重试。
         <Alert
           type="error"
-          showIcon
           message="读取文件清单失败"
           description={getErrorMessage(filesQuery.error)}
           action={
-            <Button size="small" onClick={() => void filesQuery.refetch()}>
+            <Button size="sm" variant="default" onClick={() => void filesQuery.refetch()}>
               重试
             </Button>
           }
         />
       ) : downloads.length === 0 && failed.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已归档的文件记录" />
+        <Empty description="暂无已归档的文件记录" />
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2 pt-2" style={{ borderTop: "1px solid var(--app-border)" }}>
+        <div className="grid grid-cols-2 gap-2 pt-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 border-t border-line">
           {downloads.map((dl) => {
             const fileName = dl.filePath.split("/").pop() || dl.filePath;
             const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
             return (
-              <Card
+              <div
                 key={dl.id}
-                size="small"
-                styles={{ body: { padding: "8px 10px" } }}
+                className="flex items-center justify-between gap-1.5 rounded-control border border-line bg-surface p-2 text-xs shadow-xs"
               >
-                <div className="flex items-center justify-between gap-1">
-                  <div className="flex items-center gap-1.5 overflow-hidden">
-                    <Tag className="!m-0 font-mono" style={{ fontSize: 10 }}>
-                      {ext}
-                    </Tag>
-                    <Typography.Text
-                      ellipsis
-                      style={{ fontSize: 11 }}
-                    >
-                      {fileName}
-                    </Typography.Text>
-                  </div>
-                  <Tooltip title="复制文件本地完整路径">
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<CopyOutlined />}
-                      onClick={() => void copyToClipboard(dl.filePath, "本地路径")}
-                    />
-                  </Tooltip>
+                <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+                  <span className="rounded bg-surface-muted px-1 py-0.5 font-mono text-[10px] text-fg-muted">
+                    {ext}
+                  </span>
+                  <span className="truncate text-fg-body font-medium" title={fileName}>
+                    {fileName}
+                  </span>
                 </div>
-              </Card>
+                <Tooltip title="复制文件本地完整路径">
+                  <Button
+                    variant="text"
+                    size="sm"
+                    circle
+                    icon={<Copy className="size-3" />}
+                    onClick={() => void copyToClipboard(dl.filePath, "本地路径")}
+                    aria-label="复制本地路径"
+                  />
+                </Tooltip>
+              </div>
             );
           })}
 
           {failed.map((fl) => (
-            <Card
+            <div
               key={fl.id}
-              size="small"
-              style={{ background: "#fef2f2", borderColor: "#fecaca" }}
-              styles={{ body: { padding: "8px 10px" } }}
+              className="rounded-control border border-danger/30 bg-danger-soft p-2 text-xs"
             >
-              <Typography.Text ellipsis type="danger" className="block" style={{ fontSize: 11 }}>
-                下载失败
-              </Typography.Text>
-              <Typography.Text ellipsis type="secondary" className="block" style={{ fontSize: 10 }}>
+              <span className="block font-medium text-danger truncate">下载失败</span>
+              <span className="block text-[11px] text-fg-muted truncate" title={fl.error || fl.mediaUrl}>
                 {fl.error || fl.mediaUrl}
-              </Typography.Text>
-            </Card>
+              </span>
+            </div>
           ))}
         </div>
       )}
