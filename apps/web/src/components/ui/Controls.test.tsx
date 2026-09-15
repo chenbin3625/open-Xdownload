@@ -175,4 +175,15 @@ describe("Button", () => {
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.getByRole("link", { name: "文档" })).not.toBeNull();
   });
+
+  it("asChild 支持 loading 状态", () => {
+    render(
+      <Button asChild loading>
+        <a href="/docs">文档</a>
+      </Button>,
+    );
+    const link = screen.getByRole("link", { name: "文档" });
+    expect(link.getAttribute("aria-busy")).toBe("true");
+    expect(link.getAttribute("aria-disabled")).toBe("true");
+  });
 });
