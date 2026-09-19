@@ -285,24 +285,6 @@ export const getJobFiles = (id: number, signal?: AbortSignal) => api<JobFiles>(`
 export const getLibraryDownloads = (limit = 100, signal?: AbortSignal) =>
   api<DownloadRecord[]>(`/api/library/downloads?limit=${limit}`, { signal });
 
-export interface PosterBackfillStatus {
-  running: boolean;
-  total: number;
-  done: number;
-  fetched: number;
-  skipped: number;
-  failed: number;
-  startedAt?: string;
-  finishedAt?: string;
-}
-
-export const posterBackfillQueryRoot = ["poster-backfill"] as const;
-
-export const getPosterBackfillStatus = (signal?: AbortSignal) =>
-  api<PosterBackfillStatus>("/api/library/posters/backfill", { signal });
-
-export const startPosterBackfill = () =>
-  api<PosterBackfillStatus>("/api/library/posters/backfill", { method: "POST" });
 
 export const getDashboardMeta = (signal?: AbortSignal) => api<DashboardMeta>("/api/dashboard/meta", { signal });
 

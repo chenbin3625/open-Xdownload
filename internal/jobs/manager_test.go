@@ -356,9 +356,13 @@ func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
 
 func TestDownloadMediaSuffixedPathWhenAnotherTweetOwnsFilename(t *testing.T) {
 	var requests atomic.Int64
+	bodies := map[string][]byte{
+		"/one.mp4": []byte("first tweet media"),
+		"/two.mp4": []byte("second tweet media"),
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		_, _ = w.Write([]byte("identical tweet media"))
+		_, _ = w.Write(bodies[r.URL.Path])
 	}))
 	defer server.Close()
 
@@ -401,10 +405,10 @@ func TestDownloadMediaSuffixedPathWhenAnotherTweetOwnsFilename(t *testing.T) {
 
 	firstPath := filepath.Join(root, "identical text.mp4")
 	secondPath := filepath.Join(root, "identical text(1).mp4")
-	if got, err := os.ReadFile(firstPath); err != nil || string(got) != "identical tweet media" {
+	if got, err := os.ReadFile(firstPath); err != nil || string(got) != string(bodies["/one.mp4"]) {
 		t.Fatalf("first tweet media missing or overwritten: %q, %v", got, err)
 	}
-	if got, err := os.ReadFile(secondPath); err != nil || string(got) != "identical tweet media" {
+	if got, err := os.ReadFile(secondPath); err != nil || string(got) != string(bodies["/two.mp4"]) {
 		t.Fatalf("second tweet media not at suffixed path: %q, %v", got, err)
 	}
 	if requests.Load() != 2 {
@@ -898,6 +902,66 @@ func TestDownloadMediaSkipsSameMediaWithSameNameAndSize(t *testing.T) {
 		t.Fatalf("first record = %+v, err = %v", firstRecord, err)
 	}
 	secondRecord, err := store.GetDownloadByTweetMedia(ctx, "tweet-2", mediaURL)
+	if err != nil || secondRecord == nil {
+		t.Fatalf("second record = %+v, err = %v", secondRecord, err)
+	}
+	if secondRecord.FilePath != firstRecord.FilePath {
+		t.Fatalf("second record path = %q, want reused %q", secondRecord.FilePath, firstRecord.FilePath)
+	}
+}
+
+func TestDownloadMediaReusesSameContentFromDifferentURLs(t *testing.T) {
+	body := []byte("same video bytes behind different urls")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+	firstURL := server.URL + "/video-a.mp4"
+	secondURL := server.URL + "/video-b.mp4"
+
+	first, err := manager.downloadMedia(ctx, ctx, job, cfg, firstURL, "tweet-1", root, "same text", false, time.Time{})
+	if err != nil {
+		t.Fatalf("first download: %v", err)
+	}
+	if first.skipped {
+		t.Fatal("first download skipped = true, want false")
+	}
+	second, err := manager.downloadMedia(ctx, ctx, job, cfg, secondURL, "tweet-2", root, "same text", false, time.Time{})
+	if err != nil {
+		t.Fatalf("second download: %v", err)
+	}
+	if !second.skipped {
+		t.Fatal("second download skipped = false, want true for identical content")
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read archive dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("archive dir has %d entries, want 1 after content dedupe", len(entries))
+	}
+	firstRecord, err := store.GetDownloadByTweetMedia(ctx, "tweet-1", firstURL)
+	if err != nil || firstRecord == nil {
+		t.Fatalf("first record = %+v, err = %v", firstRecord, err)
+	}
+	secondRecord, err := store.GetDownloadByTweetMedia(ctx, "tweet-2", secondURL)
 	if err != nil || secondRecord == nil {
 		t.Fatalf("second record = %+v, err = %v", secondRecord, err)
 	}

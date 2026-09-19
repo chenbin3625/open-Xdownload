@@ -6,26 +6,21 @@ import {
   Film,
   Image as ImageIcon,
   PictureInPicture,
-  RefreshCw,
   Video,
 } from "lucide-react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import React, {
   useCallback,
   useDeferredValue,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import {
   formatBytes,
   getLibraryDownloads,
-  getPosterBackfillStatus,
   libraryDownloadsLimit,
   libraryDownloadsQueryRoot,
-  posterBackfillQueryRoot,
-  startPosterBackfill,
   type DownloadRecord,
   type Job,
 } from "../lib/api";
@@ -39,7 +34,6 @@ import { MediaModal, Tooltip } from "../components/ui/Overlay";
 import { Pagination } from "../components/ui/Pagination";
 import { SearchSelect } from "../components/ui/SearchSelect";
 import { Spinner } from "../components/ui/Spinner";
-import { toast } from "../components/ui/Toast";
 
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
@@ -238,45 +232,6 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
     enabled: !downloads,
   });
 
-  const queryClient = useQueryClient();
-  const backfillQuery = useQuery({
-    queryKey: posterBackfillQueryRoot,
-    queryFn: ({ signal }) => getPosterBackfillStatus(signal),
-    refetchInterval: (query) => (query.state.data?.running ? 1500 : false),
-  });
-  const backfillStatus = backfillQuery.data;
-  const backfillRunning = backfillStatus?.running ?? false;
-
-  const backfillMutation = useMutation({
-    mutationFn: startPosterBackfill,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: posterBackfillQueryRoot });
-    },
-    onError: (error) => {
-      toast.error({ message: "封面补齐启动失败", description: String(error) });
-    },
-  });
-
-  const backfillWasRunning = useRef(false);
-  useEffect(() => {
-    if (!backfillStatus) return;
-    const wasRunning = backfillWasRunning.current;
-    backfillWasRunning.current = backfillStatus.running;
-    if (wasRunning && !backfillStatus.running && backfillStatus.total > 0) {
-      if (backfillStatus.failed > 0) {
-        toast.info({
-          message: "封面补齐完成",
-          description: `新增 ${backfillStatus.fetched} 张，跳过 ${backfillStatus.skipped} 张，失败 ${backfillStatus.failed} 张`,
-        });
-      } else {
-        toast.success({
-          message: "封面补齐完成",
-          description: `新增 ${backfillStatus.fetched} 张，其余均已存在`,
-        });
-      }
-      void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
-    }
-  }, [backfillStatus, queryClient]);
 
   const allDownloads = downloads ?? libraryQuery.data ?? [];
 
@@ -432,19 +387,6 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
             className="w-52"
           />
 
-          <Tooltip title="扫描媒体库，为缺失封面的视频/GIF 重新拉取预览图并保存到本地；已有封面的记录会自动跳过">
-            <Button
-              variant="default"
-              icon={<RefreshCw className={`size-4 ${backfillRunning ? "animate-spin" : ""}`} />}
-              loading={backfillMutation.isPending}
-              disabled={backfillRunning}
-              onClick={() => backfillMutation.mutate()}
-            >
-              {backfillRunning && backfillStatus
-                ? `补齐封面 ${backfillStatus.done}/${backfillStatus.total}`
-                : "补齐视频封面"}
-            </Button>
-          </Tooltip>
         </div>
       </div>
 

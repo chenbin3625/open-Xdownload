@@ -471,6 +471,15 @@ func (s *Store) addMissingColumns() error {
 			return err
 		}
 	}
+	var hasContentHash int
+	if err := tx.Get(&hasContentHash, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'content_hash'`); err != nil {
+		return err
+	}
+	if hasContentHash == 0 {
+		if _, err := tx.Exec(`ALTER TABLE downloads ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -670,6 +679,8 @@ func (s *Store) addMissingIndexes() error {
 	ON downloads (job_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_downloads_media_key
 	ON downloads (media_key);
+	CREATE INDEX IF NOT EXISTS idx_downloads_content_hash
+	ON downloads (content_hash);
 	CREATE INDEX IF NOT EXISTS idx_failed_media_job_created_at
 	ON failed_media (job_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_failed_tweets_updated_at
@@ -1240,16 +1251,17 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	record.MediaKey = downloader.MediaIdentity(record.MediaURL)
 	if strings.TrimSpace(record.TweetID) != "" {
 		err := s.db.GetContext(ctx, &record, `
-	INSERT INTO downloads (job_id, tweet_id, media_url, media_key, preview_url, file_path, bytes, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO downloads (job_id, tweet_id, media_url, media_key, content_hash, preview_url, file_path, bytes, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(tweet_id, media_url) WHERE tweet_id <> '' DO UPDATE SET
 		media_key = excluded.media_key,
+		content_hash = CASE WHEN excluded.content_hash <> '' THEN excluded.content_hash ELSE downloads.content_hash END,
 		preview_url = CASE WHEN excluded.preview_url <> '' THEN excluded.preview_url ELSE downloads.preview_url END,
 		file_path = excluded.file_path,
 		bytes = excluded.bytes,
 		created_at = excluded.created_at
 	RETURNING *`,
-			record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.PreviewURL, record.FilePath, record.Bytes, now)
+			record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.ContentHash, record.PreviewURL, record.FilePath, record.Bytes, now)
 		if err == nil {
 			s.invalidateLibraryDownloadsCache()
 		}
@@ -1257,16 +1269,17 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	}
 	// tweet_id 为空（直接媒体 URL 任务）：按 media_url 去重，避免同一 URL 重复跑产生重复行。
 	err := s.db.GetContext(ctx, &record, `
-INSERT INTO downloads (job_id, tweet_id, media_url, media_key, preview_url, file_path, bytes, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO downloads (job_id, tweet_id, media_url, media_key, content_hash, preview_url, file_path, bytes, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
 		media_key = excluded.media_key,
+		content_hash = CASE WHEN excluded.content_hash <> '' THEN excluded.content_hash ELSE downloads.content_hash END,
 		preview_url = CASE WHEN excluded.preview_url <> '' THEN excluded.preview_url ELSE downloads.preview_url END,
 		file_path = excluded.file_path,
 	bytes = excluded.bytes,
 	created_at = excluded.created_at
 RETURNING *`,
-		record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.PreviewURL, record.FilePath, record.Bytes, now)
+		record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.ContentHash, record.PreviewURL, record.FilePath, record.Bytes, now)
 	if err == nil {
 		s.invalidateLibraryDownloadsCache()
 	}
@@ -1516,18 +1529,6 @@ func (s *Store) UpdateDownloadPreviewURL(ctx context.Context, id int64, previewU
 	return nil
 }
 
-// ListVideoDownloadsForPosterBackfill 返回视频/GIF 媒体记录（仅必需列），供封面
-// 批量回填扫描。照片的预览就是文件本身，无需参与扫描。
-func (s *Store) ListVideoDownloadsForPosterBackfill(ctx context.Context) ([]DownloadRecord, error) {
-	items := []DownloadRecord{}
-	err := s.db.SelectContext(ctx, &items, `
-SELECT id, media_url, preview_url, file_path
-FROM downloads
-WHERE media_url LIKE '%video.twimg.com%' AND file_path <> ''
-ORDER BY id`)
-	return items, err
-}
-
 // GetDownload returns one archived media record by its stable database ID.
 // Unknown and non-positive IDs both yield (nil, nil) so HTTP callers can map
 // them uniformly to 404.
@@ -1696,12 +1697,30 @@ LIMIT ?`, mediaKey, limit)
 	return items, err
 }
 
+func (s *Store) FindDownloadsByContentHash(ctx context.Context, contentHash string, limit int) ([]DownloadRecord, error) {
+	contentHash = strings.TrimSpace(contentHash)
+	if contentHash == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	items := []DownloadRecord{}
+	err := s.db.SelectContext(ctx, &items, `
+SELECT * FROM downloads
+WHERE content_hash = ? AND file_path <> ''
+ORDER BY id ASC
+LIMIT ?`, contentHash, limit)
+	return items, err
+}
+
 type mediaDownloadStateRow struct {
 	Unavailable int            `db:"unavailable"`
 	ID          sql.NullInt64  `db:"id"`
 	JobID       sql.NullInt64  `db:"job_id"`
 	TweetID     sql.NullString `db:"tweet_id"`
 	MediaURL    sql.NullString `db:"media_url"`
+	ContentHash sql.NullString `db:"content_hash"`
 	PreviewURL  sql.NullString `db:"preview_url"`
 	FilePath    sql.NullString `db:"file_path"`
 	Bytes       sql.NullInt64  `db:"bytes"`
@@ -1714,14 +1733,14 @@ const (
 	mediaDownloadStateByTweetQuery = `
 SELECT
 	CASE WHEN um.media_url IS NOT NULL THEN 1 ELSE 0 END AS unavailable,
-	d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes, d.created_at
+	d.id, d.job_id, d.tweet_id, d.media_url, d.content_hash, d.preview_url, d.file_path, d.bytes, d.created_at
 FROM (SELECT ? AS tweet_id, ? AS media_url) request
 LEFT JOIN unavailable_media um ON um.media_url = request.media_url
 LEFT JOIN downloads d ON d.tweet_id = request.tweet_id AND d.media_url = request.media_url AND d.tweet_id <> ''`
 	mediaDownloadStateByMediaURLQuery = `
 SELECT
 	CASE WHEN um.media_url IS NOT NULL THEN 1 ELSE 0 END AS unavailable,
-	d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes, d.created_at
+	d.id, d.job_id, d.tweet_id, d.media_url, d.content_hash, d.preview_url, d.file_path, d.bytes, d.created_at
 FROM (SELECT ? AS media_url) request
 LEFT JOIN unavailable_media um ON um.media_url = request.media_url
 LEFT JOIN downloads d ON d.tweet_id = '' AND d.media_url = request.media_url AND d.media_url <> ''`
@@ -1741,14 +1760,15 @@ func (s *Store) GetMediaDownloadState(ctx context.Context, tweetID string, media
 		return nil, row.Unavailable != 0, nil
 	}
 	return &DownloadRecord{
-		ID:         row.ID.Int64,
-		JobID:      row.JobID.Int64,
-		TweetID:    row.TweetID.String,
-		MediaURL:   row.MediaURL.String,
-		PreviewURL: row.PreviewURL.String,
-		FilePath:   row.FilePath.String,
-		Bytes:      row.Bytes.Int64,
-		CreatedAt:  row.CreatedAt.Time,
+		ID:          row.ID.Int64,
+		JobID:       row.JobID.Int64,
+		TweetID:     row.TweetID.String,
+		MediaURL:    row.MediaURL.String,
+		ContentHash: row.ContentHash.String,
+		PreviewURL:  row.PreviewURL.String,
+		FilePath:    row.FilePath.String,
+		Bytes:       row.Bytes.Int64,
+		CreatedAt:   row.CreatedAt.Time,
 	}, row.Unavailable != 0, nil
 }
 
