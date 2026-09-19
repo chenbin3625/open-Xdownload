@@ -766,6 +766,15 @@ func TestArchiveUsersDeduplicatesOnSerialPath(t *testing.T) {
 	}
 }
 
+func TestShouldAbortArchiveUsersOnAllClientsRateLimited(t *testing.T) {
+	if !shouldAbortArchiveUsers(xclient.ErrAllClientsRateLimited) {
+		t.Fatal("all-clients rate limit should abort the current archive run")
+	}
+	if shouldAbortArchiveUsers(fmt.Errorf("读取失败")) {
+		t.Fatal("ordinary user read errors should stay scoped to that user")
+	}
+}
+
 func TestRefreshUserLinksSkipsLegacyFollowingLinks(t *testing.T) {
 	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
