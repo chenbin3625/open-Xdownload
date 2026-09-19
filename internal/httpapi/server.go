@@ -91,9 +91,6 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/api/library/downloads/{id}/file", s.serveDownloadFile)
 	r.Get("/api/library/downloads/{id}/preview", s.serveDownloadPreview)
 	r.Get("/api/library/file", s.serveLibraryFile)
-	r.Post("/api/library/cleanup", s.cleanupLibraryDownloads)
-	r.Post("/api/library/posters/backfill", s.startPosterBackfill)
-	r.Get("/api/library/posters/backfill", s.getPosterBackfillStatus)
 	r.Get("/api/logs", s.listFailedMedia)
 	r.Get("/api/failed-tweets", s.listFailedTweets)
 	r.Post("/api/failed-tweets/retry", s.retryFailedTweets)
@@ -736,23 +733,6 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// startPosterBackfill kicks off a background pass that fetches missing video
-// posters for the whole library. It uses context.Background() on purpose: the
-// run outlives the HTTP request and reports progress through the status
-// endpoint instead.
-func (s *Server) startPosterBackfill(w http.ResponseWriter, r *http.Request) {
-	status, err := s.manager.StartPosterBackfill(context.Background())
-	if err != nil {
-		writeError(w, http.StatusConflict, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, status)
-}
-
-func (s *Server) getPosterBackfillStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.manager.PosterBackfillStatus())
-}
-
 func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListLibraryDownloads(r.Context(), parseLimit(r, storage.MaxLibraryDownloadsLimit, storage.MaxLibraryDownloadsLimit))
 	if err != nil {
@@ -765,20 +745,6 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, items)
-}
-
-func (s *Server) cleanupLibraryDownloads(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.store.GetConfig(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	result, err := s.store.CleanupLibraryDownloads(r.Context(), cfg.DownloadDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {

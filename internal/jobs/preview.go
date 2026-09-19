@@ -28,9 +28,8 @@ const (
 )
 
 // ensureVideoPoster 为单条视频/GIF 记录补齐 preview_url 与本地海报文件。归档重新
-// 遇到已下载媒体时（附本次解析读到的海报地址）与媒体库"补齐视频封面"批量回填
-// 共用本函数。返回 fetched（本次抓到了海报）、skipped（无需处理或海报已存在）。
-// 所有失败只记日志，绝不影响归档任务本身。
+// 遇到已下载媒体时会附带本次解析读到的海报地址调用本函数。返回 fetched（本次抓到了海报）、
+// skipped（无需处理或海报已存在）。所有失败只记日志，绝不影响归档任务本身。
 func (m *Manager) ensureVideoPoster(ctx context.Context, cfg config.AppConfig, target filestore.Store, record *storage.DownloadRecord, freshPreviewURL string) (fetched bool, skipped bool) {
 	if record == nil || record.ID <= 0 || ctx.Err() != nil {
 		return false, true

@@ -590,57 +590,6 @@ func TestServeDownloadFileSupportsRangeAndKeepsPathContained(t *testing.T) {
 	}
 }
 
-func TestCleanupLibraryDownloadsRemovesMissingRecords(t *testing.T) {
-	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "downloads")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("mkdir downloads: %v", err)
-	}
-	if _, err := db.UpdateConfig(ctx, config.AppConfig{
-		DownloadDir: root,
-		StorageType: config.StorageLocal,
-	}); err != nil {
-		t.Fatalf("save config: %v", err)
-	}
-	job, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://video.twimg.com/missing.mp4", "clip")
-	if err != nil {
-		t.Fatalf("create job: %v", err)
-	}
-	if _, err := db.CreateDownload(ctx, storage.DownloadRecord{
-		JobID: job.ID, MediaURL: "https://video.twimg.com/missing.mp4", FilePath: filepath.Join(root, "missing.mp4"), Bytes: 10,
-	}); err != nil {
-		t.Fatalf("create download: %v", err)
-	}
-
-	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/library/cleanup", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var result storage.LibraryCleanupResult
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		t.Fatalf("decode result: %v", err)
-	}
-	if result.Scanned != 1 || result.MissingRecords != 1 {
-		t.Fatalf("cleanup result = %+v, want scanned=1 missing=1", result)
-	}
-	items, err := db.ListDownloads(ctx, 10)
-	if err != nil {
-		t.Fatalf("list downloads: %v", err)
-	}
-	if len(items) != 0 {
-		t.Fatalf("downloads after cleanup = %+v, want empty", items)
-	}
-}
-
 func TestEventsNilBusReturnsServiceUnavailable(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

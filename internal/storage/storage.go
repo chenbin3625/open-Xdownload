@@ -2,13 +2,10 @@ package storage
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1298,133 +1295,6 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 	return items, err
 }
 
-func (s *Store) CleanupLibraryDownloads(ctx context.Context, root string) (LibraryCleanupResult, error) {
-	items := []DownloadRecord{}
-	if err := s.db.SelectContext(ctx, &items, `SELECT * FROM downloads WHERE file_path <> '' ORDER BY id ASC`); err != nil {
-		return LibraryCleanupResult{}, err
-	}
-	result := LibraryCleanupResult{Scanned: len(items)}
-	changed := false
-	seen := map[string]DownloadRecord{}
-	for _, item := range items {
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		path := strings.TrimSpace(item.FilePath)
-		if path == "" {
-			continue
-		}
-		info, err := os.Stat(path)
-		if os.IsNotExist(err) {
-			if err := s.deleteDownloadRecord(ctx, item.ID); err != nil {
-				return result, err
-			}
-			result.MissingRecords++
-			changed = true
-			continue
-		}
-		if err != nil {
-			return result, err
-		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		contentHash := strings.TrimSpace(item.ContentHash)
-		if contentHash == "" {
-			contentHash, err = fileSHA256(path)
-			if err != nil {
-				return result, err
-			}
-			if err := s.updateDownloadContentHash(ctx, item.ID, contentHash); err != nil {
-				return result, err
-			}
-			item.ContentHash = contentHash
-			changed = true
-		}
-		if contentHash == "" {
-			continue
-		}
-		keeper, ok := seen[contentHash]
-		if !ok {
-			seen[contentHash] = item
-			continue
-		}
-		if err := s.deleteDownloadRecord(ctx, item.ID); err != nil {
-			return result, err
-		}
-		result.DuplicateRecords++
-		changed = true
-		keeperPath := filepath.Clean(strings.TrimSpace(keeper.FilePath))
-		itemPath := filepath.Clean(path)
-		if itemPath != keeperPath && canDeleteLibraryFile(root, itemPath) {
-			if err := removeLibraryMediaFile(itemPath); err != nil {
-				return result, err
-			}
-			result.DuplicateFiles++
-			result.BytesFreed += info.Size()
-		}
-	}
-	if changed {
-		s.invalidateLibraryDownloadsCache()
-	}
-	return result, nil
-}
-
-func (s *Store) deleteDownloadRecord(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE id = ?`, id)
-	return err
-}
-
-func removeLibraryMediaFile(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	posterPath := path + ".preview.jpg"
-	if err := os.Remove(posterPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-func (s *Store) updateDownloadContentHash(ctx context.Context, id int64, contentHash string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET content_hash = ? WHERE id = ? AND content_hash = ''`, contentHash, id)
-	return err
-}
-
-func fileSHA256(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
-func canDeleteLibraryFile(root string, path string) bool {
-	root = strings.TrimSpace(root)
-	path = strings.TrimSpace(path)
-	if root == "" || path == "" {
-		return false
-	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return false
-	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(absRoot, absPath)
-	if err != nil {
-		return false
-	}
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
-}
-
 // ListLibraryDownloads enriches archive records with the owning user when the
 // file was saved under a user entity directory. Older records remain valid and
 // simply return empty user fields when no entity can be inferred.
@@ -1657,18 +1527,6 @@ func (s *Store) UpdateDownloadPreviewURL(ctx context.Context, id int64, previewU
 		s.invalidateLibraryDownloadsCache()
 	}
 	return nil
-}
-
-// ListVideoDownloadsForPosterBackfill 返回视频/GIF 媒体记录（仅必需列），供封面
-// 批量回填扫描。照片的预览就是文件本身，无需参与扫描。
-func (s *Store) ListVideoDownloadsForPosterBackfill(ctx context.Context) ([]DownloadRecord, error) {
-	items := []DownloadRecord{}
-	err := s.db.SelectContext(ctx, &items, `
-SELECT id, media_url, preview_url, file_path
-FROM downloads
-WHERE media_url LIKE '%video.twimg.com%' AND file_path <> ''
-ORDER BY id`)
-	return items, err
 }
 
 // GetDownload returns one archived media record by its stable database ID.

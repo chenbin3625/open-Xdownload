@@ -88,14 +88,6 @@ type DownloadRecord struct {
 	ContentHash string `json:"-" db:"content_hash"`
 }
 
-type LibraryCleanupResult struct {
-	Scanned          int   `json:"scanned"`
-	MissingRecords   int   `json:"missingRecords"`
-	DuplicateRecords int   `json:"duplicateRecords"`
-	DuplicateFiles   int   `json:"duplicateFiles"`
-	BytesFreed       int64 `json:"bytesFreed"`
-}
-
 type FailedMedia struct {
 	ID        int64     `json:"id" db:"id"`
 	JobID     int64     `json:"jobId" db:"job_id"`

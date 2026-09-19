@@ -38,9 +38,6 @@ type Manager struct {
 	mu         sync.Mutex
 	active     map[int64]context.CancelFunc
 	stopCancel context.CancelFunc
-	// runCtx 是调度循环的根上下文。后台任务（如封面回填）从它派生，
-	// 这样 Stop() 才能真正取消它们，而不是只等超时。
-	runCtx     context.Context
 	wg         sync.WaitGroup
 	retryMu    sync.Mutex
 	userMu     sync.Mutex
@@ -54,12 +51,6 @@ type Manager struct {
 	// lastMaintenance 记录上次后台维护时间（M7：定期清理过期的失败记录）。仅在
 	// 调度循环单 goroutine 中读写，无需加锁。
 	lastMaintenance time.Time
-
-	// 封面批量回填（媒体库按钮触发）的运行状态与取消句柄。同一时间只允许一个
-	// 回填任务；状态经 /api/library/posters/backfill 暴露给前端轮询。
-	posterBackfillMu     sync.Mutex
-	posterBackfillCancel context.CancelFunc
-	posterBackfillStatus PosterBackfillStatus
 }
 
 const (
@@ -92,7 +83,6 @@ func (m *Manager) Start(ctx context.Context) {
 		runCtx, cancel := context.WithCancel(ctx)
 		m.mu.Lock()
 		m.stopCancel = cancel
-		m.runCtx = runCtx
 		m.mu.Unlock()
 		m.wg.Add(1)
 		go func() {
@@ -127,17 +117,6 @@ func (m *Manager) Stop() {
 		m.mu.Unlock()
 		log.Printf("manager.Stop: %d task(s) did not drain within %s: %v", len(ids), managerStopTimeout, ids)
 	}
-}
-
-// backgroundParent 返回后台任务应当派生的父上下文：优先用调度循环的根上下文，
-// 使 Stop() 能取消这些任务；Start() 未被调用时（测试）退回调用方传入的上下文。
-func (m *Manager) backgroundParent(fallback context.Context) context.Context {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.runCtx != nil {
-		return m.runCtx
-	}
-	return fallback
 }
 
 func (m *Manager) Notify() {
