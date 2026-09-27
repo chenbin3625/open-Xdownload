@@ -337,9 +337,9 @@ func TestBackfillDownloadsMediaKeyFillsHistoricalRows(t *testing.T) {
 		mediaURL string
 		want     string
 	}{
-		{"tweet-1", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc"},
-		{"tweet-2", "https://pbs.twimg.com/media/abc.jpg", "https://pbs.twimg.com/media/abc"},
-		{"", "https://pbs.twimg.com/media/xyz?format=png", "https://pbs.twimg.com/media/xyz"},
+		{"tweet-1", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc?format=mp4"},
+		{"tweet-2", "https://pbs.twimg.com/media/abc.jpg", "https://pbs.twimg.com/media/abc?format=jpg"},
+		{"", "https://pbs.twimg.com/media/xyz?format=png", "https://pbs.twimg.com/media/xyz?format=png"},
 	}
 	for _, row := range rows {
 		if _, err := store.db.Exec(`INSERT INTO downloads (job_id, tweet_id, media_url, media_key, file_path, bytes, created_at) VALUES (?, ?, ?, '', ?, ?, ?)`,
@@ -382,5 +382,49 @@ func TestBackfillDownloadsMediaKeyFillsHistoricalRows(t *testing.T) {
 	}
 	if applied != 1 {
 		t.Fatalf("migration recorded %d times, want 1", applied)
+	}
+}
+
+func TestUpgradeRekeysExistingDownloadFormats(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindList, "list", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rawURL := range []string{
+		"https://pbs.twimg.com/media/shared.jpg",
+		"https://pbs.twimg.com/media/shared?format=png",
+	} {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{
+			JobID: job.ID, TweetID: rawURL, MediaURL: rawURL, FilePath: "/archive/shared",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE downloads SET media_key = 'https://pbs.twimg.com/media/shared'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE name = 'rekey_downloads_media_formats'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	items, err := store.ListDownloads(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].MediaKey == items[1].MediaKey {
+		t.Fatalf("upgraded identities must distinguish formats: %+v", items)
 	}
 }

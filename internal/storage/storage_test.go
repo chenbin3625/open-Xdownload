@@ -952,7 +952,7 @@ func TestCreateDownloadPersistsMediaKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create download: %v", err)
 	}
-	if want := "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc"; record.MediaKey != want {
+	if want := "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc?format=mp4"; record.MediaKey != want {
 		t.Fatalf("media_key = %q, want %q", record.MediaKey, want)
 	}
 	if record.MediaKey != "" && strings.Contains(record.MediaKey, "tag=") {
@@ -992,7 +992,7 @@ func TestFindDownloadsByMediaKeyFindsEquivalentURLs(t *testing.T) {
 		}
 	}
 
-	items, err := store.FindDownloadsByMediaKey(ctx, "https://pbs.twimg.com/media/abc", 20)
+	items, err := store.FindDownloadsByMediaKey(ctx, "https://pbs.twimg.com/media/abc?format=jpg", 20)
 	if err != nil {
 		t.Fatalf("find by media key: %v", err)
 	}

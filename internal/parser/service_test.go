@@ -181,6 +181,56 @@ func TestTweetFromGraphQLResultNestedTweetMediaRequiresOption(t *testing.T) {
 	}
 }
 
+func TestTweetFromGraphQLResultMergesEquivalentMediaAcrossRetweet(t *testing.T) {
+	// 推文自身与被转推推文重复列出同一张照片，且写法各异（裸 .jpg、?format=jpg、
+	// ?name=small 缩略图）。这些都是同一张照片，必须合并成一份；不同编码（png）才是
+	// 另一份媒体。
+	result := gjson.Parse(`{
+		"__typename": "Tweet", "rest_id": "200",
+		"legacy": {
+			"extended_entities": {"media": [
+				{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/shared.jpg"},
+				{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/shared?format=jpg&name=small"}
+			]}
+		},
+		"retweeted_status_result": {"result": {
+			"legacy": {"extended_entities": {"media": [
+				{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/shared?format=jpg"},
+				{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/shared?format=jpg&name=large"},
+				{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/shared?format=png"}
+			]}}
+		}}
+	}`)
+	tweet, err := TweetFromGraphQLResultWithOptions("", "root", "200", result, ParseOptions{IncludeNestedTweets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls := tweet.BestMediaURLs()
+	want := []string{
+		"https://pbs.twimg.com/media/shared.jpg",
+		"https://pbs.twimg.com/media/shared?format=png",
+	}
+	if len(urls) != len(want) {
+		t.Fatalf("media URLs = %#v, want %#v", urls, want)
+	}
+	for index, url := range want {
+		if urls[index] != url {
+			t.Fatalf("media URLs = %#v, want %#v", urls, want)
+		}
+	}
+}
+
+func TestSyndicationMediaMergesPhotoURLForms(t *testing.T) {
+	result := gjson.Parse(`{
+		"mediaDetails": [{"type": "photo", "media_url_https": "https://pbs.twimg.com/media/shared.jpg"}],
+		"photos": [{"url": "https://pbs.twimg.com/media/shared?format=jpg"}]
+	}`)
+	items := parseSyndicationMedia(result, ParseOptions{})
+	if len(items) != 1 {
+		t.Fatalf("media = %#v, want one photo", items)
+	}
+}
+
 func TestMediaFromDetailRejectsNonTwimgURL(t *testing.T) {
 	twimg := gjson.Parse(`{
 		"id_str": "p1",

@@ -919,6 +919,120 @@ func TestDownloadMediaSkipsSameMediaWithSameNameAndSize(t *testing.T) {
 	}
 }
 
+func TestDownloadMediaFindsLiveCopyBeyondStaleHistory(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("shared media"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaURL := server.URL + "/shared.mp4"
+	for i := 0; i < 501; i++ {
+		path := filepath.Join(root, fmt.Sprintf("copy-%d.mp4", i))
+		if i == 500 {
+			if err := os.WriteFile(path, []byte("shared media"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := store.CreateDownload(ctx, storage.DownloadRecord{
+			JobID: job.ID, TweetID: fmt.Sprintf("tweet-%d", i),
+			MediaURL: mediaURL, FilePath: path,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+	result, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "retweet", root, "retweet", false, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.skipped || requests.Load() != 0 {
+		t.Fatalf("skipped=%v HTTP requests=%d, want reuse without downloading", result.skipped, requests.Load())
+	}
+	record, err := store.GetDownloadByTweetMedia(ctx, "retweet", mediaURL)
+	if err != nil || record == nil || record.FilePath != filepath.Join(root, "copy-500.mp4") {
+		t.Fatalf("reused record=%+v err=%v", record, err)
+	}
+}
+
+func TestDownloadMediaReusesMatchingContentBeyondStaleHistory(t *testing.T) {
+	body := []byte("identical bytes")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
+	firstURL := server.URL + "/first.mp4"
+	if _, err := manager.downloadMedia(ctx, ctx, job, cfg, firstURL, "original", root, "original", false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := store.GetDownloadByTweetMedia(ctx, "original", firstURL)
+	if err != nil || original == nil {
+		t.Fatalf("original=%+v err=%v", original, err)
+	}
+	for i := 0; i < 500; i++ {
+		if _, err := store.CreateDownload(ctx, storage.DownloadRecord{
+			JobID: job.ID, TweetID: fmt.Sprintf("stale-%d", i),
+			MediaURL:    fmt.Sprintf("%s/stale-%d.mp4", server.URL, i),
+			ContentHash: original.ContentHash, FilePath: filepath.Join(root, fmt.Sprintf("stale-%d.mp4", i)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// All early hash matches are stale; the later record is the only live file.
+	// Insert the live copy after the stale rows with a separate path.
+	livePath := filepath.Join(root, "live.mp4")
+	if err := os.WriteFile(livePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDownload(ctx, storage.DownloadRecord{
+		JobID: job.ID, TweetID: "live", MediaURL: server.URL + "/live.mp4",
+		ContentHash: original.ContentHash, FilePath: livePath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(original.FilePath); err != nil {
+		t.Fatal(err)
+	}
+	secondURL := server.URL + "/second.mp4"
+	result, err := manager.downloadMedia(ctx, ctx, job, cfg, secondURL, "retweet", root, "retweet", false, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetDownloadByTweetMedia(ctx, "retweet", secondURL)
+	if err != nil || record == nil || record.FilePath != livePath || !result.skipped {
+		t.Fatalf("result=%+v record=%+v err=%v, want reuse of %s", result, record, err, livePath)
+	}
+	if _, err := os.Stat(filepath.Join(root, "retweet.mp4")); !os.IsNotExist(err) {
+		t.Fatalf("duplicate media remains on disk: %v", err)
+	}
+}
+
 func TestDownloadMediaReusesSameContentFromDifferentURLs(t *testing.T) {
 	body := []byte("same video bytes behind different urls")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

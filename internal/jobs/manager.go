@@ -804,38 +804,39 @@ func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context
 			}
 		}
 	}
-	copies, err := m.store.FindDownloadsByMediaKey(saveCtx, mediaKey, 20)
-	if err != nil {
-		return false, err
-	}
-	for _, copy := range copies {
-		path := strings.TrimSpace(copy.FilePath)
-		if path == "" {
-			continue
-		}
-		archived, size, err := archivedFileState(path)
+	for offset := 0; ; offset += storage.MaxMediaCopyLookup {
+		copies, err := m.store.FindDownloadsByMediaKeyPage(saveCtx, mediaKey, storage.MaxMediaCopyLookup, offset)
 		if err != nil {
 			return false, err
 		}
-		if !archived {
-			continue
+		for _, copy := range copies {
+			path := strings.TrimSpace(copy.FilePath)
+			archived, size, err := archivedFileState(path)
+			if err != nil {
+				return false, err
+			}
+			if !archived {
+				continue
+			}
+			record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+				JobID:       job.ID,
+				TweetID:     tweetID,
+				MediaURL:    mediaURL,
+				ContentHash: copy.ContentHash,
+				PreviewURL:  previewURL,
+				FilePath:    filepath.Clean(path),
+				Bytes:       size,
+			})
+			if err != nil {
+				return false, err
+			}
+			m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
+			return true, nil
 		}
-		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-			JobID:       job.ID,
-			TweetID:     tweetID,
-			MediaURL:    mediaURL,
-			ContentHash: copy.ContentHash,
-			PreviewURL:  previewURL,
-			FilePath:    filepath.Clean(path),
-			Bytes:       size,
-		})
-		if err != nil {
-			return false, err
+		if len(copies) < storage.MaxMediaCopyLookup {
+			return false, nil
 		}
-		m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
-		return true, nil
 	}
-	return false, nil
 }
 
 func (m *Manager) skipSameContentMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, target filestore.Store, result downloader.Result, mediaURL string, tweetID string, previewURL string) (bool, error) {
@@ -843,42 +844,46 @@ func (m *Manager) skipSameContentMedia(ctx context.Context, saveCtx context.Cont
 	if contentHash == "" || strings.TrimSpace(result.Path) == "" {
 		return false, nil
 	}
-	copies, err := m.store.FindDownloadsByContentHash(saveCtx, contentHash, 20)
-	if err != nil {
-		return false, err
-	}
 	resultPath := filepath.Clean(result.Path)
-	for _, copy := range copies {
-		path := strings.TrimSpace(copy.FilePath)
-		if path == "" || filepath.Clean(path) == resultPath {
-			continue
-		}
-		archived, size, err := archivedFileState(path)
+	for offset := 0; ; offset += storage.MaxMediaCopyLookup {
+		copies, err := m.store.FindDownloadsByContentHashPage(saveCtx, contentHash, storage.MaxMediaCopyLookup, offset)
 		if err != nil {
 			return false, err
 		}
-		if !archived {
-			continue
+		for _, copy := range copies {
+			path := strings.TrimSpace(copy.FilePath)
+			if path == "" || filepath.Clean(path) == resultPath {
+				continue
+			}
+			archived, size, err := archivedFileState(path)
+			if err != nil {
+				return false, err
+			}
+			if !archived {
+				continue
+			}
+			if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
+				return false, err
+			}
+			record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+				JobID:       job.ID,
+				TweetID:     tweetID,
+				MediaURL:    mediaURL,
+				ContentHash: contentHash,
+				PreviewURL:  previewURL,
+				FilePath:    filepath.Clean(path),
+				Bytes:       size,
+			})
+			if err != nil {
+				return false, err
+			}
+			m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
+			return true, nil
 		}
-		if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
-			return false, err
+		if len(copies) < storage.MaxMediaCopyLookup {
+			return false, nil
 		}
-		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-			JobID:       job.ID,
-			TweetID:     tweetID,
-			MediaURL:    mediaURL,
-			ContentHash: contentHash,
-			PreviewURL:  previewURL,
-			FilePath:    filepath.Clean(path),
-			Bytes:       size,
-		})
-		if err != nil {
-			return false, err
-		}
-		m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
-		return true, nil
 	}
-	return false, nil
 }
 
 // archivedFileState 报告 path 处是否已经放着普通文件，并返回其字节数。

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/tidwall/gjson"
 )
@@ -358,17 +359,16 @@ func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[strin
 		if !isTwimgMediaURL(rawURL) {
 			continue
 		}
-		if _, ok := seen[rawURL]; ok {
-			continue
-		}
-		seen[rawURL] = struct{}{}
-		*items = append(*items, Media{
+		// 走 appendUniqueMedia 而不是自己比对 rawURL 字符串：syndication 的 photos 与
+		// mediaDetails 常常是同一份图片的不同写法（`.jpg` 对 `?format=jpg`），按原始
+		// 字符串去重会漏判，把同一张图片重复下载一次。
+		appendUniqueMedia(items, seen, []Media{{
 			ID:         fmt.Sprintf("photo-%d", index+1),
 			Type:       MediaPhoto,
 			URL:        rawURL,
 			PreviewURL: rawURL,
 			BestURL:    rawURL,
-		})
+		}})
 	}
 	if !options.IncludeNestedTweets {
 		return
@@ -716,7 +716,18 @@ func appendUniqueMedia(items *[]Media, seen map[string]struct{}, mediaItems []Me
 	}
 }
 
+// mediaKey 返回用于同一条推文内去重的媒体身份键。键按 downloader.MediaIdentity 归一化，
+// 使同一份媒体的不同 URL 写法（`.jpg` 与 `?format=jpg`、易变的 `?tag=`、大小写主机名）
+// 收敛到同一个键：推文自身、被转推推文与引用推文的媒体列表常常重复列出同一份媒体，
+// 未归一化时会被当成多份媒体各自下载一次。
+//
+// 图片的 `?name=` 尺寸变体（small/large/orig 等）同样收敛到同一个键：它们是同一张照片的
+// 不同分辨率，下载侧按最大尺寸取回。
 func mediaKey(media Media) string {
+	return downloader.MediaIdentity(rawMediaKey(media))
+}
+
+func rawMediaKey(media Media) string {
 	if media.BestURL != "" {
 		return media.BestURL
 	}

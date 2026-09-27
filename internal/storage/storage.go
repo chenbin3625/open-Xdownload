@@ -339,6 +339,9 @@ END;
 	if err := s.runMigrationOnce("backfill_downloads_media_key", s.backfillDownloadsMediaKey); err != nil {
 		return err
 	}
+	if err := s.runMigrationOnce("rekey_downloads_media_formats", s.rekeyDownloadsMediaFormats); err != nil {
+		return err
+	}
 	if err := s.runMigrationOnce("drop_smb_webdav_config_columns", s.dropSMBWebDAVConfigColumns); err != nil {
 		return err
 	}
@@ -581,6 +584,28 @@ func (s *Store) backfillDownloadsMediaKey(exec migrationExecutor) error {
 		}
 		if _, err := exec.Exec(`UPDATE downloads SET media_key = ? WHERE id = ?`, key, row.ID); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// Recalculate keys written before format became part of the media identity.
+func (s *Store) rekeyDownloadsMediaFormats(exec migrationExecutor) error {
+	type downloadRow struct {
+		ID       int64  `db:"id"`
+		MediaURL string `db:"media_url"`
+		MediaKey string `db:"media_key"`
+	}
+	rows := []downloadRow{}
+	if err := exec.Select(&rows, `SELECT id, media_url, media_key FROM downloads WHERE media_url <> ''`); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		key := downloader.MediaIdentity(row.MediaURL)
+		if key != row.MediaKey {
+			if _, err := exec.Exec(`UPDATE downloads SET media_key = ? WHERE id = ?`, key, row.ID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1676,41 +1701,72 @@ func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, med
 	return &record, nil
 }
 
-// FindDownloadsByMediaKey 返回同一媒体身份（downloader.MediaIdentity）的历史下载记录，
-// 按写入顺序升序，最多 limit 条。同一份媒体可能分布在多个归档目录里（转推、引用推文、
-// 卡片媒体会复用同一条媒体 URL），归档时据此判断是否已有可用文件，从而跳过重复下载。
+// MaxMediaCopyLookup 是单页上限；调用方可继续翻页查找仍存在的副本。
+const MaxMediaCopyLookup = 500
+
+func normalizedMediaCopyLimit(limit int) int {
+	if limit <= 0 || limit > MaxMediaCopyLookup {
+		return MaxMediaCopyLookup
+	}
+	return limit
+}
+
+// FindDownloadsByMediaKey 按媒体身份键回查已归档的副本，用于跨推文复用同一份本地文件。
+//
+// 按 file_path 归并（每个路径取最小 id 的记录）：同一份媒体被转推/引用时会写入多条
+// downloads 记录，但它们复用同一个 file_path。不归并时这些重复记录会挤满 LIMIT，
+// 把真正还在磁盘上的那份文件挤出结果之外，导致调用方误判"没有副本"而重新下载一次。
 // 记录里的文件未必仍然存在，调用方必须自行校验。
 func (s *Store) FindDownloadsByMediaKey(ctx context.Context, mediaKey string, limit int) ([]DownloadRecord, error) {
+	return s.FindDownloadsByMediaKeyPage(ctx, mediaKey, limit, 0)
+}
+
+func (s *Store) FindDownloadsByMediaKeyPage(ctx context.Context, mediaKey string, limit int, offset int) ([]DownloadRecord, error) {
 	mediaKey = strings.TrimSpace(mediaKey)
 	if mediaKey == "" {
 		return nil, nil
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 20
+	if offset < 0 {
+		offset = 0
 	}
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `
 SELECT * FROM downloads
-WHERE media_key = ? AND file_path <> ''
+WHERE id IN (
+	SELECT MIN(id) FROM downloads
+	WHERE media_key = ? AND file_path <> ''
+	GROUP BY file_path
+)
 ORDER BY id ASC
-LIMIT ?`, mediaKey, limit)
+LIMIT ? OFFSET ?`, mediaKey, normalizedMediaCopyLimit(limit), offset)
 	return items, err
 }
 
+// FindDownloadsByContentHash 按内容哈希回查已归档的副本，用于下载后发现同样字节的文件
+// 已经存在时删掉本次多余的副本。与 FindDownloadsByMediaKey 同样按 file_path 归并，
+// 避免重复记录把仍在磁盘上的那份文件挤出 LIMIT。
 func (s *Store) FindDownloadsByContentHash(ctx context.Context, contentHash string, limit int) ([]DownloadRecord, error) {
+	return s.FindDownloadsByContentHashPage(ctx, contentHash, limit, 0)
+}
+
+func (s *Store) FindDownloadsByContentHashPage(ctx context.Context, contentHash string, limit int, offset int) ([]DownloadRecord, error) {
 	contentHash = strings.TrimSpace(contentHash)
 	if contentHash == "" {
 		return nil, nil
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 20
+	if offset < 0 {
+		offset = 0
 	}
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `
 SELECT * FROM downloads
-WHERE content_hash = ? AND file_path <> ''
+WHERE id IN (
+	SELECT MIN(id) FROM downloads
+	WHERE content_hash = ? AND file_path <> ''
+	GROUP BY file_path
+)
 ORDER BY id ASC
-LIMIT ?`, contentHash, limit)
+LIMIT ? OFFSET ?`, contentHash, normalizedMediaCopyLimit(limit), offset)
 	return items, err
 }
 
