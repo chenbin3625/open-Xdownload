@@ -3,7 +3,7 @@ module github.com/chenbin3625/open-Xdownload
 go 1.26.6
 
 require (
-	github.com/andybalholm/brotli v1.2.4
+	github.com/andybalholm/brotli v1.2.5
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/quic-go/quic-go v0.62.0
