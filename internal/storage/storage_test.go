@@ -3,8 +3,12 @@ package storage
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1009,5 +1013,258 @@ func TestFindDownloadsByMediaKeyFindsEquivalentURLs(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Fatalf("empty key matched %d records, want 0", len(empty))
+	}
+}
+
+func TestRewriteDownloadPathPrefixMovesOnlyRecordsInsideDirectory(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	root := t.TempDir()
+	oldDir := filepath.Join(root, "users", "Alice(alice)")
+	newDir := filepath.Join(root, "users", "Alice2(alice)")
+	// 下划线与百分号若走 LIKE 会被当作通配符：确保前缀按字面量比较。
+	sibling := filepath.Join(root, "users", "Alice(alice)_backup", "x.jpg")
+	wildcard := filepath.Join(root, "users", "AliceXalice)", "y.jpg")
+	records := map[string]string{
+		"t1": filepath.Join(oldDir, "a.jpg"),
+		"t2": filepath.Join(oldDir, "nested", "b.mp4"),
+		"t3": sibling,
+		"t4": wildcard,
+	}
+	ids := map[string]int64{}
+	for tweetID, path := range records {
+		record, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: tweetID, MediaURL: "https://pbs.twimg.com/media/" + tweetID + ".jpg", FilePath: path})
+		if err != nil {
+			t.Fatalf("create download: %v", err)
+		}
+		ids[tweetID] = record.ID
+	}
+
+	rewritten, err := store.RewriteDownloadPathPrefix(ctx, oldDir, newDir)
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if rewritten != 2 {
+		t.Fatalf("rewritten = %d, want 2", rewritten)
+	}
+	want := map[string]string{
+		"t1": filepath.Join(newDir, "a.jpg"),
+		"t2": filepath.Join(newDir, "nested", "b.mp4"),
+		"t3": sibling,
+		"t4": wildcard,
+	}
+	for tweetID, path := range want {
+		record, err := store.GetDownload(ctx, ids[tweetID])
+		if err != nil || record == nil {
+			t.Fatalf("get download %s: %v", tweetID, err)
+		}
+		if record.FilePath != path {
+			t.Errorf("%s file_path = %q, want %q", tweetID, record.FilePath, path)
+		}
+	}
+}
+
+func TestRewriteDownloadPathPrefixHandlesMultibyteNames(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "zhangsan", "zhangsan")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	// 显示名常含中文/emoji：SQLite 的 substr 按字符计数，而 Go len() 按字节计数。
+	root := t.TempDir()
+	oldDir := filepath.Join(root, "users", "张三🎨(zhangsan)")
+	newDir := filepath.Join(root, "users", "张三丰(zhangsan)")
+	record, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: "t1", MediaURL: "https://pbs.twimg.com/media/t1.jpg", FilePath: filepath.Join(oldDir, "照片.jpg")})
+	if err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+	rewritten, err := store.RewriteDownloadPathPrefix(ctx, oldDir, newDir)
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	got, err := store.GetDownload(ctx, record.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get download: %v", err)
+	}
+	if want := filepath.Join(newDir, "照片.jpg"); rewritten != 1 || got.FilePath != want {
+		t.Fatalf("rewritten = %d, file_path = %q, want 1 and %q", rewritten, got.FilePath, want)
+	}
+}
+
+func TestUpsertUserAllowsRecycledScreenName(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// 用户 1 曾叫 foo，改名后没有再归档过，库里仍是旧名；foo 随后被用户 2 注册。
+	if _, err := store.UpsertUser(ctx, User{ID: "1", ScreenName: "foo", Name: "Old"}); err != nil {
+		t.Fatalf("upsert user 1: %v", err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "2", ScreenName: "foo", Name: "New"}); err != nil {
+		t.Fatalf("recycled screen_name must not fail archiving: %v", err)
+	}
+	// 两个 screen_name 都为空的用户（解析缺字段）同样不能互相冲突。
+	if _, err := store.UpsertUser(ctx, User{ID: "3"}); err != nil {
+		t.Fatalf("upsert user 3: %v", err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "4"}); err != nil {
+		t.Fatalf("empty screen_name must not conflict: %v", err)
+	}
+}
+
+func TestMigrateDropsLegacyUniqueScreenNameIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// 模拟旧库：唯一索引仍然存在。
+	if _, err := store.db.Exec(`DROP INDEX IF EXISTS idx_users_screen_name; CREATE UNIQUE INDEX idx_users_screen_name ON users (screen_name); DELETE FROM schema_migrations WHERE name = 'drop_unique_users_screen_name'`); err != nil {
+		t.Fatalf("recreate legacy index: %v", err)
+	}
+	store.Close()
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer store.Close()
+	var unique int
+	if err := store.db.Get(&unique, `SELECT COUNT(*) FROM pragma_index_list('users') WHERE name = 'idx_users_screen_name' AND "unique" = 1`); err != nil {
+		t.Fatalf("inspect index: %v", err)
+	}
+	if unique != 0 {
+		t.Fatal("legacy unique index on users.screen_name should be replaced by a plain index")
+	}
+}
+
+func TestTouchFailedTweetMovesItToBackOfRetryQueue(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "u1", ScreenName: "alice", Name: "Alice"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	entity, err := store.EnsureUserEntity(ctx, "u1", t.TempDir(), "Alice(alice)")
+	if err != nil {
+		t.Fatalf("ensure entity: %v", err)
+	}
+	first, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "1", Payload: "{}", Error: "old"})
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "2", Payload: "{}", Error: "old"}); err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if err := store.TouchFailedTweet(ctx, first.ID, "retry failed again"); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	items, err := store.ListFailedTweets(ctx, 1)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// 重试失败的条目必须排到队尾，否则前 LIMIT 条一直失败就会永远挡住后面的条目。
+	if len(items) != 1 || items[0].TweetID != "2" {
+		t.Fatalf("head of retry queue = %+v, want tweet 2 after tweet 1 was requeued", items)
+	}
+	all, err := store.ListFailedTweets(ctx, 10)
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if last := all[len(all)-1]; last.TweetID != "1" || last.Error != "retry failed again" {
+		t.Fatalf("requeued item = %+v, want tweet 1 with the latest error", last)
+	}
+}
+
+func TestRetryJobConcurrentDoubleClickCreatesOneJob(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	original, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	original.Status = JobFailed
+	original.Error = "boom"
+	if err := store.UpdateJob(ctx, original); err != nil {
+		t.Fatalf("fail job: %v", err)
+	}
+
+	// 双击"重试"或两个标签页同时点：只能生成一个新任务，否则同一目标被重复归档。
+	const clicks = 8
+	var wg sync.WaitGroup
+	var created atomic.Int64
+	for i := 0; i < clicks; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.RetryJob(ctx, original.ID); err == nil {
+				created.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if created.Load() != 1 {
+		t.Fatalf("concurrent retries created %d jobs, want 1", created.Load())
+	}
+	var active int
+	if err := store.db.Get(&active, `SELECT COUNT(*) FROM jobs WHERE kind = ? AND input = ? AND status = ?`, JobKindUser, "alice", JobPending); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("pending retry jobs = %d, want 1", active)
+	}
+}
+
+func TestCollectOrphanLibraryFilesStopsWhenCanceled(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 50; i++ {
+		dir := filepath.Join(root, "users", strconv.Itoa(i))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "a.jpg"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := collectOrphanLibraryFiles(context.Background(), root, map[string]struct{}{}, nil)
+	if err != nil || len(items) != 50 {
+		t.Fatalf("live walk = %d items, err %v; want 50", len(items), err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	// 请求被取消（用户切走页面）后不能继续遍历整个下载目录，结果也不能进缓存。
+	if _, err := collectOrphanLibraryFiles(canceled, root, map[string]struct{}{}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
