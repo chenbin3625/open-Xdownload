@@ -57,8 +57,13 @@ type Options struct {
 }
 
 func New() *Downloader {
+	return NewWithTimeout(10 * time.Minute)
+}
+
+// NewWithTimeout 返回单次媒体请求（含读取 body）总超时为 timeout 的下载器。
+func NewWithTimeout(timeout time.Duration) *Downloader {
 	return &Downloader{
-		client: httpx.Client("", 10*time.Minute),
+		client: httpx.Client("", timeout),
 	}
 }
 
@@ -594,4 +599,51 @@ func truncateUTF8Bytes(value string, maxBytes int) string {
 		builder.WriteRune(ch)
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+// staleTempFilePatterns 匹配下载器与海报回填写出的临时文件（见 DownloadWithOptions 与
+// jobs/preview.go）。它们正常情况下会被重命名或删除，只有进程在写入中途被杀才会残留。
+var staleTempFilePatterns = []string{".xdl-*.part", ".preview-*.jpg"}
+
+// RemoveStaleTempFiles 删除 root 下修改时间早于 olderThan 的残留临时文件，返回删除数量。
+// 按年龄过滤，不会误删正在写入的临时文件。
+func RemoveStaleTempFiles(ctx context.Context, root string, olderThan time.Duration) (int, error) {
+	cutoff := time.Now().Add(-olderThan)
+	removed := 0
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			// 单个目录不可读不影响其余目录的清理。
+			if entry != nil && entry.IsDir() && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() || !isStaleTempFileName(entry.Name()) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			return nil
+		}
+		if err := os.Remove(path); err == nil {
+			removed++
+		}
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return removed, nil
+	}
+	return removed, err
+}
+
+func isStaleTempFileName(name string) bool {
+	for _, pattern := range staleTempFilePatterns {
+		if matched, _ := filepath.Match(pattern, name); matched {
+			return true
+		}
+	}
+	return false
 }

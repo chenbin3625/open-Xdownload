@@ -2,6 +2,8 @@ package jobs
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
+	_ "modernc.org/sqlite"
 )
 
 func TestCancelJobStopsActiveDownload(t *testing.T) {
@@ -532,14 +535,19 @@ func TestNewestTweetIDPicksFirstWhenAlreadyDescending(t *testing.T) {
 	}
 }
 
-func TestShouldRetryMediaErrorSkipsForbiddenAndNotFound(t *testing.T) {
+// TestShouldRetryMediaErrorQueuesTransientForbidden：X 对过期的 video.twimg.com 签名例行
+// 返回裸 403，那是瞬时状态，必须进失败队列等待重试（与 retryFailedTweets 的约定一致）；
+// 只有 404/410/DMCA 这类永久失效才不重试。
+func TestShouldRetryMediaErrorQueuesTransientForbidden(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 		want bool
 	}{
-		{name: "forbidden", err: &downloader.HTTPStatusError{StatusCode: http.StatusForbidden}, want: false},
+		{name: "bare forbidden", err: &downloader.HTTPStatusError{StatusCode: http.StatusForbidden, Payload: "Forbidden"}, want: true},
+		{name: "dmca forbidden", err: &downloader.HTTPStatusError{StatusCode: http.StatusForbidden, Payload: `{"error_response":"Dmcaed"}`}, want: false},
 		{name: "not found", err: &downloader.HTTPStatusError{StatusCode: http.StatusNotFound}, want: false},
+		{name: "gone", err: &downloader.HTTPStatusError{StatusCode: http.StatusGone}, want: false},
 		{name: "too many requests", err: &downloader.HTTPStatusError{StatusCode: http.StatusTooManyRequests}, want: true},
 		{name: "plain error", err: context.DeadlineExceeded, want: true},
 	}
@@ -1392,5 +1400,376 @@ func TestDownloadMediaConcurrentSameTargetDownloadsOnce(t *testing.T) {
 	}
 	if payload, err := os.ReadFile(filepath.Join(root, "photo.mp4")); err != nil || string(payload) != "viral media" {
 		t.Fatalf("archived media = %q, err = %v", payload, err)
+	}
+}
+
+func TestIsCancellationOnlyTrustsJobContext(t *testing.T) {
+	live := context.Background()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// net/http 的 Client.Timeout / ResponseHeaderTimeout 错误满足
+	// errors.Is(err, context.DeadlineExceeded)。它们是网络故障，不是用户取消：
+	// 若按取消处理，handleInterrupt 发现任务并未被取消便什么都不写，任务会
+	// 永久停在 downloading，直到重启。
+	client := &http.Client{Timeout: 50 * time.Millisecond}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	_, timeoutErr := client.Get(server.URL)
+	if timeoutErr == nil || !errors.Is(timeoutErr, context.DeadlineExceeded) {
+		t.Fatalf("precondition: expected an http timeout matching DeadlineExceeded, got %v", timeoutErr)
+	}
+
+	cases := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{name: "http client timeout on live job", ctx: live, err: timeoutErr, want: false},
+		{name: "bare deadline exceeded on live job", ctx: live, err: context.DeadlineExceeded, want: false},
+		{name: "wrapped canceled on live job", ctx: live, err: fmt.Errorf("download: %w", context.Canceled), want: false},
+		{name: "job context canceled", ctx: canceled, err: context.Canceled, want: true},
+		{name: "job context canceled with other error", ctx: canceled, err: errors.New("read: connection reset"), want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCancellation(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("isCancellation() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMediaJobFailsInsteadOfHangingOnNetworkTimeout(t *testing.T) {
+	// 服务端先返回响应头，随后不再发送任何数据：请求在 body 读取阶段撞上客户端超时。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: t.TempDir(), MaxConcurrency: 1}); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, server.URL+"/media.mp4", "media")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	manager.downloader = downloader.NewWithTimeout(100 * time.Millisecond)
+	managerCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	manager.Start(managerCtx)
+	manager.Notify()
+
+	eventually(t, func() bool {
+		got, err := store.GetJob(ctx, job.ID)
+		return err == nil && got.Status == storage.JobFailed
+	})
+}
+
+func TestEnsureUserEntityRenameRewritesDownloadPaths(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	cfg := config.AppConfig{DownloadDir: root}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+
+	before := xclient.User{ID: "u1", Name: "Alice", ScreenName: "alice"}
+	if _, err := store.UpsertUser(ctx, storageUser(before)); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	_, oldDir, err := manager.ensureUserEntity(ctx, cfg, before)
+	if err != nil {
+		t.Fatalf("ensure user entity: %v", err)
+	}
+	oldFile := filepath.Join(oldDir, "a.jpg")
+	if err := os.WriteFile(oldFile, []byte("img"), 0o600); err != nil {
+		t.Fatalf("write media: %v", err)
+	}
+	job, err := store.CreateJob(ctx, storage.JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	record, err := store.CreateDownload(ctx, storage.DownloadRecord{JobID: job.ID, TweetID: "t1", MediaURL: "https://pbs.twimg.com/media/a.jpg", FilePath: oldFile})
+	if err != nil {
+		t.Fatalf("create download: %v", err)
+	}
+
+	after := xclient.User{ID: "u1", Name: "Alice2", ScreenName: "alice"}
+	_, newDir, err := manager.ensureUserEntity(ctx, cfg, after)
+	if err != nil {
+		t.Fatalf("ensure renamed user entity: %v", err)
+	}
+	if newDir == oldDir {
+		t.Fatalf("expected directory to change on display name change")
+	}
+	got, err := store.GetDownload(ctx, record.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get download: %v", err)
+	}
+	if want := filepath.Join(newDir, "a.jpg"); got.FilePath != want {
+		t.Fatalf("file_path = %q, want %q (media library would 404 after rename)", got.FilePath, want)
+	}
+	if _, err := os.Stat(got.FilePath); err != nil {
+		t.Fatalf("rewritten file_path does not exist on disk: %v", err)
+	}
+}
+
+func TestEnsureUserEntityKeepsOldNameWhenRenameFails(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	cfg := config.AppConfig{DownloadDir: root}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+
+	before := xclient.User{ID: "u1", Name: "Alice", ScreenName: "alice"}
+	if _, err := store.UpsertUser(ctx, storageUser(before)); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	_, oldDir, err := manager.ensureUserEntity(ctx, cfg, before)
+	if err != nil {
+		t.Fatalf("ensure user entity: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "a.jpg"), []byte("img"), 0o600); err != nil {
+		t.Fatalf("write media: %v", err)
+	}
+	// 目标名已被一个非空目录占用：os.Rename 会失败。
+	after := xclient.User{ID: "u1", Name: "Alice2", ScreenName: "alice"}
+	blocker := filepath.Join(root, "users", safeName(after.Title()))
+	if err := os.MkdirAll(blocker, 0o700); err != nil {
+		t.Fatalf("mkdir blocker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(blocker, "other.jpg"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	entity, dir, err := manager.ensureUserEntity(ctx, cfg, after)
+	if err != nil {
+		t.Fatalf("ensure user entity: %v", err)
+	}
+	// 改名失败时继续使用旧目录，避免同一用户的文件分散到两个目录。
+	if dir != oldDir || entity.Name != filepath.Base(oldDir) {
+		t.Fatalf("dir = %q (entity %q), want old dir %q kept after failed rename", dir, entity.Name, oldDir)
+	}
+}
+
+func TestFailingDueScheduleIsBackedOff(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	schedule, err := store.CreateArchiveSchedule(ctx, storage.ArchiveSchedule{
+		Name:            "broken",
+		Enabled:         true,
+		IntervalMinutes: storage.MinArchiveScheduleIntervalMinutes,
+		Items:           []storage.ArchiveScheduleItem{{Kind: storage.JobKindUser, Input: "alice"}},
+	})
+	if err != nil {
+		t.Fatalf("create schedule: %v", err)
+	}
+	// 让它到期，并把库里的目标清单改坏（模拟校验常量收紧后遗留的旧计划）：领取会失败。
+	due := time.Now().UTC().Add(-time.Minute)
+	if _, err := store.RescheduleArchiveSchedule(ctx, schedule.ID, due); err != nil {
+		t.Fatalf("reschedule: %v", err)
+	}
+	raw, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `UPDATE archive_schedules SET items_json = '[{"kind":"media_url","input":"x"}]' WHERE id = ?`, schedule.ID); err != nil {
+		t.Fatalf("corrupt items: %v", err)
+	}
+	_ = raw.Close()
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	manager.enqueueDueArchiveSchedules(ctx)
+
+	got, err := store.GetArchiveSchedule(ctx, schedule.ID)
+	if err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	// 失败的计划必须被推后，否则每 2 秒 tick 都会重试，并按 next_run_at 升序挤占
+	// ListDueArchiveSchedules 的 LIMIT 10，让其他计划永远轮不到。
+	if !got.NextRunAt.After(time.Now().UTC()) {
+		t.Fatalf("next_run_at = %v, want pushed into the future after a failed claim", got.NextRunAt)
+	}
+}
+
+func TestRetryFailedTweetsRequeuesStillFailingItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	cfg := config.AppConfig{DownloadDir: t.TempDir(), AutoRetryFailed: true}
+	job, err := store.CreateJob(ctx, storage.JobKindFailedRetry, "retry", "retry")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := store.UpsertUser(ctx, storage.User{ID: "u1", ScreenName: "alice", Name: "Alice"}); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	entity, err := store.EnsureUserEntity(ctx, "u1", filepath.Join(cfg.DownloadDir, "users"), "Alice(alice)")
+	if err != nil {
+		t.Fatalf("ensure entity: %v", err)
+	}
+	payload := func(id string) string {
+		return `{"id":"` + id + `","media":[{"type":"video","bestUrl":"` + server.URL + `/` + id + `.mp4"}]}`
+	}
+	head, err := store.CreateFailedTweet(ctx, storage.FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "1", Payload: payload("1"), Error: "old"})
+	if err != nil {
+		t.Fatalf("create head: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := store.CreateFailedTweet(ctx, storage.FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "2", Payload: payload("2"), Error: "old"}); err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	if retried := manager.retryFailedTweets(ctx, ctx, job, cfg, true); retried != 0 {
+		t.Fatalf("retried = %d, want 0 while upstream is down", retried)
+	}
+
+	items, err := store.ListFailedTweets(ctx, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("failed tweets = %d, want both kept for a later retry", len(items))
+	}
+	for _, item := range items {
+		if item.ID == head.ID && !item.UpdatedAt.After(head.UpdatedAt) {
+			t.Fatalf("head item updated_at not refreshed after a failed retry: %v", item.UpdatedAt)
+		}
+		if item.Error == "old" {
+			t.Fatalf("item %s error not refreshed after a failed retry", item.TweetID)
+		}
+	}
+}
+
+func TestArchiveTweetsAdvancesCursorWhenFailuresAreQueued(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "bad") {
+			http.Error(w, "Forbidden", http.StatusForbidden) // 过期签名的裸 403：瞬时失败
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer server.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	cfg := config.AppConfig{DownloadDir: t.TempDir(), MaxFilenameLength: config.DefaultMaxFilenameLength, FileNamingMode: config.FileNamingTweetText, StorageType: config.StorageLocal}
+	job, err := store.CreateJob(ctx, storage.JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	user := xclient.User{ID: "u1", Name: "Alice", ScreenName: "alice"}
+	if _, err := store.UpsertUser(ctx, storageUser(user)); err != nil {
+		t.Fatalf("upsert user: %v", err)
+	}
+	entity, dir, err := manager.ensureUserEntity(ctx, cfg, user)
+	if err != nil {
+		t.Fatalf("ensure entity: %v", err)
+	}
+	tweets := []parser.TweetData{
+		{ID: "200", Text: "ok", Media: []parser.Media{{Type: parser.MediaVideo, BestURL: server.URL + "/good.mp4"}}},
+		{ID: "100", Text: "bad", Media: []parser.Media{{Type: parser.MediaVideo, BestURL: server.URL + "/bad.mp4"}}},
+	}
+
+	stats, err := manager.archiveTweets(ctx, ctx, job, cfg, user, entity, dir, tweets, nil)
+	if err != nil {
+		t.Fatalf("archive tweets: %v", err)
+	}
+	if stats.Failed != 1 || stats.Downloaded != 1 {
+		t.Fatalf("stats = %+v, want 1 downloaded and 1 failed", stats)
+	}
+	queued, err := store.ListFailedTweets(ctx, 10)
+	if err != nil {
+		t.Fatalf("list failed: %v", err)
+	}
+	if len(queued) != 1 || queued[0].TweetID != "100" {
+		t.Fatalf("failed queue = %+v, want tweet 100 queued for retry", queued)
+	}
+	got, err := store.GetUserEntity(ctx, entity.ID)
+	if err != nil {
+		t.Fatalf("get entity: %v", err)
+	}
+	// 失败已由失败队列负责补齐，游标必须前进；否则开了增量归档也会每次全量扫描。
+	if got.LastSeenTweetID != "200" {
+		t.Fatalf("last_seen_tweet_id = %q, want 200", got.LastSeenTweetID)
+	}
+}
+
+func TestDownloadableMediaCountSkipsUnplayableVideos(t *testing.T) {
+	tweet := parser.TweetData{Media: []parser.Media{
+		{Type: parser.MediaVideo, URL: "https://pbs.twimg.com/ext_tw_video_thumb/t.jpg", PreviewURL: "https://pbs.twimg.com/ext_tw_video_thumb/t.jpg"},
+		{Type: parser.MediaPhoto, URL: "https://pbs.twimg.com/media/a.jpg", BestURL: "https://pbs.twimg.com/media/a.jpg"},
+	}}
+	if got := downloadableMediaCount(tweet); got != 1 {
+		t.Fatalf("downloadableMediaCount = %d, want 1 (video has no mp4 variant)", got)
+	}
+	onlyVideo := parser.TweetData{Media: tweet.Media[:1]}
+	if got := downloadableMediaCount(onlyVideo); got != 0 {
+		t.Fatalf("downloadableMediaCount = %d, want 0", got)
+	}
+}
+
+func TestSyncLinkUsesPrivatePermissions(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "users", "Alice(alice)")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listDir := filepath.Join(root, "lists", "private list(1)")
+	if err := syncLink(filepath.Join(listDir, "Alice(alice)"), target); err != nil {
+		t.Fatalf("sync link: %v", err)
+	}
+	info, err := os.Stat(listDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 与媒体目录的 0700 加固一致：列表目录名会暴露私密列表名与成员。
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("list directory permissions = %o, want no group/other access", perm)
 	}
 }

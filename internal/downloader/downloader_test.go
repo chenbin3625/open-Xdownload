@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 )
@@ -581,5 +582,51 @@ func TestOpenRejectsRedirectOutsideTwimg(t *testing.T) {
 	_, err := New().Open(context.Background(), server.URL+"/media.mp4", Options{})
 	if err == nil || !strings.Contains(err.Error(), "非 twimg.com") {
 		t.Fatalf("Open(redirect) error = %v, want non-twimg redirect rejection", err)
+	}
+}
+
+func TestRemoveStaleTempFilesKeepsFreshAndRegularFiles(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "users", "Alice(alice)")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, age time.Duration) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Now().Add(-age)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stalePart := filepath.Join(nested, ".xdl-123.part")
+	stalePreview := filepath.Join(nested, ".preview-456.jpg")
+	freshPart := filepath.Join(nested, ".xdl-789.part") // 可能是正在进行的下载
+	media := filepath.Join(nested, "photo.jpg")
+	lookalike := filepath.Join(nested, "xdl-notes.part")
+	write(stalePart, 3*time.Hour)
+	write(stalePreview, 3*time.Hour)
+	write(freshPart, time.Minute)
+	write(media, 3*time.Hour)
+	write(lookalike, 3*time.Hour)
+
+	removed, err := RemoveStaleTempFiles(context.Background(), root, time.Hour)
+	if err != nil {
+		t.Fatalf("remove stale temp files: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	for _, path := range []string{stalePart, stalePreview} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed", filepath.Base(path))
+		}
+	}
+	for _, path := range []string{freshPart, media, lookalike} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s should be kept: %v", filepath.Base(path), err)
+		}
 	}
 }
