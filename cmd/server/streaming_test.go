@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chenbin3625/open-Xdownload/internal/httpapi"
+	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 )
 
 // 确认 ReadTimeout 不会掐断长连接流式响应（SSE）。
@@ -104,5 +107,37 @@ func TestWebAppSecurityHeaders(t *testing.T) {
 	}
 	if strings.Contains(scriptDirective, "unsafe-inline") || strings.Contains(scriptDirective, "unsafe-eval") {
 		t.Errorf("script-src 不应放开 unsafe-*: %s", scriptDirective)
+	}
+}
+
+// 浏览器开着页面（/api/events 长连接）时，Shutdown 必须很快返回，而不是等满超时。
+func TestShutdownDoesNotWaitForOpenEventStream(t *testing.T) {
+	eventBus := jobs.NewEventBus()
+	api := httpapi.NewServer(nil, nil, nil, eventBus)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := newHTTPServer(listener.Addr().String(), api.Routes())
+	server.RegisterOnShutdown(eventBus.CloseAll)
+	go func() { _ = server.Serve(listener) }()
+
+	response, err := http.Get("http://" + listener.Addr().String() + "/api/events")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer response.Body.Close()
+	if line, err := bufio.NewReader(response.Body).ReadString('\n'); err != nil || !strings.HasPrefix(line, ": connected") {
+		t.Fatalf("event stream not established: %q %v", line, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := server.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v (blocked %v on the open event stream)", err, time.Since(started))
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("shutdown took %v with an open event stream", elapsed)
 	}
 }

@@ -10,10 +10,13 @@ import {
   applyDashboardMeta,
   applyDashboardEvent,
   prependJobsToCaches,
+  invalidateWorkbenchQueries,
   sameJob,
 } from "./useDashboardEvents";
 import {
+  archiveScheduleQueryRoot,
   dashboardMetaQueryRoot,
+  libraryDownloadsQueryRoot,
   jobsQueryRoot,
   type DashboardMeta,
   type Job,
@@ -281,5 +284,64 @@ describe("patchDashboardJobCaches ordering guard", () => {
     });
 
     expect(result).toBe("refresh-meta");
+  });
+});
+
+function isInvalidated(queryClient: QueryClient, key: readonly unknown[]) {
+  return queryClient.getQueryState(key)?.isInvalidated ?? false;
+}
+
+function seedRoots(queryClient: QueryClient) {
+  queryClient.setQueryData(archiveScheduleQueryRoot, []);
+  queryClient.setQueryData(libraryDownloadsQueryRoot, { items: [] });
+  queryClient.setQueryData(jobsQueryRoot, makeJobsPage([]));
+}
+
+describe("archive schedule events", () => {
+  it.each(["archive_schedule.created", "archive_schedule.updated", "archive_schedule.deleted", "archive_schedule.ran"])(
+    "%s only invalidates the schedule query",
+    (type) => {
+      const queryClient = new QueryClient();
+      seedRoots(queryClient);
+      const result = applyDashboardEvent(queryClient, { type, payload: { id: 1 } });
+      expect(result).toBe("handled");
+      expect(isInvalidated(queryClient, archiveScheduleQueryRoot)).toBe(true);
+      expect(isInvalidated(queryClient, libraryDownloadsQueryRoot)).toBe(false);
+      expect(isInvalidated(queryClient, jobsQueryRoot)).toBe(false);
+    },
+  );
+
+  it("invalidateWorkbenchQueries also refreshes the schedule list", async () => {
+    const queryClient = new QueryClient();
+    seedRoots(queryClient);
+    await invalidateWorkbenchQueries(queryClient);
+    expect(isInvalidated(queryClient, archiveScheduleQueryRoot)).toBe(true);
+  });
+});
+
+describe("terminal job.updated", () => {
+  it("invalidates the library downloads query", () => {
+    const queryClient = new QueryClient();
+    const job = makeJob({ id: 1, status: "downloading" });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20], makeJobsPage([job]));
+    queryClient.setQueryData([...libraryDownloadsQueryRoot, "all"], { items: [] });
+    applyDashboardEvent(queryClient, {
+      type: "job.updated",
+      payload: makeJob({ id: 1, status: "completed", progress: 1, updatedAt: "2024-01-01T00:00:10Z" }),
+      meta: { stats: { total: 1, active: 0, completed: 1, failed: 0 }, failedTweetCount: 0 },
+    });
+    expect(isInvalidated(queryClient, [...libraryDownloadsQueryRoot, "all"])).toBe(true);
+  });
+
+  it("leaves the library query alone for non-terminal progress", () => {
+    const queryClient = new QueryClient();
+    const job = makeJob({ id: 1, status: "downloading" });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20], makeJobsPage([job]));
+    queryClient.setQueryData(libraryDownloadsQueryRoot, { items: [] });
+    applyDashboardEvent(queryClient, {
+      type: "job.updated",
+      payload: makeJob({ id: 1, progress: 0.8, updatedAt: "2024-01-01T00:00:10Z" }),
+    });
+    expect(isInvalidated(queryClient, libraryDownloadsQueryRoot)).toBe(false);
   });
 });

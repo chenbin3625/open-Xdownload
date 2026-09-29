@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -337,9 +338,9 @@ func TestBackfillDownloadsMediaKeyFillsHistoricalRows(t *testing.T) {
 		mediaURL string
 		want     string
 	}{
-		{"tweet-1", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc"},
-		{"tweet-2", "https://pbs.twimg.com/media/abc.jpg", "https://pbs.twimg.com/media/abc"},
-		{"", "https://pbs.twimg.com/media/xyz?format=png", "https://pbs.twimg.com/media/xyz"},
+		{"tweet-1", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc?format=mp4"},
+		{"tweet-2", "https://pbs.twimg.com/media/abc.jpg", "https://pbs.twimg.com/media/abc?format=jpg"},
+		{"", "https://pbs.twimg.com/media/xyz?format=png", "https://pbs.twimg.com/media/xyz?format=png"},
 	}
 	for _, row := range rows {
 		if _, err := store.db.Exec(`INSERT INTO downloads (job_id, tweet_id, media_url, media_key, file_path, bytes, created_at) VALUES (?, ?, ?, '', ?, ?, ?)`,
@@ -382,5 +383,102 @@ func TestBackfillDownloadsMediaKeyFillsHistoricalRows(t *testing.T) {
 	}
 	if applied != 1 {
 		t.Fatalf("migration recorded %d times, want 1", applied)
+	}
+}
+
+func TestUpgradeRekeysExistingDownloadFormats(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindList, "list", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rawURL := range []string{
+		"https://pbs.twimg.com/media/shared.jpg",
+		"https://pbs.twimg.com/media/shared?format=png",
+	} {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{
+			JobID: job.ID, TweetID: rawURL, MediaURL: rawURL, FilePath: "/archive/shared",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE downloads SET media_key = 'https://pbs.twimg.com/media/shared'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE name = 'rekey_downloads_media_formats'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	items, err := store.ListDownloads(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].MediaKey == items[1].MediaKey {
+		t.Fatalf("upgraded identities must distinguish formats: %+v", items)
+	}
+}
+
+// schemaColumnsForVersion 记录每个 schemaVersion 对应的表/列集合。给表加列或新增表而
+// 不递增 schemaVersion 时，回滚到旧二进制会通过版本闸门，随后在 SELECT * 上报
+// "missing destination name"：本测试让这种遗漏在 CI 里直接失败。结构变更时：递增
+// schemaVersion，并在这里登记新版本的完整列集合。
+var schemaColumnsForVersion = map[int]string{
+	// v2（v0.8.3 起）：downloads 新增 content_hash。
+	2: "app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
+		"archive_schedules(created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
+		"dashboard_counters(active,completed,failed,failed_tweet_count,id,total);" +
+		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,tweet_id);" +
+		"failed_media(created_at,error,id,job_id,media_url);" +
+		"failed_tweets(created_at,entity_id,error,id,job_id,payload,tweet_id,updated_at);" +
+		"jobs(created_at,error,id,input,kind,message,progress,status,title,updated_at);" +
+		"list_entities(id,list_id,name,parent_dir,updated_at);" +
+		"schema_migrations(applied_at,name);" +
+		"twitter_lists(id,name,owner_user_id,updated_at);" +
+		"unavailable_media(created_at,error,media_url,tweet_id,updated_at);" +
+		"user_entities(id,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id);" +
+		"user_links(id,list_entity_id,name,updated_at,user_id);" +
+		"user_previous_names(id,name,recorded_at,screen_name,user_id);" +
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
+}
+
+func TestSchemaVersionMatchesTableColumns(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	var tables []string
+	if err := store.db.Select(&tables, `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`); err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	parts := make([]string, 0, len(tables))
+	for _, table := range tables {
+		var columns []string
+		if err := store.db.Select(&columns, `SELECT name FROM pragma_table_info(?) ORDER BY name`, table); err != nil {
+			t.Fatalf("columns of %s: %v", table, err)
+		}
+		parts = append(parts, table+"("+strings.Join(columns, ",")+")")
+	}
+	got := strings.Join(parts, ";")
+
+	want, ok := schemaColumnsForVersion[schemaVersion]
+	if !ok {
+		t.Fatalf("schemaVersion %d has no registered column set; add it to schemaColumnsForVersion:\n%s", schemaVersion, got)
+	}
+	if got != want {
+		t.Fatalf("table columns changed without bumping schemaVersion (%d).\nBump schemaVersion and register the new set.\ngot:  %s\nwant: %s", schemaVersion, got, want)
 	}
 }

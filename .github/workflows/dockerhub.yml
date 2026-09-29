@@ -62,8 +62,14 @@ jobs:
               fi
               echo "CI is still running for $SHA, waiting..."
             elif [ "$SECONDS" -ge 300 ]; then
-              # Older commits (or tags on them) may no longer have a CI run at all;
-              # do not block a release forever in that case.
+              # ci.yml only runs for pushes to main, so a tag on a commit that never
+              # landed on main has no CI run at all. Tags produce versioned release
+              # images: refuse instead of publishing untested code. Re-run with
+              # workflow_dispatch + skip_ci_check to publish deliberately.
+              if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+                echo "::error::No CI run found for tagged commit $SHA; refusing to publish an untested release image."
+                exit 1
+              fi
               echo "::warning::No CI run found for $SHA, publishing without a CI gate."
               exit 0
             else

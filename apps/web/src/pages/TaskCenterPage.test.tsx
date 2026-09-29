@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as commonUI from "../components/common/CommonUI";
 import { TooltipProvider } from "../components/ui/Overlay";
+import { toast } from "../components/ui/Toast";
 import type { DownloadRecord, FailedMedia, Job } from "../lib/api";
 import * as api from "../lib/api";
 import { TaskCenterPage } from "./TaskCenterPage";
@@ -14,6 +16,15 @@ vi.mock("../lib/api", async (importOriginal) => {
   return {
     ...actual,
     getJobFiles: vi.fn(),
+    retryFailedTweets: vi.fn(),
+  };
+});
+
+vi.mock("../components/common/CommonUI", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/common/CommonUI")>();
+  return {
+    ...actual,
+    writeClipboard: vi.fn(),
   };
 });
 
@@ -308,3 +319,96 @@ describe("TaskCenterPage", () => {
   });
 });
 
+
+function renderTaskCenter(failedTweetCount: number) {
+  return renderWithClient(
+    <TaskCenterPage
+      jobs={mockJobs}
+      failedTweetCount={failedTweetCount}
+      pagination={{ page: 1, pageSize: 20, total: 3, totalPages: 1 }}
+      onPageChange={vi.fn()}
+      onPageSizeChange={vi.fn()}
+      onOpenCreateModal={vi.fn()}
+      onOpenFailedDrawer={vi.fn()}
+    />,
+  );
+}
+
+describe("TaskCenterPage 失败推文重试", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("失败推文队列为空时不展示重试按钮，即使存在失败任务", () => {
+    renderTaskCenter(0);
+    expect(screen.queryByRole("button", { name: /重试失败推文|重试全部失败/ })).toBeNull();
+  });
+
+  it("失败推文队列非空时展示“重试失败推文”并调用失败推文重试接口", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.retryFailedTweets).mockResolvedValue({ ...mockJobs[0], id: 99, kind: "failed_retry" });
+    renderTaskCenter(5);
+
+    await user.click(screen.getByRole("button", { name: "重试失败推文" }));
+
+    await waitFor(() => expect(api.retryFailedTweets).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("TaskCenterPage 复制错误信息", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.getJobFiles).mockResolvedValue({ downloads: [], failed: [] });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function openFailedJob() {
+    const user = userEvent.setup();
+    renderTaskCenter(0);
+    await user.click(screen.getAllByLabelText("展开详情")[1]);
+    await waitFor(() => expect(screen.getByText("任务执行失败")).not.toBeNull());
+    return user;
+  }
+
+  it("通过 writeClipboard 复制并在成功后显示已复制", async () => {
+    vi.mocked(commonUI.writeClipboard).mockResolvedValue(true);
+    const user = await openFailedJob();
+
+    await user.click(screen.getByRole("button", { name: "复制错误信息" }));
+
+    expect(commonUI.writeClipboard).toHaveBeenCalledWith(expect.stringContaining("任务 ID: #2"));
+    expect(await screen.findByRole("button", { name: "已复制诊断信息" })).not.toBeNull();
+  });
+
+  it("复制失败时给出警告而不是显示已复制", async () => {
+    vi.mocked(commonUI.writeClipboard).mockResolvedValue(false);
+    const warning = vi.spyOn(toast, "warning");
+    const user = await openFailedJob();
+
+    await user.click(screen.getByRole("button", { name: "复制错误信息" }));
+
+    await waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("button", { name: "已复制诊断信息" })).toBeNull();
+    expect(screen.getByRole("button", { name: "复制错误信息" })).not.toBeNull();
+  });
+
+  it("卸载时清理复位计时器", async () => {
+    vi.mocked(commonUI.writeClipboard).mockResolvedValue(true);
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    const user = await openFailedJob();
+    await user.click(screen.getByRole("button", { name: "复制错误信息" }));
+    await screen.findByRole("button", { name: "已复制诊断信息" });
+
+    const resetCall = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 2000);
+    expect(resetCall).toBeGreaterThanOrEqual(0);
+    const resetTimer = setTimeoutSpy.mock.results[resetCall].value;
+
+    cleanup();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(resetTimer);
+  });
+});

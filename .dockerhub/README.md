@@ -97,6 +97,7 @@ The container listens on port **8787** and sets `OPEN_XDOWNLOAD_ADDR=0.0.0.0:878
 | `TZ` | — | Container timezone, e.g. `Asia/Shanghai`. |
 | `PUID` / `PGID` | `1000` / `1000` | UID/GID the service runs as inside the container. |
 | `OPEN_XDOWNLOAD_FORCE_CHOWN` | `0` | Set to `1` to force a recursive `chown` of the data and download directories at startup. |
+| `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | empty | Comma-separated `Host` allowlist that blocks DNS rebinding. Empty accepts only IP addresses and `localhost`, so `http://127.0.0.1:8787` and LAN access by IP keep working. If you reach the service through a domain name (reverse proxy, `nas.local`, …), list it here, e.g. `nas.local,xdl.example.com`; other hosts get HTTP 421. |
 
 | Port | Purpose |
 | --- | --- |
@@ -247,6 +248,7 @@ PGID=1000
 | `TZ` | — | 容器时区，例如 `Asia/Shanghai`。 |
 | `PUID` / `PGID` | `1000` / `1000` | 容器内服务运行使用的 UID/GID。 |
 | `OPEN_XDOWNLOAD_FORCE_CHOWN` | `0` | 设为 `1` 时在启动阶段强制递归修正数据目录和下载目录的归属。 |
+| `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | 空 | 逗号分隔的 `Host` 白名单，用于阻断 DNS rebinding。为空时只放行 IP 地址和 `localhost`，`http://127.0.0.1:8787` 与局域网按 IP 访问不受影响；通过域名访问（反向代理、`nas.local` 等）时需把域名填进来，如 `nas.local,xdl.example.com`，其他 Host 返回 HTTP 421。 |
 
 | 端口 | 用途 |
 | --- | --- |

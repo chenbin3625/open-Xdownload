@@ -15,12 +15,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/tidwall/gjson"
 )
 
 var (
-	tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?(?:x|twitter)\.com/([^/?#]+)/status/([0-9]+)`)
+	tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/([^/?#]+)/status/([0-9]+)`)
 	// 仅匹配主机为 twimg.com（及其子域 pbs./video. 等）的 URL：主机部分必须紧跟 :// 之后，
 	// 避免 `http://攻击者/?pbs.twimg.com=x.mp4` 这类把 twimg.com 放在 query 里的伪造 URL
 	// 被提取并随后由 downloader 拉取（SSRF，如云元数据端点）。
@@ -139,12 +140,14 @@ func BestVariant(variants []MediaVariant) MediaVariant {
 		}
 		return allowed[i].Bitrate > allowed[j].Bitrate
 	})
+	// 只接受 mp4：没有 mp4 时不退回 HLS（m3u8）。项目里没有 HLS 下载实现，退回只会
+	// 把一个文本播放列表当成视频存下来。
 	for _, variant := range allowed {
 		if isMP4Variant(variant) {
 			return variant
 		}
 	}
-	return allowed[0]
+	return MediaVariant{}
 }
 
 func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions) (TweetData, error) {
@@ -177,11 +180,12 @@ func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, 
 }
 
 func parseAuthor(result gjson.Result, fallbackUsername string) Author {
+	// X 已把 screen_name / name 从 legacy 迁到 core；新字段优先，旧结构兜底。
 	legacy := result.Get("legacy")
 	author := Author{
 		ID:         result.Get("rest_id").String(),
-		Name:       legacy.Get("name").String(),
-		ScreenName: legacy.Get("screen_name").String(),
+		Name:       firstString(result.Get("core.name"), legacy.Get("name")),
+		ScreenName: firstString(result.Get("core.screen_name"), legacy.Get("screen_name")),
 	}
 	if author.ScreenName == "" {
 		author.ScreenName = fallbackUsername
@@ -300,6 +304,10 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 	if !result.Get("id_str").Exists() && !result.Get("__typename").Exists() {
 		return TweetData{}, errors.New("X 推文详情响应中没有推文数据")
 	}
+	// 已删除/受限推文返回 TweetTombstone：不能当成"一条没有媒体的推文"静默处理。
+	if result.Get("__typename").String() == "TweetTombstone" {
+		return TweetData{}, errors.New("推文不可用（已删除或受限）")
+	}
 	return tweetFromSyndication(rawURL, fallbackUsername, fallbackID, result, options)
 }
 
@@ -358,17 +366,16 @@ func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[strin
 		if !isTwimgMediaURL(rawURL) {
 			continue
 		}
-		if _, ok := seen[rawURL]; ok {
-			continue
-		}
-		seen[rawURL] = struct{}{}
-		*items = append(*items, Media{
+		// 走 appendUniqueMedia 而不是自己比对 rawURL 字符串：syndication 的 photos 与
+		// mediaDetails 常常是同一份图片的不同写法（`.jpg` 对 `?format=jpg`），按原始
+		// 字符串去重会漏判，把同一张图片重复下载一次。
+		appendUniqueMedia(items, seen, []Media{{
 			ID:         fmt.Sprintf("photo-%d", index+1),
 			Type:       MediaPhoto,
 			URL:        rawURL,
 			PreviewURL: rawURL,
 			BestURL:    rawURL,
-		})
+		}})
 	}
 	if !options.IncludeNestedTweets {
 		return
@@ -440,13 +447,9 @@ func parseCardMedia(card gjson.Result) []Media {
 		})
 	}
 
-	items := []Media{}
-	for _, binding := range bindings {
-		for _, media := range parseCardBindingMedia(binding, mediaEntities) {
-			items = append(items, media)
-		}
-	}
-	return items
+	// 只有 unified_card 携带推文自身的媒体（图片/视频卡片）。其他 binding（普通链接卡片的
+	// thumbnail_image_*、player_image 等）是链接预览配图或站点头像，不是推文媒体。
+	return parseCardBindingMedia(bindings["unified_card"], mediaEntities)
 }
 
 func parseCardBindingMedia(binding string, mediaEntities map[string]gjson.Result) []Media {
@@ -673,6 +676,23 @@ func isTwimgMediaURL(rawURL string) bool {
 	return isTwimgHost(parsed.Hostname())
 }
 
+// tweetPhotoPathPrefixes 是 pbs.twimg.com 上推文图片媒体（含视频/GIF 海报）的目录。
+var tweetPhotoPathPrefixes = []string{
+	"/media/",
+	"/ext_tw_video_thumb/",
+	"/amplify_video_thumb/",
+	"/tweet_video_thumb/",
+}
+
+func isTweetPhotoPath(path string) bool {
+	for _, prefix := range tweetPhotoPathPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func isPhotoMediaURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -684,7 +704,9 @@ func isPhotoMediaURL(rawURL string) bool {
 	}
 	host := strings.ToLower(parsed.Hostname())
 	if host == "pbs.twimg.com" || strings.HasSuffix(host, ".pbs.twimg.com") {
-		return true
+		// pbs 上除了推文媒体还有头像（profile_images）、横幅（profile_banners）、链接卡片
+		// 配图（card_img）等：卡片兜底扫描整段 JSON 时只能接受推文媒体目录。
+		return isTweetPhotoPath(parsed.Path)
 	}
 	switch strings.ToLower(pathExtension(parsed.Path)) {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif":
@@ -716,7 +738,18 @@ func appendUniqueMedia(items *[]Media, seen map[string]struct{}, mediaItems []Me
 	}
 }
 
+// mediaKey 返回用于同一条推文内去重的媒体身份键。键按 downloader.MediaIdentity 归一化，
+// 使同一份媒体的不同 URL 写法（`.jpg` 与 `?format=jpg`、易变的 `?tag=`、大小写主机名）
+// 收敛到同一个键：推文自身、被转推推文与引用推文的媒体列表常常重复列出同一份媒体，
+// 未归一化时会被当成多份媒体各自下载一次。
+//
+// 图片的 `?name=` 尺寸变体（small/large/orig 等）同样收敛到同一个键：它们是同一张照片的
+// 不同分辨率，下载侧按最大尺寸取回。
 func mediaKey(media Media) string {
+	return downloader.MediaIdentity(rawMediaKey(media))
+}
+
+func rawMediaKey(media Media) string {
 	if media.BestURL != "" {
 		return media.BestURL
 	}

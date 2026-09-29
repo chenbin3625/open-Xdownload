@@ -13,7 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getJobProgressDisplay, parseAggregatedErrors } from "../lib/jobErrors";
 import {
   cancelJob,
@@ -36,6 +36,7 @@ import {
   getErrorMessage,
   kindLabel,
   notifyError,
+  writeClipboard,
 } from "../components/common/CommonUI";
 import {
   cancelableStatuses,
@@ -489,7 +490,8 @@ export function TaskCenterPage({
               ]}
             />
 
-            {(displayStats.failed > 0 || bucketCounts.failed > 0) && (
+            {/* 该按钮走失败推文队列的重试接口，只看队列计数，与失败任务数无关 */}
+            {failedTweetCount > 0 && (
               <Button
                 variant="default"
                 size="md"
@@ -497,7 +499,7 @@ export function TaskCenterPage({
                 loading={retryAllFailed.isPending}
                 onClick={() => retryAllFailed.mutate()}
               >
-                重试全部失败
+                重试失败推文
               </Button>
             )}
           </div>
@@ -543,13 +545,21 @@ export function TaskCenterPage({
 function JobErrorAlert({ job }: { job: Job }) {
   const groups = useMemo(() => parseAggregatedErrors(job.error), [job.error]);
   const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
 
   const toggleExpand = (id: string) => {
     setExpandedGroups((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const handleCopy = () => {
+  const handleCopy = async () => {
     const textToCopy = [
       `任务 ID: #${job.id}`,
       `任务状态: ${job.status}`,
@@ -559,9 +569,19 @@ function JobErrorAlert({ job }: { job: Job }) {
       .filter(Boolean)
       .join("\n");
 
-    void navigator.clipboard.writeText(textToCopy);
+    if (!(await writeClipboard(textToCopy))) {
+      toast.warning({
+        message: "复制失败",
+        description: "当前浏览器环境不支持自动复制，请手动复制错误信息",
+      });
+      return;
+    }
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = window.setTimeout(() => {
+      copiedTimerRef.current = null;
+      setCopied(false);
+    }, 2000);
   };
 
   const title = job.status === "failed" ? "任务执行失败" : "任务处理存在异常或部分失败";
@@ -578,7 +598,7 @@ function JobErrorAlert({ job }: { job: Job }) {
             size="sm"
             variant="ghost"
             className="h-6 px-2 text-[11px] text-danger hover:text-danger-600 hover:bg-danger/10"
-            onClick={handleCopy}
+            onClick={() => void handleCopy()}
             icon={copied ? <Check className="size-3 text-success" /> : <Copy className="size-3" />}
           >
             {copied ? "已复制诊断信息" : "复制错误信息"}

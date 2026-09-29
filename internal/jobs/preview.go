@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -81,19 +80,28 @@ func isVideoLikePath(value string) bool {
 
 // savePosterImage fetches an image over HTTP（代理感知）and publishes it
 // atomically to destPath. 预览图地址只允许 twimg.com：即便 downloads 表被篡改，
-// 也不能把本服务变成任意地址的抓取代理。var 间接引用便于测试注入。
+// 也不能把本服务变成任意地址的抓取代理；重定向同样限定在 twimg.com。var 间接引用
+// 便于测试注入。
 var savePosterImage = func(ctx context.Context, proxyURL string, rawURL string, destPath string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || !isTwimgPreviewHost(parsed.Hostname()) {
 		return fmt.Errorf("预览图地址无效")
 	}
+	client := httpx.Client(proxyURL, posterFetchTimeout)
+	httpx.RestrictRedirects(client, isTwimgPreviewHost)
+	return fetchPosterImage(ctx, client, rawURL, destPath, maxPosterBytes)
+}
+
+// fetchPosterImage 下载 rawURL 并原子发布到 destPath。超过 maxBytes 时报错且不发布：
+// 截断的图片一旦落盘，之后会因文件已存在而被永久沿用。
+func fetchPosterImage(ctx context.Context, client *http.Client, rawURL string, destPath string, maxBytes int64) error {
 	fetchCtx, cancel := context.WithTimeout(ctx, posterFetchTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
-	response, err := httpx.Client(proxyURL, posterFetchTimeout).Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return err
 	}
@@ -109,7 +117,7 @@ var savePosterImage = func(ctx context.Context, proxyURL string, rawURL string, 
 		return err
 	}
 	temporaryPath := temporary.Name()
-	if _, err = io.Copy(temporary, io.LimitReader(response.Body, maxPosterBytes)); err != nil {
+	if _, err = httpx.CopyLimited(temporary, response.Body, maxBytes); err != nil {
 		_ = temporary.Close()
 		_ = os.Remove(temporaryPath)
 		return err

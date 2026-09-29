@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -206,5 +207,96 @@ func TestUpdateArchiveScheduleConcurrentEditsStayConsistent(t *testing.T) {
 	}
 	if final.NextRunAt.After(time.Now().UTC().Add(time.Duration(final.IntervalMinutes+1) * time.Minute)) {
 		t.Fatalf("next_run_at = %v 超出 interval %d 分钟", final.NextRunAt, final.IntervalMinutes)
+	}
+}
+
+// TestScheduledClaimSkipsScheduleDisabledAfterListing 覆盖调度器读到到期计划后、领取前
+// 用户停用计划的竞态：UpdateArchiveSchedule 停用时保留 next_run_at，领取条件若只看
+// next_run_at，会按已停用的计划再跑一次。
+func TestScheduledClaimSkipsScheduleDisabledAfterListing(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	created, err := store.CreateArchiveSchedule(ctx, newTestSchedule("daily", MinArchiveScheduleIntervalMinutes, "alice"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	snapshot := created // 调度器在 ListDueArchiveSchedules 中读到的快照
+
+	disabled := created
+	disabled.Enabled = false
+	if _, err := store.UpdateArchiveSchedule(ctx, disabled); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	jobs, err := store.CreateScheduledArchiveJobs(ctx, snapshot, time.Now().UTC())
+	if !errors.Is(err, ErrArchiveScheduleAlreadyClaimed) || len(jobs) != 0 {
+		t.Fatalf("scheduled claim of a disabled schedule = %d jobs, err %v; want none and ErrArchiveScheduleAlreadyClaimed", len(jobs), err)
+	}
+}
+
+// TestScheduleClaimUsesItemsFromClaimTransaction 覆盖领取前用户编辑了目标清单（间隔不变，
+// next_run_at 不变）：任务必须按领取时库里的最新 items 生成，而不是调度器手里的旧快照。
+func TestScheduleClaimUsesItemsFromClaimTransaction(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	created, err := store.CreateArchiveSchedule(ctx, newTestSchedule("daily", MinArchiveScheduleIntervalMinutes, "alice", "bob"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	snapshot := created
+
+	edited := created
+	edited.Items = []ArchiveScheduleItem{{Kind: JobKindUser, Input: "carol", Title: "carol"}}
+	if _, err := store.UpdateArchiveSchedule(ctx, edited); err != nil {
+		t.Fatalf("edit items: %v", err)
+	}
+	for name, claim := range map[string]func(context.Context, ArchiveSchedule, time.Time) ([]Job, error){
+		"scheduled": store.CreateScheduledArchiveJobs,
+		"manual":    store.CreateJobsForArchiveSchedule,
+	} {
+		current, err := store.GetArchiveSchedule(ctx, created.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		stale := snapshot
+		stale.NextRunAt = current.NextRunAt // 快照与库里的领取条件一致，只有 items 是旧的
+		jobs, err := claim(ctx, stale, time.Now().UTC())
+		if err != nil {
+			t.Fatalf("%s claim: %v", name, err)
+		}
+		if len(jobs) != 1 || jobs[0].Input != "carol" {
+			inputs := make([]string, 0, len(jobs))
+			for _, job := range jobs {
+				inputs = append(inputs, job.Input)
+			}
+			t.Fatalf("%s claim created jobs for %v, want [carol] (stale snapshot items used)", name, inputs)
+		}
+	}
+}
+
+// TestManualRunStillWorksForPausedSchedule 保证手动"立即运行"对已暂停的计划仍然可用。
+func TestManualRunStillWorksForPausedSchedule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	schedule := newTestSchedule("paused", MinArchiveScheduleIntervalMinutes, "alice")
+	schedule.Enabled = false
+	created, err := store.CreateArchiveSchedule(ctx, schedule)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	jobs, err := store.CreateJobsForArchiveSchedule(ctx, created, time.Now().UTC())
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("manual run of paused schedule = %d jobs, err %v; want 1 job", len(jobs), err)
 	}
 }

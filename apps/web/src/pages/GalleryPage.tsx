@@ -55,6 +55,17 @@ function entryKey(item: DownloadRecord) {
   return item.id > 0 ? String(item.id) : item.filePath;
 }
 
+// 焦点在 <video controls> 或可编辑元素上时，方向键属于该元素（视频拖动进度、文本移动光标），灯箱不应截获。
+function isKeyboardOwnedTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  if (target instanceof HTMLMediaElement) return true;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  const editable = target.closest("[contenteditable]");
+  return editable !== null && editable.getAttribute("contenteditable") !== "false";
+}
+
 export interface GalleryPageProps {
   jobs?: Job[];
   downloads?: DownloadRecord[];
@@ -236,28 +247,38 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
   const allDownloads = downloads ?? libraryQuery.data ?? [];
 
   const indexedDownloads = useMemo(
-    () =>
-      allDownloads.map((item) => {
+    () => {
+      const groups = new Map<string, DownloadRecord[]>();
+      for (const item of allDownloads) {
+        const key = item.filePath || `record:${item.id}`;
+        const group = groups.get(key);
+        if (group) group.push(item);
+        else groups.set(key, [item]);
+      }
+      return [...groups.values()].map((records) => {
+        const item = records[0];
         const lower = item.filePath.toLowerCase().split("?")[0];
         return {
           item,
+          records,
           isVideo: VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext)),
           isImage: IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext)),
           isGif: lower.endsWith(".gif"),
         };
-      }),
+      });
+    },
     [allDownloads],
   );
 
   const categoryCounts = useMemo(() => {
-    const counts = { all: allDownloads.length, images: 0, videos: 0, gifs: 0 };
+    const counts = { all: indexedDownloads.length, images: 0, videos: 0, gifs: 0 };
     for (const entry of indexedDownloads) {
       if (entry.isVideo) counts.videos += 1;
       if (entry.isImage) counts.images += 1;
       if (entry.isGif) counts.gifs += 1;
     }
     return counts;
-  }, [allDownloads.length, indexedDownloads]);
+  }, [indexedDownloads]);
 
   const userOptions = useMemo(() => {
     const users = new Map<string, string>();
@@ -275,25 +296,20 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
 
   const filteredEntries = useMemo(() => {
     const kw = deferredSearchFilter.trim().toLowerCase();
-    return indexedDownloads.filter((entry) => {
-      const { item } = entry;
-      if (filterType === "images" && !entry.isImage) return false;
-      if (filterType === "videos" && !entry.isVideo) return false;
-      if (filterType === "gifs" && !entry.isGif) return false;
+    return indexedDownloads.flatMap((entry) => {
+      if (filterType === "images" && !entry.isImage) return [];
+      if (filterType === "videos" && !entry.isVideo) return [];
+      if (filterType === "gifs" && !entry.isGif) return [];
 
-      if (userFilter !== "all" && (item.userScreenName || "unknown") !== userFilter) {
-        return false;
-      }
-
-      if (kw) {
-        return (
+      const matching = entry.records.filter((item) =>
+        (userFilter === "all" || (item.userScreenName || "unknown") === userFilter) &&
+        (!kw || (
           item.filePath.toLowerCase().includes(kw) ||
           item.mediaUrl.toLowerCase().includes(kw) ||
           String(item.tweetId).includes(kw)
-        );
-      }
-
-      return true;
+        )),
+      );
+      return matching.length ? [{ ...entry, item: matching[0] }] : [];
     });
   }, [deferredSearchFilter, filterType, indexedDownloads, userFilter]);
 
@@ -322,6 +338,7 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
     }
     if (previewIndex === -1) return;
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (isKeyboardOwnedTarget(event.target)) return;
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
         if (filteredEntries.length === 0) return;

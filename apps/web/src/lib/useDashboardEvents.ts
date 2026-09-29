@@ -22,6 +22,15 @@ export function invalidateWorkbenchQueries(queryClient: QueryClient) {
     queryClient.invalidateQueries({ queryKey: jobsQueryRoot }),
     queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot }),
     queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot }),
+    queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot }),
+  ]);
+}
+
+// 后端 SSE 不支持断点续传，断线期间的事件全部丢失；重连成功后整体补拉一次。
+export function invalidateAfterReconnect(queryClient: QueryClient) {
+  return Promise.all([
+    invalidateWorkbenchQueries(queryClient),
+    queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot }),
   ]);
 }
 
@@ -188,11 +197,8 @@ export function applyDashboardEvent(
     }
     return false;
   };
-  if (event.type === "archive_schedule.updated" || event.type === "archive_schedule.created") {
-    void queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot });
-    return "handled";
-  }
-  if (event.type === "archive_schedule.ran") {
+  // created/updated/deleted/ran 只影响计划列表；ran 产生的任务另有 jobs.created 事件。
+  if (event.type?.startsWith("archive_schedule.")) {
     void queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot });
     return "handled";
   }
@@ -214,6 +220,10 @@ export function applyDashboardEvent(
     const patched = patchDashboardJobCaches(queryClient, event.payload);
     // 迟到的事件已被丢弃，不能再拿它去驱动统计刷新。
     if (patched.stale) return "handled";
+    // 任务结束意味着可能落了新文件；媒体库 staleTime 很长，需主动失效（只会重拉活跃查询）。
+    if (isJobTerminal(event.payload.status)) {
+      void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+    }
     if (patched.found) {
       if (isJobTerminal(event.payload.status)) {
         void queryClient.invalidateQueries({ queryKey: [...jobFilesQueryRoot, event.payload.id] });
@@ -239,6 +249,7 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
   const [sseConnected, setSseConnected] = useState(true);
   const [epoch, setEpoch] = useState(0);
   const retryDelayRef = useRef(sseRetryBaseDelay);
+  const reconnectPendingRef = useRef(false);
 
   useEffect(() => {
     if (!enabled) {
@@ -281,10 +292,16 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
     events.onopen = () => {
       setSseConnected(true);
       retryDelayRef.current = sseRetryBaseDelay;
+      if (reconnectPendingRef.current) {
+        reconnectPendingRef.current = false;
+        void invalidateAfterReconnect(queryClient);
+      }
     };
 
     events.onerror = () => {
       setSseConnected(false);
+      // 标记放在 ref 上：CLOSED 后会换新的 EventSource 实例，标记需要跨实例保留。
+      reconnectPendingRef.current = true;
       scheduleRefresh();
       // CLOSED 表示 EventSource 已放弃重试，只能换一个实例重新连。
       if (events.readyState === EventSource.CLOSED && !disposed && !retryTimer) {

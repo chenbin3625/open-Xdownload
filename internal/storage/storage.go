@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
@@ -56,8 +57,12 @@ const sqliteOpenOptions = "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma
 // 向前迁移是可加、幂等的，但没有版本闸门时，回滚镜像会让旧二进制打开新库并正常启动，
 // 直到某个 SELECT * 撞上未知列才失败（ListDownloads/ListJobs 报
 // "missing destination name ..."），任务列表和媒体库直接不可用且看不出原因。
-// 新增列 / 新表这类结构变更时递增该值。
-const schemaVersion = 1
+// 新增列 / 新表这类结构变更时递增该值，并在 migration_test.go 的
+// schemaColumnsForVersion 登记新版本的列集合（测试会拦截遗漏）。
+//
+// v2：downloads.content_hash（v0.8.3 引入时漏了递增，回滚到 v0.8.2 及更早的镜像会
+// 通过闸门后在 SELECT * 上失败）。
+const schemaVersion = 2
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -232,7 +237,7 @@ CREATE INDEX IF NOT EXISTS idx_downloads_created_at
 		updated_at DATETIME NOT NULL
 	);
 
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_users_screen_name ON users (screen_name);
+	CREATE INDEX IF NOT EXISTS idx_users_screen_name ON users (screen_name);
 
 	CREATE TABLE IF NOT EXISTS user_previous_names (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -339,7 +344,13 @@ END;
 	if err := s.runMigrationOnce("backfill_downloads_media_key", s.backfillDownloadsMediaKey); err != nil {
 		return err
 	}
+	if err := s.runMigrationOnce("rekey_downloads_media_formats", s.rekeyDownloadsMediaFormats); err != nil {
+		return err
+	}
 	if err := s.runMigrationOnce("drop_smb_webdav_config_columns", s.dropSMBWebDAVConfigColumns); err != nil {
+		return err
+	}
+	if err := s.runMigrationOnce("drop_unique_users_screen_name", s.dropUniqueUsersScreenName); err != nil {
 		return err
 	}
 	if err := s.ensureDashboardCounters(); err != nil {
@@ -586,6 +597,28 @@ func (s *Store) backfillDownloadsMediaKey(exec migrationExecutor) error {
 	return nil
 }
 
+// Recalculate keys written before format became part of the media identity.
+func (s *Store) rekeyDownloadsMediaFormats(exec migrationExecutor) error {
+	type downloadRow struct {
+		ID       int64  `db:"id"`
+		MediaURL string `db:"media_url"`
+		MediaKey string `db:"media_key"`
+	}
+	rows := []downloadRow{}
+	if err := exec.Select(&rows, `SELECT id, media_url, media_key FROM downloads WHERE media_url <> ''`); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		key := downloader.MediaIdentity(row.MediaURL)
+		if key != row.MediaKey {
+			if _, err := exec.Exec(`UPDATE downloads SET media_key = ? WHERE id = ?`, key, row.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // backfillDownloadPreviewURLs restores the CDN poster URL for historical
 // Twitter video records created before preview_url was persisted. It is a
 // one-time migration so opening the gallery no longer needs to derive this
@@ -647,6 +680,16 @@ WHERE media_url LIKE '%video.twimg.com%'
 
 // dropSMBWebDAVConfigColumns 删除历史版本 app_config 中遗留的 SMB/WebDAV 配置列，
 // 连同其中的明文密码一并清除（SMB/WebDAV 存储后端已移除）。
+// dropUniqueUsersScreenName 把 users.screen_name 的唯一索引换成普通索引。X 允许改名，
+// 旧用户名也可能被他人注册：库里残留旧名时，新用户的 UpsertUser（只处理 id 冲突）
+// 会撞上唯一约束，导致该用户的归档每次都失败。代码里没有依赖 screen_name 唯一性的查询。
+func (s *Store) dropUniqueUsersScreenName(exec migrationExecutor) error {
+	_, err := exec.Exec(`
+DROP INDEX IF EXISTS idx_users_screen_name;
+CREATE INDEX IF NOT EXISTS idx_users_screen_name ON users (screen_name);`)
+	return err
+}
+
 func (s *Store) dropSMBWebDAVConfigColumns(exec migrationExecutor) error {
 	columns := []string{
 		"smb_host", "smb_port", "smb_share", "smb_path", "smb_domain",
@@ -967,16 +1010,48 @@ UPDATE jobs SET status = ?, message = ?, progress = 1, error = '', updated_at = 
 	return s.GetJob(ctx, id)
 }
 
+// ErrJobRetryBusy 表示原任务或同一目标的任务仍在运行或排队中。
+var ErrJobRetryBusy = errors.New("任务仍在运行或排队中，不能重试")
+
+// RetryJob 为已结束的任务创建一个同目标的新任务。检查与插入放在同一个写事务里：先读后
+// 写时，双击"重试"或两个标签页同时点会各自看到终态、各插入一条，同一目标被重复归档。
+// 同一目标已有排队/运行中的任务时同样拒绝。
 func (s *Store) RetryJob(ctx context.Context, id int64) (Job, error) {
-	job, err := s.GetJob(ctx, id)
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
+		return Job{}, err
+	}
+	defer tx.Rollback() // Commit 后为 no-op
+
+	job := Job{}
+	if err := tx.GetContext(ctx, &job, `SELECT * FROM jobs WHERE id = ?`, id); err != nil {
 		return Job{}, err
 	}
 	switch job.Status {
 	case JobPending, JobResolving, JobDownloading:
-		return Job{}, fmt.Errorf("任务仍在运行或排队中，不能重试")
+		return Job{}, ErrJobRetryBusy
 	}
-	return s.CreateJob(ctx, job.Kind, job.Input, job.Title)
+	var active int
+	if err := tx.GetContext(ctx, &active, `
+SELECT COUNT(*) FROM jobs WHERE kind = ? AND input = ? AND status IN (?, ?, ?)`,
+		job.Kind, job.Input, JobPending, JobResolving, JobDownloading); err != nil {
+		return Job{}, err
+	}
+	if active > 0 {
+		return Job{}, ErrJobRetryBusy
+	}
+	now := time.Now().UTC()
+	retried := Job{}
+	if err := tx.GetContext(ctx, &retried, `
+INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
+VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+RETURNING *`, job.Kind, JobPending, job.Input, job.Title, "排队中", now, now); err != nil {
+		return Job{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Job{}, err
+	}
+	return retried, nil
 }
 
 func (s *Store) RequeueInterruptedJobs(ctx context.Context) ([]Job, error) {
@@ -1184,37 +1259,61 @@ WHERE id IN (?) AND status IN (?, ?, ?)`, ids, JobPending, JobResolving, JobDown
 	return count > 0, err
 }
 
+// CreateJobsForArchiveSchedule 手动"立即运行"：领取计划并按其目标创建任务。已暂停的
+// 计划也允许手动运行。
 func (s *Store) CreateJobsForArchiveSchedule(ctx context.Context, schedule ArchiveSchedule, runAt time.Time) ([]Job, error) {
-	schedule, err := prepareArchiveScheduleForSave(schedule)
-	if err != nil {
-		return nil, err
-	}
+	return s.claimArchiveScheduleJobs(ctx, schedule, runAt, false)
+}
+
+// CreateScheduledArchiveJobs 调度器到期触发：与手动运行相同，但只领取仍启用的计划。
+// 调度器从 ListDueArchiveSchedules 读到快照后、领取前，用户可能刚停用了计划，而
+// 停用会保留 next_run_at，只比对 next_run_at 会让已停用的计划再跑一次。
+func (s *Store) CreateScheduledArchiveJobs(ctx context.Context, schedule ArchiveSchedule, runAt time.Time) ([]Job, error) {
+	return s.claimArchiveScheduleJobs(ctx, schedule, runAt, true)
+}
+
+// claimArchiveScheduleJobs 以 next_run_at 做乐观锁领取计划，并在同一事务里按库中最新的
+// 目标清单与间隔创建任务。调用方手里的 schedule 只是快照：编辑目标清单（间隔不变）
+// 不会改动 next_run_at，用快照的 Items 会按用户刚删掉的目标继续归档。
+func (s *Store) claimArchiveScheduleJobs(ctx context.Context, snapshot ArchiveSchedule, runAt time.Time, requireEnabled bool) ([]Job, error) {
 	runAt = runAt.UTC()
-	claimNextRunAt := schedule.NextRunAt.UTC()
-	nextRunAt := nextArchiveScheduleRun(runAt, schedule.IntervalMinutes)
+	claimNextRunAt := snapshot.NextRunAt.UTC()
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	claimResult, err := tx.ExecContext(ctx, `
+	current := ArchiveSchedule{}
+	query := `SELECT * FROM archive_schedules WHERE id = ? AND next_run_at = ?`
+	if requireEnabled {
+		query += ` AND enabled = 1`
+	}
+	if err := tx.GetContext(ctx, &current, query, snapshot.ID, claimNextRunAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrArchiveScheduleAlreadyClaimed
+		}
+		return nil, err
+	}
+	current, err = hydrateArchiveSchedule(current)
+	if err != nil {
+		return nil, err
+	}
+	schedule, err := prepareArchiveScheduleForSave(current)
+	if err != nil {
+		return nil, err
+	}
+	nextRunAt := nextArchiveScheduleRun(runAt, schedule.IntervalMinutes)
+	// 事务开头已取写锁（_txlock=immediate），SELECT 与 UPDATE 之间不会有并发写入。
+	if _, err := tx.ExecContext(ctx, `
 UPDATE archive_schedules SET
 	last_run_at = ?,
 	next_run_at = ?,
 	last_job_ids = '[]',
 	updated_at = ?
-WHERE id = ? AND next_run_at = ?`,
-		runAt, nextRunAt, runAt, schedule.ID, claimNextRunAt)
-	if err != nil {
+WHERE id = ?`,
+		runAt, nextRunAt, runAt, schedule.ID); err != nil {
 		return nil, err
-	}
-	claimed, err := claimResult.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if claimed == 0 {
-		return nil, ErrArchiveScheduleAlreadyClaimed
 	}
 
 	drafts := make([]JobDraft, 0, len(schedule.Items))
@@ -1351,7 +1450,27 @@ ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit)
 			known[filepath.Clean(path)] = struct{}{}
 		}
 	}
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	items, err = collectOrphanLibraryFiles(ctx, root, known, items)
+	if err != nil {
+		// 请求被取消：不完整的结果不能写进缓存。
+		return nil, err
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	s.cacheLibraryDownloads(items, limit, generation)
+	return append([]DownloadRecord(nil), items...), nil
+}
+
+// collectOrphanLibraryFiles 遍历下载目录，把不在 known 中的媒体文件（没有下载记录的
+// 孤儿文件）追加到 items。遍历响应 ctx 取消：否则用户切走页面后，服务端仍会走完整个
+// 下载目录。
+func collectOrphanLibraryFiles(ctx context.Context, root string, known map[string]struct{}, items []DownloadRecord) ([]DownloadRecord, error) {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil || entry.IsDir() {
 			return nil
 		}
@@ -1370,12 +1489,11 @@ ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit)
 		known[cleaned] = struct{}{}
 		return nil
 	})
-	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
-	if len(items) > limit {
-		items = items[:limit]
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
-	s.cacheLibraryDownloads(items, limit, generation)
-	return append([]DownloadRecord(nil), items...), nil
+	_ = err // 其余遍历错误（根目录不存在等）沿用原行为：忽略，返回已收集的结果。
+	return items, nil
 }
 
 // attributeLibraryUsers 按 file_path 前缀为下载记录补充归属用户。
@@ -1529,6 +1647,31 @@ func (s *Store) UpdateDownloadPreviewURL(ctx context.Context, id int64, previewU
 	return nil
 }
 
+// RewriteDownloadPathPrefix 在目录被重命名（如用户改显示名）后，把位于 oldDir 之下的
+// 下载记录的 file_path 改写到 newDir 之下，返回改写行数。前缀用 substr 等值比较而
+// 不是 LIKE：目录名里常见的 "_"、"%" 在 LIKE 中是通配符。SQLite 的 substr 对 TEXT
+// 按字符计数，长度必须用 rune 数而不是字节数，否则含中文/emoji 的显示名永远匹配不上。
+func (s *Store) RewriteDownloadPathPrefix(ctx context.Context, oldDir string, newDir string) (int64, error) {
+	oldPrefix := strings.TrimRight(filepath.Clean(oldDir), `/\`) + string(filepath.Separator)
+	newPrefix := strings.TrimRight(filepath.Clean(newDir), `/\`) + string(filepath.Separator)
+	if oldPrefix == newPrefix {
+		return 0, nil
+	}
+	prefixChars := utf8.RuneCountInString(oldPrefix)
+	result, err := s.db.ExecContext(ctx, `
+UPDATE downloads SET file_path = ? || substr(file_path, ?)
+WHERE substr(file_path, 1, ?) = ?`,
+		newPrefix, prefixChars+1, prefixChars, oldPrefix)
+	if err != nil {
+		return 0, err
+	}
+	changed, _ := result.RowsAffected()
+	if changed > 0 {
+		s.invalidateLibraryDownloadsCache()
+	}
+	return changed, nil
+}
+
 // GetDownload returns one archived media record by its stable database ID.
 // Unknown and non-positive IDs both yield (nil, nil) so HTTP callers can map
 // them uniformly to 404.
@@ -1676,41 +1819,72 @@ func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, med
 	return &record, nil
 }
 
-// FindDownloadsByMediaKey 返回同一媒体身份（downloader.MediaIdentity）的历史下载记录，
-// 按写入顺序升序，最多 limit 条。同一份媒体可能分布在多个归档目录里（转推、引用推文、
-// 卡片媒体会复用同一条媒体 URL），归档时据此判断是否已有可用文件，从而跳过重复下载。
+// MaxMediaCopyLookup 是单页上限；调用方可继续翻页查找仍存在的副本。
+const MaxMediaCopyLookup = 500
+
+func normalizedMediaCopyLimit(limit int) int {
+	if limit <= 0 || limit > MaxMediaCopyLookup {
+		return MaxMediaCopyLookup
+	}
+	return limit
+}
+
+// FindDownloadsByMediaKey 按媒体身份键回查已归档的副本，用于跨推文复用同一份本地文件。
+//
+// 按 file_path 归并（每个路径取最小 id 的记录）：同一份媒体被转推/引用时会写入多条
+// downloads 记录，但它们复用同一个 file_path。不归并时这些重复记录会挤满 LIMIT，
+// 把真正还在磁盘上的那份文件挤出结果之外，导致调用方误判"没有副本"而重新下载一次。
 // 记录里的文件未必仍然存在，调用方必须自行校验。
 func (s *Store) FindDownloadsByMediaKey(ctx context.Context, mediaKey string, limit int) ([]DownloadRecord, error) {
+	return s.FindDownloadsByMediaKeyPage(ctx, mediaKey, limit, 0)
+}
+
+func (s *Store) FindDownloadsByMediaKeyPage(ctx context.Context, mediaKey string, limit int, offset int) ([]DownloadRecord, error) {
 	mediaKey = strings.TrimSpace(mediaKey)
 	if mediaKey == "" {
 		return nil, nil
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 20
+	if offset < 0 {
+		offset = 0
 	}
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `
 SELECT * FROM downloads
-WHERE media_key = ? AND file_path <> ''
+WHERE id IN (
+	SELECT MIN(id) FROM downloads
+	WHERE media_key = ? AND file_path <> ''
+	GROUP BY file_path
+)
 ORDER BY id ASC
-LIMIT ?`, mediaKey, limit)
+LIMIT ? OFFSET ?`, mediaKey, normalizedMediaCopyLimit(limit), offset)
 	return items, err
 }
 
+// FindDownloadsByContentHash 按内容哈希回查已归档的副本，用于下载后发现同样字节的文件
+// 已经存在时删掉本次多余的副本。与 FindDownloadsByMediaKey 同样按 file_path 归并，
+// 避免重复记录把仍在磁盘上的那份文件挤出 LIMIT。
 func (s *Store) FindDownloadsByContentHash(ctx context.Context, contentHash string, limit int) ([]DownloadRecord, error) {
+	return s.FindDownloadsByContentHashPage(ctx, contentHash, limit, 0)
+}
+
+func (s *Store) FindDownloadsByContentHashPage(ctx context.Context, contentHash string, limit int, offset int) ([]DownloadRecord, error) {
 	contentHash = strings.TrimSpace(contentHash)
 	if contentHash == "" {
 		return nil, nil
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 20
+	if offset < 0 {
+		offset = 0
 	}
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `
 SELECT * FROM downloads
-WHERE content_hash = ? AND file_path <> ''
+WHERE id IN (
+	SELECT MIN(id) FROM downloads
+	WHERE content_hash = ? AND file_path <> ''
+	GROUP BY file_path
+)
 ORDER BY id ASC
-LIMIT ?`, contentHash, limit)
+LIMIT ? OFFSET ?`, contentHash, normalizedMediaCopyLimit(limit), offset)
 	return items, err
 }
 
@@ -2096,6 +2270,15 @@ RETURNING *`,
 	return failed, err
 }
 
+// TouchFailedTweet 记录一次重试失败：刷新 error 与 updated_at，让该条目排到重试队列
+// （ListFailedTweets 按 updated_at 升序）的末尾。否则最早的一批条目若持续失败，会永远
+// 占住每次重试的 LIMIT 名额，后面的条目要等到过期清理都轮不到。
+func (s *Store) TouchFailedTweet(ctx context.Context, id int64, errMessage string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE failed_tweets SET error = ?, updated_at = ? WHERE id = ?`,
+		errMessage, time.Now().UTC(), id)
+	return err
+}
+
 func (s *Store) ListFailedTweets(ctx context.Context, limit int) ([]FailedTweet, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
@@ -2181,8 +2364,8 @@ func (s *Store) DeleteAllFailedTweets(ctx context.Context) error {
 func (s *Store) PruneFailedRecords(ctx context.Context, olderThan time.Time) (int, error) {
 	olderThan = olderThan.UTC()
 	var pruned int64
-	// 分语句执行：database/sql 的 Exec 对多语句 SQL 只执行第一条（SQLite 下 RowsAffected
-	// 仅反映首个 DELETE），必须逐个执行。
+	// 分语句执行：多语句 Exec 的 RowsAffected 只反映最后一条语句，要累计删除行数就必须
+	// 逐条执行（modernc 驱动本身会执行全部语句，迁移代码依赖这一点）。
 	for _, statement := range []string{
 		`DELETE FROM failed_tweets WHERE updated_at < ?`,
 		`DELETE FROM failed_media WHERE created_at < ?`,

@@ -61,6 +61,10 @@ const (
 	// progressWriteInterval 归档进度写入的最小时隔，避免每个媒体一次 DB 写 + SSE
 	// 发布造成写放大（P1）。终态与每用户完成仍即时写入。
 	progressWriteInterval = 400 * time.Millisecond
+	// staleTempFileAge 超过该年龄的下载临时文件视为崩溃残留，由后台维护清理。
+	staleTempFileAge = time.Hour
+	// failedScheduleRetryDelay 是到期计划领取失败后推迟重试的时长。
+	failedScheduleRetryDelay = 10 * time.Minute
 	// managerStopTimeout 关停时等待调度循环与活跃任务退出的最长时间。
 	managerStopTimeout = 15 * time.Second
 )
@@ -280,10 +284,17 @@ func (m *Manager) enqueueDueArchiveSchedules(ctx context.Context) {
 				continue
 			}
 		}
-		jobs, err := m.store.CreateJobsForArchiveSchedule(ctx, schedule, now)
+		jobs, err := m.store.CreateScheduledArchiveJobs(ctx, schedule, now)
 		if err != nil {
-			if errors.Is(err, storage.ErrArchiveScheduleAlreadyClaimed) {
+			if errors.Is(err, storage.ErrArchiveScheduleAlreadyClaimed) || ctx.Err() != nil {
 				continue
+			}
+			// 领取失败（计划数据已不合法、DB 错误等）时必须推后：否则每个 tick 都会重试，
+			// 且它的 next_run_at 最早，会一直占住 ListDueArchiveSchedules 的名额。
+			log.Printf("archive schedule %d: create jobs: %v", schedule.ID, err)
+			next := now.Add(failedScheduleRetryDelay)
+			if _, err := m.store.RescheduleArchiveSchedule(ctx, schedule.ID, next); err == nil {
+				m.publish(Event{Type: "archive_schedule.updated", Payload: map[string]any{"id": schedule.ID, "nextRunAt": next}})
 			}
 			continue
 		}
@@ -318,6 +329,14 @@ func (m *Manager) maybeMaintain(ctx context.Context) {
 		log.Printf("prune stale failed records: %v", err)
 	} else if pruned > 0 {
 		log.Printf("pruned %d stale failed records", pruned)
+	}
+	// 进程在下载/海报写入中途被杀时 .part 临时文件会永久残留（大视频可达数百 MB）。
+	if cfg, err := m.store.GetConfig(ctx); err == nil && cfg.DownloadDir != "" {
+		if removed, err := downloader.RemoveStaleTempFiles(ctx, cfg.DownloadDir, staleTempFileAge); err != nil && ctx.Err() == nil {
+			log.Printf("remove stale temp files: %v", err)
+		} else if removed > 0 {
+			log.Printf("removed %d stale temp files", removed)
+		}
 	}
 }
 
@@ -399,7 +418,8 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	if len(tweet.Media) == 0 {
+	if downloadableMediaCount(tweet) == 0 {
+		// 包括"只有缩略图、没有 mp4 变体的视频"：不能报下载完成，否则用户以为已存档。
 		job.Status = storage.JobFailed
 		job.Progress = 1
 		job.Message = "链接已识别，但还没有解析到媒体 URL"
@@ -804,38 +824,39 @@ func (m *Manager) skipArchivedMedia(ctx context.Context, saveCtx context.Context
 			}
 		}
 	}
-	copies, err := m.store.FindDownloadsByMediaKey(saveCtx, mediaKey, 20)
-	if err != nil {
-		return false, err
-	}
-	for _, copy := range copies {
-		path := strings.TrimSpace(copy.FilePath)
-		if path == "" {
-			continue
-		}
-		archived, size, err := archivedFileState(path)
+	for offset := 0; ; offset += storage.MaxMediaCopyLookup {
+		copies, err := m.store.FindDownloadsByMediaKeyPage(saveCtx, mediaKey, storage.MaxMediaCopyLookup, offset)
 		if err != nil {
 			return false, err
 		}
-		if !archived {
-			continue
+		for _, copy := range copies {
+			path := strings.TrimSpace(copy.FilePath)
+			archived, size, err := archivedFileState(path)
+			if err != nil {
+				return false, err
+			}
+			if !archived {
+				continue
+			}
+			record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+				JobID:       job.ID,
+				TweetID:     tweetID,
+				MediaURL:    mediaURL,
+				ContentHash: copy.ContentHash,
+				PreviewURL:  previewURL,
+				FilePath:    filepath.Clean(path),
+				Bytes:       size,
+			})
+			if err != nil {
+				return false, err
+			}
+			m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
+			return true, nil
 		}
-		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-			JobID:       job.ID,
-			TweetID:     tweetID,
-			MediaURL:    mediaURL,
-			ContentHash: copy.ContentHash,
-			PreviewURL:  previewURL,
-			FilePath:    filepath.Clean(path),
-			Bytes:       size,
-		})
-		if err != nil {
-			return false, err
+		if len(copies) < storage.MaxMediaCopyLookup {
+			return false, nil
 		}
-		m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
-		return true, nil
 	}
-	return false, nil
 }
 
 func (m *Manager) skipSameContentMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, target filestore.Store, result downloader.Result, mediaURL string, tweetID string, previewURL string) (bool, error) {
@@ -843,42 +864,46 @@ func (m *Manager) skipSameContentMedia(ctx context.Context, saveCtx context.Cont
 	if contentHash == "" || strings.TrimSpace(result.Path) == "" {
 		return false, nil
 	}
-	copies, err := m.store.FindDownloadsByContentHash(saveCtx, contentHash, 20)
-	if err != nil {
-		return false, err
-	}
 	resultPath := filepath.Clean(result.Path)
-	for _, copy := range copies {
-		path := strings.TrimSpace(copy.FilePath)
-		if path == "" || filepath.Clean(path) == resultPath {
-			continue
-		}
-		archived, size, err := archivedFileState(path)
+	for offset := 0; ; offset += storage.MaxMediaCopyLookup {
+		copies, err := m.store.FindDownloadsByContentHashPage(saveCtx, contentHash, storage.MaxMediaCopyLookup, offset)
 		if err != nil {
 			return false, err
 		}
-		if !archived {
-			continue
+		for _, copy := range copies {
+			path := strings.TrimSpace(copy.FilePath)
+			if path == "" || filepath.Clean(path) == resultPath {
+				continue
+			}
+			archived, size, err := archivedFileState(path)
+			if err != nil {
+				return false, err
+			}
+			if !archived {
+				continue
+			}
+			if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
+				return false, err
+			}
+			record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
+				JobID:       job.ID,
+				TweetID:     tweetID,
+				MediaURL:    mediaURL,
+				ContentHash: contentHash,
+				PreviewURL:  previewURL,
+				FilePath:    filepath.Clean(path),
+				Bytes:       size,
+			})
+			if err != nil {
+				return false, err
+			}
+			m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
+			return true, nil
 		}
-		if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
-			return false, err
+		if len(copies) < storage.MaxMediaCopyLookup {
+			return false, nil
 		}
-		record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{
-			JobID:       job.ID,
-			TweetID:     tweetID,
-			MediaURL:    mediaURL,
-			ContentHash: contentHash,
-			PreviewURL:  previewURL,
-			FilePath:    filepath.Clean(path),
-			Bytes:       size,
-		})
-		if err != nil {
-			return false, err
-		}
-		m.ensureVideoPoster(ctx, cfg, target, &record, previewURL)
-		return true, nil
 	}
-	return false, nil
 }
 
 // archivedFileState 报告 path 处是否已经放着普通文件，并返回其字节数。
@@ -1184,8 +1209,27 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
 		return stats, nil
 	}
-	stats.Tweets += len(tweets)
-	failedBefore := stats.Failed
+	downloaded, err := m.archiveTweets(ctx, saveCtx, job, cfg, user, entity, dir, tweets, updateDownloading)
+	stats.Tweets += downloaded.Tweets
+	stats.Downloaded += downloaded.Downloaded
+	stats.Skipped += downloaded.Skipped
+	stats.Failed += downloaded.Failed
+	if err != nil {
+		return stats, err
+	}
+	_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
+	return stats, nil
+}
+
+// archiveTweets 下载一批时间线推文的媒体，并推进该用户的增量游标。
+//
+// 游标只要求"本轮的失败都已交给失败队列"：可重试的失败由 retryFailedTweets 补齐，
+// 永久失效的媒体再怎么重扫也拿不回来。若要求零失败，一条长期失败的推文会让游标永远
+// 停在旧位置，开了增量归档也等于每次全量扫描。只有失败未能入队时才不推进游标，
+// 让下次归档重新扫到它。
+func (m *Manager) archiveTweets(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string)) (archiveStats, error) {
+	stats := archiveStats{Tweets: len(tweets)}
+	cursorBlocked := false
 	for _, tweet := range tweets {
 		for mediaIndex, media := range tweet.Media {
 			if ctx.Err() != nil {
@@ -1206,7 +1250,10 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 				stats.Failed++
 				_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
 				if shouldRetryMediaError(err) {
-					_ = m.rememberFailedTweet(saveCtx, job, entity, tweet, err)
+					if rememberErr := m.rememberFailedTweet(saveCtx, job, entity, tweet, err); rememberErr != nil {
+						log.Printf("remember failed tweet %s: %v", tweet.ID, rememberErr)
+						cursorBlocked = true
+					}
 				}
 				continue
 			}
@@ -1217,7 +1264,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 			}
 		}
 	}
-	if len(tweets) > 0 && stats.Failed == failedBefore {
+	if len(tweets) > 0 && !cursorBlocked {
 		// 游标取本轮见到的最新推文 ID（数值最大）。timeline 按时间倒序，但首页可能含
 		// 置顶推文（ID 较旧却排在最前），若用 tweets[0].ID 作游标，下次增量归档会在首页
 		// 对其精确命中而立即早停，漏掉比置顶更新的推文。无论开关是否开启都写入，切换
@@ -1226,7 +1273,6 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 			log.Printf("update user entity %d last_seen_tweet_id: %v", entity.ID, err)
 		}
 	}
-	_ = m.store.UpdateUserEntityMediaCount(saveCtx, entity.ID, user.MediaCount)
 	return stats, nil
 }
 
@@ -1308,6 +1354,7 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 		}
 		dir := target.Join(entity.ParentDir, entity.Name)
 		failed := false
+		var lastErr error
 		for index, media := range tweet.Media {
 			mediaURL := bestMediaURL(media)
 			if mediaURL == "" {
@@ -1325,19 +1372,22 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 						TweetID:  tweet.ID,
 						Error:    err.Error(),
 					}); markErr != nil {
-						failed = true
+						failed, lastErr = true, markErr
 						break
 					}
 					_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
 					continue
 				}
-				failed = true
+				failed, lastErr = true, err
 				break
 			}
 		}
 		if !failed {
 			_ = m.store.DeleteFailedTweet(saveCtx, item.ID)
 			retried++
+		} else if ctx.Err() == nil {
+			// 重试失败的条目续期排到队尾，避免持续失败的头部条目永远挡住后面的条目。
+			_ = m.store.TouchFailedTweet(saveCtx, item.ID, lastErr.Error())
 		}
 	}
 	return retried
@@ -1351,12 +1401,11 @@ func shouldAbortArchiveUsers(err error) bool {
 	return xclient.IsAllClientsRateLimited(err)
 }
 
+// shouldRetryMediaError 判断下载失败的推文是否进入失败队列等待重试。只有永久失效
+// （404/410/DMCA）不重试：X 对过期的 video.twimg.com 签名例行返回裸 403，那是瞬时
+// 状态。403 若不入队，这条推文既不会被重试，又会让增量游标永远停在旧位置。
 func shouldRetryMediaError(err error) bool {
-	var statusErr *downloader.HTTPStatusError
-	if errors.As(err, &statusErr) {
-		return statusErr.StatusCode != http.StatusForbidden && statusErr.StatusCode != http.StatusNotFound && statusErr.StatusCode != http.StatusGone
-	}
-	return true
+	return !isPermanentlyUnavailableMediaError(err)
 }
 
 func isPermanentlyUnavailableMediaError(err error) bool {
@@ -1382,9 +1431,9 @@ func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, us
 		return storage.UserEntity{}, "", err
 	}
 	if existing != nil && existing.Name != "" && existing.Name != name {
-		oldPath := target.Join(existing.ParentDir, existing.Name)
-		newPath := target.Join(existing.ParentDir, name)
-		_ = target.Rename(ctx, oldPath, newPath)
+		if name, err = m.renameEntityDir(ctx, target, existing.ParentDir, existing.Name, name); err != nil {
+			return storage.UserEntity{}, "", err
+		}
 	}
 	entity, err := m.store.EnsureUserEntity(ctx, user.ID, parent, name)
 	if err != nil {
@@ -1398,6 +1447,23 @@ func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, us
 		return storage.UserEntity{}, "", err
 	}
 	return entity, dir, nil
+}
+
+// renameEntityDir 把实体目录从 oldName 改名为 newName，并同步改写 downloads.file_path，
+// 返回之后应使用的目录名。只改目录不改记录，媒体库会整体 404，下次归档还会因找不到
+// 旧文件把全部媒体重下成 "(1)" 副本。改名失败（如新名目录已存在且非空）时沿用旧名，
+// 避免同一实体的文件分散到两个目录。
+func (m *Manager) renameEntityDir(ctx context.Context, target filestore.Store, parentDir string, oldName string, newName string) (string, error) {
+	oldPath := target.Join(parentDir, oldName)
+	newPath := target.Join(parentDir, newName)
+	if err := target.Rename(ctx, oldPath, newPath); err != nil {
+		log.Printf("rename %s -> %s: %v; keep old directory name", oldPath, newPath, err)
+		return oldName, nil
+	}
+	if _, err := m.store.RewriteDownloadPathPrefix(ctx, oldPath, newPath); err != nil {
+		return "", err
+	}
+	return newName, nil
 }
 
 func (m *Manager) refreshUserLinks(ctx context.Context, cfg config.AppConfig, userID string, name string, targetDir string) error {
@@ -1442,9 +1508,9 @@ func (m *Manager) ensureListEntity(ctx context.Context, cfg config.AppConfig, gr
 		return storage.ListEntity{}, err
 	}
 	if existing != nil && existing.Name != "" && existing.Name != name {
-		oldPath := target.Join(existing.ParentDir, existing.Name)
-		newPath := target.Join(existing.ParentDir, name)
-		_ = target.Rename(ctx, oldPath, newPath)
+		if name, err = m.renameEntityDir(ctx, target, existing.ParentDir, existing.Name, name); err != nil {
+			return storage.ListEntity{}, err
+		}
 	}
 	entity, err := m.store.EnsureListEntity(ctx, id, parent, name)
 	if err != nil {
@@ -1535,8 +1601,12 @@ func (m *Manager) jobCanceled(ctx context.Context, saveCtx context.Context, id i
 	return err == nil && job.Status == storage.JobCanceled
 }
 
-func isCancellation(ctx context.Context, err error) bool {
-	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+// isCancellation 只以任务自身 ctx 为准判断是否被取消或关停。不能看 err：net/http 的
+// Client.Timeout / ResponseHeaderTimeout 错误同样满足 errors.Is(err,
+// context.DeadlineExceeded)，把网络超时当成取消会走 handleInterrupt，而任务并未被
+// 取消，于是什么都不写，任务永久停在 downloading/resolving。
+func isCancellation(ctx context.Context, _ error) bool {
+	return ctx.Err() != nil
 }
 
 var (
@@ -1581,18 +1651,21 @@ func nonEmptyStrings(values ...string) []string {
 	return parts
 }
 
-func bestMediaURL(media parser.Media) string {
-	raw := media.BestURL
-	if raw == "" {
-		raw = media.URL
-	}
-	if raw == "" {
-		for _, variant := range media.Variants {
-			if variant.URL != "" {
-				raw = variant.URL
-				break
-			}
+// downloadableMediaCount 统计推文中有可下载地址的媒体数量。
+func downloadableMediaCount(tweet parser.TweetData) int {
+	count := 0
+	for _, media := range tweet.Media {
+		if bestMediaURL(media) != "" {
+			count++
 		}
+	}
+	return count
+}
+
+func bestMediaURL(media parser.Media) string {
+	raw := parser.MediaDownloadURL(media)
+	if raw == "" {
+		return ""
 	}
 	return downloader.NormalizeMediaURL(raw)
 }
@@ -1833,7 +1906,8 @@ func syncLink(linkPath string, target string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+	// 与媒体目录的 0700/0600 加固一致：列表目录与 sidecar 会暴露私密列表名和成员。
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o700); err != nil {
 		return err
 	}
 	if current, err := os.Readlink(linkPath); err == nil && current == targetAbs {
@@ -1851,7 +1925,7 @@ func syncLink(linkPath string, target string) error {
 		}
 		return nil
 	}
-	return os.WriteFile(linkPath+".link", []byte(targetAbs+"\n"), 0o644)
+	return os.WriteFile(linkPath+".link", []byte(targetAbs+"\n"), 0o600)
 }
 
 func removeLinkPlaceholder(linkPath string) error {

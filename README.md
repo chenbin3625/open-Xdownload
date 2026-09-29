@@ -152,7 +152,7 @@ Available service flags:
 | `-tls-cert` | `OPEN_XDOWNLOAD_TLS_CERT` | empty | TLS certificate file; enables HTTPS, HTTP/2 and HTTP/3. Must be set together with `-tls-key`. |
 | `-tls-key` | `OPEN_XDOWNLOAD_TLS_KEY` | empty | TLS private key file. |
 | `-tls-auto` | `OPEN_XDOWNLOAD_TLS_AUTO` | off | Issue a self-signed localhost certificate into `<data-dir>/tls` and serve HTTPS. For local use only. |
-| n/a | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | empty (all hosts allowed) | Comma-separated `Host` allowlist. Unset means any `Host` is accepted, which keeps reverse-proxy deployments working. Set it to your real hostnames (e.g. `nas.local,192.168.1.10`) to block DNS-rebinding attacks that resolve an attacker-controlled domain to your machine. |
+| n/a | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | empty (IP addresses and `localhost` only) | Comma-separated `Host` allowlist that blocks DNS-rebinding attacks (an attacker-controlled domain resolved to your machine). Unset means only IP literals and `localhost` are accepted, so access by IP and Docker port mappings keep working. If you reach the service through a domain name (reverse proxy, `nas.local`, etc.), list those names here, e.g. `nas.local,xdl.example.com`; requests with any other `Host` get HTTP 421. |
 | n/a | `OPEN_XDOWNLOAD_PROXY_URL` | empty | Proxy used before a config row exists (first start / auth check). The proxy configured in the Web UI takes precedence afterwards. |
 | n/a | `OPEN_XDOWNLOAD_GUEST_BEARER` | built-in public web token | Overrides the guest bearer token used for unauthenticated endpoints. Only needed if X rotates the public token. |
 | n/a | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | empty | Supplies X credentials via the environment instead of the database. Env-provided values are never persisted and are always redacted in the API. |
@@ -468,7 +468,7 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 | `-tls-cert` | `OPEN_XDOWNLOAD_TLS_CERT` | 空 | TLS 证书文件；启用后提供 HTTPS、HTTP/2 与 HTTP/3。需与 `-tls-key` 同时设置。 |
 | `-tls-key` | `OPEN_XDOWNLOAD_TLS_KEY` | 空 | TLS 私钥文件。 |
 | `-tls-auto` | `OPEN_XDOWNLOAD_TLS_AUTO` | 关闭 | 在 `<data-dir>/tls` 下自动签发 localhost 自签证书并启用 HTTPS，仅供本机使用。 |
-| 无 | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | 空（放行全部） | 逗号分隔的 `Host` 白名单。不设置时放行任意 `Host`，以保持反向代理部署可用；填入真实主机名（如 `nas.local,192.168.1.10`）可阻断 DNS rebinding——攻击者把自己的域名解析到你的机器来绕过同源假设。 |
+| 无 | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | 空（仅放行 IP 地址与 `localhost`） | 逗号分隔的 `Host` 白名单，用于阻断 DNS rebinding（攻击者把自己的域名解析到你的机器）。不设置时只放行 IP 字面量与 `localhost`，按 IP 访问和 Docker 端口映射不受影响；如果通过域名访问（反向代理、`nas.local` 等），需要把这些域名填进来，如 `nas.local,xdl.example.com`，其他 `Host` 的请求返回 HTTP 421。 |
 | 无 | `OPEN_XDOWNLOAD_PROXY_URL` | 空 | 配置记录尚不存在时（首次启动 / 鉴权检查）使用的代理；此后以 Web UI 中配置的代理为准。 |
 | 无 | `OPEN_XDOWNLOAD_GUEST_BEARER` | 内置公开 web token | 覆盖免登录接口使用的 guest bearer。仅当 X 轮换了该公开 token 时才需要设置。 |
 | 无 | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | 空 | 通过环境变量提供 X 凭据，替代存库方式。环境变量提供的值不会写入数据库，且在 API 中始终脱敏。 |

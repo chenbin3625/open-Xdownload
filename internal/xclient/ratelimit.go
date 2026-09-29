@@ -80,11 +80,17 @@ func (rl *rateLimiter) after(path string, header http.Header) {
 	if err != nil {
 		return
 	}
+	// 与 Retry-After 同样截断：时钟偏差或异常的 reset 值会让 before() 一直阻塞到该时刻，
+	// 任务带着并发槽位卡死（只有 ctx 能打断）。
+	reset := time.Unix(resetUnix, 0)
+	if latest := time.Now().Add(maxRetryAfter); reset.After(latest) {
+		reset = latest
+	}
 	rl.mu.Lock()
 	rl.limits[path] = rateLimitState{
 		remaining: remaining,
 		limit:     limit,
-		reset:     time.Unix(resetUnix, 0),
+		reset:     reset,
 		ready:     true,
 	}
 	rl.mu.Unlock()

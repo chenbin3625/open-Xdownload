@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,11 +15,20 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 )
+
+// newLoopbackRequest 构造 Host 为回环地址的请求。httptest.NewRequest 默认 Host 是
+// example.com，会被 DNS rebinding 防护（hostAllowed）当作域名拒绝。
+func newLoopbackRequest(method string, target string, body io.Reader) *http.Request {
+	request := httptest.NewRequest(method, target, body)
+	request.Host = "127.0.0.1:8787"
+	return request
+}
 
 func TestRetryActiveJobReturnsBusinessError(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -32,7 +43,7 @@ func TestRetryActiveJobReturnsBusinessError(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/jobs/"+strconv.FormatInt(job.ID, 10)+"/retry", nil)
+	request := newLoopbackRequest(http.MethodPost, "/api/jobs/"+strconv.FormatInt(job.ID, 10)+"/retry", nil)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -66,7 +77,7 @@ func TestRetryTerminalJobCreatesNewJob(t *testing.T) {
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
 	handler := NewServer(db, nil, manager, eventBus).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/jobs/"+strconv.FormatInt(original.ID, 10)+"/retry", nil)
+	request := newLoopbackRequest(http.MethodPost, "/api/jobs/"+strconv.FormatInt(original.ID, 10)+"/retry", nil)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -100,7 +111,7 @@ func TestCancelNonexistentJobReturnsNotFound(t *testing.T) {
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
 	handler := NewServer(db, nil, manager, eventBus).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/jobs/999999/cancel", nil)
+	request := newLoopbackRequest(http.MethodPost, "/api/jobs/999999/cancel", nil)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -118,7 +129,7 @@ func TestRetryNonexistentJobReturnsNotFound(t *testing.T) {
 	defer db.Close()
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/jobs/999999/retry", nil)
+	request := newLoopbackRequest(http.MethodPost, "/api/jobs/999999/retry", nil)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -138,7 +149,7 @@ func TestCreateTweetJobOnlyValidatesURLShape(t *testing.T) {
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
 	handler := NewServer(db, nil, manager, eventBus).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(`{
+	request := newLoopbackRequest(http.MethodPost, "/api/jobs", strings.NewReader(`{
 		"kind": "tweet_link",
 		"input": "https://x.com/openai/status/1234567890"
 	}`))
@@ -169,7 +180,7 @@ func TestCreateMediaURLRejectsNonTwimgHost(t *testing.T) {
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
 	handler := NewServer(db, nil, manager, eventBus).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(`{
+	request := newLoopbackRequest(http.MethodPost, "/api/jobs", strings.NewReader(`{
 		"kind": "media_url",
 		"input": "http://127.0.0.1/latest/meta-data"
 	}`))
@@ -202,7 +213,7 @@ func TestCreateLocalDirectoryCreatesAndReturnsListing(t *testing.T) {
 
 	target := filepath.Join(allowedRoot, "new", "downloads")
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/local-directories", strings.NewReader(`{"path":`+strconv.Quote(target)+`}`))
+	request := newLoopbackRequest(http.MethodPost, "/api/local-directories", strings.NewReader(`{"path":`+strconv.Quote(target)+`}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
@@ -237,7 +248,7 @@ func TestCreateLocalDirectoryRejectsPathOutsideAllowedRoots(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodPost, "/api/local-directories", strings.NewReader(`{"path":"/etc/open-xdownload-blocked"}`))
+	request := newLoopbackRequest(http.MethodPost, "/api/local-directories", strings.NewReader(`{"path":"/etc/open-xdownload-blocked"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
@@ -315,7 +326,7 @@ func TestListFailedTweetsSupportsPagination(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/api/failed-tweets?page=2&pageSize=2", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/failed-tweets?page=2&pageSize=2", nil)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -368,7 +379,7 @@ func TestDashboardOmitsFailedTweetBodies(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/dashboard", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -418,7 +429,7 @@ func TestDashboardMetaReturnsStatsWithoutJobs(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/api/dashboard/meta", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/dashboard/meta", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -451,7 +462,7 @@ func TestListJobsPageOmitsStats(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/api/jobs?page=1&pageSize=2", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/jobs?page=1&pageSize=2", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -502,7 +513,7 @@ func TestGetJobFilesReturnsDownloadsAndFailedMedia(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/api/jobs/"+strconv.FormatInt(job.ID, 10)+"/files", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/jobs/"+strconv.FormatInt(job.ID, 10)+"/files", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -519,7 +530,7 @@ func TestGetJobFilesReturnsDownloadsAndFailedMedia(t *testing.T) {
 		t.Fatalf("failed = %+v", files.Failed)
 	}
 
-	missing := httptest.NewRequest(http.MethodGet, "/api/jobs/999999/files", nil)
+	missing := newLoopbackRequest(http.MethodGet, "/api/jobs/999999/files", nil)
 	missingResponse := httptest.NewRecorder()
 	handler.ServeHTTP(missingResponse, missing)
 	if missingResponse.Code != http.StatusNotFound {
@@ -561,14 +572,14 @@ func TestServeDownloadFileSupportsRangeAndKeepsPathContained(t *testing.T) {
 	}
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/file", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/file", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "0123456789" {
 		t.Fatalf("full response = %d %q, want 200 full media", response.Code, response.Body.String())
 	}
 
-	rangeRequest := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/file", nil)
+	rangeRequest := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/file", nil)
 	rangeRequest.Header.Set("Range", "bytes=2-5")
 	rangeResponse := httptest.NewRecorder()
 	handler.ServeHTTP(rangeResponse, rangeRequest)
@@ -582,7 +593,7 @@ func TestServeDownloadFileSupportsRangeAndKeepsPathContained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create outside download: %v", err)
 	}
-	outRequest := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(outside.ID, 10)+"/file", nil)
+	outRequest := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(outside.ID, 10)+"/file", nil)
 	outResponse := httptest.NewRecorder()
 	handler.ServeHTTP(outResponse, outRequest)
 	if outResponse.Code != http.StatusForbidden {
@@ -598,7 +609,7 @@ func TestEventsNilBusReturnsServiceUnavailable(t *testing.T) {
 	defer db.Close()
 
 	handler := NewServer(db, nil, nil, nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/events", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
@@ -688,7 +699,7 @@ func TestServeLibraryFileWhitelistsMediaAndKeepsPathContained(t *testing.T) {
 	}
 
 	// 媒体文件正常返回。
-	request := httptest.NewRequest(http.MethodGet, "/api/library/file?path="+strings.ReplaceAll(url.QueryEscape(mediaPath), "+", "%20"), nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/library/file?path="+strings.ReplaceAll(url.QueryEscape(mediaPath), "+", "%20"), nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "video-bytes" {
@@ -696,7 +707,7 @@ func TestServeLibraryFileWhitelistsMediaAndKeepsPathContained(t *testing.T) {
 	}
 
 	// 非媒体扩展名被白名单拒绝。
-	request = httptest.NewRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(textPath), nil)
+	request = newLoopbackRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(textPath), nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
@@ -704,7 +715,7 @@ func TestServeLibraryFileWhitelistsMediaAndKeepsPathContained(t *testing.T) {
 	}
 
 	// 下载目录之外拒绝。
-	request = httptest.NewRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(outsidePath), nil)
+	request = newLoopbackRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(outsidePath), nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
@@ -712,7 +723,7 @@ func TestServeLibraryFileWhitelistsMediaAndKeepsPathContained(t *testing.T) {
 	}
 
 	// 目录内的缺失媒体文件返回 404 而非 403。
-	request = httptest.NewRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(filepath.Join(root, "users", "john_smith", "gone.jpg")), nil)
+	request = newLoopbackRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(filepath.Join(root, "users", "john_smith", "gone.jpg")), nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
@@ -724,7 +735,7 @@ func TestServeDownloadFileUnknownIDsReturn404(t *testing.T) {
 	_, handler, _ := newLibraryTestServer(t)
 
 	for _, id := range []string{"0", "-1", "99999"} {
-		request := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+id+"/file", nil)
+		request := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+id+"/file", nil)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusNotFound {
@@ -755,7 +766,7 @@ func TestServeDownloadPreviewServesLocalPoster(t *testing.T) {
 		t.Fatalf("write poster: %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/preview", nil)
+	request := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/preview", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "poster" {
@@ -801,7 +812,7 @@ func TestUpdateConfigRejectsDownloadDirOutsideAllowedRoots(t *testing.T) {
 	}
 	handler := NewServer(db, nil, nil, nil).Routes()
 
-	request := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{"downloadDir":"/"}`))
+	request := newLoopbackRequest(http.MethodPut, "/api/config", strings.NewReader(`{"downloadDir":"/"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -840,12 +851,87 @@ func TestUpdateConfigAcceptsDownloadDirWithinAllowedRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	request := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(string(body)))
+	request := newLoopbackRequest(http.MethodPut, "/api/config", strings.NewReader(string(body)))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200 for download dir inside allowed root, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestLocalDirectoryAllowedRootsExcludesWorkingDirectory(t *testing.T) {
+	// launchd / 未配 WorkingDirectory 的 systemd 下 cwd 是 "/"：把 cwd 当允许根，下载目录
+	// 就能被改成 "/"，全盘文件随之可经 /api/library/file 读取。
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	roots := localDirectoryAllowedRoots(config.AppConfig{DownloadDir: filepath.Join(home, "downloads")})
+	for _, root := range roots {
+		if root == cwd {
+			t.Fatalf("allowed roots %v must not include the process working directory", roots)
+		}
+	}
+	if withinAllowedRoot(filepath.Join(cwd, "sub"), roots) {
+		t.Fatal("a path under the working directory must not be allowed")
+	}
+}
+
+func TestValidateDownloadDirRejectsAllowedRootItself(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	roots := []string{home}
+	// 设成家目录本身，家目录下所有图片/视频都会变成"媒体库内"文件。
+	if err := validateDownloadDir(home, roots); err == nil {
+		t.Fatal("download dir equal to the home directory should be rejected")
+	}
+	if err := validateDownloadDir(filepath.Join(home, "Downloads", "x"), roots); err != nil {
+		t.Fatalf("subdirectory of home should be accepted: %v", err)
+	}
+	if err := validateDownloadDir("/", []string{"/"}); err == nil {
+		t.Fatal("filesystem root should always be rejected")
+	}
+}
+
+func TestFetchRemotePosterRejectsOversizedBodyAndHoldsSlot(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-release // 响应头已发出，body 迟迟不结束
+		_, _ = w.Write(bytes.Repeat([]byte{'j'}, 64))
+	}))
+	defer server.Close()
+
+	limiter := make(countingSemaphore, 1)
+	dest := filepath.Join(t.TempDir(), "clip.mp4.preview.jpg")
+	done := make(chan error, 1)
+	go func() {
+		done <- fetchRemotePoster(context.Background(), server.Client(), limiter, server.URL+"/p.jpg", dest, 32)
+	}()
+	// body 读取期间仍占着并发名额：信号量若只覆盖到响应头，首屏几十张海报的 body
+	// 会同时下载，限流形同虚设。
+	deadline := time.Now().Add(2 * time.Second)
+	for len(limiter) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if len(limiter) != 1 {
+		t.Fatalf("limiter slots in use while reading body = %d, want 1", len(limiter))
+	}
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatal("oversized poster should fail instead of being truncated and cached")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("truncated poster was published: %v", err)
+	}
+	if len(limiter) != 0 {
+		t.Fatalf("limiter slot not released after fetch: %d", len(limiter))
 	}
 }

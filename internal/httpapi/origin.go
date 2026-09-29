@@ -20,20 +20,27 @@ import (
 // Sec-Fetch-Site 作为补充：现代浏览器一定会带，能覆盖 Origin 被剥离的情况。
 func guardCrossOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		if isStateChanging(r.Method) {
 			if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" || site == "same-site" {
 				writeError(w, http.StatusForbidden, errors.New("拒绝跨站请求"))
 				return
 			}
+			// 沙箱 iframe、data: 页面等不透明来源的 Origin 是 "null"。SPA 自身永远不会发出
+			// 这种请求；不带 Sec-Fetch-Site 的旧浏览器上，这是拦住无 body 简单 POST 的唯一一环。
+			if origin == "null" {
+				writeError(w, http.StatusForbidden, errors.New("拒绝不透明来源的请求"))
+				return
+			}
 		}
-		if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" && origin != "null" {
+		if origin != "" && origin != "null" {
 			if !originMatchesHost(origin, r.Host) {
 				writeError(w, http.StatusForbidden, errors.New("拒绝跨源请求"))
 				return
 			}
 		}
 		if !hostAllowed(r.Host) {
-			writeError(w, http.StatusMisdirectedRequest, errors.New("Host 不在允许列表内"))
+			writeError(w, http.StatusMisdirectedRequest, errors.New("Host 不在允许列表内：通过域名访问时请把该域名加入 OPEN_XDOWNLOAD_ALLOWED_HOSTS"))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -79,13 +86,16 @@ func hostOnly(hostport string) string {
 	return hostport
 }
 
-// hostAllowed 可选的 Host 白名单，用于防御 DNS rebinding（攻击者把自己的域名
-// 解析到 127.0.0.1，从而绕过 Origin 之外的同源假设）。默认放行全部，避免破坏
-// 既有的反向代理部署；设置 OPEN_XDOWNLOAD_ALLOWED_HOSTS 后才生效。
+// hostAllowed 防御 DNS rebinding：攻击者把自己的域名解析到 127.0.0.1 后，页面发出的
+// 请求 Origin 与 Host 一致，Origin 校验拦不住，只能校验 Host。rebinding 只能借助域名
+// 发起，因此未设置 OPEN_XDOWNLOAD_ALLOWED_HOSTS 时只放行 IP 字面量与 localhost：局域网
+// 按 IP 访问、Docker 端口映射不受影响；通过域名访问（反向代理、mDNS 主机名）需把域名
+// 加入白名单。设置白名单后只放行列表内的 Host。
 func hostAllowed(host string) bool {
 	raw := strings.TrimSpace(os.Getenv("OPEN_XDOWNLOAD_ALLOWED_HOSTS"))
 	if raw == "" {
-		return true
+		name := strings.Trim(hostOnly(host), "[]")
+		return strings.EqualFold(name, "localhost") || net.ParseIP(name) != nil
 	}
 	candidate := hostOnly(host)
 	for _, allowed := range strings.Split(raw, ",") {

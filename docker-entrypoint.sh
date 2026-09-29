@@ -36,7 +36,11 @@ fix_owner() {
 
   current="$(stat -c '%u:%g' "$dir" 2>/dev/null || true)"
   if [ "$mode" = "always" ] || [ "$current" != "$PUID:$PGID" ] || [ "${OPEN_XDOWNLOAD_FORCE_CHOWN:-0}" = "1" ]; then
-    chown -R "$PUID:$PGID" "$dir"
+    # NFS root_squash、只读卷等场景下 chown 会失败：不能让 set -e 直接把容器杀掉，
+    # 留给程序自己在写入时报出权限错误。
+    if ! chown -R "$PUID:$PGID" "$dir"; then
+      echo "warning: chown -R $PUID:$PGID $dir failed; continuing with existing ownership" >&2
+    fi
   fi
 }
 

@@ -57,8 +57,13 @@ type Options struct {
 }
 
 func New() *Downloader {
+	return NewWithTimeout(10 * time.Minute)
+}
+
+// NewWithTimeout 返回单次媒体请求（含读取 body）总超时为 timeout 的下载器。
+func NewWithTimeout(timeout time.Duration) *Downloader {
 	return &Downloader{
-		client: httpx.Client("", 10*time.Minute),
+		client: httpx.Client("", timeout),
 	}
 }
 
@@ -337,6 +342,13 @@ func isAllowedTwimgHost(host string) bool {
 	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
 }
 
+// isPhotoSizingHost 报告该主机是否用 ?name= 表示图片尺寸。仅 pbs.twimg.com（图片与
+// 视频海报）如此；video.twimg.com 的清晰度体现在各自独立的变体 URL 上。
+func isPhotoSizingHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return host == "pbs.twimg.com" || strings.HasSuffix(host, ".pbs.twimg.com")
+}
+
 var unsupportedFilenameChars = regexp.MustCompile(`[/\\:*?"<>\|]`)
 
 func Filename(rawURL string, hint string, contentType string, maxFilenameLength int) string {
@@ -429,12 +441,17 @@ func largePhotoURL(rawURL string) string {
 	if err != nil {
 		return rawURL
 	}
-	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	if (parsed.Scheme != "http" && parsed.Scheme != "https") || !isAllowedTwimgHost(host) || (host != "pbs.twimg.com" && !strings.HasSuffix(host, ".pbs.twimg.com")) {
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || !isPhotoSizingHost(parsed.Hostname()) {
 		return rawURL
 	}
 	query := parsed.Query()
-	if query.Get("name") == "" {
+	// 无条件改写 name 尺寸参数，而不是仅在缺省时补上：X 在卡片图片、syndication photos
+	// 与 component image_url 里常常给出 ?name=small / ?name=large 这类缩略图写法，指向的
+	// 是同一张图片。沿用请求里的小尺寸会归档一张缩略图，且与同一张图片的其他写法（无 name
+	// 参数，按 4096x4096 取回）字节不同，内容哈希去重也无法合并，于是同一张照片落盘两次。
+	// 统一取最大尺寸后，同一张照片的各种写法都取回同一份字节。
+	// name=orig 是原始上传件，本身已是最佳，改成 4096x4096 反而会降级，故保留。
+	if !strings.EqualFold(query.Get("name"), "orig") {
 		query.Set("name", "4096x4096")
 	}
 	parsed.RawQuery = query.Encode()
@@ -446,8 +463,13 @@ func largePhotoURL(rawURL string) string {
 // 供跨推文去重使用：转推、引用推文与卡片媒体经常复用同一条媒体 URL，仅按
 // (tweet_id, media_url) 判重会漏判，导致同一份媒体被重复下载多份。
 //
-// 保留决定尺寸/清晰度的参数（name 等），只忽略不影响内容的差异，避免把小尺寸缩略图
-// 误判成原图。非 twimg.com URL 原样返回：没有已知的等价改写规则，只按完全相同的 URL 去重。
+// 保留 format：不同编码（JPG 与 PNG）视为不同媒体。但 pbs.twimg.com 上的 name 参数
+// 只是尺寸指令（small/medium/large/orig/4096x4096 都是同一张图片的不同分辨率），故不
+// 参与身份：保留它会让同一张照片的不同写法拿到不同身份键而各自下载一份，且两份字节
+// 不同（缩略图对原图），内容哈希去重也合并不了。下载侧由 largePhotoURL 统一按最大
+// 尺寸取回，保证收敛到同一份字节。
+//
+// 非 twimg.com URL 原样返回：没有已知的等价改写规则，只按完全相同的 URL 去重。
 // 幂等；返回空字符串表示该 URL 不能用于去重。
 func MediaIdentity(rawURL string) string {
 	trimmed := strings.TrimSpace(rawURL)
@@ -456,9 +478,22 @@ func MediaIdentity(rawURL string) string {
 		return trimmed
 	}
 	query := parsed.Query()
-	// tag：Twitter 重新编码后变化；format：与路径上的媒体扩展名等价（相同内容）。
+	// 将路径扩展名和 format 参数统一表示，避免将 JPG 与 PNG 当成同一份文件。
+	mediaFormat := query.Get("format")
+	if mediaFormat == "" {
+		mediaFormat = filepath.Ext(parsed.Path)
+	}
+	if ext := normalizeMediaExtension(mediaFormat); ext != "" {
+		query.Set("format", strings.TrimPrefix(ext, "."))
+	}
+	// tag 随 Twitter 重新编码变化，不代表不同媒体。
 	query.Del("tag")
-	query.Del("format")
+	// name 是 pbs.twimg.com 的尺寸指令，同一张图片的不同分辨率写法必须收敛到同一身份。
+	// 只对图片主机生效：video.twimg.com 不用 name 表示尺寸（清晰度体现在各自独立的
+	// 变体 URL 上），不应在那里改变去重语义。
+	if isPhotoSizingHost(parsed.Hostname()) {
+		query.Del("name")
+	}
 	parsed.Scheme = "https"
 	parsed.Host = strings.ToLower(parsed.Hostname())
 	parsed.User = nil
@@ -564,4 +599,51 @@ func truncateUTF8Bytes(value string, maxBytes int) string {
 		builder.WriteRune(ch)
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+// staleTempFilePatterns 匹配下载器与海报回填写出的临时文件（见 DownloadWithOptions 与
+// jobs/preview.go）。它们正常情况下会被重命名或删除，只有进程在写入中途被杀才会残留。
+var staleTempFilePatterns = []string{".xdl-*.part", ".preview-*.jpg"}
+
+// RemoveStaleTempFiles 删除 root 下修改时间早于 olderThan 的残留临时文件，返回删除数量。
+// 按年龄过滤，不会误删正在写入的临时文件。
+func RemoveStaleTempFiles(ctx context.Context, root string, olderThan time.Duration) (int, error) {
+	cutoff := time.Now().Add(-olderThan)
+	removed := 0
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			// 单个目录不可读不影响其余目录的清理。
+			if entry != nil && entry.IsDir() && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() || !isStaleTempFileName(entry.Name()) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			return nil
+		}
+		if err := os.Remove(path); err == nil {
+			removed++
+		}
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return removed, nil
+	}
+	return removed, err
+}
+
+func isStaleTempFileName(name string) bool {
+	for _, pattern := range staleTempFilePatterns {
+		if matched, _ := filepath.Match(pattern, name); matched {
+			return true
+		}
+	}
+	return false
 }
