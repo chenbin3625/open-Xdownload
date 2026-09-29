@@ -2,6 +2,7 @@ package xclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -230,8 +231,8 @@ func TestPoolSelectAllRateLimitedErrorIsClassified(t *testing.T) {
 
 func TestPoolSelectErrorsWhenAllClientsDisabled(t *testing.T) {
 	pool := &Pool{clients: []*Client{
-		{disabled: true},
-		{disabled: true},
+		{disabledUntil: time.Now().Add(time.Hour)},
+		{disabledUntil: time.Now().Add(time.Hour)},
 	}}
 	if _, err := pool.Select(context.Background(), "/x"); err == nil {
 		t.Fatal("Select with all disabled should error")
@@ -368,5 +369,234 @@ func TestGetUserTimelineNumericStopOnLaterPage(t *testing.T) {
 	}
 	if requester.calls != 2 {
 		t.Fatalf("graphQL calls = %d, want 2", requester.calls)
+	}
+}
+
+func TestSelfCheckPageChangeDoesNotDisableClient(t *testing.T) {
+	// /home 改版、返回挑战页时 HTTP 200 但识别不到 screen_name：这不能证明 Cookie 失效，
+	// 禁用会让主 Cookie 在不重启的情况下永远不可用。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html>challenge</html>`))
+	}))
+	defer server.Close()
+	client := &Client{http: server.Client(), baseURL: server.URL}
+	if _, err := client.GetSelfScreenName(context.Background()); err == nil {
+		t.Fatal("expected an error when screen_name is missing")
+	}
+	if client.isDisabled() {
+		t.Fatal("unrecognized /home page must not disable the client")
+	}
+	if status := client.status(0, true); status.Error == "" {
+		t.Fatal("the self-check error should still be recorded for diagnostics")
+	}
+}
+
+func TestSuccessfulSelfCheckReenablesClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"screen_name":"owner"}`))
+	}))
+	defer server.Close()
+	client := &Client{http: server.Client(), baseURL: server.URL}
+	client.disable(&HTTPError{StatusCode: http.StatusForbidden})
+	if !client.isDisabled() {
+		t.Fatal("precondition: client should be disabled")
+	}
+	if _, err := client.GetSelfScreenName(context.Background()); err != nil {
+		t.Fatalf("self check: %v", err)
+	}
+	if client.isDisabled() {
+		t.Fatal("a successful login check must re-enable the client")
+	}
+	if status := client.status(0, true); !status.OK || status.Error != "" {
+		t.Fatalf("status = %+v, want OK with cleared error", status)
+	}
+}
+
+func TestDisabledClientRecoversAfterCooldown(t *testing.T) {
+	previous := clientDisableCooldown
+	clientDisableCooldown = 30 * time.Millisecond
+	t.Cleanup(func() { clientDisableCooldown = previous })
+
+	client := &Client{}
+	client.disable(&HTTPError{StatusCode: http.StatusForbidden})
+	if !client.isDisabled() {
+		t.Fatal("client should be disabled right after disable()")
+	}
+	time.Sleep(60 * time.Millisecond)
+	// 403 也可能来自 WAF 等瞬时拦截；冷却期后必须允许重新尝试，真正失效会被再次禁用。
+	if client.isDisabled() {
+		t.Fatal("disabled client should become selectable again after the cooldown")
+	}
+}
+
+func TestDisabledClientErrorIsNotRetried(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer server.Close()
+	var backoffCalls atomic.Int64
+	client := &Client{
+		http:    server.Client(),
+		baseURL: server.URL,
+		retryBackoff: func(int) time.Duration {
+			backoffCalls.Add(1)
+			return 0
+		},
+	}
+	client.disable(errors.New("forbidden"))
+	_, err := client.graphQL(context.Background(), "/test", nil)
+	if !errors.Is(err, ErrClientDisabled) {
+		t.Fatalf("err = %v, want ErrClientDisabled", err)
+	}
+	if isTransientError(err) {
+		t.Fatal("ErrClientDisabled must not be classified as transient")
+	}
+	if backoffCalls.Load() != 0 || requests.Load() != 0 {
+		t.Fatalf("disabled client retried: backoff=%d requests=%d", backoffCalls.Load(), requests.Load())
+	}
+}
+
+func TestPoolGraphQLKeepsAllClientsRateLimitedClassification(t *testing.T) {
+	previousWait := maxPoolSelectWait
+	maxPoolSelectWait = 0
+	t.Cleanup(func() { maxPoolSelectWait = previousWait })
+
+	reset := time.Now().Add(15 * time.Minute).Unix()
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("X-Rate-Limit-Limit", "50")
+		w.Header().Set("X-Rate-Limit-Remaining", "0")
+		w.Header().Set("X-Rate-Limit-Reset", fmt.Sprint(reset))
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	newClient := func() *Client {
+		return &Client{
+			http:         server.Client(),
+			baseURL:      server.URL,
+			limiter:      newRateLimiter(),
+			retryBackoff: func(int) time.Duration { return 0 },
+		}
+	}
+	pool := &Pool{clients: []*Client{newClient(), newClient()}}
+	_, err := pool.graphQL(context.Background(), "/i/api/graphql/x/UserMedia", nil)
+	// 第一个客户端 429 后，Select 发现全部受限并返回 ErrAllClientsRateLimited。这个分类
+	// 必须保留：manager 靠它中止批量归档，否则会继续对后面每个用户撞限流。
+	if !IsAllClientsRateLimited(err) {
+		t.Fatalf("err = %v, want ErrAllClientsRateLimited", err)
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("err = %v, want the last 429 kept as context", err)
+	}
+}
+
+func TestRateLimitResetHeaderIsClamped(t *testing.T) {
+	limiter := newRateLimiter()
+	header := http.Header{}
+	header.Set("X-Rate-Limit-Limit", "50")
+	header.Set("X-Rate-Limit-Remaining", "0")
+	// 时钟偏差或异常值：reset 在一天之后。before() 会一直等到 reset，任务带着槽位卡死。
+	header.Set("X-Rate-Limit-Reset", fmt.Sprint(time.Now().Add(24*time.Hour).Unix()))
+	limiter.after("/p", header)
+	reset, ok := limiter.blockedReset()
+	if !ok {
+		t.Fatal("path should be blocked")
+	}
+	if wait := time.Until(reset); wait > maxRetryAfter+time.Minute {
+		t.Fatalf("blocked for %v, want at most ~%v", wait, maxRetryAfter)
+	}
+}
+
+func TestPoolSwitchesCookieInsteadOfWaitingOutRateLimit(t *testing.T) {
+	reset := time.Now().Add(15 * time.Minute).Unix()
+	var limitedRequests atomic.Int64
+	limited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limitedRequests.Add(1)
+		w.Header().Set("X-Rate-Limit-Limit", "50")
+		w.Header().Set("X-Rate-Limit-Remaining", "0")
+		w.Header().Set("X-Rate-Limit-Reset", fmt.Sprint(reset))
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer limited.Close()
+	free := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer free.Close()
+
+	pool := &Pool{clients: []*Client{
+		{http: limited.Client(), baseURL: limited.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }},
+		{http: free.Client(), baseURL: free.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }},
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	payload, err := pool.graphQL(ctx, "/i/api/graphql/x/UserMedia", nil)
+	if err != nil {
+		t.Fatalf("graphQL: %v (a free cookie was available)", err)
+	}
+	if string(payload) != `{"data":{}}` {
+		t.Fatalf("payload = %q", payload)
+	}
+	// 受限客户端收到 429 后应立即交还，而不是在 before() 里等 15 分钟复位。
+	if elapsed := time.Since(started); elapsed > 2*time.Second || limitedRequests.Load() != 1 {
+		t.Fatalf("elapsed %v, limited requests %d; want an immediate switch after one 429", elapsed, limitedRequests.Load())
+	}
+}
+
+func TestAPIErrorIgnoresPartialErrorsAlongsideData(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{
+			// X 常在 200 响应里同时返回完整 data 与针对个别子项（如不可用的引用推文）的错误。
+			name:    "partial error with timeline data",
+			payload: `{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[]}}}}},"errors":[{"message":"_Missing: No status found with that ID","kind":"NonFatal"}]}`,
+			wantErr: false,
+		},
+		{name: "errors with null data", payload: `{"data":null,"errors":[{"code":88,"message":"Rate limit exceeded"}]}`, wantErr: true},
+		{name: "errors with empty data", payload: `{"data":{},"errors":[{"code":29,"message":"Timeout"}]}`, wantErr: true},
+		{name: "errors without data", payload: `{"errors":[{"code":326,"message":"locked"}]}`, wantErr: true},
+		{name: "rest v1.1 error", payload: `{"errors":[{"code":34,"message":"Sorry, that page does not exist."}]}`, wantErr: true},
+		{name: "clean data", payload: `{"data":{"user":{}}}`, wantErr: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := apiError([]byte(tc.payload)); (err != nil) != tc.wantErr {
+				t.Fatalf("apiError() = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseUserReadsRelocatedFields(t *testing.T) {
+	// X 把部分字段从 legacy 迁到了 core / privacy / relationship_perspectives；读不到时
+	// ScreenName 为空，私密账号的 following 也会被误判为 false（直接跳过归档）。
+	raw := gjson.Parse(`{"result": {
+		"__typename": "User",
+		"rest_id": "u1",
+		"core": {"screen_name": "owner", "name": "Owner"},
+		"privacy": {"protected": true},
+		"relationship_perspectives": {"following": true},
+		"legacy": {"media_count": 7, "friends_count": 3}
+	}}`)
+	user, err := parseUser(raw)
+	if err != nil {
+		t.Fatalf("parseUser: %v", err)
+	}
+	if user.ScreenName != "owner" || user.Name != "Owner" || !user.Protected || !user.Following || user.MediaCount != 7 {
+		t.Fatalf("user = %+v, want relocated fields parsed", user)
+	}
+
+	legacy := gjson.Parse(`{"result": {"rest_id": "u2", "legacy": {"screen_name": "old", "name": "Old", "protected": true, "following": true}}}`)
+	user, err = parseUser(legacy)
+	if err != nil || user.ScreenName != "old" || !user.Protected || !user.Following {
+		t.Fatalf("legacy user = %+v, err %v", user, err)
 	}
 }

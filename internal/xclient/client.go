@@ -54,6 +54,13 @@ const (
 
 var ErrAllClientsRateLimited = errors.New("X 客户端暂时全部限流，请稍后重试")
 
+// ErrClientDisabled 表示该 Cookie 近期因认证失败被标记为不可用。它不是瞬时错误：
+// 同一客户端重试只会立刻再次命中，应交给 Pool 换用其他 Cookie。
+var ErrClientDisabled = errors.New("X Cookie 已被标记为不可用")
+
+// clientDisableCooldown 是认证失败后客户端被禁用的时长，到期后允许重新尝试。
+var clientDisableCooldown = 30 * time.Minute
+
 func IsAllClientsRateLimited(err error) bool {
 	return errors.Is(err, ErrAllClientsRateLimited)
 }
@@ -82,9 +89,11 @@ type Client struct {
 	limiter      *rateLimiter
 	screen       string
 	mu           sync.Mutex
-	disabled     bool
-	lastError    string
-	requestCount atomic.Int64
+	// disabledUntil 非零且晚于当前时间时客户端不可用。禁用带冷却期而不是永久：403 也可能
+	// 来自 WAF 等瞬时拦截，Pool 按配置长期缓存，永久禁用会让主 Cookie 直到重启都不可用。
+	disabledUntil time.Time
+	lastError     string
+	requestCount  atomic.Int64
 }
 
 type Pool struct {
@@ -416,15 +425,17 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	}
 	matches := screenNamePattern.FindSubmatch(payload)
 	if len(matches) < 2 {
+		// HTTP 200 却识别不到账号，多是首页改版或返回了挑战页，不能证明 Cookie 失效：
+		// 只记录错误供诊断，不禁用。
 		err := errors.New("无法从 X 首页识别登录账号")
-		c.disable(err)
+		c.recordError(err)
 		return "", err
 	}
 	screenName := string(matches[1])
 	c.mu.Lock()
 	c.screen = screenName
 	c.mu.Unlock()
-	c.clearError()
+	c.enable()
 	return screenName, nil
 }
 
@@ -739,17 +750,38 @@ func (c *Client) graphQL(ctx context.Context, path string, values url.Values) ([
 	return c.do(ctx, http.MethodGet, path, values, nil)
 }
 
+// yieldOnRateLimitKey 标记请求由 Pool 发起：客户端被限流时应立即把请求交还给 Pool
+// 换用别的 Cookie，而不是在本客户端的 before() 里阻塞到限流复位（可达 15 分钟）。
+type yieldOnRateLimitKey struct{}
+
+func withYieldOnRateLimit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, yieldOnRateLimitKey{}, true)
+}
+
+func yieldsOnRateLimit(ctx context.Context) bool {
+	yield, _ := ctx.Value(yieldOnRateLimitKey{}).(bool)
+	return yield
+}
+
 func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]byte, error) {
 	var lastErr error
-	for attempts := 0; attempts < max(1, len(p.clients)); attempts++ {
+	failures, handoffs := 0, 0
+	// 限流交还不计入失败次数，但总数有界：限流复位后若仍反复 429，最终按失败处理。
+	maxHandoffs := max(1, len(p.clients)) * requestMaxAttempts
+	for failures < max(1, len(p.clients)) {
 		client, err := p.Select(ctx, path)
 		if err != nil {
+			// "全部限流"必须原样上抛（保留最后一次失败作上下文）：manager 靠这个分类中止
+			// 批量归档，被 lastErr（通常是一个 429）覆盖后会继续对后面每个用户撞限流。
+			if IsAllClientsRateLimited(err) && lastErr != nil {
+				return nil, fmt.Errorf("%w: %w", err, lastErr)
+			}
 			if lastErr != nil {
 				return nil, lastErr
 			}
 			return nil, err
 		}
-		payload, err := client.graphQL(ctx, path, values)
+		payload, err := client.graphQL(withYieldOnRateLimit(ctx), path, values)
 		if err == nil {
 			return payload, nil
 		}
@@ -760,6 +792,13 @@ func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]b
 		if !client.isDisabled() && !isTransientError(err) {
 			return nil, err
 		}
+		// 客户端因限流把请求交还：回到 Select 换用未受限的 Cookie；全部受限时 Select
+		// 会有界地等待最早复位，超时返回 ErrAllClientsRateLimited。
+		if client.limiter != nil && client.limiter.wouldBlock(path) && handoffs < maxHandoffs {
+			handoffs++
+			continue
+		}
+		failures++
 	}
 	if lastErr != nil {
 		return nil, lastErr
@@ -784,6 +823,10 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 		if !isTransientError(err) || ctx.Err() != nil || attempt == requestMaxAttempts-1 {
 			return nil, err
 		}
+		if yieldsOnRateLimit(ctx) && c.limiter != nil && c.limiter.wouldBlock(path) {
+			// 下一次尝试会在 before() 里阻塞到复位；由 Pool 发起时交还给它换用其他 Cookie。
+			return nil, err
+		}
 		timer := time.NewTimer(c.requestRetryDelay(attempt))
 		select {
 		case <-ctx.Done():
@@ -797,7 +840,7 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 
 func (c *Client) doOnce(ctx context.Context, method string, path string, query url.Values, form url.Values) ([]byte, error) {
 	if c.isDisabled() {
-		return nil, errors.New("X Cookie 已被标记为不可用")
+		return nil, ErrClientDisabled
 	}
 	if c.limiter != nil {
 		if err := c.limiter.before(ctx, path); err != nil {
@@ -887,6 +930,12 @@ func apiError(payload []byte) error {
 	if !errorsResult.Exists() {
 		return nil
 	}
+	// GraphQL 允许部分成功：X 常在 200 响应里同时返回完整 data 和针对个别子项的错误
+	// （如某条被引用推文不可用，kind=NonFatal）。data 非空时按成功处理，由调用方从
+	// data 中取用；否则一页里一条坏推文就会让整个用户的归档失败。
+	if data := gjson.GetBytes(payload, "data"); data.IsObject() && len(data.Map()) > 0 {
+		return nil
+	}
 	code := -1
 	if raw := errorsResult.Get("0.code"); raw.Exists() {
 		code = int(raw.Int())
@@ -908,16 +957,28 @@ func limitedErrorPayload(payload []byte) string {
 func (c *Client) isDisabled() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.disabled
+	return c.disabledLocked()
+}
+
+func (c *Client) disabledLocked() bool {
+	return !c.disabledUntil.IsZero() && time.Now().Before(c.disabledUntil)
 }
 
 func (c *Client) disable(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.disabled = true
+	c.disabledUntil = time.Now().Add(clientDisableCooldown)
 	if err != nil {
 		c.lastError = err.Error()
 	}
+}
+
+// enable 在登录校验成功后解除禁用，让用户在设置页重新检测即可恢复被误禁的 Cookie。
+func (c *Client) enable() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.disabledUntil = time.Time{}
+	c.lastError = ""
 }
 
 func (c *Client) recordError(err error) {
@@ -931,7 +992,7 @@ func (c *Client) recordError(err error) {
 func (c *Client) clearError() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.disabled {
+	if !c.disabledLocked() {
 		c.lastError = ""
 	}
 }
@@ -939,7 +1000,7 @@ func (c *Client) clearError() {
 func (c *Client) status(index int, primary bool) ClientStatus {
 	c.mu.Lock()
 	screenName := c.screen
-	disabled := c.disabled
+	disabled := c.disabledLocked()
 	lastError := c.lastError
 	c.mu.Unlock()
 	var rateLimits []RateLimitSnapshot
@@ -973,7 +1034,7 @@ func isPermanentClientError(err error) bool {
 func isTransientError(err error) bool {
 	// 上下文取消/超时不是"可重试的瞬时错误"：重试只会再失败。把它判为非瞬时，
 	// 让 do()/Pool.graphQL 立即返回，避免取消时遍历重试所有客户端并白白消耗速率预算。
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrClientDisabled) {
 		return false
 	}
 	var apiErr *APIError
@@ -998,18 +1059,31 @@ func parseUser(raw gjson.Result) (User, error) {
 	if !legacy.Exists() {
 		return User{}, errors.New("响应中没有用户 legacy 数据")
 	}
+	// X 已把部分字段从 legacy 迁到 core / privacy / relationship_perspectives，不同接口
+	// 返回的结构并不一致：新位置优先，旧位置兜底。
+	relationship := raw.Get("relationship_perspectives")
 	return User{
 		ID:           raw.Get("rest_id").String(),
-		Name:         legacy.Get("name").String(),
-		ScreenName:   legacy.Get("screen_name").String(),
-		Protected:    legacy.Get("protected").Bool(),
+		Name:         firstString(raw.Get("core.name"), legacy.Get("name")),
+		ScreenName:   firstString(raw.Get("core.screen_name"), legacy.Get("screen_name")),
+		Protected:    firstBool(raw.Get("privacy.protected"), legacy.Get("protected")),
 		FriendsCount: int(legacy.Get("friends_count").Int()),
 		MediaCount:   int(legacy.Get("media_count").Int()),
-		Muting:       legacy.Get("muting").Bool(),
-		Blocking:     legacy.Get("blocking").Bool(),
-		Following:    legacy.Get("following").Bool(),
-		Requested:    legacy.Get("follow_request_sent").Bool(),
+		Muting:       firstBool(relationship.Get("muting"), legacy.Get("muting")),
+		Blocking:     firstBool(relationship.Get("blocking"), legacy.Get("blocking")),
+		Following:    firstBool(relationship.Get("following"), legacy.Get("following")),
+		Requested:    firstBool(relationship.Get("follow_request_sent"), legacy.Get("follow_request_sent")),
 	}, nil
+}
+
+// firstBool 返回第一个存在的布尔字段的值；都不存在时为 false。
+func firstBool(values ...gjson.Result) bool {
+	for _, value := range values {
+		if value.Exists() {
+			return value.Bool()
+		}
+	}
+	return false
 }
 
 func timelineItems(payload []byte, instructionsPath string) ([]gjson.Result, string, error) {

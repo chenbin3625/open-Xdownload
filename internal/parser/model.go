@@ -45,12 +45,24 @@ type TweetData struct {
 func (tweet TweetData) BestMediaURLs() []string {
 	urls := make([]string, 0, len(tweet.Media))
 	for _, media := range tweet.Media {
-		switch {
-		case media.BestURL != "":
-			urls = append(urls, media.BestURL)
-		case media.URL != "":
-			urls = append(urls, media.URL)
+		if raw := MediaDownloadURL(media); raw != "" {
+			urls = append(urls, raw)
 		}
 	}
 	return urls
+}
+
+// MediaDownloadURL 返回应当下载的媒体地址；没有可下载的版本时返回空串。
+//
+// 视频/GIF 的 URL 字段是缩略图（media_url_https），只能用作预览：拿它兜底会把一张
+// jpg 当成视频存档并标记完成。旧版本存下的 payload 可能没有 BestURL，此时从
+// Variants 里重新挑选 mp4。
+func MediaDownloadURL(media Media) string {
+	if media.BestURL != "" {
+		return media.BestURL
+	}
+	if media.Type == MediaVideo || media.Type == MediaGIF {
+		return BestVariant(media.Variants).URL
+	}
+	return media.URL
 }
