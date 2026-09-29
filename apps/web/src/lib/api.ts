@@ -254,6 +254,17 @@ export interface FailedTweetPage {
   pagination: DashboardPagination;
 }
 
+// 仍是 Error 子类，既有的 instanceof Error / error.message 调用方不受影响；额外带上 HTTP 状态码。
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const response = await fetch(path, {
@@ -264,10 +275,13 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const payload: { error?: string } | null = await response
-      .json()
-      .catch(() => ({ error: response.statusText }));
-    throw new Error(payload?.error ?? response.statusText);
+    const payload: { error?: string } | null = await response.json().catch(() => null);
+    // 空串 error、{}、HTTP/2 下为空的 statusText 都要继续回退，保证提示里总有内容。
+    const message =
+      (typeof payload?.error === "string" && payload.error) ||
+      response.statusText ||
+      `请求失败 (${response.status})`;
+    throw new ApiError(message, response.status);
   }
   return response.json() as Promise<T>;
 }

@@ -70,6 +70,29 @@ const batchTabs: {
   },
 ];
 
+// 可选协议 / www. / mobile.，x.com 或 twitter.com，可选 @，1-15 位用户名，其后只能是 / ? # 或结尾。
+const profileLinkPattern =
+  /^(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x|twitter)\.com\/@?([A-Za-z0-9_]{1,15})(?:[/?#]|$)/i;
+const plainHandlePattern = /^@?([A-Za-z0-9_]{1,15})$/;
+const xLinkPattern = /^(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x|twitter)\.com(?:[/?#]|$)/i;
+const tweetStatusPattern = /\/status\/\d+/;
+const listLinkPattern = /(?:^|\/)(?:i\/)?lists\/\d+/;
+
+// 从主页链接、@handle 或纯 handle 中取出用户名；无法识别时返回 null。
+export function parseScreenName(input: string): string | null {
+  const trimmed = input.trim();
+  const match = trimmed.match(profileLinkPattern) ?? trimmed.match(plainHandlePattern);
+  return match ? match[1] : null;
+}
+
+// 顶部快捷输入框的分流：推文链接 → 单条推文，列表链接/纯数字 → 列表，其余 → 用户。
+export function detectQuickInputTab(input: string): "tweet_link" | "list" | "user" {
+  const trimmed = input.trim();
+  if (tweetStatusPattern.test(trimmed)) return "tweet_link";
+  if (listLinkPattern.test(trimmed) || /^\d{5,}$/.test(trimmed)) return "list";
+  return "user";
+}
+
 function parseLinesToItems(raw: string, kind: JobKind): JobRequest[] {
   const seen = new Set<string>();
   const items: JobRequest[] = [];
@@ -81,11 +104,8 @@ function parseLinesToItems(raw: string, kind: JobKind): JobRequest[] {
 
     // 清洗常见的输入前缀
     if (kind === "user" || kind === "following") {
-      if (line.startsWith("https://x.com/") || line.startsWith("https://twitter.com/")) {
-        const parts = line.split("/").filter(Boolean);
-        line = parts[parts.length - 1] || line;
-      }
-      line = line.replace(/^@+/, "").trim();
+      // 识别不了的输入原样交给后端校验，避免静默丢弃。
+      line = parseScreenName(line) ?? line.replace(/^@+/, "").trim();
     } else if (kind === "list") {
       const match = line.match(/(?:lists\/|^)(\d+)/);
       if (match) {
@@ -122,19 +142,14 @@ export function CreateJobModal({
   useEffect(() => {
     if (!open) return;
     if (initialInput) {
-      if (
-        initialInput.includes("status/") ||
-        initialInput.includes("x.com/") ||
-        initialInput.includes("twitter.com/")
-      ) {
-        setActiveTab("tweet_link");
-        setTweetUrl(initialInput);
-      } else if (/^\d{5,}$/.test(initialInput.trim())) {
-        setActiveTab("list");
-        setBatchInputs({ list: initialInput });
+      const quickTab = detectQuickInputTab(initialInput);
+      setActiveTab(quickTab);
+      if (quickTab === "tweet_link") {
+        const trimmed = initialInput.trim();
+        // 后端只认带协议的推文链接，补齐 x.com/... 这类省略协议的输入。
+        setTweetUrl(xLinkPattern.test(trimmed) && !/^https?:\/\//i.test(trimmed) ? `https://${trimmed}` : trimmed);
       } else {
-        setActiveTab("user");
-        setBatchInputs({ user: initialInput });
+        setBatchInputs({ [quickTab]: initialInput });
       }
     } else {
       setActiveTab(tabKeys.includes(initialKind) ? initialKind : "user");
@@ -143,6 +158,9 @@ export function CreateJobModal({
       setIsSchedule(true);
     }
   }, [open, initialInput, initialKind]);
+
+  // 单条推文不支持定时计划：切到该标签时勾选状态保留（切回可恢复），但不参与任何展示与提交。
+  const scheduleMode = isSchedule && activeTab !== "tweet_link";
 
   const currentBatchItems = useMemo(() => {
     if (activeTab === "tweet_link") return [];
@@ -177,7 +195,7 @@ export function CreateJobModal({
         throw new Error("请至少输入一个有效目标");
       }
 
-      if (isSchedule) {
+      if (scheduleMode) {
         const payload: ArchiveScheduleRequest = {
           name:
             scheduleName.trim() ||
@@ -194,7 +212,7 @@ export function CreateJobModal({
     },
     onSuccess: (jobs) => {
       void invalidateWorkbenchQueries(queryClient);
-      if (isSchedule) {
+      if (scheduleMode) {
         toast.success({
           message: "定时归档计划已保存",
           description: `执行频率: 每 ${intervalMinutes} 分钟`,
@@ -341,7 +359,7 @@ export function CreateJobModal({
           <span className="text-xs text-fg-subtle">
             {activeTab === "tweet_link"
               ? "解析后点击立即下载入库"
-              : isSchedule
+              : scheduleMode
               ? `将保存为包含 ${currentBatchItems.length} 个目标的定时计划`
               : `将同时创建 ${currentBatchItems.length} 个后台下载任务`}
           </span>
@@ -356,7 +374,7 @@ export function CreateJobModal({
               onClick={() => createJobsMutation.mutate()}
               icon={<Download className="size-4" />}
             >
-              {isSchedule
+              {scheduleMode
                 ? "保存定时计划"
                 : activeTab === "tweet_link"
                 ? "立即下载"

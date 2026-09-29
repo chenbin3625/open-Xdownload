@@ -55,6 +55,17 @@ function entryKey(item: DownloadRecord) {
   return item.id > 0 ? String(item.id) : item.filePath;
 }
 
+// 焦点在 <video controls> 或可编辑元素上时，方向键属于该元素（视频拖动进度、文本移动光标），灯箱不应截获。
+function isKeyboardOwnedTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  if (target instanceof HTMLMediaElement) return true;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  const editable = target.closest("[contenteditable]");
+  return editable !== null && editable.getAttribute("contenteditable") !== "false";
+}
+
 export interface GalleryPageProps {
   jobs?: Job[];
   downloads?: DownloadRecord[];
@@ -327,6 +338,7 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
     }
     if (previewIndex === -1) return;
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (isKeyboardOwnedTarget(event.target)) return;
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
         if (filteredEntries.length === 0) return;
