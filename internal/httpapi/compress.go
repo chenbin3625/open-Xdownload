@@ -94,9 +94,12 @@ func (g *sniffCompressWriter) WriteHeader(code int) {
 	g.handlerWroteHeader = true
 	g.handlerStatus = code
 	g.contentType = g.Header().Get("Content-Type")
-	if strings.HasPrefix(strings.ToLower(g.contentType), "text/event-stream") {
-		// Defensive: never buffer a stream, even if it bypasses the /api/events
-		// exclusion (e.g. a future handler).
+	if !isJSONContentType(g.contentType) {
+		// Only JSON is ever compressed, so anything else (media files served by
+		// http.ServeFile, event streams, bodies left to net/http's sniffing)
+		// streams through untouched. Buffering it would hold up to
+		// maxBufferedJSON per request in memory and delay the first byte until
+		// the whole file was read.
 		g.forceRaw = true
 	}
 }

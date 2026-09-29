@@ -171,3 +171,61 @@ func TestCompressJSONFlushForcesRaw(t *testing.T) {
 		t.Fatalf("flushed response should not be compressed, got %q", response.Header().Get("Content-Encoding"))
 	}
 }
+
+// streamProbeWriter 记录底层 ResponseWriter 第一次收到正文字节时，处理器已写出多少字节。
+type streamProbeWriter struct {
+	*httptest.ResponseRecorder
+	firstWriteAfter int
+	handlerWritten  *int
+}
+
+func (w *streamProbeWriter) Write(p []byte) (int, error) {
+	if w.firstWriteAfter < 0 {
+		w.firstWriteAfter = *w.handlerWritten
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+func TestCompressJSONStreamsNonJSONBodiesWithoutBuffering(t *testing.T) {
+	const chunk = 64 << 10
+	written := 0
+	handler := compressJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 4; i++ {
+			written += chunk
+			_, _ = w.Write(bytes.Repeat([]byte{'v'}, chunk))
+		}
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/api/library/file?path=x.mp4", nil)
+	request.Header.Set("Accept-Encoding", "br, gzip")
+	probe := &streamProbeWriter{ResponseRecorder: httptest.NewRecorder(), firstWriteAfter: -1, handlerWritten: &written}
+	handler.ServeHTTP(probe, request)
+
+	// 媒体文件不压缩，也不能先缓冲（每请求最多 8 MiB 常驻内存、首字节延迟到读完）。
+	if probe.firstWriteAfter != chunk {
+		t.Fatalf("first body byte reached the client after %d handler bytes, want %d (no buffering)", probe.firstWriteAfter, chunk)
+	}
+	if got := probe.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, media must not be re-encoded", got)
+	}
+	if probe.Body.Len() != 4*chunk {
+		t.Fatalf("body length = %d, want %d", probe.Body.Len(), 4*chunk)
+	}
+}
+
+func TestCompressJSONStreamsBodyWrittenWithoutExplicitHeader(t *testing.T) {
+	written := 0
+	handler := compressJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		written = 1024
+		_, _ = w.Write(bytes.Repeat([]byte{'i'}, 1024)) // 隐式 200
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/api/library/downloads/1/preview", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	probe := &streamProbeWriter{ResponseRecorder: httptest.NewRecorder(), firstWriteAfter: -1, handlerWritten: &written}
+	handler.ServeHTTP(probe, request)
+	if probe.Code != http.StatusOK || probe.Body.Len() != 1024 || probe.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("code=%d len=%d encoding=%q", probe.Code, probe.Body.Len(), probe.Header().Get("Content-Encoding"))
+	}
+}

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"mime"
 	"net/http"
@@ -790,52 +789,79 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("没有可用的视频预览图"))
 		return
 	}
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, posterURL, nil)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("预览图地址无效"))
-		return
-	}
 	// 缩略图回源必须与媒体下载共用同一套代理解析：浏览器无法直连 twimg 的部署里，
 	// 走系统默认 transport 的回源请求会全部失败，这正是历史媒体看不到预览图的
-	// 原因之一。并发经信号量限流：首屏几十张缺海报的卡片不会同时发起远程抓取。
-	if err := posterFetchLimiter.acquire(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("预览图抓取繁忙"))
-		return
-	}
-	response, err := httpx.Client(cfg.ProxyURL, 20*time.Second).Do(request)
-	posterFetchLimiter.release()
-	if err != nil || response.Body == nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("下载视频预览图失败"))
-		return
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		writeError(w, http.StatusNotFound, fmt.Errorf("视频预览图不可用"))
-		return
-	}
-	contentType := response.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "image/") {
-		writeError(w, http.StatusUnsupportedMediaType, fmt.Errorf("视频预览图格式无效"))
-		return
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(posterPath), ".preview-*.jpg")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	temporaryPath := temporary.Name()
-	if _, err = io.Copy(temporary, io.LimitReader(response.Body, 10<<20)); err != nil {
-		temporary.Close()
-		_ = os.Remove(temporaryPath)
-		writeError(w, http.StatusBadGateway, fmt.Errorf("保存视频预览图失败"))
-		return
-	}
-	if err = temporary.Close(); err != nil || os.Rename(temporaryPath, posterPath) != nil {
-		_ = os.Remove(temporaryPath)
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("保存视频预览图失败"))
+	// 原因之一。重定向同样限定在 twimg.com。
+	client := httpx.Client(cfg.ProxyURL, 20*time.Second)
+	httpx.RestrictRedirects(client, isAllowedPreviewHost)
+	if err := fetchRemotePoster(r.Context(), client, posterFetchLimiter, posterURL, posterPath, maxPosterBytes); err != nil {
+		var statusErr *posterStatusError
+		switch {
+		case errors.As(err, &statusErr):
+			writeError(w, statusErr.status, statusErr)
+		case r.Context().Err() != nil:
+			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("预览图抓取已取消"))
+		default:
+			writeError(w, http.StatusBadGateway, fmt.Errorf("下载视频预览图失败"))
+		}
 		return
 	}
 	http.ServeFile(w, r, posterPath)
+}
+
+// maxPosterBytes 限制单张回源海报的大小；name=small 缩略图通常 <100KB。
+const maxPosterBytes = 10 << 20
+
+// posterStatusError 表示可以直接映射为 HTTP 状态码的回源失败（上游 4xx/5xx、非图片）。
+type posterStatusError struct {
+	status  int
+	message string
+}
+
+func (e *posterStatusError) Error() string { return e.message }
+
+// fetchRemotePoster 回源下载海报并原子发布到 posterPath。并发名额覆盖整个下载过程（含
+// 读取 body），否则首屏几十张卡片的 body 仍会同时下载。超过 maxBytes 时报错且不发布：
+// 截断的图片一旦落盘，之后会被当作有效缓存永久返回。
+func fetchRemotePoster(ctx context.Context, client *http.Client, limiter countingSemaphore, posterURL string, posterPath string, maxBytes int64) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, posterURL, nil)
+	if err != nil {
+		return &posterStatusError{status: http.StatusNotFound, message: "预览图地址无效"}
+	}
+	if err := limiter.acquire(ctx); err != nil {
+		return &posterStatusError{status: http.StatusServiceUnavailable, message: "预览图抓取繁忙"}
+	}
+	defer limiter.release()
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return &posterStatusError{status: http.StatusNotFound, message: "视频预览图不可用"}
+	}
+	if !strings.HasPrefix(response.Header.Get("Content-Type"), "image/") {
+		return &posterStatusError{status: http.StatusUnsupportedMediaType, message: "视频预览图格式无效"}
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(posterPath), ".preview-*.jpg")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	if _, err := httpx.CopyLimited(temporary, response.Body, maxBytes); err != nil {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if err := os.Rename(temporaryPath, posterPath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	return nil
 }
 
 func isAllowedPreviewHost(host string) bool {
@@ -1202,15 +1228,14 @@ func displayUserInput(input string) string {
 	return "@" + input
 }
 
-// localDirectoryAllowedRoots 返回本地目录浏览/创建允许的根集合：用户家目录、进程工作目录、
-// 以及配置的下载目录。无鉴权本地服务下，限制任意路径枚举/创建（S5）。
+// localDirectoryAllowedRoots 返回本地目录浏览/创建允许的根集合：用户家目录与当前
+// 配置的下载目录。无鉴权本地服务下，限制任意路径枚举/创建（S5）。刻意不含进程工作
+// 目录：launchd、未配 WorkingDirectory 的 systemd 下 cwd 就是 "/"，会让沙箱整体失效。
+// 默认下载目录 <cwd>/downloads 作为"当前下载目录"仍然可用。
 func localDirectoryAllowedRoots(cfg config.AppConfig) []string {
 	roots := []string{}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		roots = append(roots, home)
-	}
-	if cwd, err := os.Getwd(); err == nil && cwd != "" {
-		roots = append(roots, cwd)
 	}
 	if cfg.DownloadDir != "" {
 		if abs, err := filepath.Abs(cfg.DownloadDir); err == nil {
@@ -1315,11 +1340,34 @@ func validateDownloadDir(value string, allowedRoots []string) error {
 	if err != nil {
 		return fmt.Errorf("下载目录无效: %w", err)
 	}
+	// 下载目录同时是媒体库的沙箱根：设成文件系统根或家目录本身，其下所有图片/视频都会
+	// 变成可读的"媒体库文件"。当前下载目录保持不变是允许的。
+	if isFilesystemRoot(path) || isHomeDirectory(path) {
+		return fmt.Errorf("下载目录不能是文件系统根目录或家目录本身，请选择其中的子目录")
+	}
 	if !withinAllowedRoot(path, allowedRoots) {
-		return fmt.Errorf("下载目录不允许：仅限家目录、程序工作目录或当前下载目录范围内；" +
+		return fmt.Errorf("下载目录不允许：仅限家目录或当前下载目录范围内；" +
 			"如需指向其他位置（例如外置磁盘），请用 OPEN_XDOWNLOAD_DOWNLOAD_DIR 环境变量启动")
 	}
 	return nil
+}
+
+func isFilesystemRoot(path string) bool {
+	cleaned := filepath.Clean(path)
+	return filepath.Dir(cleaned) == cleaned
+}
+
+func isHomeDirectory(path string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	resolvedHome, err := resolvePathForCheck(home)
+	if err != nil {
+		return false
+	}
+	resolved, err := resolvePathForCheck(path)
+	return err == nil && resolved == resolvedHome
 }
 
 func createLocalDirectoryPath(value string, allowedRoots []string) (string, error) {

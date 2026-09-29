@@ -103,6 +103,9 @@ func main() {
 		handler = withHTTP3AltSvc(handler, listenPort(addr))
 	}
 	server := newHTTPServer(addr, handler)
+	// Shutdown 不会取消处理中请求的 ctx：关闭事件总线让 /api/events 长连接立即结束，
+	// 否则只要浏览器开着页面，Shutdown 就要等满超时，manager.Stop() 来不及执行。
+	server.RegisterOnShutdown(eventBus.CloseAll)
 	var http3Server http3Closer
 	if listen.tlsEnabled() {
 		http3Server = newHTTP3Server(addr, handler, server.TLSConfig)
