@@ -9,6 +9,7 @@ import {
 import React from "react";
 import { cn } from "../../lib/cn";
 import { Spinner } from "./Spinner";
+import { useFieldId } from "./Input";
 
 export interface SelectOption {
   value: string;
@@ -23,6 +24,7 @@ export function Select({
   size = "md",
   className,
   ariaLabel,
+  id,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -31,10 +33,13 @@ export function Select({
   size?: "sm" | "md";
   className?: string;
   ariaLabel?: string;
+  id?: string;
 }) {
+  const fieldId = useFieldId();
   return (
     <RadixSelect.Root value={value} onValueChange={onChange}>
       <RadixSelect.Trigger
+        id={id ?? fieldId}
         aria-label={ariaLabel}
         className={cn(
           "inline-flex items-center justify-between gap-2 rounded-control",
@@ -112,7 +117,9 @@ export function Switch({
     >
       <RadixSwitch.Thumb
         className={cn(
-          "flex size-4 items-center justify-center rounded-full bg-white shadow-sm",
+          // 滑块用 --surface 而不是写死白色：深色钛金的 brand-500 本身就是近白，
+          // 白滑块会与轨道融在一起（1.10:1），看不出开关状态。
+          "flex size-4 items-center justify-center rounded-full bg-surface shadow-sm",
           "transition-transform duration-200",
           "data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0.5",
         )}
@@ -149,7 +156,8 @@ export function Checkbox({
         )}
       >
         <RadixCheckbox.Indicator>
-          <Check className="size-3 text-white" strokeWidth={3} />
+          {/* 勾号跟随强调色的配对前景色，深色钛金下品牌色近白也能看清 */}
+          <Check className="size-3 text-brand-contrast" strokeWidth={3} />
         </RadixCheckbox.Indicator>
       </RadixCheckbox.Root>
       {label && (

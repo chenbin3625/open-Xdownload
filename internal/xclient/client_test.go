@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/tidwall/gjson"
 )
@@ -29,6 +30,15 @@ func TestTweetResultIDUnwrapsVisibilityResultForStopAt(t *testing.T) {
 	}
 	if !shouldStopAt(tweetResultID(result), "12345", 0) {
 		t.Fatal("wrapped stop tweet did not trigger exact-match early stop")
+	}
+}
+
+func TestFirstBoolSkipsNullAndKeepsExplicitFalse(t *testing.T) {
+	if !firstBool(gjson.Parse(`null`), gjson.Parse(`true`)) {
+		t.Fatal("null suppressed the legacy true value")
+	}
+	if firstBool(gjson.Parse(`false`), gjson.Parse(`true`)) {
+		t.Fatal("explicit false should override legacy true")
 	}
 }
 
@@ -92,11 +102,52 @@ func TestPoolGetUserByInputFallsBackToAnotherCookie(t *testing.T) {
 	}
 }
 
-func TestRequestRetryDelayUsesCappedExponentialBackoff(t *testing.T) {
-	want := []time.Duration{750 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second, 6 * time.Second, 6 * time.Second}
-	for attempt, expected := range want {
-		if got := requestRetryDelay(attempt); got != expected {
-			t.Fatalf("attempt %d delay = %s, want %s", attempt, got, expected)
+func TestPoolRateLimitErrorYieldsToAnotherCookie(t *testing.T) {
+	var primaryRequests atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryRequests.Add(1)
+		w.Header().Set("Retry-After", "60")
+		_, _ = w.Write([]byte(`{"data":{"user":null},"errors":[{"code":88,"message":"Rate limit exceeded"}]}`))
+	}))
+	defer primary.Close()
+
+	var backupRequests atomic.Int64
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupRequests.Add(1)
+		_, _ = w.Write([]byte(`{"data":{"user":{"result":{"rest_id":"user-2","legacy":{"name":"Backup","screen_name":"backup"}}}}}`))
+	}))
+	defer backup.Close()
+
+	pool := &Pool{clients: []*Client{
+		{http: primary.Client(), baseURL: primary.URL, retryBackoff: func(int) time.Duration { return 0 }, limiter: newRateLimiter()},
+		{http: backup.Client(), baseURL: backup.URL, retryBackoff: func(int) time.Duration { return 0 }, limiter: newRateLimiter()},
+	}}
+	user, err := pool.GetUserByInput(context.Background(), "backup")
+	if err != nil {
+		t.Fatalf("get user by input: %v", err)
+	}
+	if user.ID != "user-2" {
+		t.Fatalf("user id = %q, want backup response", user.ID)
+	}
+	if primaryRequests.Load() != 1 || backupRequests.Load() != 1 {
+		t.Fatalf("requests primary=%d backup=%d, want 1 each", primaryRequests.Load(), backupRequests.Load())
+	}
+	if pool.clients[0].isDisabled() {
+		t.Fatal("rate-limit response disabled a valid primary client")
+	}
+	if !pool.clients[0].limiter.wouldBlock("/i/api/graphql/xmU6X_CKVnQ5lSrCbAmJsg/UserByScreenName") {
+		t.Fatal("rate-limit response did not block the primary client")
+	}
+}
+
+func TestRequestRetryDelayUsesCappedExponentialBackoffWithJitter(t *testing.T) {
+	base := []time.Duration{750 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second, 6 * time.Second, 6 * time.Second}
+	for attempt, expected := range base {
+		for i := 0; i < 50; i++ {
+			got := requestRetryDelay(attempt)
+			if got < expected || got > expected+expected/2 {
+				t.Fatalf("attempt %d delay = %s, want within [%s, %s]", attempt, got, expected, expected+expected/2)
+			}
 		}
 	}
 }
@@ -272,6 +323,36 @@ func timelinePagePayload(tweetIDs []string, cursor string) string {
 		strings.Join(entries, ","))
 }
 
+func TestUserTimelineContinuesAfterEmptyCursorPage(t *testing.T) {
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload(nil, "next-page"),
+		timelinePagePayload([]string{"123"}, ""),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u", ScreenName: "user"}, parser.ParseOptions{})
+	if err != nil || len(tweets) != 1 || tweets[0].ID != "123" {
+		t.Fatalf("tweets=%+v error=%v", tweets, err)
+	}
+}
+
+func TestUserTimelineSkipsMalformedTweetWithoutFailing(t *testing.T) {
+	// 毒丸修复：单条推文解析失败只计数跳过，不再让整个用户时间线失败；
+	// 后续合法推文仍应被返回，且 stats.LastSeenTweetID 覆盖被跳过的条目。
+	malformed := `{"content":{"entryType":"TimelineTimelineItem","itemContent":{"tweet_results":{"result":{"rest_id":"999","__typename":"Tweet"}}}}}`
+	valid := `{"content":{"entryType":"TimelineTimelineItem","itemContent":{"tweet_results":{"result":{"rest_id":"123","legacy":{"full_text":"ok","extended_entities":{"media":[{"id_str":"m1","type":"photo","media_url_https":"https://pbs.twimg.com/media/a.jpg"}]}}}}}}}`
+	page := fmt.Sprintf(`{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[%s,%s]}]}}}}}}`, malformed, valid)
+	requester := &fakeTimelineRequester{pages: []string{page}}
+	tweets, stats, err := getUserTimelineWithStats(context.Background(), requester, User{ID: "u", ScreenName: "user"}, parser.ParseOptions{})
+	if err != nil {
+		t.Fatalf("getUserTimelineWithStats: %v", err)
+	}
+	if len(tweets) != 1 || tweets[0].ID != "123" {
+		t.Fatalf("tweets = %+v, want the valid tweet only", tweets)
+	}
+	if stats.SkippedTweets != 1 || stats.LastSeenTweetID != "999" {
+		t.Fatalf("stats = %+v, want 1 skipped and LastSeenTweetID=999", stats)
+	}
+}
+
 func tweetIDs(tweets []parser.TweetData) []string {
 	ids := make([]string, 0, len(tweets))
 	for _, tweet := range tweets {
@@ -331,6 +412,23 @@ func TestGetUserTimelinePinnedOldTweetDoesNotFalseStop(t *testing.T) {
 	}
 	if requester.calls != 1 {
 		t.Fatalf("graphQL calls = %d, want 1", requester.calls)
+	}
+}
+
+func TestGetUserTimelinePinnedStopContinuesThroughNewerPages(t *testing.T) {
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"200", "400", "350"}, "cursor-2"),
+		timelinePagePayload([]string{"300", "250", "200", "150"}, "cursor-3"),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u1", ScreenName: "u"}, parser.ParseOptions{StopAtTweetID: "200"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(tweetIDs(tweets), ","); got != "400,350,300,250" {
+		t.Fatalf("tweet IDs = %q, want all newer tweets across both pages", got)
+	}
+	if requester.calls != 2 {
+		t.Fatalf("graphQL calls = %d, want 2", requester.calls)
 	}
 }
 
@@ -561,6 +659,11 @@ func TestAPIErrorIgnoresPartialErrorsAlongsideData(t *testing.T) {
 			wantErr: false,
 		},
 		{name: "errors with null data", payload: `{"data":null,"errors":[{"code":88,"message":"Rate limit exceeded"}]}`, wantErr: true},
+		{name: "rate limit with null user", payload: `{"data":{"user":null},"errors":[{"code":88,"message":"Rate limit exceeded"}]}`, wantErr: true},
+		{name: "locked account with data", payload: `{"data":{"user":null},"errors":[{"code":326,"message":"locked"}]}`, wantErr: true},
+		{name: "fatal error follows partial error", payload: `{"data":{"user":{}},"errors":[{"kind":"NonFatal"},{"code":88,"message":"Rate limit exceeded"}]}`, wantErr: true},
+		{name: "rate limit marked nonfatal", payload: `{"data":{"user":{}},"errors":[{"kind":"NonFatal","code":88}]}`, wantErr: true},
+		{name: "empty errors", payload: `{"data":{},"errors":[]}`, wantErr: false},
 		{name: "errors with empty data", payload: `{"data":{},"errors":[{"code":29,"message":"Timeout"}]}`, wantErr: true},
 		{name: "errors without data", payload: `{"errors":[{"code":326,"message":"locked"}]}`, wantErr: true},
 		{name: "rest v1.1 error", payload: `{"errors":[{"code":34,"message":"Sorry, that page does not exist."}]}`, wantErr: true},
@@ -598,5 +701,522 @@ func TestParseUserReadsRelocatedFields(t *testing.T) {
 	user, err = parseUser(legacy)
 	if err != nil || user.ScreenName != "old" || !user.Protected || !user.Following {
 		t.Fatalf("legacy user = %+v, err %v", user, err)
+	}
+}
+
+// —— 以下是本次修复新增的回归测试 ——
+
+func newHeaderTestClient(server *httptest.Server) *Client {
+	return &Client{
+		http:         server.Client(),
+		baseURL:      server.URL,
+		authToken:    "auth-token-value",
+		csrfToken:    "csrf-token-value",
+		limiter:      newRateLimiter(),
+		retryBackoff: func(int) time.Duration { return 0 },
+	}
+}
+
+func TestClientSendsCookiesCSRFAndBearerHeaders(t *testing.T) {
+	type captured struct {
+		header  http.Header
+		cookies map[string]string
+	}
+	requests := make(chan captured, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookies := map[string]string{}
+		for _, cookie := range r.Cookies() {
+			cookies[cookie.Name] = cookie.Value
+		}
+		requests <- captured{header: r.Header.Clone(), cookies: cookies}
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer server.Close()
+
+	client := newHeaderTestClient(server)
+	if _, err := client.graphQL(context.Background(), "/i/api/graphql/test/Test", url.Values{"variables": {"{}"}}); err != nil {
+		t.Fatalf("graphQL: %v", err)
+	}
+	got := <-requests
+	if got.header.Get("Authorization") != "Bearer "+guestBearer {
+		t.Fatalf("Authorization = %q", got.header.Get("Authorization"))
+	}
+	if got.header.Get("X-Csrf-Token") != "csrf-token-value" {
+		t.Fatalf("X-Csrf-Token = %q", got.header.Get("X-Csrf-Token"))
+	}
+	if got.header.Get("User-Agent") != userAgent {
+		t.Fatalf("User-Agent = %q", got.header.Get("User-Agent"))
+	}
+	if got.header.Get("Accept") != "application/json" {
+		t.Fatalf("Accept = %q", got.header.Get("Accept"))
+	}
+	if got.cookies["auth_token"] != "auth-token-value" || got.cookies["ct0"] != "csrf-token-value" {
+		t.Fatalf("cookies = %+v", got.cookies)
+	}
+}
+
+type captureRequester struct {
+	path    string
+	values  url.Values
+	payload string
+	err     error
+}
+
+func (c *captureRequester) graphQL(_ context.Context, path string, values url.Values) ([]byte, error) {
+	c.path, c.values = path, values
+	return []byte(c.payload), c.err
+}
+
+func TestGraphQLPathsComeFromQueryIDTableAndVariablesAreJSON(t *testing.T) {
+	requester := &captureRequester{payload: `{"data":{"user":{"result":{"rest_id":"u1","legacy":{"screen_name":"alice","name":"A"}}}}}`}
+	if _, err := getUserByScreenName(context.Background(), requester, "alice"); err != nil {
+		t.Fatalf("getUserByScreenName: %v", err)
+	}
+	if requester.path != userByScreenNamePath {
+		t.Fatalf("path = %q, want %q", requester.path, userByScreenNamePath)
+	}
+	variables := gjson.Parse(requester.values.Get("variables"))
+	if variables.Get("screen_name").String() != "alice" || variables.Get("withSafetyModeUserFields").Bool() != true {
+		t.Fatalf("variables = %s", requester.values.Get("variables"))
+	}
+	if !gjson.Valid(requester.values.Get("variables")) || requester.values.Get("features") == "" {
+		t.Fatal("variables/features not valid JSON")
+	}
+
+	mediaRequester := &captureRequester{payload: `{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[]}}}}}}`}
+	if _, err := getUserTimeline(context.Background(), mediaRequester, User{ID: "u1", ScreenName: "alice"}, parser.ParseOptions{}); err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if mediaRequester.path != userMediaPath {
+		t.Fatalf("user media path = %q, want %q", mediaRequester.path, userMediaPath)
+	}
+	mediaVars := gjson.Parse(mediaRequester.values.Get("variables"))
+	if mediaVars.Get("userId").String() != "u1" || mediaVars.Get("count").Int() != 100 || !gjson.Valid(mediaRequester.values.Get("variables")) {
+		t.Fatalf("user media variables = %s", mediaRequester.values.Get("variables"))
+	}
+
+	listRequester := &captureRequester{payload: `{"data":{"list":{"members_timeline":{"timeline":{"instructions":[]}}}}}`}
+	if _, err := getListMembers(context.Background(), listRequester, List{ID: "list-1"}); err != nil {
+		t.Fatalf("getListMembers: %v", err)
+	}
+	if listRequester.path != listMembersPath {
+		t.Fatalf("list members path = %q, want %q", listRequester.path, listMembersPath)
+	}
+	if gjson.Get(listRequester.values.Get("variables"), "listId").String() != "list-1" {
+		t.Fatalf("list members variables = %s", listRequester.values.Get("variables"))
+	}
+
+	followingRequester := &captureRequester{payload: `{"data":{"user":{"result":{"timeline":{"timeline":{"instructions":[]}}}}}}`}
+	if _, err := getFollowing(context.Background(), followingRequester, User{ID: "u1"}); err != nil {
+		t.Fatalf("getFollowing: %v", err)
+	}
+	if followingRequester.path != followingPath {
+		t.Fatalf("following path = %q, want %q", followingRequester.path, followingPath)
+	}
+	if gjson.Get(followingRequester.values.Get("variables"), "userId").String() != "u1" {
+		t.Fatalf("following variables = %s", followingRequester.values.Get("variables"))
+	}
+}
+
+func TestClientRateLimitErrorsAreNotRetried(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "api code 88",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"data":{"user":null},"errors":[{"code":88,"message":"Rate limit exceeded"}]}`))
+			},
+		},
+		{
+			name: "http 429",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "30")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"errors":[{"code":88}]}`))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				tc.handler(w, r)
+			}))
+			defer server.Close()
+			client := newHeaderTestClient(server)
+			_, err := getUserByInput(context.Background(), client, "alice")
+			if err == nil {
+				t.Fatal("expected rate-limit error")
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("requests = %d, want 1 (no retry on rate limit)", requests.Load())
+			}
+			if !isRateLimitError(err) {
+				t.Fatalf("error %v not classified as rate limit", err)
+			}
+			if !client.limiter.wouldBlock(userByScreenNamePath) {
+				t.Fatal("rate limit did not block the path for failover")
+			}
+		})
+	}
+}
+
+func TestBodyTooLargeAndBusyWaitAreNotTransient(t *testing.T) {
+	if isTransientError(httpx.ErrBodyTooLarge) {
+		t.Fatal("ErrBodyTooLarge must not be retried")
+	}
+	if isTransientError(errRateLimitBusyWait) {
+		t.Fatal("errRateLimitBusyWait must not be retried")
+	}
+	if !isRateLimitError(&APIError{Code: apiErrRateLimit}) || isTransientError(&APIError{Code: apiErrRateLimit}) {
+		t.Fatal("API code 88 must be rate-limit and non-transient")
+	}
+}
+
+func TestForbiddenWAFChallengeDoesNotDisableClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<html><head><title>Just a moment...</title></head><body>Checking your browser before accessing</body></html>`))
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	_, err := getUserByInput(context.Background(), client, "alice")
+	if err == nil || !errors.Is(err, ErrWAFChallenge) || !isWAFChallengeError(err) {
+		t.Fatalf("error = %v, want WAF challenge", err)
+	}
+	if client.isDisabled() {
+		t.Fatal("WAF challenge 403 must not disable the client")
+	}
+	if !client.limiter.wouldBlock(userByScreenNamePath) {
+		t.Fatal("WAF challenge should short-block the path for failover")
+	}
+}
+
+func TestForbiddenNonWAFFailsWithShortCooldown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"errors":[{"code":32,"message":"Could not authenticate you"}]}`))
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	_, err := getUserByInput(context.Background(), client, "alice")
+	if err == nil {
+		t.Fatal("expected non-WAF 403 error")
+	}
+	if !client.isDisabled() {
+		t.Fatal("non-WAF 403 should disable the client")
+	}
+	client.mu.Lock()
+	remaining := time.Until(client.disabledUntil)
+	client.mu.Unlock()
+	if remaining < 4*time.Minute || remaining > 6*time.Minute {
+		t.Fatalf("403 cooldown = %s, want about 5m", remaining)
+	}
+}
+
+func TestUnauthorizedDisablesClientForLongCooldown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	if _, err := getUserByInput(context.Background(), client, "alice"); err == nil {
+		t.Fatal("expected 401 error")
+	}
+	client.mu.Lock()
+	remaining := time.Until(client.disabledUntil)
+	client.mu.Unlock()
+	if remaining < 25*time.Minute || remaining > 31*time.Minute {
+		t.Fatalf("401 cooldown = %s, want about 30m", remaining)
+	}
+}
+
+func TestSelfCheckWAF403DoesNotDisableClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`<html>challenge</html>`))
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	if _, err := client.GetSelfScreenName(context.Background()); err == nil || !errors.Is(err, ErrWAFChallenge) {
+		t.Fatalf("error = %v, want WAF challenge", err)
+	}
+	if client.isDisabled() {
+		t.Fatal("self-check WAF 403 must not disable the client")
+	}
+	if !client.limiter.wouldBlock(homeCheckPath) {
+		t.Fatal("self-check WAF 403 should short-block /home")
+	}
+	// 冷却期内再次自检应立刻返回，不再请求 /home。
+	if _, err := client.GetSelfScreenName(context.Background()); err == nil {
+		t.Fatal("self-check during WAF cooldown should fail fast")
+	}
+}
+
+func TestGraphQL404ReturnsQueryIDStale(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`not found`))
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	_, err := getUserByInput(context.Background(), client, "alice")
+	if err == nil || !errors.Is(err, ErrQueryIDStale) {
+		t.Fatalf("error = %v, want ErrQueryIDStale", err)
+	}
+}
+
+func TestAPIPartialErrorsAreToleratedOnlyWhenNonFatal(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{"partial without kind", `{"data":{"user":{"result":{"rest_id":"u1"}}},"errors":[{"message":"_Missing: No status found with that ID"}]}`, false},
+		{"partial with code -1", `{"data":{"user":{"result":{"rest_id":"u1"}}},"errors":[{"code":-1,"message":"missing child"}]}`, false},
+		{"partial unexpected code", `{"data":{"user":{"result":{"rest_id":"u1"}}},"errors":[{"code":34,"message":"not found"}]}`, false},
+		{"rate limit without kind", `{"data":{"user":null},"errors":[{"code":88,"message":"rate limited"}]}`, true},
+		{"account locked with data", `{"data":{"user":{"result":{"rest_id":"u1"}}},"errors":[{"code":326,"message":"locked"}]}`, true},
+		{"errors object not array", `{"errors":{"code":88}}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := apiError([]byte(tc.payload))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("apiError() = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestPaginationStopsWhenCursorDoesNotAdvance(t *testing.T) {
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload(nil, "same-cursor"),
+		timelinePagePayload(nil, "same-cursor"),
+		timelinePagePayload([]string{"123"}, ""),
+	}}
+	if _, err := getUserTimeline(context.Background(), requester, User{ID: "u", ScreenName: "user"}, parser.ParseOptions{}); err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if requester.calls != 2 {
+		t.Fatalf("calls = %d, want 2 (stop when cursor does not advance)", requester.calls)
+	}
+}
+
+func TestPaginationStopsAfterConsecutiveEmptyPages(t *testing.T) {
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload(nil, "c1"),
+		timelinePagePayload(nil, "c2"),
+		timelinePagePayload(nil, "c3"),
+		timelinePagePayload(nil, "c4"),
+		timelinePagePayload([]string{"123"}, ""),
+	}}
+	if _, err := getUserTimeline(context.Background(), requester, User{ID: "u", ScreenName: "user"}, parser.ParseOptions{}); err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if requester.calls != maxConsecutiveEmptyPages {
+		t.Fatalf("calls = %d, want %d", requester.calls, maxConsecutiveEmptyPages)
+	}
+}
+
+func TestTimelineDeduplicatesTweetIDsAcrossPages(t *testing.T) {
+	requester := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"300", "250"}, "c2"),
+		timelinePagePayload([]string{"250", "200"}, ""),
+	}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u", ScreenName: "user"}, parser.ParseOptions{})
+	if err != nil {
+		t.Fatalf("getUserTimeline: %v", err)
+	}
+	if got, want := strings.Join(tweetIDs(tweets), ","), "300,250,200"; got != want {
+		t.Fatalf("tweet IDs = %q, want %q", got, want)
+	}
+}
+
+func listMembersPage(userIDs []string, cursor string) string {
+	entries := make([]string, 0, len(userIDs)+1)
+	for _, id := range userIDs {
+		entries = append(entries, fmt.Sprintf(
+			`{"content":{"entryType":"TimelineTimelineItem","itemContent":{"user_results":{"result":{"rest_id":%q,"legacy":{"screen_name":"u-%s","name":"U"}}}}}}`, id, id))
+	}
+	if cursor != "" {
+		entries = append(entries, fmt.Sprintf(`{"content":{"entryType":"TimelineTimelineCursor","cursorType":"Bottom","value":%q}}`, cursor))
+	}
+	return fmt.Sprintf(`{"data":{"list":{"members_timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[%s]}]}}}}}}`, strings.Join(entries, ","))
+}
+
+func TestListMembersPoolUsesBackupWhenPrimaryDisabled(t *testing.T) {
+	var primaryCalls atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls.Add(1)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	var backupCalls atomic.Int64
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupCalls.Add(1)
+		_, _ = w.Write([]byte(listMembersPage([]string{"u1"}, "")))
+	}))
+	defer backup.Close()
+
+	primaryClient := &Client{http: primary.Client(), baseURL: primary.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	primaryClient.disable(errors.New("expired"))
+	backupClient := &Client{http: backup.Client(), baseURL: backup.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	pool := &Pool{clients: []*Client{primaryClient, backupClient}}
+	users, err := pool.GetListMembers(context.Background(), List{ID: "l1"})
+	if err != nil {
+		t.Fatalf("GetListMembers: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != "u1" {
+		t.Fatalf("users = %+v", users)
+	}
+	if primaryCalls.Load() != 0 || backupCalls.Load() != 1 {
+		t.Fatalf("calls primary=%d backup=%d, want 0/1", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestListMembersPoolKeepsOneClientForAllPages(t *testing.T) {
+	var primaryCalls atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := primaryCalls.Add(1)
+		switch call {
+		case 1:
+			_, _ = w.Write([]byte(listMembersPage([]string{"u1"}, "c2")))
+		case 2:
+			_, _ = w.Write([]byte(listMembersPage([]string{"u2"}, "")))
+		default:
+			_, _ = w.Write([]byte(listMembersPage(nil, "")))
+		}
+	}))
+	defer primary.Close()
+	var backupCalls atomic.Int64
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupCalls.Add(1)
+		_, _ = w.Write([]byte(listMembersPage([]string{"other"}, "")))
+	}))
+	defer backup.Close()
+
+	primaryClient := &Client{http: primary.Client(), baseURL: primary.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	backupClient := &Client{http: backup.Client(), baseURL: backup.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	pool := &Pool{clients: []*Client{primaryClient, backupClient}}
+	users, err := pool.GetListMembers(context.Background(), List{ID: "l1"})
+	if err != nil {
+		t.Fatalf("GetListMembers: %v", err)
+	}
+	if len(users) != 2 || users[0].ID != "u1" || users[1].ID != "u2" {
+		t.Fatalf("users = %+v", users)
+	}
+	if primaryCalls.Load() != 2 || backupCalls.Load() != 0 {
+		t.Fatalf("calls primary=%d backup=%d, want 2/0", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestPoolFollowUserFallsBackOnRateLimit(t *testing.T) {
+	var primaryCalls atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls.Add(1)
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer primary.Close()
+	var backupCalls atomic.Int64
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupCalls.Add(1)
+		_, _ = w.Write([]byte(`{"id":"user-1"}`))
+	}))
+	defer backup.Close()
+
+	primaryClient := &Client{http: primary.Client(), baseURL: primary.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	backupClient := &Client{http: backup.Client(), baseURL: backup.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	pool := &Pool{clients: []*Client{primaryClient, backupClient}}
+	if err := pool.FollowUser(context.Background(), User{ID: "user-1"}); err != nil {
+		t.Fatalf("FollowUser: %v", err)
+	}
+	if primaryCalls.Load() != 1 || backupCalls.Load() != 1 {
+		t.Fatalf("calls primary=%d backup=%d, want 1/1", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestListMembersDeduplicatesUsers(t *testing.T) {
+	requester := &fakeTimelineRequester{pages: []string{
+		listMembersPage([]string{"u1", "u2"}, "c2"),
+		listMembersPage([]string{"u2", "u3"}, ""),
+	}}
+	users, err := getListMembers(context.Background(), requester, List{ID: "l1"})
+	if err != nil {
+		t.Fatalf("getListMembers: %v", err)
+	}
+	if len(users) != 3 {
+		t.Fatalf("users = %+v, want deduplicated 3", users)
+	}
+}
+
+func TestTimelineParsingErrorsDoNotFailTheUser(t *testing.T) {
+	// 毒丸场景：最新一条推文解析失败，但其他推文仍应返回、任务成功。
+	malformed := `{"content":{"entryType":"TimelineTimelineItem","itemContent":{"tweet_results":{"result":{"rest_id":"999","__typename":"Tweet"}}}}}`
+	valid := `{"content":{"entryType":"TimelineTimelineItem","itemContent":{"tweet_results":{"result":{"rest_id":"100","legacy":{"full_text":"ok","extended_entities":{"media":[{"id_str":"m1","type":"photo","media_url_https":"https://pbs.twimg.com/media/a.jpg"}]}}}}}}}`
+	page := fmt.Sprintf(`{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[%s,%s]}]}}}}}}`, malformed, valid)
+	requester := &fakeTimelineRequester{pages: []string{page}}
+	tweets, err := getUserTimeline(context.Background(), requester, User{ID: "u", ScreenName: "user"}, parser.ParseOptions{})
+	if err != nil || len(tweets) != 1 || tweets[0].ID != "100" {
+		t.Fatalf("tweets=%+v err=%v, want valid tweet with nil error", tweets, err)
+	}
+}
+
+func followingPage(userIDs []string, cursor string) string {
+	entries := make([]string, 0, len(userIDs)+1)
+	for _, id := range userIDs {
+		entries = append(entries, fmt.Sprintf(
+			`{"content":{"entryType":"TimelineTimelineItem","itemContent":{"user_results":{"result":{"rest_id":%q,"legacy":{"screen_name":"f-%s","name":"F"}}}}}}`, id, id))
+	}
+	if cursor != "" {
+		entries = append(entries, fmt.Sprintf(`{"content":{"entryType":"TimelineTimelineCursor","cursorType":"Bottom","value":%q}}`, cursor))
+	}
+	return fmt.Sprintf(`{"data":{"user":{"result":{"timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[%s]}]}}}}}}`, strings.Join(entries, ","))
+}
+
+func TestFollowingPoolUsesBackupWhenPrimaryDisabled(t *testing.T) {
+	var primaryCalls atomic.Int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls.Add(1)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	var backupCalls atomic.Int64
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupCalls.Add(1)
+		_, _ = w.Write([]byte(followingPage([]string{"u1"}, "")))
+	}))
+	defer backup.Close()
+
+	primaryClient := &Client{http: primary.Client(), baseURL: primary.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	primaryClient.disable(errors.New("expired"))
+	backupClient := &Client{http: backup.Client(), baseURL: backup.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }}
+	pool := &Pool{clients: []*Client{primaryClient, backupClient}}
+	users, err := pool.GetFollowing(context.Background(), User{ID: "u1"})
+	if err != nil {
+		t.Fatalf("GetFollowing: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != "u1" {
+		t.Fatalf("users = %+v", users)
+	}
+	if primaryCalls.Load() != 0 || backupCalls.Load() != 1 {
+		t.Fatalf("calls primary=%d backup=%d, want 0/1", primaryCalls.Load(), backupCalls.Load())
+	}
+}
+
+func TestTimelineUnknownInstructionShapeReturnsError(t *testing.T) {
+	// X 改 timeline 结构（instructions 类型全未知）时必须报错，而不是静默当成"没有推文"。
+	page := `{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[{"type":"TimelineSomethingNew","entries":[]}]}}}}}}`
+	requester := &fakeTimelineRequester{pages: []string{page}}
+	_, err := getUserTimeline(context.Background(), requester, User{ID: "u", ScreenName: "user"}, parser.ParseOptions{})
+	if err == nil || !strings.Contains(err.Error(), "无法识别 timeline 结构") {
+		t.Fatalf("error = %v, want unknown timeline shape error", err)
 	}
 }

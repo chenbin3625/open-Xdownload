@@ -1,6 +1,8 @@
 .git
 .github
 .reference
+review
+docs
 data
 downloads
 logs
@@ -11,5 +13,24 @@ internal/webui/dist
 *.db
 *.db-shm
 *.db-wal
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+# 本地产物：go test -c / go build 的默认输出，避免 20MB+ 二进制进入构建上下文
+httpapi.test
+/server
+*.test
 *.tsbuildinfo
+*.md
+!Dockerfile
 .DS_Store
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+**/*_test.go

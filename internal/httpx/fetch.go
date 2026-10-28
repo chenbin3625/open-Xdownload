@@ -35,6 +35,9 @@ func RestrictRedirects(client *http.Client, allowedHost func(host string) bool) 
 		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 			return fmt.Errorf("拒绝非 HTTP 重定向: %s", req.URL.Scheme)
 		}
+		if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme == "http" {
+			return fmt.Errorf("拒绝 HTTPS 降级重定向: %s", req.URL)
+		}
 		if !allowedHost(req.URL.Hostname()) {
 			return fmt.Errorf("拒绝重定向到 %s", req.URL.Hostname())
 		}

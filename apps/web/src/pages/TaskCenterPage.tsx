@@ -6,6 +6,7 @@ import {
   Clock,
   Copy,
   FolderCheck,
+  HelpCircle,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -72,6 +73,9 @@ export interface TaskCenterPageProps {
   onPageSizeChange: (pageSize: number) => void;
   onOpenCreateModal: () => void;
   onOpenFailedDrawer: () => void;
+  /** 受控的状态筛选（App 从 URL 还原）；不传则内部自管。 */
+  statusFilter?: StatusFilterType;
+  onStatusFilterChange?: (status: StatusFilterType) => void;
 }
 
 const jobStatusPresentation: Record<
@@ -91,6 +95,16 @@ const jobStatusPresentation: Record<
   canceled: { label: "已取消", tone: "default" },
 };
 
+const unknownStatusPresentation: { label: string; tone: Tone; icon: React.ReactNode } = {
+  label: "未知",
+  tone: "default",
+  icon: <HelpCircle className="size-3" />,
+};
+
+function getJobStatusPresentation(status: Job["status"]) {
+  return jobStatusPresentation[status] ?? unknownStatusPresentation;
+}
+
 export function TaskCenterPage({
   jobs,
   stats,
@@ -101,9 +115,18 @@ export function TaskCenterPage({
   onPageSizeChange,
   onOpenCreateModal,
   onOpenFailedDrawer,
+  statusFilter: controlledStatusFilter,
+  onStatusFilterChange,
 }: TaskCenterPageProps) {
   const queryClient = useQueryClient();
-  const [statusFilter, setStatusFilter] = useState<StatusFilterType>("all");
+  const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilterType>("all");
+  const statusFilter = controlledStatusFilter ?? localStatusFilter;
+  // 筛选是当前页的客户端过滤，切筛选后回到第 1 页更符合直觉（页码也要写回 URL）。
+  const changeStatusFilter = (status: StatusFilterType) => {
+    if (controlledStatusFilter === undefined) setLocalStatusFilter(status);
+    onStatusFilterChange?.(status);
+    if (pagination.page > 1) onPageChange(1);
+  };
   const [kindFilter, setKindFilter] = useState<string>("all");
   const [searchKeyword, setSearchKeyword] = useState<string>("");
 
@@ -230,7 +253,7 @@ export function TaskCenterPage({
       title: "当前状态",
       width: 120,
       render: (record) => {
-        const meta = jobStatusPresentation[record.status];
+        const meta = getJobStatusPresentation(record.status);
         return (
           <Tag tone={meta.tone} icon={meta.icon}>
             {meta.label}
@@ -439,7 +462,7 @@ export function TaskCenterPage({
               <Segmented
                 size="md"
                 value={statusFilter}
-                onChange={(val) => setStatusFilter(val as StatusFilterType)}
+                onChange={(val) => changeStatusFilter(val as StatusFilterType)}
                 options={[
                   { label: `全部 (${jobs.length})`, value: "all" },
                   {
@@ -639,7 +662,7 @@ function JobErrorAlert({ job }: { job: Job }) {
                           </Tag>
                         )}
                         <Tag size="sm" tone="danger" className="font-medium">
-                          {group.count} 个失败
+                          {group.count} {group.countUnit ? "种异常" : "个失败"}
                         </Tag>
                       </div>
                     </div>
@@ -891,6 +914,10 @@ function ExpandedJobDetails({
 
       {/* 错误提示横幅：结构化聚合相同报错并展示受影响账号 */}
       {hasJobError && <JobErrorAlert job={job} />}
+
+      {filesQuery.data?.truncated && (
+        <Alert type="warning" message="文件清单过长，每类仅展示最近 5000 条记录" />
+      )}
 
       {/* 文件与媒体清单：恢复为结构清晰的列表 */}
       {filesQuery.isLoading ? (

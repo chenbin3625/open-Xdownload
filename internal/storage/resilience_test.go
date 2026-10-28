@@ -10,6 +10,33 @@ import (
 	"time"
 )
 
+func TestLibraryDownloadsReportsExactTruncation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: fmt.Sprint(i), MediaURL: fmt.Sprintf("https://example.com/%d.jpg", i), FilePath: fmt.Sprintf("/missing/%d.jpg", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, limit := range []int{3, 2, 3, 4} {
+		items, truncated, err := store.ListLibraryDownloadsWithStatus(ctx, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != min(3, limit) || truncated != (limit < 3) {
+			t.Fatalf("limit %d: got %d items, truncated %v", limit, len(items), truncated)
+		}
+	}
+}
+
 // TestNormalizeDownloadsMediaURLKeepsUniqueIndex 覆盖迁移窗口：normalizeDownloadsMediaURL
 // 会临时 DROP 唯一索引，若索引缺失被提交出去，后续每个 runMigrationOnce 各自提交，在
 // addMissingIndexes 重建之前 CreateDownload 的 ON CONFLICT 会全部失败。
@@ -195,7 +222,7 @@ func TestJobFilesCapsRowsPerKind(t *testing.T) {
 		t.Fatalf("commit seed: %v", err)
 	}
 
-	downloads, failed, err := store.JobFiles(ctx, job.ID)
+	downloads, failed, truncated, err := store.JobFiles(ctx, job.ID)
 	if err != nil {
 		t.Fatalf("job files: %v", err)
 	}
@@ -205,6 +232,9 @@ func TestJobFilesCapsRowsPerKind(t *testing.T) {
 	// 失败记录不能被下载记录挤掉。
 	if len(failed) != 3 {
 		t.Fatalf("failed = %d, want 3", len(failed))
+	}
+	if !truncated {
+		t.Fatal("oversized file list is missing a truncation indicator")
 	}
 }
 

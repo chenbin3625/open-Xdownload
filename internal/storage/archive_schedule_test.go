@@ -202,11 +202,12 @@ func TestUpdateArchiveScheduleConcurrentEditsStayConsistent(t *testing.T) {
 		t.Fatalf("get final: %v", err)
 	}
 	// next_run_at 必须与最终落库的 interval_minutes 自洽，不能来自别人的旧值。
-	if final.NextRunAt.Before(time.Now().UTC().Add(-time.Minute)) {
-		t.Fatalf("next_run_at = %v 已过期，说明按过期值推算", final.NextRunAt)
-	}
-	if final.NextRunAt.After(time.Now().UTC().Add(time.Duration(final.IntervalMinutes+1) * time.Minute)) {
-		t.Fatalf("next_run_at = %v 超出 interval %d 分钟", final.NextRunAt, final.IntervalMinutes)
+	// 断言要能区分"按 10 分钟推算"与"按 109 分钟推算"：只检查上界 now+(interval+1)min
+	// 时两者都能通过，因此改为与 now+interval 比较（允许 2 分钟调度/执行误差）。
+	want := time.Now().UTC().Add(time.Duration(final.IntervalMinutes) * time.Minute)
+	drift := final.NextRunAt.Sub(want)
+	if drift < -2*time.Minute || drift > 2*time.Minute {
+		t.Fatalf("next_run_at = %v 与 interval=%d 不自洽（期望约 %v，偏差 %v）", final.NextRunAt, final.IntervalMinutes, want, drift)
 	}
 }
 
@@ -266,7 +267,10 @@ func TestScheduleClaimUsesItemsFromClaimTransaction(t *testing.T) {
 			t.Fatalf("get: %v", err)
 		}
 		stale := snapshot
-		stale.NextRunAt = current.NextRunAt // 快照与库里的领取条件一致，只有 items 是旧的
+		// 快照与库里的领取条件一致（claim_version 相同），只有 items 是旧的；这样验证
+		// 领取时用的是库里的最新清单，而不是调用方快照。
+		stale.NextRunAt = current.NextRunAt
+		stale.ClaimVersion = current.ClaimVersion
 		jobs, err := claim(ctx, stale, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("%s claim: %v", name, err)

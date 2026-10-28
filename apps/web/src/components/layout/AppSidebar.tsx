@@ -67,7 +67,7 @@ export function AppSidebar({
       <div className="p-3">
         {/* 品牌区 */}
         <div className="flex items-center gap-2.5 px-1 pt-1 pb-3">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-600 text-base font-bold text-white shadow-sm shadow-brand-500/30">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-600 text-base font-bold text-brand-contrast shadow-sm shadow-brand-500/30">
             𝕏
           </span>
           <div className="min-w-0">

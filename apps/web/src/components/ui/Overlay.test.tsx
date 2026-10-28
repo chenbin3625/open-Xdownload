@@ -78,6 +78,26 @@ describe("Popconfirm", () => {
     expect(screen.queryByText("确认删除？")).toBeNull();
   });
 
+  it("暴露 alertdialog 语义并关联标题/说明", async () => {
+    const user = userEvent.setup();
+    render(
+      <Popconfirm title="确认删除？" description="删除后不可恢复" onConfirm={() => {}}>
+        <Button>删除</Button>
+      </Popconfirm>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "删除" }));
+
+    // 不可逆操作：用 alertdialog 而不是普通 dialog，并显式关联标题与说明
+    const dialog = screen.getByRole("alertdialog");
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    const describedBy = dialog.getAttribute("aria-describedby");
+    expect(labelledBy).not.toBeNull();
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(labelledBy as string)?.textContent).toBe("确认删除？");
+    expect(document.getElementById(describedBy as string)?.textContent).toBe("删除后不可恢复");
+  });
+
   it("disabled 时直接透传子元素，不挂弹出行为", async () => {
     const user = userEvent.setup();
     const onConfirm = vi.fn();

@@ -2,6 +2,7 @@ package xclient
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"sync"
@@ -16,16 +17,39 @@ type rateLimitState struct {
 }
 
 type rateLimiter struct {
-	mu     sync.Mutex
-	limits map[string]rateLimitState
+	mu        sync.Mutex
+	limits    map[string]rateLimitState
+	lastPrune time.Time
 }
 
 func newRateLimiter() *rateLimiter {
-	return &rateLimiter{limits: map[string]rateLimitState{}}
+	return &rateLimiter{limits: map[string]rateLimitState{}, lastPrune: time.Now()}
 }
 
+// prune removes stale entries whose reset time is more than 5 minutes in the past.
+// Caller must NOT hold mu.
+func (rl *rateLimiter) prune() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	if now.Sub(rl.lastPrune) < 5*time.Minute {
+		return
+	}
+	cutoff := now.Add(-5 * time.Minute)
+	for path, state := range rl.limits {
+		if state.ready && state.reset.Before(cutoff) {
+			delete(rl.limits, path)
+		}
+	}
+	rl.lastPrune = now
+}
+
+var errRateLimitBusyWait = errors.New("rate limiter: 连续等待次数超限，放弃本次请求")
+
 func (rl *rateLimiter) before(ctx context.Context, path string) error {
-	for {
+	rl.prune()
+	const maxWaitIterations = 3
+	for i := 0; ; i++ {
 		rl.mu.Lock()
 		state, ok := rl.limits[path]
 		if !ok || !state.ready || time.Now().After(state.reset) {
@@ -43,6 +67,9 @@ func (rl *rateLimiter) before(ctx context.Context, path string) error {
 		rl.mu.Unlock()
 		if wait <= 0 {
 			return nil
+		}
+		if i >= maxWaitIterations {
+			return errRateLimitBusyWait
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -94,6 +121,35 @@ func (rl *rateLimiter) after(path string, header http.Header) {
 		ready:     true,
 	}
 	rl.mu.Unlock()
+}
+
+// markRateLimited records an API-level rate-limit error even when the response
+// omitted the standard X-Rate-Limit headers. Pool callers can then yield the
+// request to another cookie instead of disabling this valid credential.
+func (rl *rateLimiter) markRateLimited(path string, header http.Header) {
+	rl.markRateLimitedFor(path, parseRetryAfter(header))
+}
+
+// markRateLimitedFor 以指定冷却时长把 path 标记为不可用；block<=0 时默认 1 分钟。
+// WAF 挑战页用固定短退避（60s），不采信挑战页可能携带的 Retry-After。
+func (rl *rateLimiter) markRateLimitedFor(path string, block time.Duration) {
+	if block <= 0 {
+		block = time.Minute
+	}
+	reset := time.Now().Add(block)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	state := rl.limits[path]
+	if state.limit <= 0 {
+		state.limit = 1
+	}
+	if state.reset.After(reset) {
+		reset = state.reset
+	}
+	state.remaining = 0
+	state.reset = reset
+	state.ready = true
+	rl.limits[path] = state
 }
 
 // refund 归还 before() 预扣的 1 个配额，用于请求在收到响应头前就失败（连接重置/超时等）

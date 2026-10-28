@@ -21,6 +21,28 @@ func TestExtractTweetURL(t *testing.T) {
 	}
 }
 
+func TestExtractOfficialWebStatusURL(t *testing.T) {
+	_, id, err := ExtractTweetURL("https://x.com/i/web/status/12345")
+	if err != nil || id != "12345" {
+		t.Fatalf("id=%q error=%v", id, err)
+	}
+}
+
+func TestTweetLongTextAndInvalidTimestamp(t *testing.T) {
+	result := gjson.Parse(`{"rest_id":"123","legacy":{"full_text":"truncated","created_at":"Tue Jan 12 23:02:33 +0000 2021"},"note_tweet":{"note_tweet_results":{"result":{"text":"complete long text"}}}}`)
+	tweet, err := TweetFromGraphQLResult("", "user", "123", result)
+	if err != nil || tweet.Text != "complete long text" {
+		t.Fatalf("tweet=%+v error=%v", tweet, err)
+	}
+	invalid := gjson.Parse(`{"rest_id":"123","legacy":{"created_at":"broken"}}`)
+	if _, err := TweetFromGraphQLResult("", "user", "123", invalid); err == nil {
+		t.Fatal("invalid timestamp accepted")
+	}
+	if _, err := tweetFromSyndication("", "user", "123", gjson.Parse(`{"created_at":"broken"}`), ParseOptions{}); err == nil {
+		t.Fatal("invalid syndication timestamp accepted")
+	}
+}
+
 func TestBestVariantPrefersHighestMP4Bitrate(t *testing.T) {
 	got := BestVariant([]MediaVariant{
 		{URL: "https://video.twimg.com/low.mp4", ContentType: "video/mp4", Bitrate: 832000},
@@ -419,6 +441,46 @@ func TestLinkPreviewCardIsNotTweetMedia(t *testing.T) {
 	}
 }
 
+// TestUnifiedCardFallbackMergesVariantsOfSameVideo：卡片兜底扫描会把同一个视频的每个
+// 清晰度变体都扫成一条媒体，导致同一个视频被下载多份。同一个媒体 ID 的变体只能保留一条，
+// 并且保留分辨率最高的那个（而不是先出现的那个）；不同媒体 ID 的视频仍各自保留。
+func TestUnifiedCardFallbackMergesVariantsOfSameVideo(t *testing.T) {
+	low := "https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/640x360/low.mp4"
+	high := "https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1280x720/high.mp4"
+	other := "https://video.twimg.com/ext_tw_video/456/pu/vid/avc1/640x360/other.mp4"
+	bindings := map[string]string{
+		"json":       `{"component_objects": {"media": {"data": {"variants": [` + strconv.Quote(low) + `, ` + strconv.Quote(high) + `, ` + strconv.Quote(other) + `]}}}}`,
+		"plain text": "variants " + low + " " + high + " " + other,
+	}
+	for name, unifiedCard := range bindings {
+		t.Run(name, func(t *testing.T) {
+			result := gjson.Parse(`{
+				"__typename": "Tweet",
+				"rest_id": "104",
+				"core": {"user_results": {"result": {"rest_id": "u1", "legacy": {"name": "OpenAI", "screen_name": "openai"}}}},
+				"legacy": {"full_text": "card video", "created_at": "Tue Jan 12 23:02:33 +0000 2021"},
+				"card": {"legacy": {"binding_values": [
+					{"key": "unified_card", "value": {"string_value": ` + strconv.Quote(unifiedCard) + `}}
+				]}}
+			}`)
+			tweet, err := TweetFromGraphQLResult("", "openai", "104", result)
+			if err != nil {
+				t.Fatalf("TweetFromGraphQLResult returned error: %v", err)
+			}
+			urls := tweet.BestMediaURLs()
+			want := []string{high, other}
+			if len(urls) != len(want) {
+				t.Fatalf("media URLs = %#v, want %#v", urls, want)
+			}
+			for index := range want {
+				if urls[index] != want[index] {
+					t.Fatalf("media URLs = %#v, want %#v", urls, want)
+				}
+			}
+		})
+	}
+}
+
 func TestUnifiedCardFallbackIgnoresProfileImages(t *testing.T) {
 	unifiedCard := `{
 		"component_objects": {
@@ -488,5 +550,73 @@ func TestParseAuthorReadsCoreFields(t *testing.T) {
 	legacy := gjson.Parse(`{"rest_id": "u1", "legacy": {"screen_name": "old", "name": "Old"}}`)
 	if author := parseAuthor(legacy, "fallback"); author.ScreenName != "old" || author.Name != "Old" {
 		t.Fatalf("legacy author = %+v", author)
+	}
+}
+
+func TestSyndicationTokenMatchesFrontendGolden(t *testing.T) {
+	// 黄金值由 X 前端等价算法在 Node 中生成：
+	// ((Number(id)/1e15)*Math.PI).toString(36).replace(/(0+|\.)/g,"")
+	cases := map[string]string{
+		"20":                  "6dq1a2xwd93",
+		"1349129669258448897": "39qeyy97t9x",
+		"1234567890123456789": "2zqic77uqyk",
+		"1580000000000000000": "3tvpsgldru",
+		"999999999999999999":  "2f9lc2ug9mm",
+		"1111111111111111111": "2oynpf5u2p5",
+		"1834484144308728205": "4g379ocr8tv",
+		"1580676752465002496": "3txubufjgku",
+	}
+	for id, want := range cases {
+		if got := syndicationToken(id); got != want {
+			t.Fatalf("syndicationToken(%s) = %q, want %q", id, got, want)
+		}
+	}
+	if got := syndicationToken("not-a-number"); got != "" {
+		t.Fatalf("non-numeric id token = %q, want empty", got)
+	}
+}
+
+func TestQualityFromURLParsesResolution(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4", "1280x720"},
+		{"https://video.twimg.com/ext_tw_video/123/pu/vid/640x360/abc.mp4?tag=12", "640x360"},
+		{"https://video.twimg.com/ext_tw_video/123/pu/vid/abc.mp4", ""},
+		{"https://pbs.twimg.com/media/abc.jpg", ""},
+		{"not a url", ""},
+	}
+	for _, tc := range cases {
+		if got := qualityFromURL(tc.raw); got != tc.want {
+			t.Fatalf("qualityFromURL(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestMediaIDSnowflakeFirstAndStableHashFallback(t *testing.T) {
+	withID := gjson.Parse(`{"id_str":"1234567890","type":"photo","media_url_https":"https://pbs.twimg.com/media/abc.jpg"}`)
+	if media := mediaFromDetail(withID); media.ID != "1234567890" {
+		t.Fatalf("media ID = %q, want snowflake id", media.ID)
+	}
+	withoutID := gjson.Parse(`{"type":"photo","media_url_https":"https://pbs.twimg.com/media/abc.jpg"}`)
+	first := mediaFromDetail(withoutID)
+	if !strings.HasPrefix(first.ID, "url-") {
+		t.Fatalf("fallback media ID = %q, want url-<hash>", first.ID)
+	}
+	if second := mediaFromDetail(withoutID); second.ID != first.ID {
+		t.Fatalf("fallback media ID not stable: %q vs %q", first.ID, second.ID)
+	}
+	// 同一媒体的不同 URL 写法（.jpg 与 ?format=jpg）应得到同一个稳定 ID。
+	urlA := mediaFromURL("https://pbs.twimg.com/media/abc.jpg")
+	urlB := mediaFromURL("https://pbs.twimg.com/media/abc?format=jpg")
+	if urlA.ID == "" || urlA.ID != urlB.ID {
+		t.Fatalf("equivalent media URLs got different IDs: %q vs %q", urlA.ID, urlB.ID)
+	}
+	// syndication photos 不再用会漂移的 photo-N 序号。
+	payload := gjson.Parse(`{"photos":[{"url":"https://pbs.twimg.com/media/abc.jpg"}]}`)
+	items := parseSyndicationMedia(payload, ParseOptions{})
+	if len(items) != 1 || !strings.HasPrefix(items[0].ID, "url-") {
+		t.Fatalf("syndication photo ID = %+v, want stable url-<hash>", items)
 	}
 }

@@ -75,7 +75,7 @@ func TestJobFilesReturnsNotFoundForMissingJob(t *testing.T) {
 	}
 	defer store.Close()
 
-	_, _, err = store.JobFiles(context.Background(), 999)
+	_, _, _, err = store.JobFiles(context.Background(), 999)
 	if err == nil {
 		t.Fatal("expected error for missing job")
 	}

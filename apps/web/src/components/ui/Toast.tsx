@@ -71,7 +71,9 @@ const variantMeta: Record<ToastVariant, { icon: React.ReactNode; accent: string 
 };
 
 function ToastItem({ record }: { record: ToastRecord }) {
-  const [paused, setPaused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const paused = hovered || focused;
   const remainingRef = useRef(record.duration ?? DEFAULT_DURATION);
   const startedRef = useRef(Date.now());
 
@@ -88,13 +90,16 @@ function ToastItem({ record }: { record: ToastRecord }) {
 
   return (
     <div
+      role={record.variant === "error" ? "alert" : undefined}
       className={cn(
         "animate-toast-in pointer-events-auto flex w-80 items-start gap-2.5",
         "rounded-card border border-l-3 border-line bg-surface p-3 shadow-overlay",
         variantMeta[record.variant].accent,
       )}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => setFocused(event.currentTarget.contains(event.relatedTarget))}
     >
       <span className="mt-0.5">{variantMeta[record.variant].icon}</span>
       <div className="min-w-0 flex-1">

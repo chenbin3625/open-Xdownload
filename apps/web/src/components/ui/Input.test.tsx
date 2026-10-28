@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Field, Input, NumberInput, PasswordInput } from "./Input";
+import { Field, Input, NumberInput, PasswordInput, Textarea } from "./Input";
 
 describe("Input", () => {
   it("onPressEnter 只在回车时触发", async () => {
@@ -121,13 +121,52 @@ describe("Field", () => {
     expect(document.activeElement?.id).toBe("dir");
   });
 
-  it("不传 htmlFor 时不产生悬空的 label 关联", () => {
+  it("自动生成 ID 时，htmlFor 指向真实存在的控件（不产生悬空 label）", () => {
     render(
-      <Field label="仅说明">
-        <input aria-label="内部输入" />
+      <Field label="备注说明">
+        <Textarea aria-label="内部输入" />
       </Field>,
     );
-    // 悬空的 htmlFor 会让读屏朗读指向不存在元素的标签，比没有 label 更糟
-    expect(document.querySelector("label")).toBeNull();
+    const label = document.querySelector("label");
+    expect(label).not.toBeNull();
+    const target = document.getElementById(label?.htmlFor ?? "");
+    // 悬空的 htmlFor 会让读屏朗读"指向不存在元素"的标签，比没有 label 更糟
+    expect(target).not.toBeNull();
+    expect(target?.tagName).toBe("TEXTAREA");
+  });
+
+  it("Input / NumberInput / Textarea 都能认领 Field 的 id", () => {
+    const { unmount } = render(
+      <Field label="代理">
+        <Input />
+      </Field>,
+    );
+    expect(document.getElementById(document.querySelector("label")?.htmlFor ?? "")?.tagName).toBe("INPUT");
+    unmount();
+
+    const second = render(
+      <Field label="并发">
+        <NumberInput value={1} onChange={() => {}} />
+      </Field>,
+    );
+    expect(document.getElementById(document.querySelector("label")?.htmlFor ?? "")?.tagName).toBe("INPUT");
+    second.unmount();
+
+    render(
+      <Field label="备注">
+        <Textarea />
+      </Field>,
+    );
+    expect(document.getElementById(document.querySelector("label")?.htmlFor ?? "")?.tagName).toBe("TEXTAREA");
+  });
+
+  it("tooltip 不嵌在 label 内部（提示按钮是交互元素）", () => {
+    render(
+      <Field label="代理" tooltip={<button type="button">说明</button>}>
+        <Input />
+      </Field>,
+    );
+    const label = document.querySelector("label");
+    expect(label?.querySelector("button")).toBeNull();
   });
 });

@@ -85,3 +85,20 @@ func TestEventBusCloseAllEndsSubscribersAndRejectsNewOnes(t *testing.T) {
 		t.Fatal("Subscribe after CloseAll should be rejected")
 	}
 }
+
+func TestEventBusCountsDroppedEvents(t *testing.T) {
+	t.Parallel()
+	bus := NewEventBus()
+	channel, ok := bus.Subscribe()
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
+	defer bus.Unsubscribe(channel)
+	// 不读取 channel，让缓冲（subscriberBuffer=64）填满后的事件被丢弃。
+	for i := 0; i < subscriberBuffer+36; i++ {
+		bus.Publish(Event{Type: "job.updated"})
+	}
+	if got := bus.DroppedEvents(); got != 36 {
+		t.Fatalf("dropped = %d, want 36", got)
+	}
+}

@@ -39,6 +39,7 @@ export function LocalDirectoryPicker({
   const [selectedPath, setSelectedPath] = useState(path);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [treeData, setTreeData] = useState<DirectoryTreeNode[]>([]);
+  const [inlineError, setInlineError] = useState("");
   const nodeLoadControllerRef = useRef<AbortController | null>(null);
 
   const listing = useQuery<LocalDirectoryListing>({
@@ -60,27 +61,27 @@ export function LocalDirectoryPicker({
     onError: notifyError("创建目录失败"),
   });
 
-  const resolvedPath = listing.data?.path ?? rootPath;
+  const resolvedPath = listing.isError ? rootPath : listing.data?.path ?? rootPath;
 
   useEffect(() => {
     setRootPath(path);
     setSelectedPath(path);
   }, [path]);
 
-  const listingRootPath = listing.data?.path;
-  const listingRef = useRef(listing.data);
-  listingRef.current = listing.data;
-
   useEffect(() => {
-    const current = listingRef.current;
-    if (!current || listingRootPath === undefined) {
+    const current = listing.data;
+    if (listing.isError || !current) {
+      setTreeData([]);
+      setExpandedKeys([]);
+      setInlineError("");
       return;
     }
     const rootNode = listingToDirectoryTreeRoot(current);
     setTreeData([rootNode]);
     setExpandedKeys([rootNode.key]);
     setSelectedPath(rootNode.path);
-  }, [listingRootPath]);
+    setInlineError("");
+  }, [listing.data, listing.isError]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -99,12 +100,11 @@ export function LocalDirectoryPicker({
       if (controller?.signal.aborted) return;
       const children = childListing.entries.map(directoryEntryToTreeNode);
       setTreeData((current) => updateDirectoryTreeChildren(current, dirNode.key, children));
+      setInlineError("");
     } catch (error) {
       if (controller?.signal.aborted) return;
-      toast.error({
-        message: "读取目录失败",
-        description: getErrorMessage(error),
-      });
+      const message = getErrorMessage(error);
+      setInlineError(message);
     }
   }
 
@@ -125,6 +125,7 @@ export function LocalDirectoryPicker({
       <div className="flex flex-wrap items-center gap-2">
         <div className="min-w-[240px] flex-1">
           <Input
+            aria-label="下载目录"
             prefix={<Folder className="size-4 text-fg-subtle" />}
             value={selectedPath}
             onChange={(event) => setSelectedPath(event.target.value)}
@@ -164,7 +165,7 @@ export function LocalDirectoryPicker({
               size="sm"
               variant="secondary"
               icon={<ArrowUp className="size-3.5" />}
-              disabled={!listing.data?.parent || listing.isLoading}
+              disabled={!listing.data?.parent || listing.isLoading || listing.isError}
               onClick={() => listing.data?.parent && setRootPath(listing.data.parent)}
             >
               上级目录
@@ -195,12 +196,20 @@ export function LocalDirectoryPicker({
             />
           )}
 
+          {inlineError && !listing.isError && (
+            <Alert
+              type="warning"
+              message="读取子目录失败"
+              description={inlineError}
+            />
+          )}
+
           <div className="relative min-h-[140px] rounded-control border border-line bg-surface p-1">
-            {listing.isLoading && treeData.length === 0 ? (
+            {listing.isLoading ? (
               <div className="flex h-32 items-center justify-center">
                 <Spinner className="size-5" />
               </div>
-            ) : treeData.length > 0 ? (
+            ) : !listing.isError && treeData.length > 0 ? (
               <Tree
                 nodes={treeData}
                 expandedKeys={expandedKeys}

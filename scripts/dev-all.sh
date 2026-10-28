@@ -41,11 +41,13 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-echo "Starting backend:  http://0.0.0.0:8787"
+echo "Starting backend:  http://${OPEN_XDOWNLOAD_ADDR:-127.0.0.1:8787}"
 go run ./cmd/server &
 backend_pid=$!
 
-echo "Starting frontend: http://0.0.0.0:5173"
+# 前端默认只监听回环（vite dev server 无鉴权，避免误暴露给局域网）。
+# 需要局域网调试时单独运行 `npm --prefix apps/web run dev:lan`。
+echo "Starting frontend: http://127.0.0.1:5173"
 npm --prefix "$WEB_DIR" run dev &
 frontend_pid=$!
 

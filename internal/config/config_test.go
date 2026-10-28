@@ -2,6 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -147,6 +150,56 @@ func TestRedactAndRestoreAdditionalCookies(t *testing.T) {
 	if got := RestoreAdditionalCookies("", raw); got != "" {
 		t.Fatalf("RestoreAdditionalCookies(empty) = %q, want empty", got)
 	}
+
+	// Case 5 (P1-4): Placeholder values must not survive into merged output.
+	// Simulates a submitted cookie with unknown ID where no stored match exists —
+	// the placeholder should be stripped, not written as a real credential.
+	orphanPairs := []AuthCookie{{ID: "orphan-1", AuthToken: SecretPlaceholder, CSRFToken: SecretPlaceholder}}
+	orphanBytes, _ := json.Marshal(orphanPairs)
+	restoredOrphan := RestoreAdditionalCookies(string(orphanBytes), raw)
+	if restoredOrphan != "" {
+		orphanResult := ParseCookiePairs(restoredOrphan)
+		for _, p := range orphanResult {
+			if p.AuthToken == SecretPlaceholder || p.CSRFToken == SecretPlaceholder {
+				t.Fatalf("placeholder leaked into restored cookies: %+v", orphanResult)
+			}
+		}
+	}
+
+	// Case 6 (P1-4): Mixed — one valid new cookie + one orphan placeholder.
+	mixedPairs := []AuthCookie{
+		{ID: "new-1", AuthToken: "real-tok", CSRFToken: "real-csrf"},
+		{ID: "orphan-2", AuthToken: SecretPlaceholder, CSRFToken: SecretPlaceholder},
+	}
+	mixedBytes, _ := json.Marshal(mixedPairs)
+	restoredMixed := RestoreAdditionalCookies(string(mixedBytes), "")
+	if pairs := ParseCookiePairs(restoredMixed); len(pairs) != 1 || pairs[0].AuthToken != "real-tok" {
+		t.Fatalf("RestoreAdditionalCookies(mixed) = %+v, want only the real cookie", pairs)
+	}
+}
+
+func TestRedactAdditionalCookiesEmptyParsedReturnsEmpty(t *testing.T) {
+	// P1-4: When stored cookies parse to zero entries, RedactAdditionalCookies
+	// should return "" instead of "********" to prevent the whole-placeholder
+	// expansion path on the frontend.
+	got := RedactAdditionalCookies("invalid-not-a-cookie")
+	pairs := ParseCookiePairs(got)
+	if len(pairs) == 0 && got == SecretPlaceholder {
+		t.Fatal("RedactAdditionalCookies returned placeholder for zero parsed entries; want empty string")
+	}
+}
+
+func TestAdditionalCookiesDoNotRestoreMaskedRowsWithoutIDs(t *testing.T) {
+	stored := "auth_token=first; ct0=first-csrf\nauth_token=second; ct0=second-csrf"
+	if got := RestoreAdditionalCookies("auth_token=********; ct0=********", stored); got != "" {
+		t.Fatalf("anonymous masked row restored credentials by position: %q", got)
+	}
+}
+
+func TestClearSentinel(t *testing.T) {
+	if ClearSentinel != "__CLEAR__" {
+		t.Fatalf("ClearSentinel = %q, want __CLEAR__", ClearSentinel)
+	}
 }
 
 func TestParseCookiePairsAcceptsYAMLColonFormat(t *testing.T) {
@@ -195,5 +248,173 @@ func TestRevertEnvOnlyEcho(t *testing.T) {
 	t.Setenv(EnvProxyURL, "")
 	if got := RevertEnvOnlyEcho("http://env-proxy:8080", "", EnvProxyURL); got != "http://env-proxy:8080" {
 		t.Fatalf("no env = %q, want submitted", got)
+	}
+}
+
+// 逐字段脱敏：有值字段才变占位符，空字段保持空串。
+func TestRedactAdditionalCookiesKeepsEmptyFields(t *testing.T) {
+	raw := "auth_token=only-auth\n\nauth_token=a2; ct0=c2"
+	redacted := RedactAdditionalCookies(raw)
+	pairs := ParseCookiePairs(redacted)
+	if len(pairs) != 2 {
+		t.Fatalf("pairs = %#v, want 2", pairs)
+	}
+	if pairs[0].AuthToken != SecretPlaceholder {
+		t.Fatalf("auth[0] = %q, want placeholder", pairs[0].AuthToken)
+	}
+	if pairs[0].CSRFToken != "" {
+		t.Fatalf("csrf[0] = %q, want empty (was empty in stored)", pairs[0].CSRFToken)
+	}
+	if pairs[1].AuthToken != SecretPlaceholder || pairs[1].CSRFToken != SecretPlaceholder {
+		t.Fatalf("pairs[1] = %#v, want both masked", pairs[1])
+	}
+}
+
+// 宽松解析：重复 id 保留第一条，不报错。
+func TestRestoreAdditionalCookiesDuplicateIDKeepsFirst(t *testing.T) {
+	stored := `[{"id":"a","authToken":"tok-a","csrfToken":"csrf-a"}]`
+	submitted := `[{"id":"a","authToken":"********","csrfToken":"********"},{"id":"a","authToken":"evil","csrfToken":"evil"}]`
+	got := RestoreAdditionalCookies(submitted, stored)
+	pairs := ParseCookiePairs(got)
+	if len(pairs) != 1 {
+		t.Fatalf("pairs = %#v, want 1 (duplicate id dropped)", pairs)
+	}
+	if pairs[0].AuthToken != "tok-a" || pairs[0].CSRFToken != "csrf-a" {
+		t.Fatalf("pairs[0] = %#v, want stored credentials", pairs[0])
+	}
+}
+
+// 宽松解析：还原不到的占位符置空，半行保留，不返回错误。
+func TestRestoreAdditionalCookiesHalfRowAndOrphan(t *testing.T) {
+	// 未知 id 的两个占位符 → 整对为空 → 丢弃。
+	if got := RestoreAdditionalCookies(`[{"id":"ghost","authToken":"********","csrfToken":"********"}]`, ``); got != "" {
+		t.Fatalf("orphan = %q, want empty", got)
+	}
+	// 半行：只有 auth_token 的真实值 → 保留，csrf 为空。
+	got := RestoreAdditionalCookies(`[{"id":"x","authToken":"real","csrfToken":""}]`, ``)
+	pairs := ParseCookiePairs(got)
+	if len(pairs) != 1 || pairs[0].AuthToken != "real" || pairs[0].CSRFToken != "" {
+		t.Fatalf("half row = %#v, want half row preserved", pairs)
+	}
+	// ClearSentinel 清空整串。
+	if got := RestoreAdditionalCookies(ClearSentinel, `[{"id":"a","authToken":"t","csrfToken":"c"}]`); got != "" {
+		t.Fatalf("clear sentinel = %q, want empty", got)
+	}
+}
+
+// ResolveSubmission 不再因占位符/重复 id/半行返回 400。
+func TestResolveSubmissionNeverBlocksSaving(t *testing.T) {
+	stored := AppConfig{AuthToken: "stored-auth", AdditionalCookies: `[{"id":"a","authToken":"t","csrfToken":"c"}]`}
+	cases := []AppConfig{
+		{AdditionalCookies: `[{"id":"ghost","authToken":"********","csrfToken":"********"}]`},
+		{AdditionalCookies: `[{"id":"a","authToken":"********","csrfToken":"********"},{"id":"a","authToken":"x","csrfToken":"y"}]`},
+		{AdditionalCookies: `[{"id":"half","authToken":"only","csrfToken":""}]`},
+		{AuthToken: SecretPlaceholder, CSRFToken: SecretPlaceholder},
+		{},
+	}
+	for i, submitted := range cases {
+		got, err := ResolveSubmission(submitted, stored)
+		if err != nil {
+			t.Fatalf("case %d returned error: %v", i, err)
+		}
+		if got.AuthToken != "stored-auth" {
+			t.Fatalf("case %d AuthToken = %q, want stored", i, got.AuthToken)
+		}
+		for _, pair := range ParseCookiePairs(got.AdditionalCookies) {
+			if pair.AuthToken == SecretPlaceholder || pair.CSRFToken == SecretPlaceholder {
+				t.Fatalf("case %d leaked placeholder: %#v", i, pair)
+			}
+		}
+	}
+}
+
+// env 接管的字段保存时一律保留 stored（含 ClearSentinel 提交）。
+func TestResolveSubmissionKeepsStoredForEnvFields(t *testing.T) {
+	t.Setenv(EnvAuthToken, "env-auth")
+	t.Setenv(EnvCSRFToken, "env-ct0")
+	t.Setenv(EnvProxyURL, "http://env-proxy:8080")
+	t.Setenv(EnvAdditionalCookies, "auth_token=env; ct0=envcsrf")
+	t.Setenv(EnvDownloadDir, "/tmp/env-download")
+
+	stored := AppConfig{
+		DownloadDir:       "/data/downloads",
+		AuthToken:         "db-auth",
+		CSRFToken:         "db-ct0",
+		ProxyURL:          "http://db-proxy:3128",
+		AdditionalCookies: `[{"id":"a","authToken":"db","csrfToken":"dbc"}]`,
+	}
+	got, err := ResolveSubmission(AppConfig{
+		DownloadDir:       "/tmp/env-download",
+		AuthToken:         ClearSentinel,
+		CSRFToken:         ClearSentinel,
+		ProxyURL:          "http://evil:1",
+		AdditionalCookies: `[{"id":"a","authToken":"x","csrfToken":"y"}]`,
+	}, stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DownloadDir != stored.DownloadDir || got.AuthToken != stored.AuthToken ||
+		got.CSRFToken != stored.CSRFToken || got.ProxyURL != stored.ProxyURL ||
+		got.AdditionalCookies != stored.AdditionalCookies {
+		t.Fatalf("env-overridden fields not preserved: %#v", got)
+	}
+}
+
+func TestEnvOverridesHelpers(t *testing.T) {
+	t.Setenv(EnvDownloadDir, "/tmp/env-dl")
+	t.Setenv(EnvAuthToken, "   ") // 纯空白视为未设置
+	t.Setenv(EnvCSRFToken, "")
+	t.Setenv(EnvProxyURL, "")
+	t.Setenv(EnvAdditionalCookies, "")
+
+	overrides := EnvOverrides()
+	if !overrides["DownloadDir"] {
+		t.Fatalf("DownloadDir not overridden: %#v", overrides)
+	}
+	if overrides["AuthToken"] {
+		t.Fatalf("blank env must not count as override: %#v", overrides)
+	}
+	if !IsEnvOverridden("DownloadDir") || IsEnvOverridden("AuthToken") || IsEnvOverridden("NoSuchField") {
+		t.Fatal("IsEnvOverridden returned wrong结果")
+	}
+	if got := EffectiveDownloadDir(AppConfig{DownloadDir: "/data/dl"}); got != "/tmp/env-dl" {
+		t.Fatalf("EffectiveDownloadDir = %q, want env value", got)
+	}
+
+	t.Setenv(EnvAuthToken, "env-auth")
+	fields := EnvOverriddenFields()
+	if len(fields) != 2 || fields[0] != "authToken" || fields[1] != "downloadDir" {
+		t.Fatalf("EnvOverriddenFields = %#v, want [authToken downloadDir]", fields)
+	}
+	redacted := AppConfig{AuthToken: "secret"}.Redacted()
+	if len(redacted.EnvOverridden) != 2 || redacted.AuthToken != SecretPlaceholder {
+		t.Fatalf("Redacted() = %#v, want envOverridden filled + token masked", redacted)
+	}
+
+	t.Setenv(EnvDownloadDir, "")
+	if got := EffectiveDownloadDir(AppConfig{DownloadDir: "/data/dl"}); got != "/data/dl" {
+		t.Fatalf("EffectiveDownloadDir without env = %q, want stored", got)
+	}
+}
+
+// ValidateDownloadRoot 用哨兵错误包装"根/家目录"这一存量配置不可用的情形，
+// 让 storage/main 能用 errors.Is 区分并降级修复，而不是笼统拒绝启动。
+func TestValidateDownloadRootSentinel(t *testing.T) {
+	if err := ValidateDownloadRoot("/"); !errors.Is(err, ErrInvalidDownloadRoot) {
+		t.Fatalf("root dir error = %v, want ErrInvalidDownloadRoot", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	if err := ValidateDownloadRoot(home); !errors.Is(err, ErrInvalidDownloadRoot) {
+		t.Fatalf("home dir error = %v, want ErrInvalidDownloadRoot", err)
+	}
+	dir := t.TempDir()
+	if err := ValidateDownloadRoot(dir); err != nil {
+		t.Fatalf("temp dir rejected: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "nested")); statErr == nil {
+		t.Fatal("unexpected nested dir")
 	}
 }

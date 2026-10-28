@@ -8,35 +8,32 @@ import {
   PictureInPicture,
   Video,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import React, {
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   formatBytes,
-  getLibraryDownloads,
-  libraryDownloadsLimit,
+  getLibraryDownloadsPage,
   libraryDownloadsQueryRoot,
   type DownloadRecord,
-  type Job,
 } from "../lib/api";
-import { copyToClipboard, formatDateTime } from "../components/common/CommonUI";
+import { copyToClipboard, formatDateTime, getErrorMessage } from "../components/common/CommonUI";
+import { useDebouncedValue } from "../lib/useDebouncedValue";
+import {
+  defaultGalleryFilter,
+  galleryPageSize,
+  type GalleryRouteState,
+} from "../lib/useRouteState";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Segmented } from "../components/ui/Controls";
-import { Empty, Skeleton } from "../components/ui/Feedback";
+import { Alert, Empty, Skeleton } from "../components/ui/Feedback";
 import { SearchInput } from "../components/ui/Input";
 import { MediaModal, Tooltip } from "../components/ui/Overlay";
 import { Pagination } from "../components/ui/Pagination";
 import { SearchSelect } from "../components/ui/SearchSelect";
-import { Spinner } from "../components/ui/Spinner";
 
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
-const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
+const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".avif"];
 
 function hasExtension(url: string, extensions: string[]) {
   const path = url.toLowerCase().split(/[?#]/)[0];
@@ -67,9 +64,16 @@ function isKeyboardOwnedTarget(target: EventTarget | null) {
 }
 
 export interface GalleryPageProps {
-  jobs?: Job[];
-  downloads?: DownloadRecord[];
+  /** 受控筛选（App 从 URL 还原并写回）；不传时组件内部自管，便于单独测试。 */
+  filter?: GalleryRouteState;
+  onFilterChange?: (
+    patch: Partial<GalleryRouteState>,
+    options?: { replace?: boolean },
+  ) => void;
 }
+
+/** 搜索输入防抖：避免每敲一个字符就打一次服务端分页查询。 */
+const GALLERY_SEARCH_DEBOUNCE_MS = 300;
 
 function VideoPoster({
   item,
@@ -115,7 +119,7 @@ function VideoPoster({
         />
       )}
       <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/20 opacity-0 transition-opacity group-hover:opacity-100">
-        <div className="flex size-10 items-center justify-center rounded-full bg-brand-500/90 text-white shadow-md">
+        <div className="flex size-10 items-center justify-center rounded-full bg-brand-500/90 text-brand-contrast shadow-md">
           <PictureInPicture className="size-5" />
         </div>
       </div>
@@ -147,7 +151,7 @@ const GalleryCard = React.memo(function GalleryCard({
       cover={
         <div className="aspect-square relative flex items-center justify-center overflow-hidden bg-surface-muted border-b border-line">
           {isVideo ? (
-            <VideoPoster item={item} fileName={fileName} onOpen={() => onOpen(entryKey(item))} />
+            <VideoPoster key={`${item.id}:${item.previewUrl || ""}`} item={item} fileName={fileName} onOpen={() => onOpen(entryKey(item))} />
           ) : isPreviewableImage ? (
             <button
               type="button"
@@ -225,114 +229,156 @@ const GalleryCard = React.memo(function GalleryCard({
   );
 });
 
-export function GalleryPage({ downloads }: GalleryPageProps) {
-  const [filterType, setFilterType] = useState<string>("all");
-  const [searchFilter, setSearchFilter] = useState<string>("");
-  const [userFilter, setUserFilter] = useState<string>("all");
+export function GalleryPage({ filter: controlledFilter, onFilterChange }: GalleryPageProps) {
+  const [localFilter, setLocalFilter] = useState<GalleryRouteState>(defaultGalleryFilter);
+  const filter = controlledFilter ?? localFilter;
+  const updateFilter = useCallback(
+    (patch: Partial<GalleryRouteState>, options?: { replace?: boolean }) => {
+      if (controlledFilter !== undefined) {
+        onFilterChange?.(patch, options);
+        return;
+      }
+      setLocalFilter((current) => ({ ...current, ...patch }));
+    },
+    [controlledFilter, onFilterChange],
+  );
+
   const [previewId, setPreviewId] = useState<string | null>(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const pageSize = 60;
-  const deferredSearchFilter = useDeferredValue(searchFilter);
+  const pageSize = galleryPageSize;
+  // 输入框即时响应，查询键用 300ms 防抖后的值。
+  const debouncedSearch = useDebouncedValue(filter.search, GALLERY_SEARCH_DEBOUNCE_MS);
 
   const libraryQuery = useQuery({
-    queryKey: libraryDownloadsQueryRoot,
-    queryFn: ({ signal }) => getLibraryDownloads(libraryDownloadsLimit, signal),
+    queryKey: [
+      ...libraryDownloadsQueryRoot,
+      {
+        page: filter.page,
+        kind: filter.kind,
+        user: filter.user,
+        search: debouncedSearch,
+      },
+    ],
+    queryFn: ({ signal }) =>
+      getLibraryDownloadsPage(
+        {
+          page: filter.page,
+          pageSize,
+          kind: filter.kind,
+          user: filter.user,
+          search: debouncedSearch,
+        },
+        signal,
+      ),
+    // 翻页/切筛选时保留上一页内容，避免整块骨架闪烁与分页条消失。
+    placeholderData: keepPreviousData,
     staleTime: 10 * 60_000,
     gcTime: 30 * 60_000,
     refetchOnWindowFocus: false,
-    enabled: !downloads,
   });
 
+  const allDownloads = libraryQuery.data?.items ?? [];
 
-  const allDownloads = downloads ?? libraryQuery.data ?? [];
-
-  const indexedDownloads = useMemo(
-    () => {
-      const groups = new Map<string, DownloadRecord[]>();
-      for (const item of allDownloads) {
-        const key = item.filePath || `record:${item.id}`;
-        const group = groups.get(key);
-        if (group) group.push(item);
-        else groups.set(key, [item]);
-      }
-      return [...groups.values()].map((records) => {
-        const item = records[0];
-        const lower = item.filePath.toLowerCase().split("?")[0];
-        return {
-          item,
-          records,
-          isVideo: VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext)),
-          isImage: IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext)),
-          isGif: lower.endsWith(".gif"),
-        };
-      });
-    },
-    [allDownloads],
-  );
-
-  const categoryCounts = useMemo(() => {
-    const counts = { all: indexedDownloads.length, images: 0, videos: 0, gifs: 0 };
-    for (const entry of indexedDownloads) {
-      if (entry.isVideo) counts.videos += 1;
-      if (entry.isImage) counts.images += 1;
-      if (entry.isGif) counts.gifs += 1;
-    }
-    return counts;
-  }, [indexedDownloads]);
-
-  const userOptions = useMemo(() => {
-    const users = new Map<string, string>();
+  const indexedDownloads = useMemo(() => {
+    const groups = new Map<string, DownloadRecord[]>();
     for (const item of allDownloads) {
-      const key = item.userScreenName || "unknown";
-      const label = item.userScreenName
-        ? `${item.userName || item.userScreenName} (@${item.userScreenName})`
-        : "未识别用户";
-      users.set(key, label);
+      const key = item.filePath || `record:${item.id}`;
+      const group = groups.get(key);
+      if (group) group.push(item);
+      else groups.set(key, [item]);
     }
-    return [...users.entries()]
-      .sort((a, b) => a[1].localeCompare(b[1], "zh-CN"))
-      .map(([value, label]) => ({ value, label }));
+    return [...groups.values()].map((records) => {
+      const item = records[0];
+      const lower = item.filePath.toLowerCase().split("?")[0];
+      return {
+        item,
+        records,
+        isVideo: VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext)),
+        isImage: IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext)),
+        isGif: lower.endsWith(".gif"),
+      };
+    });
   }, [allDownloads]);
 
-  const filteredEntries = useMemo(() => {
-    const kw = deferredSearchFilter.trim().toLowerCase();
-    return indexedDownloads.flatMap((entry) => {
-      if (filterType === "images" && !entry.isImage) return [];
-      if (filterType === "videos" && !entry.isVideo) return [];
-      if (filterType === "gifs" && !entry.isGif) return [];
-
-      const matching = entry.records.filter((item) =>
-        (userFilter === "all" || (item.userScreenName || "unknown") === userFilter) &&
-        (!kw || (
-          item.filePath.toLowerCase().includes(kw) ||
-          item.mediaUrl.toLowerCase().includes(kw) ||
-          String(item.tweetId).includes(kw)
-        )),
-      );
-      return matching.length ? [{ ...entry, item: matching[0] }] : [];
-    });
-  }, [deferredSearchFilter, filterType, indexedDownloads, userFilter]);
-
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [filterType, searchFilter, userFilter]);
-
-  const visibleEntries = useMemo(
-    () => filteredEntries.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [currentPage, filteredEntries],
+  const categoryCounts = libraryQuery.data?.counts ?? { all: 0, images: 0, videos: 0, gifs: 0 };
+  const userOptions = libraryQuery.data?.users ?? [];
+  const totalEntries = libraryQuery.data?.pagination.total ?? 0;
+  const totalPages = Math.max(
+    1,
+    libraryQuery.data?.pagination.totalPages ?? Math.ceil(totalEntries / pageSize),
   );
+
+  // 数据变少（删除/筛选后总数下降）时把页码收敛到最后一页，避免停在空页。
+  useEffect(() => {
+    if (!libraryQuery.data) return;
+    if (filter.page > totalPages) {
+      updateFilter({ page: totalPages }, { replace: true });
+    }
+  }, [libraryQuery.data, filter.page, totalPages, updateFilter]);
+
+  const visibleEntries = indexedDownloads;
+  const hasActiveFilter =
+    filter.kind !== "all" || filter.user !== "all" || filter.search.trim() !== "";
 
   const previewIndex = useMemo(
     () =>
       previewId === null
         ? -1
-        : filteredEntries.findIndex((entry) => entryKey(entry.item) === previewId),
-    [filteredEntries, previewId],
+        : visibleEntries.findIndex((entry) => entryKey(entry.item) === previewId),
+    [previewId, visibleEntries],
   );
-  const previewEntry = previewIndex >= 0 ? filteredEntries[previewIndex] : undefined;
+  const previewEntry = previewIndex >= 0 ? visibleEntries[previewIndex] : undefined;
+
+
+  const openPreview = useCallback((nextId: string) => setPreviewId(nextId), []);
+
+  // 跨页切图：走到当前页边界时翻一页，等新页数据落地后再把灯箱定位到首/末项。
+  const [pendingPreviewEdge, setPendingPreviewEdge] = useState<"first" | "last" | null>(null);
+
+  const stepPreview = useCallback(
+    (delta: number) => {
+      if (visibleEntries.length === 0 || previewIndex === -1) return;
+      const nextIndex = previewIndex + delta;
+      if (nextIndex >= visibleEntries.length) {
+        if (filter.page < totalPages) {
+          setPendingPreviewEdge("first");
+          updateFilter({ page: filter.page + 1 });
+        }
+        return;
+      }
+      if (nextIndex < 0) {
+        if (filter.page > 1) {
+          setPendingPreviewEdge("last");
+          updateFilter({ page: filter.page - 1 });
+        }
+        return;
+      }
+      setPreviewId(entryKey(visibleEntries[nextIndex].item));
+    },
+    [filter.page, previewIndex, totalPages, updateFilter, visibleEntries],
+  );
 
   useEffect(() => {
-    if (previewId !== null && previewIndex === -1) {
+    if (!pendingPreviewEdge) return;
+    if (libraryQuery.isError) {
+      setPendingPreviewEdge(null);
+      return;
+    }
+    if (!libraryQuery.data || libraryQuery.isPlaceholderData) return;
+    if (visibleEntries.length === 0) {
+      setPendingPreviewEdge(null);
+      return;
+    }
+    const target =
+      pendingPreviewEdge === "first"
+        ? visibleEntries[0]
+        : visibleEntries[visibleEntries.length - 1];
+    setPreviewId(entryKey(target.item));
+    setPendingPreviewEdge(null);
+  }, [pendingPreviewEdge, libraryQuery.data, libraryQuery.isPlaceholderData, visibleEntries]);
+
+  useEffect(() => {
+    // 正在跨页续开时不要因为"当前页找不到旧 previewId"就关掉灯箱。
+    if (previewId !== null && previewIndex === -1 && !pendingPreviewEdge) {
       setPreviewId(null);
       return;
     }
@@ -341,26 +387,19 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
       if (isKeyboardOwnedTarget(event.target)) return;
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
-        if (filteredEntries.length === 0) return;
-        const delta = event.key === "ArrowRight" ? 1 : -1;
-        const nextIndex =
-          (previewIndex + delta + filteredEntries.length) % filteredEntries.length;
-        setPreviewId(entryKey(filteredEntries[nextIndex].item));
+        stepPreview(event.key === "ArrowRight" ? 1 : -1);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [filteredEntries, previewId, previewIndex]);
+  }, [pendingPreviewEdge, previewId, previewIndex, stepPreview]);
 
-  const openPreview = useCallback((nextId: string) => setPreviewId(nextId), []);
-  const stepPreview = useCallback(
-    (delta: number) => {
-      if (filteredEntries.length === 0 || previewIndex === -1) return;
-      const nextIndex =
-        (previewIndex + delta + filteredEntries.length) % filteredEntries.length;
-      setPreviewId(entryKey(filteredEntries[nextIndex].item));
+  const goToPage = useCallback(
+    (nextPage: number) => {
+      setPreviewId(null);
+      updateFilter({ page: Math.min(Math.max(1, nextPage), totalPages) });
     },
-    [filteredEntries, previewIndex],
+    [totalPages, updateFilter],
   );
 
   return (
@@ -377,8 +416,8 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
         <div className="flex flex-wrap items-center gap-2.5">
           <Segmented
             size="md"
-            value={filterType}
-            onChange={(val) => setFilterType(val)}
+            value={filter.kind}
+            onChange={(val) => updateFilter({ kind: val, page: 1 })}
             options={[
               { label: `全部 (${categoryCounts.all})`, value: "all" },
               { label: `图片 (${categoryCounts.images})`, value: "images" },
@@ -389,8 +428,8 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
 
           <div className="w-56">
             <SearchSelect
-              value={userFilter}
-              onChange={setUserFilter}
+              value={filter.user}
+              onChange={(val) => updateFilter({ user: val, page: 1 })}
               options={[{ value: "all", label: "全部用户" }, ...userOptions]}
               placeholder="按用户筛选..."
             />
@@ -398,17 +437,20 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
 
           <SearchInput
             placeholder="搜索文件名、推文 ID..."
-            value={searchFilter}
-            onChange={(e) => setSearchFilter(e.target.value)}
+            value={filter.search}
+            onChange={(e) => updateFilter({ search: e.target.value, page: 1 }, { replace: true })}
             allowClear
             className="w-52"
           />
-
         </div>
       </div>
 
+      {libraryQuery.data?.truncated && (
+        <Alert type="warning" message="媒体库索引已达上限，当前仅显示最近的记录" />
+      )}
+
       {/* 媒体内容流展示 */}
-      {!downloads && libraryQuery.isLoading ? (
+      {libraryQuery.isLoading ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
           {Array.from({ length: 12 }, (_, index) => (
             <Card key={index} size="sm" bodyClassName="p-2 space-y-2">
@@ -418,12 +460,43 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
             </Card>
           ))}
         </div>
-      ) : filteredEntries.length === 0 ? (
+      ) : libraryQuery.isError && !libraryQuery.data ? (
+        <Card className="py-8">
+          <Alert
+            type="error"
+            showIcon
+            message="媒体库加载失败"
+            description={getErrorMessage(libraryQuery.error)}
+            action={
+              <Button
+                size="sm"
+                variant="default"
+                loading={libraryQuery.isFetching}
+                onClick={() => void libraryQuery.refetch()}
+              >
+                重试
+              </Button>
+            }
+          />
+        </Card>
+      ) : visibleEntries.length === 0 ? (
         <Card className="text-center py-12">
-          <Empty description="暂无归档文件记录。完成下载任务后，媒体文件将自动在此呈现。" />
+          <Empty
+            description={
+              hasActiveFilter
+                ? "没有匹配的媒体文件，试试调整筛选或搜索关键词。"
+                : "暂无归档文件记录。完成下载任务后，媒体文件将自动在此呈现。"
+            }
+          />
         </Card>
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+        <div
+          className={
+            libraryQuery.isFetching
+              ? "grid grid-cols-2 gap-3 opacity-60 transition-opacity sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
+              : "grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
+          }
+        >
           {visibleEntries.map(({ item, isVideo, isImage, isGif }) => (
             <GalleryCard
               key={item.id || item.filePath}
@@ -436,15 +509,15 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
         </div>
       )}
 
-      {/* 底部分页 */}
-      {filteredEntries.length > pageSize && (
+      {/* 底部分页（服务端分页，页码写回 URL） */}
+      {totalPages > 1 && (
         <div className="flex justify-center pt-3">
           <Pagination
-            page={currentPage}
+            page={filter.page}
             pageSize={pageSize}
-            total={filteredEntries.length}
+            total={totalEntries}
             totalLabel={(total) => `共 ${total} 项`}
-            onPageChange={(page) => setCurrentPage(page)}
+            onPageChange={goToPage}
           />
         </div>
       )}
@@ -452,7 +525,10 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
       {/* 沉浸式多媒体灯箱预览弹窗 */}
       <MediaModal
         open={previewEntry !== undefined}
-        onClose={() => setPreviewId(null)}
+        onClose={() => {
+          setPendingPreviewEdge(null);
+          setPreviewId(null);
+        }}
         title={
           previewEntry
             ? `${previewEntry.item.userName || "未识别用户"}${
@@ -486,7 +562,7 @@ export function GalleryPage({ downloads }: GalleryPageProps) {
                   />
                 )}
 
-                {/* 左右切图浮动按钮 */}
+                {/* 左右切图浮动按钮（当前服务端分页内循环） */}
                 <button
                   type="button"
                   aria-label="上一个媒体文件"

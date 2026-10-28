@@ -25,16 +25,11 @@ import {
 import { Button } from "../ui/Button";
 import { Popconfirm } from "../ui/Overlay";
 import { Tag } from "../ui/Tag";
+import { Alert } from "../ui/Feedback";
 import { toast } from "../ui/Toast";
 import { dashboardMetaQueryRoot, failedTweetQueryRoot, jobsQueryRoot } from "../../lib/api";
 
-export function FailedTweetQueue({
-  items,
-  total,
-}: {
-  items: FailedTweet[];
-  total: number;
-}) {
+export function FailedTweetQueue({ total }: { total: number }) {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -51,7 +46,7 @@ export function FailedTweetQueue({
     totalPages: total > 0 ? Math.ceil(total / pageSize) : 0,
   };
 
-  const pageItems = failedTweetsQuery.data?.items ?? (page === 1 ? items.slice(0, pageSize) : []);
+  const pageItems = failedTweetsQuery.data?.items ?? [];
   const pagination = failedTweetsQuery.data?.pagination ?? fallbackPagination;
 
   const refreshFailedTweets = () => {
@@ -132,7 +127,24 @@ export function FailedTweetQueue({
         </div>
       </Toolbar>
 
-      {failedTweetsQuery.isLoading && pageItems.length === 0 ? (
+      {failedTweetsQuery.isError ? (
+        <Alert
+          type="error"
+          showIcon
+          message="失败队列加载失败"
+          description={failedTweetsQuery.error.message}
+          action={
+            <Button
+              size="sm"
+              variant="default"
+              loading={failedTweetsQuery.isFetching}
+              onClick={() => void failedTweetsQuery.refetch()}
+            >
+              重试
+            </Button>
+          }
+        />
+      ) : failedTweetsQuery.isLoading && pageItems.length === 0 ? (
         <ListSkeleton rows={pageSize} />
       ) : pageItems.length === 0 ? (
         <AppEmpty description="暂无失败推文" />

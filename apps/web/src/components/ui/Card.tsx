@@ -54,7 +54,9 @@ export function Card({
         <div className="flex items-stretch border-t border-line">
           {actions.map((action, index) => (
             <div
-              key={index}
+              // 优先用调用方给 action 的 key（React element 上的 key），
+              // 没有才退回下标：actions 是纯 ReactNode，拿不到业务 id。
+              key={React.isValidElement(action) && action.key != null ? action.key : index}
               className={cn(
                 "flex flex-1 items-center justify-center py-2",
                 index > 0 && "border-l border-line",

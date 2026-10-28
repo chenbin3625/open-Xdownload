@@ -22,14 +22,15 @@ const textStyle =
 // 焦点环由全局 :focus-visible 提供，这里不重复定义。
 const variantClass: Record<ButtonVariant, string> = {
   primary:
-    "bg-gradient-to-b from-brand-500 to-brand-600 text-white border border-brand-400/25 shadow-xs shadow-brand-500/20 hover:from-brand-400 hover:to-brand-500 hover:shadow-brand-500/35 active:from-brand-600 active:to-brand-700",
+    "bg-gradient-to-b from-brand-500 to-brand-600 text-brand-contrast border border-brand-400/25 shadow-xs shadow-brand-500/20 hover:from-brand-400 hover:to-brand-500 hover:shadow-brand-500/35 active:from-brand-600 active:to-brand-700",
   default: defaultStyle,
   secondary: defaultStyle,
   text: textStyle,
   ghost: textStyle,
   link: "bg-transparent text-brand-500 border border-transparent hover:text-brand-600 hover:underline active:opacity-80",
   danger:
-    "bg-danger-soft text-danger border border-danger/30 hover:bg-danger hover:text-white hover:border-danger active:bg-danger/90",
+    // hover 时是实心 danger 底，前景必须用配对色（暗色 danger 是亮红，白字只有 3.76:1）
+    "bg-danger-soft text-danger-strong border border-danger/30 hover:bg-danger hover:text-danger-contrast hover:border-danger active:bg-danger/90",
 };
 
 const sizeClass: Record<ButtonSize, string> = {

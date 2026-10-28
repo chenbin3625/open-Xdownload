@@ -164,7 +164,6 @@ export interface FailedTweet {
   jobId: number;
   entityId: number;
   tweetId: string;
-  payload?: string;
   error: string;
   createdAt: string;
   updatedAt: string;
@@ -236,6 +235,15 @@ export interface JobsPage {
 export interface JobFiles {
   downloads: DownloadRecord[];
   failed: FailedMedia[];
+  truncated?: boolean;
+}
+
+export interface LibraryDownloadsPage {
+  items: DownloadRecord[];
+  pagination: DashboardPagination;
+  counts: { all: number; images: number; videos: number; gifs: number };
+  users: { value: string; label: string }[];
+  truncated: boolean;
 }
 
 export const jobFilesQueryRoot = ["job-files"] as const;
@@ -245,9 +253,6 @@ export const configQueryRoot = ["config"] as const;
 export const archiveScheduleQueryRoot = ["archive-schedules"] as const;
 export const failedTweetQueryRoot = ["failed-tweets"] as const;
 export const libraryDownloadsQueryRoot = ["library-downloads"] as const;
-// 与后端 storage.MaxLibraryDownloadsLimit 对齐：媒体库前端做全量筛选/计数/搜索，
-// 总是请求全部记录，该值只为超大规模归档兜底。
-export const libraryDownloadsLimit = 100000;
 
 export interface FailedTweetPage {
   items: FailedTweet[];
@@ -265,25 +270,110 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const method = (init?.method ?? "GET").toUpperCase();
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      ...(method !== "GET" && method !== "HEAD" ? { "Content-Type": "application/json" } : {}),
-      ...(init?.headers ?? {}),
-    },
-  });
-  if (!response.ok) {
-    const payload: { error?: string } | null = await response.json().catch(() => null);
-    // 空串 error、{}、HTTP/2 下为空的 statusText 都要继续回退，保证提示里总有内容。
-    const message =
-      (typeof payload?.error === "string" && payload.error) ||
-      response.statusText ||
-      `请求失败 (${response.status})`;
-    throw new ApiError(message, response.status);
+// 默认 30 秒超时；媒体库分页、配置写入、Cookie 检测等"已知可能很慢"的请求用 60 秒。
+export const DEFAULT_TIMEOUT_MS = 30_000;
+export const LONG_TIMEOUT_MS = 60_000;
+
+export interface ApiInit extends RequestInit {
+  /** 单次请求超时（毫秒）；传 null 表示不超时，默认 DEFAULT_TIMEOUT_MS。 */
+  timeoutMs?: number | null;
+}
+
+/**
+ * 组合"调用方取消"与"超时中止"两个 signal。
+ * 老浏览器（Safari < 17.4 / Firefox < 124）没有 AbortSignal.any/timeout：
+ * - 只有一方存在时直接用那一方；
+ * - 两方都存在时手写组合；AbortController 也不存在时退化为不超时（宁可慢也不炸）。
+ */
+function createRequestSignal(
+  external: AbortSignal | null | undefined,
+  timeoutMs: number | null,
+): { signal: AbortSignal | undefined; dispose: () => void } {
+  const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+  const canCreateController = typeof AbortController === "function";
+  const canAny = typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function";
+
+  let timeoutSignal: AbortSignal | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  if (hasTimeout) {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      timeoutSignal = AbortSignal.timeout(timeoutMs);
+    } else if (canCreateController) {
+      const controller = new AbortController();
+      timer = setTimeout(() => controller.abort(), timeoutMs);
+      timeoutSignal = controller.signal;
+    }
   }
-  return response.json() as Promise<T>;
+
+  let signal: AbortSignal | undefined;
+  if (timeoutSignal && external) {
+    if (canAny) {
+      signal = AbortSignal.any([external, timeoutSignal]);
+    } else if (canCreateController) {
+      // 手写组合：任一方中止都触发同一个 controller。
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      external.addEventListener("abort", abort);
+      timeoutSignal.addEventListener("abort", abort);
+      signal = controller.signal;
+    } else {
+      signal = external; // 无法组合时不牺牲"调用方取消"
+    }
+  } else {
+    signal = timeoutSignal ?? external ?? undefined;
+  }
+
+  return {
+    signal,
+    dispose: () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
+export async function api<T>(path: string, init?: ApiInit): Promise<T> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...requestInit } = init ?? {};
+  const method = (requestInit.method ?? "GET").toUpperCase();
+  const composed = createRequestSignal(requestInit.signal, timeoutMs);
+  try {
+    const response = await fetch(path, {
+      ...requestInit,
+      signal: composed.signal,
+      headers: {
+        ...(method !== "GET" && method !== "HEAD" ? { "Content-Type": "application/json" } : {}),
+        ...(requestInit.headers ?? {}),
+      },
+    });
+    if (!response.ok) {
+      const payload: { error?: string } | null = await response.json().catch(() => null);
+      // 空串 error、{}、HTTP/2 下为空的 statusText 都要继续回退，保证提示里总有内容。
+      const message =
+        (typeof payload?.error === "string" && payload.error) ||
+        response.statusText ||
+        `请求失败 (${response.status})`;
+      throw new ApiError(message, response.status);
+    }
+    // 204/205 按协议就没有响应体，返回 undefined 由调用方决定是否使用。
+    if (response.status === 204 || response.status === 205) {
+      return undefined as T;
+    }
+    const body = await response.text();
+    if (!body.trim()) {
+      // 期望 JSON 的接口返回空体多半是反代/网关截断，必须显式报错，避免 undefined 流进缓存。
+      throw new ApiError("空响应", response.status);
+    }
+    try {
+      return JSON.parse(body) as T;
+    } catch {
+      throw new ApiError("响应格式无效", response.status);
+    }
+  } finally {
+    composed.dispose();
+  }
 }
 
 export const getJobsPage = ({
@@ -295,9 +385,24 @@ export const getJobsPage = ({
 
 export const getConfig = (signal?: AbortSignal) => api<AppConfig>("/api/config", { signal });
 
-export const getJobFiles = (id: number, signal?: AbortSignal) => api<JobFiles>(`/api/jobs/${id}/files`, { signal });
-export const getLibraryDownloads = (limit = 100, signal?: AbortSignal) =>
-  api<DownloadRecord[]>(`/api/library/downloads?limit=${limit}`, { signal });
+export const getJobFiles = (id: number, signal?: AbortSignal) =>
+  api<JobFiles>(`/api/jobs/${id}/files`, { signal, timeoutMs: LONG_TIMEOUT_MS });
+export const getLibraryDownloadsPage = (
+  options: { page: number; pageSize: number; kind: string; user: string; search: string },
+  signal?: AbortSignal,
+) => {
+  const params = new URLSearchParams({
+    page: String(options.page),
+    pageSize: String(options.pageSize),
+    kind: options.kind,
+    user: options.user,
+    search: options.search,
+  });
+  return api<LibraryDownloadsPage>(`/api/library/downloads?${params}`, {
+    signal,
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+};
 
 
 export const getDashboardMeta = (signal?: AbortSignal) => api<DashboardMeta>("/api/dashboard/meta", { signal });
@@ -320,6 +425,7 @@ export const createJobsBatch = (request: BatchJobRequest) =>
   api<Job[]>("/api/jobs/batch", {
     method: "POST",
     body: JSON.stringify(request),
+    timeoutMs: LONG_TIMEOUT_MS,
   });
 
 export const createArchiveSchedule = (request: ArchiveScheduleRequest) =>
@@ -338,7 +444,7 @@ export const deleteArchiveSchedule = (id: number) =>
   api<{ ok: boolean }>(`/api/archive-schedules/${id}`, { method: "DELETE" });
 
 export const runArchiveSchedule = (id: number) =>
-  api<Job[]>(`/api/archive-schedules/${id}/run`, { method: "POST" });
+  api<Job[]>(`/api/archive-schedules/${id}/run`, { method: "POST", timeoutMs: LONG_TIMEOUT_MS });
 
 export const retryJob = (id: number) =>
   api<Job>(`/api/jobs/${id}/retry`, { method: "POST" });
@@ -359,10 +465,16 @@ export const updateConfig = (config: AppConfig) =>
   api<AppConfig>("/api/config", {
     method: "PUT",
     body: JSON.stringify(config),
+    // 改下载目录会触发历史路径重写，可能超过默认 30s。
+    timeoutMs: LONG_TIMEOUT_MS,
   });
 
 export const listLocalDirectories = (path?: string, signal?: AbortSignal) =>
-  api<LocalDirectoryListing>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ""}`, { signal });
+  api<LocalDirectoryListing>(`/api/local-directories${path ? `?path=${encodeURIComponent(path)}` : ""}`, {
+    signal,
+    // 网络盘/大目录枚举可能很慢。
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
 
 export const createLocalDirectory = (path: string) =>
   api<LocalDirectoryListing>("/api/local-directories", {
@@ -381,6 +493,8 @@ export const checkAuth = (config: AppConfig) =>
   api<AuthCheck>("/api/auth/check", {
     method: "POST",
     body: JSON.stringify(config),
+    // 后端自身有 20s 超时，这里必须留足余量。
+    timeoutMs: LONG_TIMEOUT_MS,
   });
 
 export function formatBytes(bytes: number) {

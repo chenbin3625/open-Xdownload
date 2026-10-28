@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import type { DashboardMeta, Job, JobsPage } from "./api";
 import {
@@ -18,6 +18,8 @@ import {
 } from "./jobStatus";
 
 export function invalidateWorkbenchQueries(queryClient: QueryClient) {
+  // 整体刷新会立即重拉媒体库，挂起的"终态合并刷新"就没必要再发一次了。
+  cancelScheduledTerminalRefresh(queryClient);
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: jobsQueryRoot }),
     queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot }),
@@ -31,6 +33,7 @@ export function invalidateAfterReconnect(queryClient: QueryClient) {
   return Promise.all([
     invalidateWorkbenchQueries(queryClient),
     queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot }),
+    queryClient.invalidateQueries({ queryKey: jobFilesQueryRoot }),
   ]);
 }
 
@@ -54,7 +57,12 @@ export function parseDashboardEvent(raw: string): DashboardEvent | null {
 export function isDashboardJobPayload(payload: unknown): payload is Job {
   if (!payload || typeof payload !== "object") return false;
   const job = payload as Partial<Job>;
-  return typeof job.id === "number" && typeof job.status === "string";
+  return (
+    typeof job.id === "number" &&
+    typeof job.status === "string" &&
+    // createdAt 参与分页合并排序，缺失/非字符串的 payload 一律拒绝（后续走整页刷新兜底）。
+    typeof job.createdAt === "string"
+  );
 }
 
 export function isDashboardJobList(payload: unknown): payload is Job[] {
@@ -86,6 +94,10 @@ export function isStaleJobUpdate(previous: Job, next: Job) {
 }
 
 // 800ms 去抖刷新可能在更新的 SSE 补丁之后才落地：逐条比较 updatedAt，保留较新的一份。
+// 同时保留 SSE 在 fetch 期间新插入的任务：只要它比 fetched 首行"更新"，按后端
+// ORDER BY created_at DESC, id DESC 的排序语义它本该出现在第 1 页首位。
+// 这里刻意不比较浏览器时钟（客户端时钟与服务端可能差几十秒），只做服务器排序语义比较；
+// createdAt 非法时直接不保留，避免 NaN 比较把整页排序打乱。
 export function mergeNewerJobs(cached: JobsPage | undefined, fetched: JobsPage): JobsPage {
   if (!cached) return fetched;
   let changed = false;
@@ -97,7 +109,75 @@ export function mergeNewerJobs(cached: JobsPage | undefined, fetched: JobsPage):
     }
     return job;
   });
+
+  // 保留由 SSE 插入但尚未被轮询覆盖的任务（仅第一页）。
+  if (fetched.page === 1) {
+    const fetchedIds = new Set(fetched.items.map((job) => job.id));
+    const newestFetched = fetched.items[0];
+    const newestCreatedTime = newestFetched ? Date.parse(newestFetched.createdAt) : Number.NaN;
+    // fetched 首页为空说明快照里没有任何任务：缓存里不属于该快照的行一定是快照之后插入的。
+    const fetchedIsEmpty = fetched.items.length === 0;
+    const retained = cached.items.filter((job) => {
+      if (fetchedIds.has(job.id)) return false;
+      const createdTime = Date.parse(job.createdAt);
+      if (!Number.isFinite(createdTime)) return false;
+      if (fetchedIsEmpty) return true;
+      if (!Number.isFinite(newestCreatedTime)) return false;
+      return (
+        createdTime > newestCreatedTime ||
+        (createdTime === newestCreatedTime && job.id > newestFetched.id)
+      );
+    });
+    if (retained.length > 0) {
+      changed = true;
+      items.unshift(...retained);
+      items.sort(
+        (left, right) =>
+          Date.parse(right.createdAt) - Date.parse(left.createdAt) || right.id - left.id,
+      );
+      items.splice(fetched.pageSize);
+    }
+  }
+
   return changed ? { ...fetched, items } : fetched;
+}
+
+// 一次批量归档收尾会连续发出上百条终态 job.updated；逐条 invalidate 会产生同样数量的
+// 媒体库/失败队列请求。这里改成"立即标记失效（refetchType:none，不发请求）+ 300ms 合并后
+// 统一 refetch"，既不丢失效语义（期间新挂载的查询仍会自己拉），也把请求压到一次。
+export const TERMINAL_REFRESH_DEBOUNCE_MS = 300;
+
+type TerminalRefreshTimers = { timer: ReturnType<typeof setTimeout> | null };
+const terminalRefreshTimers = new WeakMap<QueryClient, TerminalRefreshTimers>();
+
+function terminalTimersFor(queryClient: QueryClient): TerminalRefreshTimers {
+  let timers = terminalRefreshTimers.get(queryClient);
+  if (!timers) {
+    timers = { timer: null };
+    terminalRefreshTimers.set(queryClient, timers);
+  }
+  return timers;
+}
+
+export function scheduleTerminalDataRefresh(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot, refetchType: "none" });
+  void queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot, refetchType: "none" });
+  const timers = terminalTimersFor(queryClient);
+  if (timers.timer) clearTimeout(timers.timer);
+  timers.timer = setTimeout(() => {
+    timers.timer = null;
+    void queryClient.refetchQueries({ queryKey: libraryDownloadsQueryRoot, type: "active" });
+    void queryClient.refetchQueries({ queryKey: failedTweetQueryRoot, type: "active" });
+  }, TERMINAL_REFRESH_DEBOUNCE_MS);
+}
+
+/** 取消挂起的终态失效刷新（手动刷新/卸载时调用，避免多余的一次合并请求）。 */
+export function cancelScheduledTerminalRefresh(queryClient: QueryClient) {
+  const timers = terminalRefreshTimers.get(queryClient);
+  if (timers?.timer) {
+    clearTimeout(timers.timer);
+    timers.timer = null;
+  }
 }
 
 export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Job) {
@@ -208,12 +288,13 @@ export function applyDashboardEvent(
   }
   if (event.type === "jobs.created" && isDashboardJobList(event.payload)) {
     prependJobsToCaches(queryClient, event.payload);
-    applyEventMeta();
+    // 新任务一定是 active 的，但 meta 缓存可能尚不知道；确保刷新统计。
+    if (!applyEventMeta()) return "refresh-meta";
     return "handled";
   }
   if (event.type === "job.created" && isDashboardJobPayload(event.payload)) {
     prependJobsToCaches(queryClient, [event.payload]);
-    applyEventMeta();
+    if (!applyEventMeta()) return "refresh-meta";
     return "handled";
   }
   if (event.type === "job.updated" && isDashboardJobPayload(event.payload)) {
@@ -221,8 +302,9 @@ export function applyDashboardEvent(
     // 迟到的事件已被丢弃，不能再拿它去驱动统计刷新。
     if (patched.stale) return "handled";
     // 任务结束意味着可能落了新文件；媒体库 staleTime 很长，需主动失效（只会重拉活跃查询）。
+    // 批量收尾时合并成一次刷新，避免 200 个终态事件打出 200 次媒体库请求。
     if (isJobTerminal(event.payload.status)) {
-      void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+      scheduleTerminalDataRefresh(queryClient);
     }
     if (patched.found) {
       if (isJobTerminal(event.payload.status)) {
@@ -342,8 +424,17 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
       if (metaTimer) clearTimeout(metaTimer);
       if (retryTimer) clearTimeout(retryTimer);
       metaController?.abort();
+      cancelScheduledTerminalRefresh(queryClient);
     };
   }, [enabled, epoch, queryClient, onRefresh]);
 
-  return { sseConnected };
+  // 用户点"重连"时丢弃当前 EventSource 并立即重建（epoch 变化会触发 effect 重跑）。
+  const reconnect = useCallback(() => {
+    reconnectPendingRef.current = true;
+    setSseConnected(false);
+    retryDelayRef.current = sseRetryBaseDelay;
+    setEpoch((current) => current + 1);
+  }, []);
+
+  return { sseConnected, reconnect };
 }

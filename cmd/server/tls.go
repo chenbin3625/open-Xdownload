@@ -12,16 +12,20 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-func ensureDevTLS(dir string) (certFile string, keyFile string, err error) {
+func ensureDevTLS(dir string, hosts ...string) (certFile string, keyFile string, err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", "", err
 	}
 	certFile = filepath.Join(dir, "dev.crt")
 	keyFile = filepath.Join(dir, "dev.key")
-	if validDevTLS(certFile, keyFile) {
+	if validDevTLS(certFile, keyFile, hosts...) {
 		return certFile, keyFile, nil
 	}
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -42,6 +46,15 @@ func ensureDevTLS(dir string) (certFile string, keyFile string, err error) {
 		DNSNames:     []string{"localhost"},
 		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 	}
+	for _, host := range hosts {
+		if ip := net.ParseIP(host); ip != nil {
+			if !ip.IsUnspecified() {
+				template.IPAddresses = append(template.IPAddresses, ip)
+			}
+		} else if host != "" && host != "localhost" {
+			template.DNSNames = append(template.DNSNames, host)
+		}
+	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
 	if err != nil {
 		return "", "", err
@@ -59,23 +72,49 @@ func ensureDevTLS(dir string) (certFile string, keyFile string, err error) {
 	return certFile, keyFile, nil
 }
 
-func validDevTLS(certFile, keyFile string) bool {
+func validDevTLS(certFile, keyFile string, hosts ...string) bool {
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
 		return false
 	}
-	if _, err := os.Stat(keyFile); err != nil {
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
 		return false
 	}
 	block, _ := pem.Decode(certPEM)
-	if block == nil {
+	keyBlock, _ := pem.Decode(keyPEM)
+	if block == nil || keyBlock == nil {
 		return false
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return false
 	}
-	return time.Now().Before(cert.NotAfter.Add(-24 * time.Hour))
+	privateKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return false
+	}
+	certPublic, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	key, okKey := privateKey.(*ecdsa.PrivateKey)
+	if !ok || !okKey || certPublic == nil || key == nil || certPublic.X.Cmp(key.PublicKey.X) != 0 || certPublic.Y.Cmp(key.PublicKey.Y) != 0 {
+		return false
+	}
+	now := time.Now()
+	if now.Before(cert.NotBefore) || !now.Before(cert.NotAfter.Add(-24*time.Hour)) {
+		return false
+	}
+	for _, host := range append([]string{"localhost", "127.0.0.1", "::1"}, hosts...) {
+		if host == "" {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+			continue
+		}
+		if cert.VerifyHostname(host) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func listenPort(addr string) string {
@@ -87,8 +126,9 @@ func listenPort(addr string) string {
 }
 
 func envEnabled(key string) bool {
-	switch os.Getenv(key) {
-	case "1", "true", "TRUE", "yes", "YES":
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
 		return true
 	default:
 		return false

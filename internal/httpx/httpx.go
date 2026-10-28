@@ -123,16 +123,26 @@ func guardDialContext(ctx context.Context, network, address string) (net.Conn, e
 // maxProxyTransports 限制缓存中的代理 Transport 数量，防止反复切换代理配置时连接无界累积。
 const maxProxyTransports = 8
 
+type transportEntry struct {
+	transport *http.Transport
+	lastUsed  time.Time
+}
+
 var (
 	transportsMu sync.Mutex
-	transports   = map[string]*http.Transport{}
+	transports   = map[string]*transportEntry{}
 )
 
 // Transport 返回按 proxyURL 缓存的 Transport。
 //   - proxyURL 非空：使用该代理（含内嵌凭据），经 http.ProxyURL。
 //   - proxyURL 为空：使用 http.ProxyFromEnvironment（尊重环境变量代理，同 Go 默认行为）。
 //
-// 无论哪种配置，底层拨号都经过链路本地地址防护。
+// 链路本地地址防护的边界（重要，别把注释当成"所有情况都安全"）：
+//   - 直连：DialContext 会先解析目标 IP 再拨号，169.254.x.x 等链路本地地址被拒绝；
+//   - 走代理：DialContext 拨的是**代理地址**，真实目标由代理解析并连接，拨号层
+//     看不到它。此时代理请求的目标主机由 guardedRoundTripper 做字面量 IP 检查
+//     （见 Client），域名解析后的链路本地地址无法在本地可靠拦截——这是部署方
+//     选择代理时接受的信任边界。
 func Transport(proxyURL string) (*http.Transport, error) {
 	proxyURL = strings.TrimSpace(proxyURL)
 	if err := ValidateProxyURL(proxyURL); err != nil {
@@ -141,8 +151,9 @@ func Transport(proxyURL string) (*http.Transport, error) {
 	key := "\x00" + proxyURL
 	transportsMu.Lock()
 	defer transportsMu.Unlock()
-	if t, ok := transports[key]; ok {
-		return t, nil
+	if entry, ok := transports[key]; ok {
+		entry.lastUsed = time.Now()
+		return entry.transport, nil
 	}
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -161,23 +172,52 @@ func Transport(proxyURL string) (*http.Transport, error) {
 		transport.Proxy = http.ProxyURL(parsed)
 	}
 	if len(transports) >= maxProxyTransports {
-		for k, t := range transports {
-			t.CloseIdleConnections()
-			delete(transports, k)
-			break
+		var oldestKey string
+		var oldestTime time.Time
+		for k, entry := range transports {
+			if oldestKey == "" || entry.lastUsed.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = entry.lastUsed
+			}
+		}
+		if oldestKey != "" {
+			transports[oldestKey].transport.CloseIdleConnections()
+			delete(transports, oldestKey)
 		}
 	}
-	transports[key] = transport
+	transports[key] = &transportEntry{transport: transport, lastUsed: time.Now()}
 	return transport, nil
 }
 
 // Client 返回一个复用 Transport 的 http.Client，携带指定超时与（可选的）代理配置。
+//
+// 返回值外面再套一层 guardedRoundTripper：直连时拨号层已经拦截链路本地地址，
+// 走代理时拨号层只能看到代理地址，这层补上"目标主机字面量是链路本地 IP"的拦截。
 func Client(proxyURL string, timeout time.Duration) *http.Client {
 	transport, err := Transport(proxyURL)
 	if err != nil || transport == nil {
 		return &http.Client{Timeout: timeout, Transport: errorRoundTripper{err: err}}
 	}
-	return &http.Client{Timeout: timeout, Transport: transport}
+	return &http.Client{Timeout: timeout, Transport: guardedRoundTripper{base: transport}}
+}
+
+// GuardedRoundTripper 给任意 RoundTripper 套上"目标主机字面量为链路本地 IP 时拒绝"
+// 的防护。供不使用 Client() 的调用方（例如自带 Transport 的下载器）复用。
+func GuardedRoundTripper(base http.RoundTripper) http.RoundTripper {
+	return guardedRoundTripper{base: base}
+}
+
+type guardedRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (t guardedRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request != nil && request.URL != nil {
+		if ip := net.ParseIP(request.URL.Hostname()); ip != nil && BlockedIP(ip) {
+			return nil, &blockedTargetError{host: request.URL.Hostname()}
+		}
+	}
+	return t.base.RoundTrip(request)
 }
 
 type errorRoundTripper struct {

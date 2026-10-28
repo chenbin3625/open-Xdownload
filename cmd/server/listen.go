@@ -3,7 +3,9 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +16,11 @@ type listenOptions struct {
 }
 
 func (o listenOptions) validate() error {
+	if o.addr != "" {
+		if _, err := net.ResolveTCPAddr("tcp", o.addr); err != nil {
+			return fmt.Errorf("invalid listen address: %w", err)
+		}
+	}
 	if (o.certFile == "") != (o.keyFile == "") {
 		return fmt.Errorf("tls-cert and tls-key must both be set")
 	}
@@ -52,17 +59,29 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-func withHTTP3AltSvc(next http.Handler, port string) http.Handler {
+func withHTTP3AltSvc(next http.Handler, port string, available ...*atomic.Bool) http.Handler {
 	value := altSvcHeader(port)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Alt-Svc", value)
+		if len(available) > 0 && !available[0].Load() {
+			w.Header().Set("Alt-Svc", "clear")
+		} else {
+			w.Header().Set("Alt-Svc", value)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func serveHTTP(server *http.Server, opts listenOptions) error {
+// listenTCP binds a TCP listener so the caller can log the actual address
+// before starting the server. Returns the listener or a bind error.
+func listenTCP(addr string) (net.Listener, error) {
+	return net.Listen("tcp", addr)
+}
+
+// serveHTTP starts serving on an already-bound listener. For TLS it uses
+// ServeTLS; for plain HTTP it uses Serve.
+func serveHTTP(server *http.Server, ln net.Listener, opts listenOptions) error {
 	if opts.tlsEnabled() {
-		return server.ListenAndServeTLS(opts.certFile, opts.keyFile)
+		return server.ServeTLS(ln, opts.certFile, opts.keyFile)
 	}
-	return server.ListenAndServe()
+	return server.Serve(ln)
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -398,6 +400,171 @@ func TestInjectedIndexHTMLBypassesStaticETag(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `id="app-bootstrap"`) {
 		t.Fatalf("missing bootstrap: %s", response.Body.String())
 	}
+}
+
+func TestStaticResponseBoundaries(t *testing.T) {
+	handler := webAppHandler(http.NotFoundHandler(), testWebFS(), nil)
+	for _, tc := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodPost, "/", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api", http.StatusNotFound},
+		{http.MethodGet, "/users/example.name", http.StatusOK},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, nil))
+			if response.Code != tc.status {
+				t.Fatalf("status = %d, want %d", response.Code, tc.status)
+			}
+		})
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, "/assets/app.js", nil))
+		if !stringsVaryIncludes(response.Header().Values("Vary"), "Accept-Encoding") {
+			t.Errorf("%s identity response lacks Vary", method)
+		}
+	}
+}
+
+func TestExternalStaticAssetsRefreshAfterRebuild(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "index.html")
+	if err := os.WriteFile(file, []byte("old index"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := webAppHandler(http.NotFoundHandler(), http.Dir(dir), nil)
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/", nil))
+	if err := os.WriteFile(file, []byte("rebuilt index with new assets"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/", nil))
+	if second.Body.String() != "rebuilt index with new assets" || second.Header().Get("ETag") == first.Header().Get("ETag") {
+		t.Fatalf("stale rebuilt asset: %s", second.Body.String())
+	}
+}
+
+func TestInvalidSidecarDoesNotServeEmptySuccess(t *testing.T) {
+	handler := webAppHandler(http.NotFoundHandler(), http.FS(fstest.MapFS{
+		"index.html.gz": {Data: []byte("invalid gzip")},
+	}), nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code == http.StatusOK {
+		t.Fatalf("invalid sidecar returned success: %q", response.Body.String())
+	}
+}
+
+func TestETagMatchAcceptsWeakAndWildcard(t *testing.T) {
+	for _, header := range []string{`W/"abc"`, `"other", W/"abc"`, "*"} {
+		if !etagMatch(header, `"abc"`) {
+			t.Errorf("etagMatch(%q) = false", header)
+		}
+	}
+}
+
+// 外部 webDir 部分重建（identity 已更新、.gz 还是旧的）时：
+// ETag 必须与当前实际发送的字节对应，且同一个 ETag 不能对应两份内容。
+func TestStaleSidecarKeepsETagAndBodyConsistent(t *testing.T) {
+	dir := t.TempDir()
+	assets := filepath.Join(dir, "assets")
+	if err := os.MkdirAll(assets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identityPath := filepath.Join(assets, "s.js")
+	sidecarPath := identityPath + ".gz"
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>idx</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(identityPath, []byte("AAAA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecarPath, gzipBytes(t, []byte("AAAA")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := webAppHandler(http.NotFoundHandler(), http.Dir(dir), nil)
+
+	fetch := func(acceptEncoding string) (string, string) {
+		request := httptest.NewRequest(http.MethodGet, "/assets/s.js", nil)
+		if acceptEncoding != "" {
+			request.Header.Set("Accept-Encoding", acceptEncoding)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Body.String(), response.Header().Get("ETag")
+	}
+
+	firstBody, firstETag := fetch("")
+	if firstBody != "AAAA" {
+		t.Fatalf("first body = %q", firstBody)
+	}
+
+	// 只改 identity，.gz 保持旧内容：identity 请求必须返回新字节，ETag 必须变化。
+	if err := os.WriteFile(identityPath, []byte("BBBBBBBBBBBBBBBB"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secondBody, secondETag := fetch("")
+	if secondBody != "BBBBBBBBBBBBBBBB" {
+		t.Fatalf("identity request served stale sidecar bytes: %q", secondBody)
+	}
+	if secondETag == firstETag {
+		t.Fatalf("ETag did not change with identity: %s", secondETag)
+	}
+
+	// 压缩表示继续使用 sidecar（内容仍是旧的 AAAA），但它有自己的 ETag，
+	// 不能与 identity 的新 ETag 相同 —— 否则同一 ETag 会对应两份内容。
+	gzipBody, gzipETag := fetch("gzip")
+	if gzipBody == "" || gzipETag == secondETag {
+		t.Fatalf("compressed representation shares identity ETag: body=%q etag=%s", gzipBody, gzipETag)
+	}
+	// 再次请求同一表示，ETag/body 必须稳定。
+	againBody, againETag := fetch("gzip")
+	if againBody != gzipBody || againETag != gzipETag {
+		t.Fatalf("compressed representation unstable: %q/%s -> %q/%s", gzipBody, gzipETag, againBody, againETag)
+	}
+
+	// sidecar 追上后，压缩表示的 ETag 必须变化（旧 ETag 不再对应新内容）。
+	if err := os.WriteFile(sidecarPath, gzipBytes(t, []byte("BBBBBBBBBBBBBBBB")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rebuiltBody, rebuiltETag := fetch("gzip")
+	if rebuiltBody == "" || rebuiltETag == gzipETag {
+		t.Fatalf("etag unchanged after rebuild: %q/%s", rebuiltBody, rebuiltETag)
+	}
+}
+
+// 注入 HTML 的响应只应有一行 Vary（handler 已按可压缩扩展名添加）。
+func TestInjectedHTMLHasSingleVary(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>idx</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inject := func(_ *http.Request, identity []byte) []byte {
+		return append(identity, []byte("<!--injected-->")...)
+	}
+	handler := webAppHandler(http.NotFoundHandler(), http.Dir(dir), inject)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := len(response.Header().Values("Vary")); got != 1 {
+		t.Fatalf("Vary header lines = %d (%v), want 1", got, response.Header().Values("Vary"))
+	}
+}
+
+func gzipBytes(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func BenchmarkServeHashedJSBrotli(b *testing.B) {

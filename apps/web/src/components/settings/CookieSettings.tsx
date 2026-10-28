@@ -2,6 +2,7 @@ import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  ClipboardPaste,
   HelpCircle,
   Key,
   Plus,
@@ -10,11 +11,13 @@ import {
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
 import type { AppConfig, AuthCheck, ClientStatus } from "../../lib/api";
+import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
 import { Alert } from "../ui/Feedback";
-import { Field, PasswordInput } from "../ui/Input";
+import { Field, PasswordInput, Textarea } from "../ui/Input";
 import { Tooltip } from "../ui/Overlay";
 import { Tag, type Tone } from "../ui/Tag";
+import { EnvOverrideNote } from "./EnvOverrideNote";
 
 export type CookieClientStatus = ClientStatus;
 
@@ -39,18 +42,27 @@ export const cookieSettingsTips = {
   backupCookie: (
     <div className="space-y-1 text-xs">
       <div>用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。</div>
-      <div>支持每行一个账号，格式为 auth_token=xxx; ct0=yyy。</div>
+      <div>
+        可点「批量粘贴」一次导入多个账号：每行一个，支持{" "}
+        <code className="font-mono">auth_token=xxx; ct0=yyy</code> 或 JSON 数组。
+      </div>
       <div>已保存的 Cookie 在此界面会以 ******** 脱敏显示，新增或修改不受影响。</div>
     </div>
   ),
 };
 
+// 与 DownloadSettings 的 TipIcon 保持一致：用可聚焦的 <button>，
+// 键盘用户也能读到说明；<span> 只能悬停触发，读屏/键盘用户拿不到。
 function TipIcon({ content }: { content: React.ReactNode }) {
   return (
     <Tooltip content={content}>
-      <span className="inline-flex cursor-help text-fg-subtle hover:text-fg-muted">
+      <button
+        type="button"
+        aria-label="查看说明"
+        className="inline-flex cursor-help text-fg-subtle hover:text-fg-muted"
+      >
         <HelpCircle className="size-3.5" />
-      </span>
+      </button>
     </Tooltip>
   );
 }
@@ -67,17 +79,26 @@ export function CookieSettingsFields({
   checking,
   draft,
   onChange,
+  envOverridden = [],
 }: {
   authError: string;
   authResult: AuthCheck | null;
   checking: boolean;
   draft: AppConfig;
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
+  envOverridden?: string[];
 }) {
   const clients = authResult?.diagnostics?.clients ?? [];
   const primaryClient = clients.find((client) => client.primary) ?? clients[0];
   const backupClients = clients.filter((client) => !client.primary);
-  const primaryComplete = Boolean((draft.authToken ?? "").trim() && (draft.csrfToken ?? "").trim());
+  const isClearSentinel = (v: string) => v === "__CLEAR__";
+  const primaryConfigured = Boolean(
+    (draft.authToken ?? "").trim() || (draft.csrfToken ?? "").trim(),
+  );
+  const primaryComplete = Boolean(
+    (draft.authToken ?? "").trim() && !isClearSentinel(draft.authToken ?? "") &&
+    (draft.csrfToken ?? "").trim() && !isClearSentinel(draft.csrfToken ?? ""),
+  );
   const sharedStatus = {
     checking,
     checked: Boolean(authResult),
@@ -92,6 +113,22 @@ export function CookieSettingsFields({
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <span className="text-sm font-semibold text-fg">主账号 Cookie (Primary)</span>
+          {primaryConfigured && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() =>
+                onChange((current) => ({
+                  ...current,
+                  authToken: "__CLEAR__",
+                  csrfToken: "__CLEAR__",
+                }))
+              }
+            >
+              <Trash2 className="size-3.5" />
+              清除
+            </Button>
+          )}
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field
@@ -105,16 +142,17 @@ export function CookieSettingsFields({
                 <CookieTokenStatus
                   {...sharedStatus}
                   client={primaryClient}
-                  hasValue={Boolean((draft.authToken ?? "").trim())}
+                  hasValue={Boolean((draft.authToken ?? "").trim()) && !isClearSentinel(draft.authToken ?? "")}
                   pairComplete={primaryComplete}
                 />
               }
-              value={draft.authToken ?? ""}
+              value={isClearSentinel(draft.authToken ?? "") ? "" : (draft.authToken ?? "")}
               onChange={(event) =>
                 onChange((current) => ({ ...current, authToken: event.target.value }))
               }
               placeholder="输入 auth_token"
             />
+            <EnvOverrideNote show={envOverridden.includes("authToken")} />
           </Field>
 
           <Field
@@ -128,16 +166,17 @@ export function CookieSettingsFields({
                 <CookieTokenStatus
                   {...sharedStatus}
                   client={primaryClient}
-                  hasValue={Boolean((draft.csrfToken ?? "").trim())}
+                  hasValue={Boolean((draft.csrfToken ?? "").trim()) && !isClearSentinel(draft.csrfToken ?? "")}
                   pairComplete={primaryComplete}
                 />
               }
-              value={draft.csrfToken ?? ""}
+              value={isClearSentinel(draft.csrfToken ?? "") ? "" : (draft.csrfToken ?? "")}
               onChange={(event) =>
                 onChange((current) => ({ ...current, csrfToken: event.target.value }))
               }
               placeholder="输入 ct0"
             />
+            <EnvOverrideNote show={envOverridden.includes("csrfToken")} />
           </Field>
         </div>
       </div>
@@ -152,6 +191,7 @@ export function CookieSettingsFields({
             onChange((current) => ({ ...current, additionalCookies }))
           }
         />
+        <EnvOverrideNote show={envOverridden.includes("additionalCookies")} />
       </div>
     </div>
   );
@@ -311,6 +351,14 @@ export function BackupCookieInputs({
 }) {
   const redactedCookieValue = "********";
   const [rows, setRows] = useState<BackupCookieRow[]>(() => parseBackupCookieRows(value));
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchText, setBatchText] = useState("");
+  const batchHelpId = React.useId();
+  // 只在面板打开时解析，并按文本记忆：每次按键都 emptyBackupCookieRow() 生成 id 太浪费。
+  const parsedBatch = React.useMemo(
+    () => (batchOpen ? parsePastedCookieRows(batchText) : null),
+    [batchOpen, batchText],
+  );
 
   useEffect(() => {
     const nextRows = parseBackupCookieRows(value);
@@ -321,58 +369,121 @@ export function BackupCookieInputs({
   }, [value]);
 
   function updateRow(index: number, field: keyof BackupCookieRow, nextValue: string) {
-    setRows((currentRows) => {
-      const nextRows = currentRows.map((row, rowIndex) => {
-        if (rowIndex !== index) {
-          return row;
-        }
-        if (isRedactedBackupCookieRow(row) && nextValue !== redactedCookieValue) {
-          return {
-            id: row.id,
-            authToken: field === "authToken" ? nextValue : "",
-            csrfToken: field === "csrfToken" ? nextValue : "",
-          };
-        }
-        return { ...row, [field]: nextValue };
-      });
-      onChange(normalizeBackupCookieRows(nextRows));
-      return nextRows;
+    const nextRows = rows.map((row, rowIndex) => {
+      if (rowIndex !== index) {
+        return row;
+      }
+      if (isRedactedBackupCookieRow(row) && nextValue !== redactedCookieValue) {
+        return {
+          id: row.id,
+          authToken: field === "authToken" ? nextValue : "",
+          csrfToken: field === "csrfToken" ? nextValue : "",
+        };
+      }
+      return { ...row, [field]: nextValue };
     });
+    setRows(nextRows);
+    onChange(normalizeBackupCookieRows(nextRows));
   }
 
   function addRow() {
-    setRows((currentRows) => {
-      const nextRows = [...currentRows, emptyBackupCookieRow()];
-      onChange(normalizeBackupCookieRows(nextRows));
-      return nextRows;
-    });
+    const nextRows = [...rows, emptyBackupCookieRow()];
+    setRows(nextRows);
+    onChange(normalizeBackupCookieRows(nextRows));
   }
 
   function removeRow(index: number) {
-    setRows((currentRows) => {
-      const nextRows = currentRows.filter((_, rowIndex) => rowIndex !== index);
-      const safeRows = nextRows.length > 0 ? nextRows : [emptyBackupCookieRow()];
-      onChange(normalizeBackupCookieRows(safeRows));
-      return safeRows;
-    });
+    const nextRows = rows.filter((_, rowIndex) => rowIndex !== index);
+    const safeRows = nextRows.length > 0 ? nextRows : [emptyBackupCookieRow()];
+    setRows(safeRows);
+    onChange(normalizeBackupCookieRows(safeRows));
+  }
+
+  // 批量粘贴：把解析出的账号追加到现有池子（空占位行会被丢掉）。
+  function importPastedRows() {
+    const parsed = parsePastedCookieRows(batchText);
+    if (parsed.rows.length === 0) return;
+    const base = rows.filter((row) => row.authToken.trim() || row.csrfToken.trim());
+    const nextRows = [...base, ...parsed.rows];
+    setRows(nextRows);
+    onChange(normalizeBackupCookieRows(nextRows));
+    setBatchText("");
+    setBatchOpen(false);
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <span className="text-sm font-semibold text-fg">备用 Cookie 多账号池</span>
           <TipIcon content={cookieSettingsTips.backupCookie} />
         </div>
-        <Button
-          size="sm"
-          variant="secondary"
-          icon={<Plus className="size-3.5" />}
-          onClick={addRow}
-        >
-          添加备用账号
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<ClipboardPaste className="size-3.5" />}
+            onClick={() => setBatchOpen((open) => !open)}
+            aria-expanded={batchOpen}
+            aria-controls={`${batchHelpId}-panel`}
+          >
+            批量粘贴
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Plus className="size-3.5" />}
+            onClick={addRow}
+          >
+            添加备用账号
+          </Button>
+        </div>
       </div>
+
+      {batchOpen && parsedBatch && (() => {
+        const canImport = parsedBatch.rows.length > 0;
+        return (
+          <div
+            id={`${batchHelpId}-panel`}
+            className="space-y-2 rounded-control border border-line bg-surface-muted/40 p-2.5"
+          >
+            <p id={batchHelpId} className="text-xs text-fg-muted">
+              每行一个账号，支持{" "}
+              <code className="font-mono">auth_token=xxx; ct0=yyy</code> 或 JSON 数组；
+              粘贴后点「导入」，已保存的账号不受影响。
+            </p>
+            <Textarea
+              rows={4}
+              aria-label="批量粘贴 Cookie 内容"
+              aria-describedby={batchHelpId}
+              value={batchText}
+              onChange={(event) => setBatchText(event.target.value)}
+              placeholder={"auth_token=xxx; ct0=yyy\nauth_token=aaa; ct0=bbb"}
+              className="font-mono text-xs"
+            />
+            {batchText.trim() && parsedBatch.error && (
+              <p className={cn("text-xs", canImport ? "text-warning-strong" : "text-danger-strong")}>
+                {parsedBatch.error}
+              </p>
+            )}
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                size="sm"
+                variant="text"
+                onClick={() => {
+                  setBatchOpen(false);
+                  setBatchText("");
+                }}
+              >
+                取消
+              </Button>
+              <Button size="sm" variant="primary" disabled={!canImport} onClick={importPastedRows}>
+                导入{canImport ? ` ${parsedBatch.rows.length} 个账号` : ""}
+              </Button>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="space-y-2.5">
         {rows.map((row, index) => {
@@ -389,57 +500,71 @@ export function BackupCookieInputs({
             pairComplete,
           };
 
+          // 半行（只填了 auth_token 或只填了 ct0）：后端现在允许保存，
+          // 但这种账号不参与轮询，必须在本行给出明确提示，别让用户以为已经生效。
+          const hasAnyValue = Boolean(row.authToken.trim() || row.csrfToken.trim());
+          const missingField = row.authToken.trim() ? "ct0" : "auth_token";
+          const showIncompleteHint = !pairComplete && hasAnyValue;
+
           return (
             <div
               key={row.id}
-              className="flex flex-col gap-2 rounded-control border border-line bg-surface-muted/40 p-2.5 sm:flex-row sm:items-center"
+              className="flex flex-col gap-1.5 rounded-control border border-line bg-surface-muted/40 p-2.5"
             >
-              <div className="flex-1">
-                <PasswordInput
-                  aria-label={`备用 Cookie ${index + 1} auth_token`}
-                  prefix={<Key className="size-3.5 text-fg-subtle" />}
-                  suffix={
-                    <CookieTokenStatus
-                      {...statusProps}
-                      hasValue={Boolean(row.authToken.trim())}
-                    />
-                  }
-                  value={row.authToken}
-                  onChange={(event) => updateRow(index, "authToken", event.target.value)}
-                  placeholder={`备用 ${index + 1} auth_token`}
-                  size="sm"
-                />
-              </div>
-
-              <div className="flex-1">
-                <PasswordInput
-                  aria-label={`备用 Cookie ${index + 1} ct0`}
-                  prefix={<Key className="size-3.5 text-fg-subtle" />}
-                  suffix={
-                    <CookieTokenStatus
-                      {...statusProps}
-                      hasValue={Boolean(row.csrfToken.trim())}
-                    />
-                  }
-                  value={row.csrfToken}
-                  onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
-                  placeholder={`备用 ${index + 1} ct0`}
-                  size="sm"
-                />
-              </div>
-
-              <div className="flex shrink-0 items-center justify-end">
-                <Tooltip content="删除此备用 Cookie">
-                  <Button
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="flex-1">
+                  <PasswordInput
+                    aria-label={`备用 Cookie ${index + 1} auth_token`}
+                    prefix={<Key className="size-3.5 text-fg-subtle" />}
+                    suffix={
+                      <CookieTokenStatus
+                        {...statusProps}
+                        hasValue={Boolean(row.authToken.trim())}
+                      />
+                    }
+                    value={row.authToken}
+                    onChange={(event) => updateRow(index, "authToken", event.target.value)}
+                    placeholder={`备用 ${index + 1} auth_token`}
                     size="sm"
-                    variant="ghost"
-                    circle
-                    icon={<Trash2 className="size-3.5 text-danger" />}
-                    onClick={() => removeRow(index)}
-                    aria-label={`删除备用 Cookie ${index + 1}`}
                   />
-                </Tooltip>
+                </div>
+
+                <div className="flex-1">
+                  <PasswordInput
+                    aria-label={`备用 Cookie ${index + 1} ct0`}
+                    prefix={<Key className="size-3.5 text-fg-subtle" />}
+                    suffix={
+                      <CookieTokenStatus
+                        {...statusProps}
+                        hasValue={Boolean(row.csrfToken.trim())}
+                      />
+                    }
+                    value={row.csrfToken}
+                    onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
+                    placeholder={`备用 ${index + 1} ct0`}
+                    size="sm"
+                  />
+                </div>
+
+                <div className="flex shrink-0 items-center justify-end">
+                  <Tooltip content="删除此备用 Cookie">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      circle
+                      icon={<Trash2 className="size-3.5 text-danger" />}
+                      onClick={() => removeRow(index)}
+                      aria-label={`删除备用 Cookie ${index + 1}`}
+                    />
+                  </Tooltip>
+                </div>
               </div>
+              {showIncompleteHint && (
+                <p className="flex items-center gap-1 text-[11px] text-warning-strong">
+                  <AlertTriangle className="size-3 shrink-0" aria-hidden="true" />
+                  缺少 {missingField}：只填一半的账号不会参与轮询，请补全或删除这一行。
+                </p>
+              )}
             </div>
           );
         })}
@@ -448,11 +573,11 @@ export function BackupCookieInputs({
   );
 }
 
-let backupCookieRowSeq = 0;
-
 export function emptyBackupCookieRow(): BackupCookieRow {
-  backupCookieRowSeq += 1;
-  return { id: `backup-cookie-${backupCookieRowSeq}`, authToken: "", csrfToken: "" };
+  const id = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) =>
+    part.toString(16).padStart(8, "0"),
+  ).join("");
+  return { id: `backup-cookie-${id}`, authToken: "", csrfToken: "" };
 }
 
 export function parseBackupCookieRows(value: string): BackupCookieRow[] {
@@ -514,11 +639,72 @@ export function parseBackupCookieRowsFromJSON(value: string): BackupCookieRow[] 
       const record = item as Record<string, unknown>;
       const authToken = firstString(record.authToken, record.auth_token);
       const csrfToken = firstString(record.csrfToken, record.ct0);
-      return authToken || csrfToken ? [{ ...emptyBackupCookieRow(), authToken, csrfToken }] : [];
+      return authToken || csrfToken
+        ? [{ id: firstString(record.id) || emptyBackupCookieRow().id, authToken, csrfToken }]
+        : [];
     });
   } catch {
     return [];
   }
+}
+
+export type PastedCookieParseResult = {
+  /** 可追加到账号池的行；为空表示没有解析出任何账号 */
+  rows: BackupCookieRow[];
+  /** 非空时展示给用户（rows 非空表示"能导入但有警告"，rows 为空表示"不能导入"） */
+  error: string;
+};
+
+// 批量粘贴解析。支持两种输入：
+//   1) JSON 数组：[{"authToken":"..","csrfToken":".."}]（也接受 auth_token / ct0 键名）
+//   2) 每行一个账号的文本：auth_token=xxx; ct0=yyy（也接受 "auth_token: xxx" 写法、markdown 列表前缀）
+// 只解析不落库；导入逻辑见 BackupCookieInputs.importPastedRows。
+export function parsePastedCookieRows(text: string): PastedCookieParseResult {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { rows: [], error: "粘贴内容为空" };
+  }
+
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    const jsonRows = parseBackupCookieRowsFromJSON(trimmed);
+    if (jsonRows.length > 0) {
+      return { rows: jsonRows, error: "" };
+    }
+    return { rows: [], error: "JSON 无法解析出 auth_token / ct0，请检查格式" };
+  }
+
+  const rows: BackupCookieRow[] = [];
+  for (const rawLine of trimmed.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^[-*]\s+/, "");
+    if (!line) continue;
+    const row = emptyBackupCookieRow();
+    // 冒号写法（auth_token: xxx）整行是一个键值对；其余按 ; , 空白分词
+    if (line.includes(":") && !/[;,]/.test(line)) {
+      setBackupCookieValue(row, line);
+    } else {
+      for (const token of line.split(/[;,\s]+/)) {
+        setBackupCookieValue(row, token);
+      }
+    }
+    if (row.authToken.trim() || row.csrfToken.trim()) {
+      rows.push(row);
+    }
+  }
+
+  if (rows.length === 0) {
+    return {
+      rows: [],
+      error: "没有识别到账号：每行应为 auth_token=xxx; ct0=yyy，或粘贴 JSON 数组",
+    };
+  }
+  const incomplete = rows.filter((row) => !row.authToken.trim() || !row.csrfToken.trim()).length;
+  return {
+    rows,
+    error:
+      incomplete > 0
+        ? `有 ${incomplete} 行只识别到一个字段，导入后需要补全（缺字段的账号不参与轮询）`
+        : "",
+  };
 }
 
 export function setBackupCookieValue(current: BackupCookieRow, raw: string) {
@@ -560,18 +746,10 @@ export function firstString(...values: unknown[]) {
 }
 
 export function normalizeBackupCookieRows(rows: BackupCookieRow[]) {
-  return rows
-    .map((row) => ({ authToken: row.authToken.trim(), csrfToken: row.csrfToken.trim() }))
-    .filter((row) => Boolean(row.authToken || row.csrfToken))
-    .map((row) =>
-      [
-        row.authToken ? `auth_token=${row.authToken}` : "",
-        row.csrfToken ? `ct0=${row.csrfToken}` : "",
-      ]
-        .filter(Boolean)
-        .join("; "),
-    )
-    .join("\n");
+  const populatedRows = rows
+    .map((row) => ({ id: row.id, authToken: row.authToken.trim(), csrfToken: row.csrfToken.trim() }))
+    .filter((row) => Boolean(row.authToken || row.csrfToken));
+  return populatedRows.length > 0 ? JSON.stringify(populatedRows) : "";
 }
 
 export function isRedactedBackupCookieRow(row: BackupCookieRow) {

@@ -60,27 +60,27 @@ function precompress(): Plugin {
   };
 }
 
+// 后端默认监听 127.0.0.1:8787；dev / preview 都把 /api 代理过去，
+// 这样两种本地预览方式都能直接连真实后端（preview 之前只有静态壳，看不到数据）。
+const API_PROXY_TARGET = "http://127.0.0.1:8787";
+
 export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(webPackage.version),
   },
   plugins: [tailwindcss(), react(), precompress()],
   build: {
+    target: "es2020",
+    // 保持现状不产出 sourcemap：发布物由 Go embed 进二进制，体积优先。
+    // 需要排查生产问题时临时改为 true（或在 CLI 上加 --sourcemap）。
+    sourcemap: false,
     modulePreload: {
       polyfill: false,
-      resolveDependencies(_filename, deps) {
-        // 入口只预加载壳层；页面 chunk 按需加载。
-        if (!_filename.includes("index")) return deps;
-        return deps.filter((dep) => !/(?:SettingsPage|player)/.test(dep));
-      },
     },
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes("node_modules")) return undefined;
-          if (
-            /\/react-player\/|\/(?:@mux\/mux-player-react|cloudflare-video-element|dash-video-element|hls-video-element|spotify-audio-element|tiktok-video-element|twitch-video-element|vimeo-video-element|wistia-video-element|youtube-video-element|screenfull)\//.test(id)
-          ) return "player";
           if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react";
           if (id.includes("/@tanstack/")) return "query";
           if (id.includes("/lucide-react/")) return "icons";
@@ -90,10 +90,19 @@ export default defineConfig({
       },
     },
   },
+  // 监听地址由 npm script 决定（见 package.json）：
+  //   npm run dev / preview        → 127.0.0.1（默认，仅本机，服务本身无鉴权）
+  //   npm run dev:lan / preview:lan → 0.0.0.0（局域网调试用，确认网络可信）
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:8787",
+      "/api": API_PROXY_TARGET,
+    },
+  },
+  preview: {
+    port: 4173,
+    proxy: {
+      "/api": API_PROXY_TARGET,
     },
   },
   test: {

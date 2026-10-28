@@ -26,6 +26,7 @@
   --color-brand-800: var(--color-brand-800);
   --color-brand-900: var(--color-brand-900);
   --color-brand-glow: var(--brand-glow);
+  --color-brand-contrast: var(--brand-contrast);
 
   /* 语义表面色 */
   --color-canvas: var(--canvas);
@@ -49,6 +50,21 @@
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
 
+  /* 状态色前景配对色：实心底色上的文字必须用它，不能写死 text-white。
+     浅色/深色两套取值在 :root / .dark 里各自给出（按底色亮度选深字或白字），
+     与 --brand-contrast 同一套思路，保证 5 套强调色 × 明暗都达 WCAG AA。 */
+  --color-success-contrast: var(--success-contrast);
+  --color-warning-contrast: var(--warning-contrast);
+  --color-danger-contrast: var(--danger-contrast);
+  --color-info-contrast: var(--info-contrast);
+
+  /* 状态色的"文本加深"版本：用于 soft 浅底或普通表面上的状态文字。
+     原始 --success/--warning/... 在 soft 底上只有 3.1–4.4:1，不满足正文 AA。 */
+  --color-success-strong: var(--success-strong);
+  --color-warning-strong: var(--warning-strong);
+  --color-danger-strong: var(--danger-strong);
+  --color-info-strong: var(--info-strong);
+
   /* 字体 */
   --font-sans: "Inter var", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
     Roboto, sans-serif;
@@ -66,6 +82,7 @@
   /* 默认主题色：𝕏 电光蓝 */
   :root,
   [data-accent="x-blue"] {
+    --brand-contrast: #09090b;
     --color-brand-50: #f0f9ff;
     --color-brand-100: #e0f2fe;
     --color-brand-200: #bae6fd;
@@ -80,6 +97,7 @@
   }
 
   [data-accent="titanium"] {
+    --brand-contrast: #ffffff;
     --color-brand-50: #fafafa;
     --color-brand-100: #f4f4f5;
     --color-brand-200: #e4e4e7;
@@ -94,6 +112,7 @@
   }
 
   [data-accent="indigo"] {
+    --brand-contrast: #ffffff;
     --color-brand-50: #eef2ff;
     --color-brand-100: #e0e7ff;
     --color-brand-200: #c7d2fe;
@@ -108,6 +127,7 @@
   }
 
   [data-accent="emerald"] {
+    --brand-contrast: #09090b;
     --color-brand-50: #ecfdf5;
     --color-brand-100: #d1fae5;
     --color-brand-200: #a7f3d0;
@@ -122,6 +142,7 @@
   }
 
   [data-accent="amber"] {
+    --brand-contrast: #09090b;
     --color-brand-50: #fffbeb;
     --color-brand-100: #fef3c7;
     --color-brand-200: #fde68a;
@@ -145,8 +166,13 @@
     --line-strong: #cbd5e1;
     --fg: #09090b;
     --fg-body: #334155;
-    --fg-muted: #64748b;
-    --fg-subtle: #94a3b8;
+    /* fg-muted / fg-subtle 的层级：subtle 必须比 muted 更浅（更次要），
+       同时两者都要在 #fff / #f8fafc / #f1f5f9 上达到 4.5:1。
+       - muted   #55657a → 5.95 / 5.69 / 5.43
+       - subtle  #5f6f84 → 5.13 / 4.90 / 4.68
+       老值 #718096（4.02/3.84/3.67）不达标，故整体压深一档。 */
+    --fg-muted: #55657a;
+    --fg-subtle: #5f6f84;
 
     --success: #059669;
     --success-soft: #ecfdf5;
@@ -156,6 +182,21 @@
     --danger-soft: #fef2f2;
     --info: #0284c7;
     --info-soft: #f0f9ff;
+
+    /* 状态实心色的前景配对（按各自底色亮度选深字/白字，均 ≥4.5:1）
+       success #059669 → 深字 5.28 ｜ warning #d97706 → 深字 6.24
+       danger  #dc2626 → 白字 4.83 ｜ info    #0284c7 → 深字 4.86 */
+    --success-contrast: #09090b;
+    --warning-contrast: #09090b;
+    --danger-contrast: #ffffff;
+    --info-contrast: #09090b;
+
+    /* 文本用加深色（soft 底与白底都 ≥4.5）：
+       success 5.21/5.6 ｜ warning 4.84/5.2 ｜ danger 5.91/6.5 ｜ info 5.57/5.9 */
+    --success-strong: #047857;
+    --warning-strong: #b45309;
+    --danger-strong: #b91c1c;
+    --info-strong: #0369a1;
 
     --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
     --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.06), 0 8px 10px -6px rgb(0 0 0 / 0.04);
@@ -173,7 +214,7 @@
     --fg: #f4f4f6;
     --fg-body: #d1d1d6;
     --fg-muted: #8e8e98;
-    --fg-subtle: #5c5c66;
+    --fg-subtle: #85858f;
 
     --success: #10b981;
     --success-soft: rgb(16 185 129 / 0.14);
@@ -184,6 +225,19 @@
     --info: #0ea5e9;
     --info-soft: rgb(14 165 233 / 0.14);
 
+    /* 暗色的状态色整体更亮，白字全部不达标（2.15–3.76），统一用深字：
+       success 7.84 ｜ warning 9.26 ｜ danger 5.29 ｜ info 7.18 */
+    --success-contrast: #09090b;
+    --warning-contrast: #09090b;
+    --danger-contrast: #09090b;
+    --info-contrast: #09090b;
+
+    /* 深色 soft 底是半透明叠加，直接用原始亮色即可；danger 略暗（4.39）提亮一档 */
+    --success-strong: #10b981;
+    --warning-strong: #f59e0b;
+    --danger-strong: #f87171;
+    --info-strong: #0ea5e9;
+
     --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
     --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.5), 0 8px 10px -6px rgb(0 0 0 / 0.5);
     --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.7);
@@ -192,6 +246,7 @@
   /* 钛金暗色特别优化：暗色下主文字提亮 */
   .dark[data-accent="titanium"],
   .dark [data-accent="titanium"] {
+    --brand-contrast: #09090b;
     --color-brand-50: #18181b;
     --color-brand-100: #27272a;
     --color-brand-200: #3f3f46;
@@ -229,7 +284,7 @@
       --fg: #f4f4f6;
       --fg-body: #d1d1d6;
       --fg-muted: #8e8e98;
-      --fg-subtle: #5c5c66;
+      --fg-subtle: #85858f;
 
       --success: #10b981;
       --success-soft: rgb(16 185 129 / 0.14);
@@ -239,6 +294,16 @@
       --danger-soft: rgb(239 68 68 / 0.14);
       --info: #0ea5e9;
       --info-soft: rgb(14 165 233 / 0.14);
+
+      /* 与 .dark 保持一致（首屏防闪路径） */
+      --success-contrast: #09090b;
+      --warning-contrast: #09090b;
+      --danger-contrast: #09090b;
+      --info-contrast: #09090b;
+      --success-strong: #10b981;
+      --warning-strong: #f59e0b;
+      --danger-strong: #f87171;
+      --info-strong: #0ea5e9;
     }
   }
 
@@ -267,9 +332,11 @@
     vertical-align: middle;
   }
 
+  /* 选中文字用强调色的配对前景色，不能写死 #fff：
+     深色钛金的 brand-500 近白，白字选中等于看不见。 */
   ::selection {
     background-color: var(--color-brand-500);
-    color: #ffffff;
+    color: var(--brand-contrast);
   }
 
   :focus-visible {
@@ -375,6 +442,18 @@
   }
 }
 
+/* Spinner 专用：keyframes 与工具类都定义在这里，不依赖别处是否恰好
+   出现过 animate-spin 字面量（Tailwind 只在字面量存在时才产出 @keyframes spin）。 */
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spinner {
+  animation: spinner-rotate 0.7s linear infinite;
+}
+
 .animate-loading-bar {
   animation: global-loading-bar-slide 1.1s ease-in-out infinite;
 }
@@ -420,6 +499,11 @@
 
   .animate-skeleton {
     animation-duration: 3s;
+  }
+
+  /* Spinner 不直接停转（否则看不出"正在加载"），只放慢到不易引起不适的速度 */
+  .animate-spinner {
+    animation-duration: 2.4s;
   }
 }
 

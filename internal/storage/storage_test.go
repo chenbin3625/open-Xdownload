@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -423,6 +424,36 @@ func TestUpdateConfigPreservesRedactedTokens(t *testing.T) {
 	}
 	if got.AuthToken != "real-auth-token" || got.CSRFToken != "real-csrf-token" {
 		t.Fatalf("tokens were not preserved: auth=%q csrf=%q", got.AuthToken, got.CSRFToken)
+	}
+}
+
+func TestUpdateConfigClearSentinelRemovesPrimaryCookies(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{
+		DownloadDir: t.TempDir(),
+		AuthToken:   "auth-token",
+		CSRFToken:   "csrf-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{
+		DownloadDir: t.TempDir(),
+		AuthToken:   config.ClearSentinel,
+		CSRFToken:   config.ClearSentinel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AuthToken != "" || got.CSRFToken != "" {
+		t.Fatalf("primary cookies were not cleared: auth=%q csrf=%q", got.AuthToken, got.CSRFToken)
 	}
 }
 
@@ -935,6 +966,325 @@ func TestGetStoredConfigCachesUntilUpdate(t *testing.T) {
 	}
 }
 
+func TestUpdateConfigInvalidatesLibraryDownloadsCache(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: firstRoot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(firstRoot, "first.jpg"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ListLibraryDownloads(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].FilePath != filepath.Join(firstRoot, "first.jpg") {
+		t.Fatalf("first library result = %+v", first)
+	}
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: secondRoot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondRoot, "second.jpg"), []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ListLibraryDownloads(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].FilePath != filepath.Join(secondRoot, "second.jpg") {
+		t.Fatalf("stale library cache after config update = %+v", second)
+	}
+}
+
+// 新语义（config.ResolveSubmission 宽松化）：无法还原的占位符不再阻塞保存——无法还原的
+// 行被丢弃、空字段保持空，绝不能把 ******** 写进库。主 Cookie 也必须保留。
+func TestUpdateConfigStripsUnresolvableMaskedCookie(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	cfg, err := store.UpdateConfig(ctx, config.AppConfig{AuthToken: "primary", AdditionalCookies: "auth_token=first; ct0=csrf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, submitted := range []string{
+		"auth_token=********; ct0=********",
+		`[{"id":"unknown","authToken":"********","csrfToken":"********"}]`,
+	} {
+		updated := cfg
+		updated.AdditionalCookies = submitted // 不再改 AuthToken，断言主 Cookie 保留
+		got, err := store.UpdateConfig(ctx, updated)
+		if err != nil {
+			t.Fatalf("lenient parse must accept %q: %v", submitted, err)
+		}
+		if strings.Contains(got.AdditionalCookies, config.SecretPlaceholder) {
+			t.Fatalf("persisted placeholder for %q: %q", submitted, got.AdditionalCookies)
+		}
+		if got.AuthToken != "primary" {
+			t.Fatalf("primary cookie changed: %q", got.AuthToken)
+		}
+	}
+}
+
+func TestLibraryLimitDoesNotTurnRecordedFilesIntoOrphans(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "media", "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var latest DownloadRecord
+	for i := 0; i < 2; i++ {
+		path := filepath.Join(root, fmt.Sprintf("%d.jpg", i))
+		if err := os.WriteFile(path, []byte("photo"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		latest, err = store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, FilePath: path, MediaURL: fmt.Sprintf("https://pbs.twimg.com/%d.jpg", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(filepath.Join(root, "0.jpg"), time.Now(), time.Now().Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.ListLibraryDownloads(ctx, 1)
+	if err != nil || len(items) != 1 || items[0].ID != latest.ID {
+		t.Fatalf("limit returned recorded file as orphan: %+v %v", items, err)
+	}
+}
+
+func TestStoredConfigRefreshesAcrossStoreInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	ctx := context.Background()
+	if _, err := first.GetStoredConfig(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.UpdateConfig(ctx, config.AppConfig{AuthToken: "new-token"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cfg, err := first.GetStoredConfig(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AuthToken == "new-token" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("configuration cache never refreshed external write")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestOpenDatabasePathWithURICharacters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive?#.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database was opened at a different path: %v", err)
+	}
+}
+
+func TestHydrateSchedulesKeepsHealthyRows(t *testing.T) {
+	items, err := hydrateArchiveSchedules([]ArchiveSchedule{
+		{ID: 1, ItemsJSON: "broken"},
+		{ID: 2, ItemsJSON: `[{"kind":"user","input":"alice"}]`, LastJobIDsJSON: "[]"},
+	})
+	if err != nil || len(items) != 1 || items[0].ID != 2 {
+		t.Fatalf("healthy schedules lost: %+v %v", items, err)
+	}
+}
+
+// 旧库 / env 指向文件系统根或家目录时，Open 不能失败（否则升级即不可用、用户没有
+// UI 可改）：降级为 <dataDir>/downloads 并持久化，同时绝不把 `/` 登记为可信根。
+func TestOpenRepairsUnsafeDownloadRoot(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	t.Setenv("OPEN_XDOWNLOAD_DOWNLOAD_DIR", string(filepath.Separator))
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("unsafe legacy download root must be repaired, not fatal: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	wantFallback := filepath.Join(dir, "downloads")
+	stored, err := store.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DownloadDir != wantFallback {
+		t.Fatalf("stored download dir = %q, want fallback %q", stored.DownloadDir, wantFallback)
+	}
+	effective, err := store.GetConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective.DownloadDir != wantFallback {
+		t.Fatalf("effective download dir = %q, want fallback %q", effective.DownloadDir, wantFallback)
+	}
+	roots, err := store.DownloadRoots(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range roots {
+		if root == string(filepath.Separator) {
+			t.Fatalf("filesystem root registered as trusted download root: %+v", roots)
+		}
+	}
+	if !containsString(roots, wantFallback) {
+		t.Fatalf("fallback root not seeded: %+v", roots)
+	}
+}
+
+// user_previous_names 只写不读：v5 迁移必须删除表与触发器（且幂等）。
+func TestMigrateDropsUserPreviousNamesTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	// 构造 v4 遗留库：把表/触发器加回来并清掉迁移记录。
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+CREATE TABLE IF NOT EXISTS user_previous_names (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id TEXT NOT NULL,
+	screen_name TEXT NOT NULL,
+	name TEXT NOT NULL,
+	recorded_at DATETIME NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS trg_users_name_history AFTER UPDATE OF screen_name, name ON users
+WHEN OLD.screen_name <> NEW.screen_name OR OLD.name <> NEW.name
+BEGIN
+	INSERT INTO user_previous_names (user_id, screen_name, name, recorded_at)
+	VALUES (OLD.id, OLD.screen_name, OLD.name, NEW.updated_at);
+END;
+DELETE FROM schema_migrations WHERE name = 'drop_user_previous_names';`); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var tables int
+	if err := store.db.Get(&tables, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'user_previous_names'`); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatal("user_previous_names table was not dropped")
+	}
+	var triggers int
+	if err := store.db.Get(&triggers, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_users_name_history'`); err != nil {
+		t.Fatal(err)
+	}
+	if triggers != 0 {
+		t.Fatal("trg_users_name_history trigger was not dropped")
+	}
+}
+
+func TestScheduleClaimAcceptsEquivalentTimeRepresentation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	schedule, err := store.CreateArchiveSchedule(ctx, ArchiveSchedule{Name: "test", Enabled: true, IntervalMinutes: 5, Items: []ArchiveScheduleItem{{Kind: JobKindUser, Input: "alice"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 领取改用 claim_version 后与 next_run_at 的文本表示无关：这里把 next_run_at 改写成
+	// 另一种时区表示，用旧快照仍能领取（旧实现按时间等值比较，遇到表示差异会永远失败）。
+	const timestamp = "2026-10-28T09:00:00+08:00"
+	if _, err := store.db.Exec(`UPDATE archive_schedules SET next_run_at = ? WHERE id = ?`, timestamp, schedule.ID); err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.CreateScheduledArchiveJobs(ctx, schedule, time.Now().UTC())
+	if err != nil || len(created) != 1 {
+		t.Fatalf("claim must not depend on timestamp text representation: %v %+v", err, created)
+	}
+}
+
+// 失败推文的退避：TouchFailedTweet 之后自动重试列表应跳过（冷却期内），手动重试
+// （force=true）必须忽略退避。任务行本身由 jobs 侧通过 ReserveAutomaticRetryJob 复用，
+// 见 TestReserveAutomaticRetryJobReusesRow。
+func TestFailedTweetRetryBackoffAndForce(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	source, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "u1", ScreenName: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	entity, err := store.EnsureUserEntity(ctx, "u1", t.TempDir(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: source.ID, EntityID: entity.ID, TweetID: "1", Payload: "{}", Error: "failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TouchFailedTweet(ctx, failed.ID, "failed again"); err != nil {
+		t.Fatal(err)
+	}
+	due, err := store.ListFailedTweetsForRetry(ctx, 20, false)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("automatic retry ignored backoff: %+v %v", due, err)
+	}
+	manual, err := store.ListFailedTweetsForRetry(ctx, 20, true)
+	if err != nil || len(manual) != 1 {
+		t.Fatalf("manual retry did not override backoff: %+v %v", manual, err)
+	}
+	if manual[0].RetryCount != 1 || manual[0].NextRetryAt == nil {
+		t.Fatalf("retry state = %+v", manual[0])
+	}
+}
+
 func TestCreateDownloadPersistsMediaKey(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -956,7 +1306,7 @@ func TestCreateDownloadPersistsMediaKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create download: %v", err)
 	}
-	if want := "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc?format=mp4"; record.MediaKey != want {
+	if want := "https://video.twimg.com/ext_tw_video/123"; record.MediaKey != want {
 		t.Fatalf("media_key = %q, want %q", record.MediaKey, want)
 	}
 	if record.MediaKey != "" && strings.Contains(record.MediaKey, "tag=") {
@@ -1177,11 +1527,18 @@ func TestTouchFailedTweetMovesItToBackOfRetryQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create first: %v", err)
 	}
-	time.Sleep(5 * time.Millisecond)
-	if _, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "2", Payload: "{}", Error: "old"}); err != nil {
+	second, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "2", Payload: "{}", Error: "old"})
+	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
-	time.Sleep(5 * time.Millisecond)
+	// 用显式回写时间建立顺序，而不是 time.Sleep：sleep 依赖调度与时钟分辨率，CI 上会偶发。
+	base := time.Now().UTC().Add(-time.Hour)
+	if _, err := store.db.Exec(`UPDATE failed_tweets SET updated_at = ? WHERE id = ?`, base, first.ID); err != nil {
+		t.Fatalf("backdate first: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE failed_tweets SET updated_at = ? WHERE id = ?`, base.Add(time.Minute), second.ID); err != nil {
+		t.Fatalf("backdate second: %v", err)
+	}
 
 	if err := store.TouchFailedTweet(ctx, first.ID, "retry failed again"); err != nil {
 		t.Fatalf("touch: %v", err)
@@ -1194,12 +1551,33 @@ func TestTouchFailedTweetMovesItToBackOfRetryQueue(t *testing.T) {
 	if len(items) != 1 || items[0].TweetID != "2" {
 		t.Fatalf("head of retry queue = %+v, want tweet 2 after tweet 1 was requeued", items)
 	}
-	all, err := store.ListFailedTweets(ctx, 10)
+	all, err := store.ListFailedTweetsForRetry(ctx, 10, true)
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
 	if last := all[len(all)-1]; last.TweetID != "1" || last.Error != "retry failed again" {
 		t.Fatalf("requeued item = %+v, want tweet 1 with the latest error", last)
+	}
+	if all[len(all)-1].NextRetryAt == nil || all[len(all)-1].NextRetryAt.Before(time.Now().Add(9*time.Minute)) {
+		t.Fatal("retry failure did not establish a ten-minute backoff")
+	}
+}
+
+func TestLibraryRecognizesRecordedPathWithDifferentCase(t *testing.T) {
+	root := t.TempDir()
+	actual := filepath.Join(root, "Photo.jpg")
+	if err := os.WriteFile(actual, []byte("photo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorded := filepath.Join(root, "photo.jpg")
+	if _, err := os.Stat(recorded); os.IsNotExist(err) {
+		t.Skip("case-sensitive filesystem")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	items, err := collectOrphanLibraryFiles(context.Background(), root, map[string]struct{}{recorded: {}}, nil)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("recorded file returned as an orphan: %+v %v", items, err)
 	}
 }
 

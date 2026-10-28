@@ -5,12 +5,75 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 )
+
+type boundedMigrationExecutor struct {
+	migrationExecutor
+}
+
+func (exec boundedMigrationExecutor) Select(dest any, query string, args ...any) error {
+	if err := exec.migrationExecutor.Select(dest, query, args...); err != nil {
+		return err
+	}
+	if count := reflect.ValueOf(dest).Elem().Len(); count > 1000 {
+		return fmt.Errorf("migration loaded %d records in one batch, limit 1000", count)
+	}
+	return nil
+}
+
+func TestDownloadMigrationsBoundReadBatches(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, err := store.CreateJob(context.Background(), JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.db.Beginx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for i := 0; i < 1201; i++ {
+		if _, err := tx.Exec(`INSERT INTO downloads(job_id,tweet_id,media_url,file_path,media_key,preview_url,bytes,created_at) VALUES(?, ?, ?, '', '', 'https://video.twimg.com/vid/a.jpg?name=small', 1, ?)`, job.ID, fmt.Sprint(i), fmt.Sprintf("https://video.twimg.com/ext_tw_video/123/pu/vid/720x720/%d.mp4?tag=12", i), time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for name, migration := range map[string]func(migrationExecutor) error{
+		"normalize":        store.normalizeDownloadsMediaURL,
+		"backfill_key":     store.backfillDownloadsMediaKey,
+		"rekey":            store.rekeyDownloadsMediaFormats,
+		"backfill_preview": store.backfillDownloadPreviewURLs,
+		"rederive_preview": store.rederiveDownloadPreviewURLs,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tx, err := store.db.Beginx()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if name == "backfill_preview" {
+				if _, err := tx.Exec(`UPDATE downloads SET preview_url = ''`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := migration(boundedMigrationExecutor{tx}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 // TestMigrateNormalizesAndDeduplicatesDownloadsMediaURL 验证历史 downloads 记录中
 // 因 ?tag= 不同而重复的同一条视频，经规范化与去重后合并为一行。直接调用迁移函数
@@ -208,16 +271,144 @@ func TestMigrationsRunOnceAfterOpen(t *testing.T) {
 		}
 	}
 
-	// 再次调用 runMigrationOnce 应直接跳过（不重复执行 fn）。
-	before := time.Now()
+	// 再次调用 runMigrationOnce 应直接跳过（不重复执行 fn）。fn 里用 t.Fatal 断言，
+	// 不再用墙钟阈值判断"是否很快"——负载高的 CI 上 100ms 断言会偶发失败，而且真正要
+	// 验证的是"不重跑"，不是速度。
 	if err := store.runMigrationOnce("deduplicate_downloads", func(migrationExecutor) error {
 		t.Fatal("already-applied migration must not re-run")
 		return nil
 	}); err != nil {
 		t.Fatalf("runMigrationOnce on applied migration: %v", err)
 	}
-	if elapsed := time.Since(before); elapsed > 100*time.Millisecond {
-		t.Fatalf("runMigrationOnce on applied migration took %v, should be near-instant", elapsed)
+}
+
+// TestDropSMBWebDAVConfigColumnsMigration 覆盖唯一会 DROP COLUMN 的破坏性迁移：
+// 旧库遗留的 SMB/WebDAV 列（含明文密码）必须被删除，且重复执行幂等。
+func TestDropSMBWebDAVConfigColumnsMigration(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// 构造 "升级前" 的 app_config：把历史 SMB/WebDAV 列加回来并写入明文密码。
+	for _, column := range []string{
+		"smb_host", "smb_port", "smb_share", "smb_path", "smb_domain",
+		"smb_username", "smb_password", "webdav_url", "webdav_path",
+		"webdav_username", "webdav_password",
+	} {
+		if _, err := store.db.Exec(`ALTER TABLE app_config ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+			t.Fatalf("add legacy column %s: %v", column, err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE app_config SET smb_password = 'plaintext-secret', webdav_password = 'dav-secret' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE name = 'drop_smb_webdav_config_columns'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.runMigrationOnce("drop_smb_webdav_config_columns", store.dropSMBWebDAVConfigColumns); err != nil {
+		t.Fatalf("run migration: %v", err)
+	}
+	for _, column := range []string{"smb_password", "smb_host", "webdav_url", "webdav_password"} {
+		var exists int
+		if err := store.db.Get(&exists, `SELECT COUNT(*) FROM pragma_table_info('app_config') WHERE name = ?`, column); err != nil {
+			t.Fatal(err)
+		}
+		if exists != 0 {
+			t.Fatalf("legacy column %s was not dropped", column)
+		}
+	}
+	// 幂等：再次执行不报错、不改动。
+	if err := store.runMigrationOnce("drop_smb_webdav_config_columns", store.dropSMBWebDAVConfigColumns); err != nil {
+		t.Fatalf("re-run migration: %v", err)
+	}
+	var downloadDir string
+	if err := store.db.Get(&downloadDir, `SELECT download_dir FROM app_config WHERE id = 1`); err != nil {
+		t.Fatalf("config row unreadable after migration: %v", err)
+	}
+}
+
+// TestAutomaticRetryIndexesAndRetryBackoff 验证新增索引存在，且失败推文的指数退避
+// 由 Go 计算后以驱动时间格式写入（不再与 SQL datetime() 的文本格式混用）。
+func TestAutomaticRetryIndexesAndRetryBackoff(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, index := range []string{"idx_failed_tweets_next_retry_at", "idx_failed_media_created_at", "idx_unavailable_media_updated_at"} {
+		var count int
+		if err := store.db.Get(&count, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("%s exists = %d, want 1", index, count)
+		}
+	}
+	cases := []struct {
+		retryCount int
+		want       time.Duration
+	}{
+		{0, 10 * time.Minute},
+		{1, 20 * time.Minute},
+		{2, 40 * time.Minute},
+		{8, 24 * time.Hour},
+		{99, 24 * time.Hour},
+		{-3, 10 * time.Minute},
+	}
+	for _, tc := range cases {
+		if got := failedTweetRetryBackoff(tc.retryCount); got != tc.want {
+			t.Fatalf("failedTweetRetryBackoff(%d) = %v, want %v", tc.retryCount, got, tc.want)
+		}
+	}
+	job, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "u1", ScreenName: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	entity, err := store.EnsureUserEntity(ctx, "u1", t.TempDir(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.CreateFailedTweet(ctx, FailedTweet{JobID: job.ID, EntityID: entity.ID, TweetID: "1", Payload: "{}", Error: "boom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TouchFailedTweet(ctx, failed.ID, "boom again"); err != nil {
+		t.Fatal(err)
+	}
+	// 格式统一：created_at 与 next_retry_at 必须使用同一种文本布局（都由驱动绑定
+	// time.Time），不能混入 SQL datetime() 写出的"无时区"格式——旧的混合格式会让
+	// julianday() 对一半行返回 0，也让任何 SQL 时间函数静默出错。
+	var createdAtText, nextRetryAtText string
+	if err := store.db.QueryRow(`SELECT CAST(created_at AS TEXT), CAST(next_retry_at AS TEXT) FROM failed_tweets WHERE id = ?`, failed.ID).
+		Scan(&createdAtText, &nextRetryAtText); err != nil {
+		t.Fatal(err)
+	}
+	const driverLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+	createdAtParsed, err := time.Parse(driverLayout, createdAtText)
+	if err != nil {
+		t.Fatalf("created_at %q does not use the driver time layout: %v", createdAtText, err)
+	}
+	nextRetryParsed, err := time.Parse(driverLayout, nextRetryAtText)
+	if err != nil {
+		t.Fatalf("next_retry_at %q does not use the driver time layout (mixed formats): %v", nextRetryAtText, err)
+	}
+	if delta := nextRetryParsed.Sub(createdAtParsed); delta < 9*time.Minute || delta > 11*time.Minute {
+		t.Fatalf("next_retry_at - created_at = %v, want ~10m", delta)
+	}
+	stored := FailedTweet{}
+	if err := store.db.GetContext(ctx, &stored, `SELECT * FROM failed_tweets WHERE id = ?`, failed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if stored.RetryCount != 1 || stored.NextRetryAt == nil {
+		t.Fatalf("retry state = %+v, want retryCount=1 with nextRetryAt", stored)
+	}
+	if delta := time.Until(*stored.NextRetryAt); delta < 9*time.Minute || delta > 11*time.Minute {
+		t.Fatalf("first backoff = %v, want ~10m", delta)
 	}
 }
 
@@ -338,7 +529,7 @@ func TestBackfillDownloadsMediaKeyFillsHistoricalRows(t *testing.T) {
 		mediaURL string
 		want     string
 	}{
-		{"tweet-1", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc?format=mp4"},
+		{"tweet-1", "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12", "https://video.twimg.com/ext_tw_video/123"},
 		{"tweet-2", "https://pbs.twimg.com/media/abc.jpg", "https://pbs.twimg.com/media/abc?format=jpg"},
 		{"", "https://pbs.twimg.com/media/xyz?format=png", "https://pbs.twimg.com/media/xyz?format=png"},
 	}
@@ -430,11 +621,88 @@ func TestUpgradeRekeysExistingDownloadFormats(t *testing.T) {
 	}
 }
 
+// TestUpgradeRekeysVideoVariantsToMediaID 验证升级前写入的视频 media_key（含清晰度与
+// 文件名）会被重算为媒体 ID 键：否则旧库里已下载的视频遇到另一个变体 URL 时查不到副本，
+// 会被再下载一份。
+func TestUpgradeRekeysVideoVariantsToMediaID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindList, "list", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mediaURL = "https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1280x720/abc.mp4"
+	if _, err := store.CreateDownload(ctx, DownloadRecord{
+		JobID: job.ID, TweetID: "tweet-1", MediaURL: mediaURL, FilePath: "/archive/abc.mp4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟旧版本按完整 URL 计算的键，并让本次新增的迁移看起来尚未执行。
+	if _, err := store.db.Exec(`UPDATE downloads SET media_key = 'https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1280x720/abc?format=mp4'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE name = 'rekey_downloads_video_media_id'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	copies, err := store.FindDownloadsByMediaKey(ctx, "https://video.twimg.com/ext_tw_video/123", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 1 || copies[0].TweetID != "tweet-1" {
+		t.Fatalf("copies by media id = %+v, want the upgraded tweet-1 record", copies)
+	}
+}
+
 // schemaColumnsForVersion 记录每个 schemaVersion 对应的表/列集合。给表加列或新增表而
 // 不递增 schemaVersion 时，回滚到旧二进制会通过版本闸门，随后在 SELECT * 上报
 // "missing destination name"：本测试让这种遗漏在 CI 里直接失败。结构变更时：递增
 // schemaVersion，并在这里登记新版本的完整列集合。
 var schemaColumnsForVersion = map[int]string{
+	// v5：archive_schedules.claim_version、download_roots.last_seen_at；
+	// 删除只写不读的 user_previous_names（表与触发器）。
+	5: "app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
+		"archive_schedules(claim_version,created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
+		"dashboard_counters(active,completed,failed,failed_tweet_count,id,total);" +
+		"download_roots(last_seen_at,path);" +
+		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,tweet_id);" +
+		"failed_media(created_at,error,id,job_id,media_url);" +
+		"failed_tweets(created_at,entity_id,error,id,job_id,next_retry_at,payload,retry_count,tweet_id,updated_at);" +
+		"jobs(created_at,error,id,input,kind,message,progress,status,title,updated_at);" +
+		"list_entities(id,list_id,name,parent_dir,updated_at);" +
+		"schema_migrations(applied_at,name);" +
+		"twitter_lists(id,name,owner_user_id,updated_at);" +
+		"unavailable_media(created_at,error,media_url,tweet_id,updated_at);" +
+		"user_entities(id,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id);" +
+		"user_links(id,list_entity_id,name,updated_at,user_id);" +
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
+	4: "app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
+		"archive_schedules(created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
+		"dashboard_counters(active,completed,failed,failed_tweet_count,id,total);" +
+		"download_roots(path);" +
+		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,tweet_id);" +
+		"failed_media(created_at,error,id,job_id,media_url);" +
+		"failed_tweets(created_at,entity_id,error,id,job_id,next_retry_at,payload,retry_count,tweet_id,updated_at);" +
+		"jobs(created_at,error,id,input,kind,message,progress,status,title,updated_at);" +
+		"list_entities(id,list_id,name,parent_dir,updated_at);" +
+		"schema_migrations(applied_at,name);" +
+		"twitter_lists(id,name,owner_user_id,updated_at);" +
+		"unavailable_media(created_at,error,media_url,tweet_id,updated_at);" +
+		"user_entities(id,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id);" +
+		"user_links(id,list_entity_id,name,updated_at,user_id);" +
+		"user_previous_names(id,name,recorded_at,screen_name,user_id);" +
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
 	// v2（v0.8.3 起）：downloads 新增 content_hash。
 	2: "app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
 		"archive_schedules(created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
@@ -442,6 +710,22 @@ var schemaColumnsForVersion = map[int]string{
 		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,tweet_id);" +
 		"failed_media(created_at,error,id,job_id,media_url);" +
 		"failed_tweets(created_at,entity_id,error,id,job_id,payload,tweet_id,updated_at);" +
+		"jobs(created_at,error,id,input,kind,message,progress,status,title,updated_at);" +
+		"list_entities(id,list_id,name,parent_dir,updated_at);" +
+		"schema_migrations(applied_at,name);" +
+		"twitter_lists(id,name,owner_user_id,updated_at);" +
+		"unavailable_media(created_at,error,media_url,tweet_id,updated_at);" +
+		"user_entities(id,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id);" +
+		"user_links(id,list_entity_id,name,updated_at,user_id);" +
+		"user_previous_names(id,name,recorded_at,screen_name,user_id);" +
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
+	// v3：failed_tweets 新增 retry_count、next_retry_at（P1-8 指数退避重试）。
+	3: "app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
+		"archive_schedules(created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
+		"dashboard_counters(active,completed,failed,failed_tweet_count,id,total);" +
+		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,tweet_id);" +
+		"failed_media(created_at,error,id,job_id,media_url);" +
+		"failed_tweets(created_at,entity_id,error,id,job_id,next_retry_at,payload,retry_count,tweet_id,updated_at);" +
 		"jobs(created_at,error,id,input,kind,message,progress,status,title,updated_at);" +
 		"list_entities(id,list_id,name,parent_dir,updated_at);" +
 		"schema_migrations(applied_at,name);" +

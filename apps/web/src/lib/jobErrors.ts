@@ -6,6 +6,7 @@ export interface AggregatedErrorGroup {
   action?: string;
   targets: string[];
   count: number;
+  countUnit?: "kinds";
 }
 
 /**
@@ -47,8 +48,14 @@ export function parseAggregatedErrors(errorText?: string): AggregatedErrorGroup[
   const groups: AggregatedErrorGroup[] = [];
   const groupMap = new Map<string, AggregatedErrorGroup>();
   let trailerCount = 0;
+  let distinctTrailerCount = 0;
 
   for (const chunk of chunks) {
+    const distinctTrailer = chunk.match(/^另有\s*(\d+)\s*种其他异常$/);
+    if (distinctTrailer) {
+      distinctTrailerCount += Number(distinctTrailer[1]);
+      continue;
+    }
     // 检查尾部追加的 "另有 23 个错误"
     const trailerMatch = chunk.match(/^另有\s*(\d+)\s*个错误$/);
     if (trailerMatch) {
@@ -59,7 +66,7 @@ export function parseAggregatedErrors(errorText?: string): AggregatedErrorGroup[
     // 检查后端预聚合的格式：
     // e.g. "读取媒体时间线失败: X 客户端暂时全部限流，请稍后重试 (共 31 个账号: @user1、@user2 等)"
     const backendGroupMatch = chunk.match(
-      /^(?:([^:：]+)[:：]\s*)?(.*?)\s*\((?:共\s*)?(\d+)\s*个(?:账号|目标|错误|次)?(?::|：)?\s*(.*?)\)$/,
+      /^(?:([^:：]+)[:：]\s*)?(.*?)\s*\((?:共\s*)?(\d+)\s*(?:个(?:账号|目标|错误)?|次)(?::|：)?\s*(.*?)\)$/,
     );
     if (backendGroupMatch && backendGroupMatch[3]) {
       const action = backendGroupMatch[1]?.trim();
@@ -107,6 +114,7 @@ export function parseAggregatedErrors(errorText?: string): AggregatedErrorGroup[
         target = `@${targetMatch[1]}`;
         const cleanPrefix = prefix
           .replace(/@[a-zA-Z0-9_]+/g, "")
+          .replace(/[()（）]/g, "")
           .replace(/\s*的\s*/g, "")
           .replace(/\s+/g, "")
           .trim();
@@ -137,6 +145,9 @@ export function parseAggregatedErrors(errorText?: string): AggregatedErrorGroup[
   }
 
   // 累加 trailer 计数（如 "另有 23 个错误"）
+  if (distinctTrailerCount > 0) {
+    groups.push({ id: `err-${groups.length + 1}`, reason: "其他异常", targets: [], count: distinctTrailerCount, countUnit: "kinds" });
+  }
   if (trailerCount > 0) {
     if (groups.length > 0) {
       // 归入第一个（通常也是唯一的主原因）组
@@ -194,19 +205,20 @@ export function getJobProgressDisplay(job: Job): {
   }
 
   // 单一错误且仅针对单个目标/单次
-  if (groups.length === 1 && groups[0].count <= 1 && groups[0].targets.length <= 1) {
+  if (groups.length === 1 && !groups[0].countUnit && groups[0].count <= 1 && groups[0].targets.length <= 1) {
     const msg = groups[0].reason || job.error || (isFailed ? "任务失败" : "部分异常");
     const tooltip = job.message && job.message !== msg ? `${msg}\n状态: ${job.message}` : msg;
     return { displayMsg: msg, tooltip, hasError };
   }
 
   // 多个目标或批量聚合错误
-  const totalCount = groups.reduce((acc, g) => acc + g.count, 0);
+  const totalCount = groups.reduce((acc, g) => acc + (g.countUnit ? 0 : g.count), 0);
+  const otherKinds = groups.reduce((acc, g) => acc + (g.countUnit ? g.count : 0), 0);
   let displayMsg: string;
   if (groups.length === 1) {
-    displayMsg = `${groups[0].reason} (${groups[0].count}项)`;
+    displayMsg = `${groups[0].reason} (${groups[0].count}${groups[0].countUnit ? "种" : "项"})`;
   } else {
-    displayMsg = `部分失败 (${totalCount}项)`;
+    displayMsg = `部分失败 (${totalCount}项${otherKinds ? `，另有${otherKinds}种异常` : ""})`;
   }
 
   const tooltipLines: string[] = [];
@@ -218,7 +230,7 @@ export function getJobProgressDisplay(job: Job): {
       g.targets.length > 0
         ? ` (${g.targets.slice(0, 5).join("、")}${g.targets.length > 5 ? " 等" : ""})`
         : "";
-    tooltipLines.push(`• ${g.reason} [${g.count}项]${targetsStr}`);
+    tooltipLines.push(`• ${g.reason} [${g.count}${g.countUnit ? "种" : "项"}]${targetsStr}`);
   }
 
   return {

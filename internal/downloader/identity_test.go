@@ -12,14 +12,26 @@ func TestMediaIdentityGroupsEquivalentMediaURLs(t *testing.T) {
 		want string
 	}{
 		{
-			name: "video tag stripped",
+			// 视频按媒体 ID 识别：清晰度、文件名与 ?tag= 都不参与身份。
+			name: "video keyed by media id",
 			in:   "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12",
-			want: "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc?format=mp4",
+			want: "https://video.twimg.com/ext_tw_video/123",
 		},
 		{
 			name: "host and scheme normalized",
 			in:   "http://VIDEO.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4",
-			want: "https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc?format=mp4",
+			want: "https://video.twimg.com/ext_tw_video/123",
+		},
+		{
+			name: "amplify video keyed by media id",
+			in:   "https://video.twimg.com/amplify_video/456/vid/avc1/720x1280/clip.mp4?tag=14",
+			want: "https://video.twimg.com/amplify_video/456",
+		},
+		{
+			// GIF 的路径里没有媒体 ID，沿用按 URL 归一化的规则。
+			name: "gif keeps url identity",
+			in:   "https://video.twimg.com/tweet_video/GifKey.mp4",
+			want: "https://video.twimg.com/tweet_video/GifKey?format=mp4",
 		},
 		{
 			name: "photo extension stripped",
@@ -40,8 +52,21 @@ func TestMediaIdentityGroupsEquivalentMediaURLs(t *testing.T) {
 		},
 		{
 			name: "video host keeps name parameter",
-			in:   "https://video.twimg.com/ext_tw_video/123/pu/vid/abc.mp4?name=xyz",
-			want: "https://video.twimg.com/ext_tw_video/123/pu/vid/abc?format=mp4&name=xyz",
+			in:   "https://video.twimg.com/tweet_video/abc.mp4?name=xyz",
+			want: "https://video.twimg.com/tweet_video/abc?format=mp4&name=xyz",
+		},
+		{
+			// HLS 播放列表不是可下载的视频文件：不能和同一视频的 mp4 共用身份，否则推文内
+			// 合并时可能留下播放列表、丢掉可下载的 mp4。
+			name: "hls playlist keeps url identity",
+			in:   "https://video.twimg.com/ext_tw_video/123/pu/pl/playlist.m3u8?tag=12",
+			want: "https://video.twimg.com/ext_tw_video/123/pu/pl/playlist.m3u8",
+		},
+		{
+			// 不是 <类型>/<数字ID>/... 结构的视频路径不能按媒体 ID 合并。
+			name: "video without numeric media id keeps url identity",
+			in:   "https://video.twimg.com/ext_tw_video/card/640x360.mp4",
+			want: "https://video.twimg.com/ext_tw_video/card/640x360?format=mp4",
 		},
 		{
 			name: "different photo format remains distinct",
@@ -88,8 +113,16 @@ func TestMediaIdentityCollapsesDuplicateURLForms(t *testing.T) {
 			"https://pbs.twimg.com/media/abc.jpg?name=4096x4096",
 		},
 		{
+			// 同一个视频的各个变体（清晰度、编码目录、文件名都不同）以及新旧两种路径布局。
 			"https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=12",
 			"https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4?tag=14",
+			"https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/640x360/low.mp4",
+			"https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1920x1080/high.mp4?tag=10",
+			"https://video.twimg.com/ext_tw_video/123/pr/vid/480x270/other.mp4",
+		},
+		{
+			"https://video.twimg.com/amplify_video/456/vid/640x360/clip.mp4",
+			"https://video.twimg.com/amplify_video/456/vid/avc1/720x1280/gAEB-Ux6zk1_4Z-t.mp4?tag=14",
 		},
 	}
 	for _, group := range groups {
@@ -99,6 +132,25 @@ func TestMediaIdentityCollapsesDuplicateURLForms(t *testing.T) {
 				t.Fatalf("MediaIdentity(%q) = %q, want %q (same media as %q)", raw, got, want, group[0])
 			}
 		}
+	}
+}
+
+func TestMediaIdentityKeepsDifferentVideosSeparate(t *testing.T) {
+	distinct := []string{
+		"https://video.twimg.com/ext_tw_video/123/pu/vid/1280x720/abc.mp4",
+		"https://video.twimg.com/ext_tw_video/124/pu/vid/1280x720/abc.mp4",
+		// 两类视频目录的 ID 各自独立，不能因为数字相同就合并。
+		"https://video.twimg.com/amplify_video/123/vid/1280x720/abc.mp4",
+		"https://video.twimg.com/tweet_video/abc.mp4",
+		"https://video.twimg.com/tweet_video/abd.mp4",
+	}
+	seen := map[string]string{}
+	for _, raw := range distinct {
+		key := MediaIdentity(raw)
+		if previous, ok := seen[key]; ok {
+			t.Fatalf("MediaIdentity(%q) = MediaIdentity(%q) = %q, want distinct videos", raw, previous, key)
+		}
+		seen[key] = raw
 	}
 }
 

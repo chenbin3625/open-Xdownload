@@ -48,9 +48,13 @@ export default function App() {
     activeSection,
     jobPage,
     jobPageSize,
+    jobStatus,
+    gallery,
     handleSectionChange,
     handleJobPageChange,
     handleJobPageSizeChange,
+    handleJobStatusChange,
+    handleGalleryChange,
     syncServerPage,
   } = useRouteState();
 
@@ -75,7 +79,11 @@ export default function App() {
     activeSection === "schedules" ||
     activeSection === "gallery";
 
-  useDashboardEvents(queryClient, refreshDashboard, isWorkbenchActive);
+  const { sseConnected, reconnect: reconnectEvents } = useDashboardEvents(
+    queryClient,
+    refreshDashboard,
+    isWorkbenchActive,
+  );
 
   // 任务分页 Query
   const jobs = useQuery({
@@ -89,10 +97,12 @@ export default function App() {
     staleTime: 15_000,
     enabled: isWorkbenchActive,
     refetchInterval: (query) => {
+      // 用全局 meta 统计判断是否有活跃任务，避免新建任务尚未被轮询拉到时漏掉刷新。
+      const metaData = queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot);
+      if (metaData) return metaData.stats.active > 0 ? 5_000 : false;
+      // meta 从未成功过（首屏 meta 挂了）：退回"本页是否有活跃任务"，避免列表彻底不轮询。
       const page = query.state.data as JobsPage | undefined;
-      return page?.items.some((job) => jobStatusBucket(job.status) === "active")
-        ? 5_000
-        : false;
+      return page?.items.some((job) => jobStatusBucket(job.status) === "active") ? 5_000 : false;
     },
   });
 
@@ -100,11 +110,12 @@ export default function App() {
   const meta = useQuery({
     queryKey: dashboardMetaQueryRoot,
     queryFn: ({ signal }) => getDashboardMeta(signal),
+    placeholderData: (previousData) => previousData,
     staleTime: 15_000,
     enabled: isWorkbenchActive,
     refetchInterval: (query) => {
       const data = query.state.data as DashboardMeta | undefined;
-      return data && data.stats.active > 0 ? 5_000 : false;
+      return data && data.stats.active > 0 ? 5_000 : 30_000;
     },
   });
 
@@ -220,6 +231,8 @@ export default function App() {
           onQuickSubmit={(input) => openCreateModal(input)}
           onToggleMobileMenu={() => setMobileMenuOpen(true)}
           showMenuButton={isCompact}
+          realtimeDisconnected={!sseConnected}
+          onReconnectRealtime={reconnectEvents}
         />
 
         {/* 页面主内容滚动容器 */}
@@ -237,6 +250,10 @@ export default function App() {
                     : "请检查后台服务连接"
                 }
               />
+            )}
+
+            {isWorkbenchActive && meta.isError && (
+              <Alert type="error" showIcon message="任务统计加载失败" description={meta.error.message} />
             )}
 
             {activeSection === "settings" && config.isError && (
@@ -267,6 +284,8 @@ export default function App() {
                 tableLoading={jobs.isPlaceholderData}
                 onPageChange={handleJobPageChange}
                 onPageSizeChange={handleJobPageSizeChange}
+                statusFilter={jobStatus}
+                onStatusFilterChange={handleJobStatusChange}
                 onOpenCreateModal={() => openCreateModal()}
                 onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
               />
@@ -276,11 +295,14 @@ export default function App() {
               <SchedulesPage
                 schedules={schedules.data ?? []}
                 loading={schedules.isLoading}
+                error={schedules.isError ? schedules.error.message : undefined}
                 onOpenCreateModal={() => openCreateModal("", "schedule")}
               />
             )}
 
-            {activeSection === "gallery" && <GalleryPage jobs={jobsData} />}
+            {activeSection === "gallery" && (
+              <GalleryPage filter={gallery} onFilterChange={handleGalleryChange} />
+            )}
 
             {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
             {activeSection === "settings" && config.isLoading && (
@@ -310,7 +332,6 @@ export default function App() {
       <FailedTweetDrawer
         open={failedDrawerOpen}
         onClose={() => setFailedDrawerOpen(false)}
-        items={[]}
         total={failedTweetCount}
       />
     </div>

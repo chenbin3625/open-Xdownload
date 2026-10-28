@@ -19,15 +19,15 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: npm
@@ -46,13 +46,29 @@ jobs:
       - name: Sync embedded web assets
         run: npm run sync:web
 
+      - name: Check embedded web assets are current
+        # git diff 看不到未跟踪文件，必须先把产物加入索引再比对，否则"新增但未提交"
+        # 的 sidecar 会被静默放过（也顺便挡住忘记 git add 的提交）。
+        run: |
+          git add -A -- internal/webui/dist
+          git diff --cached --exit-code -- internal/webui/dist
+
+      - name: Check Go formatting
+        run: test -z "$(gofmt -l cmd internal)"
+
+      - name: Check go.mod is tidy
+        # -diff 只输出差异并以非零退出，不会改写 go.mod/go.sum。
+        run: go mod tidy -diff
+
       - name: Vet Go
         run: go vet ./...
 
-      # 竞态检测必须在 CI 跑：本服务的并发写者可达数百（MaxConcurrency 上限 64，
-      # 每个归档任务再开多个 worker），普通 go test 无法暴露数据竞争。
+      # 归档任务串行执行，但 HTTP、SSE、调度和下载仍有并发访问。
       - name: Test Go (race)
-        run: go test -race ./...
+        run: go test -race -shuffle=on ./...
 
       - name: Build server
         run: CGO_ENABLED=0 go build -trimpath -o dist/open-xdownload ./cmd/server
+
+      - name: Build Docker image
+        run: docker build --tag open-xdownload:ci .

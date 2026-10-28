@@ -1,7 +1,7 @@
 {
   "name": "open-xdownload",
   "private": true,
-  "version": "0.8.6",
+  "version": "0.8.7",
   "scripts": {
     "dev": "npm --prefix apps/web run dev",
     "dev:all": "./scripts/dev-all.sh",
@@ -9,6 +9,8 @@
     "sync:web": "sh scripts/sync-webui.sh",
     "build:embedded": "npm run build && npm run sync:web",
     "server": "go run ./cmd/server",
+    "tidy": "go mod tidy",
+    "check:tidy": "go mod tidy -diff",
     "test": "go test ./... && npm --prefix apps/web run test && npm --prefix apps/web run build"
   }
 }

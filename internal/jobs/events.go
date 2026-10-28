@@ -2,7 +2,9 @@ package jobs
 
 import (
 	"encoding/json"
+	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +21,8 @@ type EventBus struct {
 	mu          sync.Mutex
 	subscribers map[chan Event]struct{}
 	closed      bool
+	// dropped 统计因订阅者缓冲满而被丢弃的事件数（前端有轮询对账兜底，这里只做可观测）。
+	dropped atomic.Int64
 }
 
 // maxEventSubscribers bounds concurrent SSE subscribers so an unauthenticated
@@ -86,8 +90,21 @@ func (bus *EventBus) Publish(event Event) {
 		select {
 		case channel <- event:
 		default:
+			// 慢消费者（SSE 客户端）丢事件是设计内的：前端靠轮询对账。但静默丢弃会让
+			// "首尾事件都丢了"这类问题无法排查，因此计数 + 每 1000 条限频日志。
+			if dropped := bus.dropped.Add(1); dropped%1000 == 1 {
+				log.Printf("event bus: dropped %d event(s) for slow subscriber(s) (latest type=%s)", dropped, event.Type)
+			}
 		}
 	}
+}
+
+// DroppedEvents 返回累计丢弃的事件数（用于测试与诊断）。
+func (bus *EventBus) DroppedEvents() int64 {
+	if bus == nil {
+		return 0
+	}
+	return bus.dropped.Load()
 }
 
 func (event Event) MarshalSSE() []byte {

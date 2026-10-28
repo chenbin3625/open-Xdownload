@@ -37,7 +37,7 @@ export function Modal({
             className,
           )}
         >
-          {title && (
+          {title ? (
             <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
               <div className="min-w-0">
                 <Dialog.Title className="text-base font-semibold text-fg">{title}</Dialog.Title>
@@ -51,6 +51,15 @@ export function Modal({
                 <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
               </Dialog.Close>
             </div>
+          ) : (
+            <>
+              <Dialog.Title className="sr-only">对话框</Dialog.Title>
+              <div className="flex justify-end px-5 pt-3">
+                <Dialog.Close asChild>
+                  <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
+                </Dialog.Close>
+              </div>
+            </>
           )}
           <div className={cn("min-h-0 flex-1 overflow-y-auto px-5 py-4", bodyClassName)}>
             {children}
@@ -148,7 +157,14 @@ export function Drawer({
               </Dialog.Close>
             </div>
           ) : (
-            <Dialog.Title className="sr-only">导航菜单</Dialog.Title>
+            <>
+              <Dialog.Title className="sr-only">导航菜单</Dialog.Title>
+              <div className="flex justify-end px-4 pt-2">
+                <Dialog.Close asChild>
+                  <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
+                </Dialog.Close>
+              </div>
+            </>
           )}
           <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
         </Dialog.Content>
@@ -220,6 +236,8 @@ export function Popconfirm({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = React.useState(false);
+  const titleId = React.useId();
+  const descriptionId = React.useId();
   // disabled 时直接透传子元素，不挂弹出行为
   if (disabled) return <>{children}</>;
 
@@ -230,13 +248,24 @@ export function Popconfirm({
         <Popover.Content
           sideOffset={6}
           collisionPadding={8}
+          // Radix Popover.Content 默认 role="dialog"；二次确认是不可逆操作，
+          // 用 alertdialog 让读屏更明确，并显式关联标题/说明。
+          role="alertdialog"
+          aria-labelledby={titleId}
+          aria-describedby={description ? descriptionId : undefined}
           className={cn(
             "z-[1250] w-64 rounded-card border border-line bg-surface p-3 shadow-overlay",
             "animate-overlay-in",
           )}
         >
-          <div className="text-sm font-medium text-fg">{title}</div>
-          {description && <div className="mt-1 text-xs text-fg-muted">{description}</div>}
+          <div id={titleId} className="text-sm font-medium text-fg">
+            {title}
+          </div>
+          {description && (
+            <div id={descriptionId} className="mt-1 text-xs text-fg-muted">
+              {description}
+            </div>
+          )}
           <div className="mt-3 flex items-center justify-end gap-2">
             <Button size="sm" variant="text" onClick={() => setOpen(false)}>
               {cancelText}

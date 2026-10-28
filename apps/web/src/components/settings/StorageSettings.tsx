@@ -1,6 +1,7 @@
 import React from "react";
 import type { AppConfig } from "../../lib/api";
 import { Stack } from "../common/CommonUI";
+import { EnvOverrideNote } from "./EnvOverrideNote";
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
 
 export function storageTargetLabel(config: AppConfig) {
@@ -10,9 +11,11 @@ export function storageTargetLabel(config: AppConfig) {
 export function StorageSettings({
   draft,
   onChange,
+  envOverridden = [],
 }: {
   draft: AppConfig;
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
+  envOverridden?: string[];
 }) {
   return (
     <Stack size={16}>
@@ -20,6 +23,7 @@ export function StorageSettings({
         path={draft.downloadDir}
         onSelect={(downloadDir) => onChange((current) => ({ ...current, downloadDir }))}
       />
+      <EnvOverrideNote show={envOverridden.includes("downloadDir")} />
     </Stack>
   );
 }

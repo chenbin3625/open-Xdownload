@@ -76,6 +76,28 @@ describe("AppHeader", () => {
     expect(document.documentElement.classList.contains("light")).toBe(true);
   });
 
+  it("SSE 断开时显示提示且点击可重连", async () => {
+    const user = userEvent.setup();
+    const onReconnectRealtime = vi.fn();
+    render(
+      <AppHeader
+        {...baseProps}
+        realtimeDisconnected
+        onReconnectRealtime={onReconnectRealtime}
+      />,
+    );
+
+    const banner = screen.getByTitle("实时更新已断开，点击重连");
+    expect(banner).not.toBeNull();
+    await user.click(banner);
+    expect(onReconnectRealtime).toHaveBeenCalledTimes(1);
+  });
+
+  it("连接正常时不渲染断线提示", () => {
+    render(<AppHeader {...baseProps} />);
+    expect(screen.queryByTitle("实时更新已断开，点击重连")).toBeNull();
+  });
+
   it("仅在紧凑布局下渲染菜单按钮", () => {
     const { unmount } = render(<AppHeader {...baseProps} showMenuButton={false} />);
     expect(screen.queryByRole("button", { name: "打开导航菜单" })).toBeNull();

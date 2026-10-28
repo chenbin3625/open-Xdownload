@@ -19,4 +19,13 @@ coverage/
 *.db-shm
 *.db-wal
 
+# 数据目录锁文件（默认 data/ 已忽略，自定义 -data-dir 时也避免脏工作区）
+*.db.lock
+
+# 本地产物：go test -c 生成的测试二进制、go build 的默认输出
+/httpapi.test
+/server
+/*.test
+
 .reference/
+pnpm-lock.yaml

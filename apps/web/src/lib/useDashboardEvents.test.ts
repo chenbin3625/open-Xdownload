@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseDashboardEvent,
   isDashboardJobPayload,
@@ -11,13 +11,18 @@ import {
   applyDashboardEvent,
   prependJobsToCaches,
   invalidateWorkbenchQueries,
+  invalidateAfterReconnect,
+  cancelScheduledTerminalRefresh,
+  TERMINAL_REFRESH_DEBOUNCE_MS,
   sameJob,
 } from "./useDashboardEvents";
 import {
   archiveScheduleQueryRoot,
   dashboardMetaQueryRoot,
+  failedTweetQueryRoot,
   libraryDownloadsQueryRoot,
   jobsQueryRoot,
+  jobFilesQueryRoot,
   type DashboardMeta,
   type Job,
   type JobsPage,
@@ -49,6 +54,15 @@ function makeMeta(jobs: Job[]): DashboardMeta {
     stats: { total: jobs.length, active: jobs.length, completed: 0, failed: 0 },
   };
 }
+
+it("refreshes open job files after an SSE reconnect", async () => {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData([...jobFilesQueryRoot, 1], { downloads: [], failed: [] });
+
+  await invalidateAfterReconnect(queryClient);
+
+  expect(isInvalidated(queryClient, [...jobFilesQueryRoot, 1])).toBe(true);
+});
 
 describe("applyDashboardMeta", () => {
   it("replaces meta without touching the jobs page cache", () => {
@@ -82,6 +96,12 @@ describe("isDashboardJobPayload", () => {
     expect(isDashboardJobPayload({})).toBe(false);
     expect(isDashboardJobPayload(null)).toBe(false);
     expect(isDashboardJobPayload("x")).toBe(false);
+  });
+
+  it("rejects payloads without a usable createdAt", () => {
+    const { createdAt: _createdAt, ...withoutCreatedAt } = makeJob();
+    expect(isDashboardJobPayload(withoutCreatedAt)).toBe(false);
+    expect(isDashboardJobPayload({ ...makeJob(), createdAt: 123 })).toBe(false);
   });
 });
 
@@ -161,6 +181,17 @@ describe("prependJobsToCaches", () => {
 });
 
 describe("applyDashboardEvent", () => {
+  it("invalidates the failed-tweet queue when a retry job finishes", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData([...failedTweetQueryRoot, 1, 10], { items: [{ id: 1 }] });
+
+    applyDashboardEvent(queryClient, {
+      type: "job.updated",
+      payload: makeJob({ kind: "failed_retry", status: "completed" }),
+    });
+
+    expect(isInvalidated(queryClient, [...failedTweetQueryRoot, 1, 10])).toBe(true);
+  });
   it("uses server meta after batch create instead of double-counting", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -214,6 +245,62 @@ describe("isStaleJobUpdate", () => {
 });
 
 describe("mergeNewerJobs", () => {
+  it("does not restore a recently updated job pushed off the first page", () => {
+    const now = Date.now();
+    const jobs = [1, 2, 3].map((id) => makeJob({
+      id,
+      createdAt: new Date(now - (4 - id) * 1000).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    }));
+    const cached = { items: [jobs[1], jobs[0]], page: 1, pageSize: 2 };
+    const fetched = { items: [jobs[2], jobs[1]], page: 1, pageSize: 2 };
+
+    expect(mergeNewerJobs(cached, fetched).items.map((job) => job.id)).toEqual([3, 2]);
+  });
+
+  it("retains newly created SSE jobs in server order within the page size", () => {
+    const timestamp = new Date().toISOString();
+    const jobs = [1, 2, 3, 4].map((id) => makeJob({ id, createdAt: timestamp, updatedAt: timestamp }));
+    const cached = { items: [jobs[2], jobs[3]], page: 1, pageSize: 2 };
+    const fetched = { items: [jobs[1], jobs[0]], page: 1, pageSize: 2 };
+
+    expect(mergeNewerJobs(cached, fetched).items.map((job) => job.id)).toEqual([4, 3]);
+  });
+
+  it("does not retain a cached row that sorts below the fetched newest row", () => {
+    const old = makeJob({ id: 1, createdAt: "2024-01-01T00:00:00Z", updatedAt: "2024-05-01T00:00:00Z" });
+    const fresh = makeJob({ id: 2, createdAt: "2024-06-01T00:00:00Z", updatedAt: "2024-06-01T00:00:00Z" });
+    const fetched = makeJobsPage([fresh]);
+
+    expect(mergeNewerJobs(makeJobsPage([old]), fetched).items.map((job) => job.id)).toEqual([2]);
+  });
+
+  it("retains SSE rows without consulting the browser clock", () => {
+    // 保留判定只看"是否比 fetched 首行更新"，与 Date.now() 无关：
+    // 即使这行创建于 10 分钟前（远超旧的 30s 窗口），只要 fetched 快照更旧就必须保留。
+    const staleSnapshotTop = makeJob({ id: 1, createdAt: "2024-01-01T00:00:00Z" });
+    const sseInserted = makeJob({ id: 2, createdAt: "2024-01-01T00:10:00Z" });
+    const fetched = makeJobsPage([staleSnapshotTop]);
+
+    expect(mergeNewerJobs(makeJobsPage([sseInserted]), fetched).items.map((job) => job.id)).toEqual([2, 1]);
+  });
+
+  it("drops a cached row whose createdAt cannot be parsed", () => {
+    const broken = makeJob({ id: 9, createdAt: "not a date", updatedAt: "not a date" });
+    const fetched = makeJobsPage([
+      makeJob({ id: 1, createdAt: "2024-01-01T00:00:00Z" }),
+    ]);
+
+    expect(mergeNewerJobs(makeJobsPage([broken]), fetched).items.map((job) => job.id)).toEqual([1]);
+  });
+
+  it("retains a newly created SSE job while an empty first page is in flight", () => {
+    const timestamp = new Date().toISOString();
+    const job = makeJob({ createdAt: timestamp, updatedAt: timestamp });
+
+    expect(mergeNewerJobs(makeJobsPage([job]), makeJobsPage([])).items).toEqual([job]);
+  });
+
   it("keeps the cached job when the fetched page is older", () => {
     const cached = makeJobsPage([
       makeJob({ id: 1, progress: 0.9, updatedAt: "2024-01-01T00:00:10Z" }),
@@ -343,5 +430,46 @@ describe("terminal job.updated", () => {
       payload: makeJob({ id: 1, progress: 0.8, updatedAt: "2024-01-01T00:00:10Z" }),
     });
     expect(isInvalidated(queryClient, libraryDownloadsQueryRoot)).toBe(false);
+    cancelScheduledTerminalRefresh(queryClient);
+  });
+
+  it("coalesces a burst of terminal updates into a single refetch", async () => {
+    vi.useFakeTimers();
+    try {
+      const queryClient = new QueryClient();
+      const job = makeJob({ id: 1, status: "downloading" });
+      queryClient.setQueryData([...jobsQueryRoot, 1, 20], makeJobsPage([job]));
+      queryClient.setQueryData([...libraryDownloadsQueryRoot, "all"], { items: [] });
+      queryClient.setQueryData([...failedTweetQueryRoot, 1, 10], { items: [] });
+      const refetchSpy = vi.spyOn(queryClient, "refetchQueries");
+
+      for (let index = 0; index < 5; index += 1) {
+        applyDashboardEvent(queryClient, {
+          type: "job.updated",
+          payload: makeJob({ id: 1, status: "completed", progress: 1, updatedAt: "2024-01-01T00:00:10Z" }),
+        });
+      }
+
+      // invalidateQueries(refetchType:"none") 内部也会调用 refetchQueries，但 type 是 none；
+      // 真正会发网络请求的是 type:"active" 的那一次。
+      // 终态事件还会对已打开的任务详情（job-files）发一次失效，这里只统计媒体库/失败队列。
+      const activeRefetches = () =>
+        refetchSpy.mock.calls.filter(([filters]) => {
+          const next = filters as { type?: string; queryKey?: readonly unknown[] };
+          if (next?.type !== "active") return false;
+          const key = JSON.stringify(next.queryKey ?? []);
+          return key.includes("library-downloads") || key.includes("failed-tweets");
+        });
+
+      // 失效标记是同步生效的（不发请求），合并刷新要等去抖窗口结束。
+      expect(isInvalidated(queryClient, [...libraryDownloadsQueryRoot, "all"])).toBe(true);
+      expect(isInvalidated(queryClient, [...failedTweetQueryRoot, 1, 10])).toBe(true);
+      expect(activeRefetches()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(TERMINAL_REFRESH_DEBOUNCE_MS);
+      expect(activeRefetches()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

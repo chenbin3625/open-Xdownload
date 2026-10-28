@@ -39,3 +39,12 @@ func TestNegotiateEncodingIgnoresMalformedParams(t *testing.T) {
 		t.Fatalf("out-of-range q should be ignored, got %q", got)
 	}
 }
+
+func TestNegotiateEncodingFindsQualityParameterAfterOtherParameters(t *testing.T) {
+	if got := NegotiateEncoding("gzip;level=1;q=0, br", "gzip", "br"); got != "br" {
+		t.Fatalf("quality parameter after another parameter was ignored: got %q, want br", got)
+	}
+	if got := NegotiateEncoding("GZip;foo=bar;Q=0, br", "gzip", "br"); got != "br" {
+		t.Fatalf("case-insensitive quality parameter was ignored: got %q, want br", got)
+	}
+}

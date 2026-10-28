@@ -68,6 +68,11 @@ type ArchiveSchedule struct {
 	LastJobIDsJSON  string                `json:"-" db:"last_job_ids"`
 	CreatedAt       time.Time             `json:"createdAt" db:"created_at"`
 	UpdatedAt       time.Time             `json:"updatedAt" db:"updated_at"`
+	// ClaimVersion 是计划领取的乐观锁版本号，不对外暴露。领取（claimArchiveScheduleJobs）、
+	// 重新排期与任何改变 next_run_at 的编辑都会使其递增，从而让"读到快照 → 领取"之间的
+	// 并发/过期快照自然失效。用整数而不是比较 next_run_at 时间：时间以 TEXT 存储，格式、
+	// 精度或时区表示的任何差异都会导致比较失败且难以排查。
+	ClaimVersion int64 `json:"-" db:"claim_version"`
 }
 
 type DownloadRecord struct {
@@ -177,14 +182,16 @@ type UserLinkTarget struct {
 }
 
 type FailedTweet struct {
-	ID        int64     `json:"id" db:"id"`
-	JobID     int64     `json:"jobId" db:"job_id"`
-	EntityID  int64     `json:"entityId" db:"entity_id"`
-	TweetID   string    `json:"tweetId" db:"tweet_id"`
-	Payload   string    `json:"payload" db:"payload"`
-	Error     string    `json:"error" db:"error"`
-	CreatedAt time.Time `json:"createdAt" db:"created_at"`
-	UpdatedAt time.Time `json:"updatedAt" db:"updated_at"`
+	ID          int64      `json:"id" db:"id"`
+	JobID       int64      `json:"jobId" db:"job_id"`
+	EntityID    int64      `json:"entityId" db:"entity_id"`
+	TweetID     string     `json:"tweetId" db:"tweet_id"`
+	Payload     string     `json:"payload" db:"payload"`
+	Error       string     `json:"error" db:"error"`
+	RetryCount  int        `json:"retryCount" db:"retry_count"`
+	NextRetryAt *time.Time `json:"nextRetryAt,omitempty" db:"next_retry_at"`
+	CreatedAt   time.Time  `json:"createdAt" db:"created_at"`
+	UpdatedAt   time.Time  `json:"updatedAt" db:"updated_at"`
 }
 
 type FailedTweetView struct {

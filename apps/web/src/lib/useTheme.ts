@@ -6,6 +6,7 @@ export type ThemeAccent = "x-blue" | "titanium" | "indigo" | "emerald" | "amber"
 
 const STORAGE_KEY = "open-xdownload-theme";
 const ACCENT_STORAGE_KEY = "open-xdownload-accent";
+const THEME_CHANGE_EVENT = "open-xdownload-theme-change";
 
 export interface ThemeAccentOption {
   id: ThemeAccent;
@@ -108,28 +109,36 @@ export function applyAccent(accent: ThemeAccent) {
 }
 
 export function useTheme() {
-  const [preference, setPreference] = useState<ThemePreference>(readThemePreference);
+  const [preference, setPreferenceState] = useState<ThemePreference>(readThemePreference);
   const [resolved, setResolved] = useState<ResolvedTheme>(() => resolveTheme(readThemePreference()));
   const [accent, setAccentState] = useState<ThemeAccent>(readAccentPreference);
+
+  useEffect(() => {
+    const handleChange = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (isThemePreference(detail?.preference)) setPreferenceState(detail.preference);
+      if (isThemeAccent(detail?.accent)) setAccentState(detail.accent);
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === null || event.key === STORAGE_KEY) setPreferenceState(readThemePreference());
+      if (event.key === null || event.key === ACCENT_STORAGE_KEY) setAccentState(readAccentPreference());
+    };
+    window.addEventListener(THEME_CHANGE_EVENT, handleChange);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(THEME_CHANGE_EVENT, handleChange);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
 
   useEffect(() => {
     const next = resolveTheme(preference);
     setResolved(next);
     applyTheme(next);
-    try {
-      window.localStorage.setItem(STORAGE_KEY, preference);
-    } catch {
-      // 写入失败不影响当前会话的显示
-    }
   }, [preference]);
 
   useEffect(() => {
     applyAccent(accent);
-    try {
-      window.localStorage.setItem(ACCENT_STORAGE_KEY, accent);
-    } catch {
-      // 写入失败不影响当前会话的显示
-    }
   }, [accent]);
 
   // 仅在跟随系统时监听系统切换；用户显式选择后系统变化不应覆盖其选择。
@@ -145,13 +154,28 @@ export function useTheme() {
     return () => query.removeEventListener("change", handleChange);
   }, [preference]);
 
-  const toggle = useCallback(() => {
-    // 切换只在明暗之间来回，不会把用户重新丢回 system
-    setPreference(resolveTheme(readThemePreference()) === "dark" ? "light" : "dark");
+  const setPreference = useCallback((nextPreference: ThemePreference) => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, nextPreference);
+    } catch {
+      // Storage failure must not prevent synchronization within this window.
+    }
+    setPreferenceState(nextPreference);
+    window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: { preference: nextPreference } }));
   }, []);
 
+  const toggle = useCallback(() => {
+    setPreference(resolveTheme(preference) === "dark" ? "light" : "dark");
+  }, [preference, setPreference]);
+
   const setAccent = useCallback((nextAccent: ThemeAccent) => {
+    try {
+      window.localStorage.setItem(ACCENT_STORAGE_KEY, nextAccent);
+    } catch {
+      // Keep the current session usable when storage is unavailable.
+    }
     setAccentState(nextAccent);
+    window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: { accent: nextAccent } }));
   }, []);
 
   return { preference, resolved, setPreference, toggle, accent, setAccent };

@@ -36,6 +36,7 @@ export function Tree({
   onExpandedChange,
   onSelect,
   loadChildren,
+  onLoadError,
   className,
 }: {
   nodes: TreeNode[];
@@ -44,6 +45,8 @@ export function Tree({
   onExpandedChange: (keys: string[]) => void;
   onSelect: (node: TreeNode) => void;
   loadChildren?: (node: TreeNode) => void | Promise<void>;
+  /** 懒加载失败回调。不传时只记录日志，绝不把 rejection 抛到 window。 */
+  onLoadError?: (node: TreeNode, error: unknown) => void;
   className?: string;
 }) {
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set());
@@ -75,6 +78,12 @@ export function Tree({
     setLoadingKeys((current) => new Set(current).add(node.key));
     try {
       await loadChildren(node);
+    } catch (error) {
+      // 展开动作是 void 调用的：这里必须兜住 rejection，否则就是 unhandled rejection。
+      // 失败时保持展开、由调用方（如 LocalDirectoryPicker 的内联错误）提示，
+      // 也可以在 onLoadError 里自己 toast。
+      if (onLoadError) onLoadError(node, error);
+      else console.error("[Tree] loadChildren failed", error);
     } finally {
       setLoadingKeys((current) => {
         const next = new Set(current);

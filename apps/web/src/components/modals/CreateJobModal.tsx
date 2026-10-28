@@ -9,7 +9,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   createArchiveSchedule,
   createJob,
@@ -78,6 +78,11 @@ const xLinkPattern = /^(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x|twitter)\.com(?
 const tweetStatusPattern = /\/status\/\d+/;
 const listLinkPattern = /(?:^|\/)(?:i\/)?lists\/\d+/;
 
+function normalizeTweetURL(input: string) {
+  const trimmed = input.trim();
+  return xLinkPattern.test(trimmed) && !/^https?:\/\//i.test(trimmed) ? `https://${trimmed}` : trimmed;
+}
+
 // 从主页链接、@handle 或纯 handle 中取出用户名；无法识别时返回 null。
 export function parseScreenName(input: string): string | null {
   const trimmed = input.trim();
@@ -89,7 +94,10 @@ export function parseScreenName(input: string): string | null {
 export function detectQuickInputTab(input: string): "tweet_link" | "list" | "user" {
   const trimmed = input.trim();
   if (tweetStatusPattern.test(trimmed)) return "tweet_link";
-  if (listLinkPattern.test(trimmed) || /^\d{5,}$/.test(trimmed)) return "list";
+  // 纯数字 ID 更常见的是用户 ID（列表 ID 也会走到这里，后端两种都能解析；
+  // 之前的实现判成 list，导致粘贴用户 ID 后必须手动切 tab）。
+  if (/^\d{5,}$/.test(trimmed)) return "user";
+  if (listLinkPattern.test(trimmed)) return "list";
   return "user";
 }
 
@@ -134,20 +142,21 @@ export function CreateJobModal({
   const [batchInputs, setBatchInputs] = useState<Partial<Record<BatchKind, string>>>({});
 
   const [parsedTweet, setParsedTweet] = useState<TweetData | null>(null);
+  const parseSequence = useRef(0);
 
   const [isSchedule, setIsSchedule] = useState(false);
   const [scheduleName, setScheduleName] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState(360);
 
   useEffect(() => {
+    parseSequence.current += 1;
+    setParsedTweet(null);
     if (!open) return;
     if (initialInput) {
       const quickTab = detectQuickInputTab(initialInput);
       setActiveTab(quickTab);
       if (quickTab === "tweet_link") {
-        const trimmed = initialInput.trim();
-        // 后端只认带协议的推文链接，补齐 x.com/... 这类省略协议的输入。
-        setTweetUrl(xLinkPattern.test(trimmed) && !/^https?:\/\//i.test(trimmed) ? `https://${trimmed}` : trimmed);
+        setTweetUrl(normalizeTweetURL(initialInput));
       } else {
         setBatchInputs({ [quickTab]: initialInput });
       }
@@ -169,21 +178,24 @@ export function CreateJobModal({
   }, [activeTab, batchInputs]);
 
   const parseMutation = useMutation({
-    mutationFn: parseTweetLink,
-    onSuccess: (data) => {
+    mutationFn: ({ url }: { url: string; sequence: number }) => parseTweetLink(url),
+    onSuccess: (data, request) => {
+      if (request.sequence !== parseSequence.current) return;
       setParsedTweet(data);
       toast.success({
         message: "推文解析成功",
         description: `包含 ${data.media.length} 个媒体，作者 @${data.author.screenName}`,
       });
     },
-    onError: notifyError("解析失败"),
+    onError: (error, request) => {
+      if (request.sequence === parseSequence.current) notifyError("解析失败")(error);
+    },
   });
 
   const createJobsMutation = useMutation({
     mutationFn: async () => {
       if (activeTab === "tweet_link") {
-        const targetUrl = tweetUrl.trim();
+        const targetUrl = normalizeTweetURL(tweetUrl);
         if (!targetUrl) throw new Error("请输入推文链接");
         const title = parsedTweet
           ? `推文 @${parsedTweet.author.screenName} (${parsedTweet.id})`
@@ -229,6 +241,7 @@ export function CreateJobModal({
   });
 
   const handleClose = () => {
+    parseSequence.current += 1;
     setTweetUrl("");
     setBatchInputs({});
     setParsedTweet(null);
@@ -238,10 +251,11 @@ export function CreateJobModal({
   };
 
   const handleParseTweet = () => {
-    const trimmed = tweetUrl.trim();
+    const trimmed = normalizeTweetURL(tweetUrl);
     if (!trimmed) return;
     setParsedTweet(null);
-    parseMutation.mutate(trimmed);
+    parseSequence.current += 1;
+    parseMutation.mutate({ url: trimmed, sequence: parseSequence.current });
   };
 
   const tabItems: TabItem[] = [
@@ -287,6 +301,7 @@ export function CreateJobModal({
             <Input
               value={tweetUrl}
               onChange={(e) => {
+                parseSequence.current += 1;
                 setTweetUrl(e.target.value);
                 setParsedTweet(null);
               }}

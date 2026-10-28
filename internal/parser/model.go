@@ -19,6 +19,8 @@ type MediaVariant struct {
 }
 
 type Media struct {
+	// ID 是媒体的稳定身份：优先 Snowflake ID（id_str/id）；没有时由归一化 URL 的
+	// hash 生成（"url-<hex>"），不会随 photos 序号或 URL 写法变化。下游可当去重键。
 	ID         string         `json:"id"`
 	Type       MediaType      `json:"type"`
 	URL        string         `json:"url"`

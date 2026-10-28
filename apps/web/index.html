@@ -3,6 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="open-Xdownload：本地运行的 X/Twitter 媒体归档工具，支持多账号 Cookie 池、增量归档、失败重试与媒体库管理。"
+    />
+    <!-- 与 index.css 的 --canvas 保持一致：亮色 #f8fafc / 暗色 #09090b，避免移动端地址栏与页面色差 -->
+    <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <title>open-Xdownload</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -11,6 +18,15 @@
   </head>
   <body class="antialiased">
     <div id="root"></div>
+    <noscript>
+      <div style="margin: 12vh auto; max-width: 32rem; padding: 0 1.5rem; font-family: system-ui, sans-serif; line-height: 1.7;">
+        <h1 style="font-size: 1.125rem; margin-bottom: 0.5rem;">需要启用 JavaScript</h1>
+        <p style="margin: 0; color: #55657a;">
+          open-Xdownload 是单页应用，界面依赖 JavaScript 渲染。请在浏览器中启用 JavaScript，或改用
+          <code>curl http://127.0.0.1:8787/api/health</code> 检查服务是否正常运行。
+        </p>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

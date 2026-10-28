@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math"
 	"net/http"
@@ -21,14 +22,18 @@ import (
 )
 
 var (
-	tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/([^/?#]+)/status/([0-9]+)`)
+	tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/([^/?#]+|i/web)/status/([0-9]+)(?:[/?#]|$)`)
 	// 仅匹配主机为 twimg.com（及其子域 pbs./video. 等）的 URL：主机部分必须紧跟 :// 之后，
 	// 避免 `http://攻击者/?pbs.twimg.com=x.mp4` 这类把 twimg.com 放在 query 里的伪造 URL
 	// 被提取并随后由 downloader 拉取（SSRF，如云元数据端点）。
 	mediaURLPattern = regexp.MustCompile(`https?://(?:[a-z0-9-]+\.)*twimg\.com(?:/[^\s"'<>\\]*)?`)
+	// qualityPattern 匹配 video.twimg.com 路径中的分辨率段，如 1280x720。
+	qualityPattern = regexp.MustCompile(`(?i)^(\d{2,5})x(\d{2,5})$`)
 )
 
 const syndicationTweetResultURL = "https://cdn.syndication.twimg.com/tweet-result"
+
+var ErrTweetUnavailable = errors.New("推文不可用（已删除或受限）")
 
 type Service struct {
 	client         *http.Client
@@ -77,25 +82,6 @@ func (s *Service) ParseTweetLinkWithClient(ctx context.Context, rawURL string, c
 		return TweetData{}, err
 	}
 	return s.parseSyndicationTweetWithClient(ctx, rawURL, username, tweetID, options, client)
-}
-
-func (s *Service) ParseTweetJSON(rawURL string, payload []byte) (TweetData, error) {
-	return s.ParseTweetJSONWithOptions(rawURL, payload, ParseOptions{})
-}
-
-func (s *Service) ParseTweetJSONWithOptions(rawURL string, payload []byte, options ParseOptions) (TweetData, error) {
-	username, tweetID, err := ExtractTweetURL(rawURL)
-	if err != nil {
-		return TweetData{}, err
-	}
-	result := gjson.GetBytes(payload, "data.threaded_conversation_with_injections_v2.instructions.0.entries.0.content.itemContent.tweet_results.result")
-	if !result.Exists() {
-		result = gjson.GetBytes(payload, "data.tweetResult.result")
-	}
-	if !result.Exists() {
-		return TweetData{}, errors.New("payload 中没有找到 tweet result")
-	}
-	return tweetFromResult(rawURL, username, tweetID, result, options)
 }
 
 func TweetFromGraphQLResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result) (TweetData, error) {
@@ -154,6 +140,9 @@ func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, 
 	if result.Get("__typename").String() == "TweetWithVisibilityResults" {
 		result = result.Get("tweet")
 	}
+	if kind := result.Get("__typename").String(); kind == "TweetTombstone" || kind == "TweetUnavailable" {
+		return TweetData{}, ErrTweetUnavailable
+	}
 	legacy := result.Get("legacy")
 	if !legacy.Exists() {
 		return TweetData{}, errors.New("payload 中没有 legacy tweet")
@@ -163,16 +152,18 @@ func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, 
 		id = fallbackID
 	}
 	author := parseAuthor(result.Get("core.user_results.result"), fallbackUsername)
-	createdAt := time.Now().UTC()
-	if raw := legacy.Get("created_at").String(); raw != "" {
-		if parsed, err := time.Parse(time.RubyDate, raw); err == nil {
-			createdAt = parsed
-		}
+	createdAt, err := tweetCreatedAt(legacy.Get("created_at").String(), time.RubyDate, id)
+	if err != nil {
+		return TweetData{}, err
+	}
+	text := result.Get("note_tweet.note_tweet_results.result.text").String()
+	if text == "" {
+		text = legacy.Get("full_text").String()
 	}
 	return TweetData{
 		ID:        id,
 		URL:       canonicalTweetURL(author.ScreenName, id),
-		Text:      legacy.Get("full_text").String(),
+		Text:      text,
 		CreatedAt: createdAt,
 		Author:    author,
 		Media:     parseTweetResultMedia(result, options),
@@ -305,8 +296,8 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 		return TweetData{}, errors.New("X 推文详情响应中没有推文数据")
 	}
 	// 已删除/受限推文返回 TweetTombstone：不能当成"一条没有媒体的推文"静默处理。
-	if result.Get("__typename").String() == "TweetTombstone" {
-		return TweetData{}, errors.New("推文不可用（已删除或受限）")
+	if kind := result.Get("__typename").String(); kind == "TweetTombstone" || kind == "TweetUnavailable" {
+		return TweetData{}, ErrTweetUnavailable
 	}
 	return tweetFromSyndication(rawURL, fallbackUsername, fallbackID, result, options)
 }
@@ -324,11 +315,9 @@ func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID str
 	if author.ScreenName == "" {
 		author.ScreenName = fallbackUsername
 	}
-	createdAt := time.Now().UTC()
-	if raw := result.Get("created_at").String(); raw != "" {
-		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-			createdAt = parsed
-		}
+	createdAt, err := tweetCreatedAt(result.Get("created_at").String(), time.RFC3339Nano, id)
+	if err != nil {
+		return TweetData{}, err
 	}
 	return TweetData{
 		ID:        id,
@@ -338,6 +327,23 @@ func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID str
 		Author:    author,
 		Media:     parseSyndicationMedia(result, options),
 	}, nil
+}
+
+func tweetCreatedAt(raw, layout, id string) (time.Time, error) {
+	if raw != "" {
+		parsed, err := time.Parse(layout, raw)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("推文 %s 的 created_at 无效: %w", id, err)
+		}
+		return parsed, nil
+	}
+	// X snowflake IDs encode the creation time; missing metadata must not
+	// turn an archived post into a post dated at the time of download.
+	snowflake, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("推文 %s 缺少有效创建时间", id)
+	}
+	return time.UnixMilli(int64(snowflake>>22) + 1288834974657).UTC(), nil
 }
 
 func parseSyndicationMedia(result gjson.Result, options ParseOptions) []Media {
@@ -356,7 +362,7 @@ func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[strin
 		appendUniqueMedia(items, seen, []Media{media})
 	}
 	appendUniqueMedia(items, seen, parseCardMedia(result.Get("card")))
-	for index, item := range result.Get("photos").Array() {
+	for _, item := range result.Get("photos").Array() {
 		rawURL := item.Get("url").String()
 		if rawURL == "" {
 			continue
@@ -370,7 +376,7 @@ func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[strin
 		// mediaDetails 常常是同一份图片的不同写法（`.jpg` 对 `?format=jpg`），按原始
 		// 字符串去重会漏判，把同一张图片重复下载一次。
 		appendUniqueMedia(items, seen, []Media{{
-			ID:         fmt.Sprintf("photo-%d", index+1),
+			ID:         stableMediaID(rawURL),
 			Type:       MediaPhoto,
 			URL:        rawURL,
 			PreviewURL: rawURL,
@@ -390,7 +396,8 @@ func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[strin
 func mediaFromSyndicationDetail(item gjson.Result) Media {
 	media := mediaFromDetail(item)
 	if media.ID == "" {
-		media.ID = firstString(item.Get("expanded_url"), item.Get("url"), item.Get("media_url_https"))
+		// 无 Snowflake ID 时用归一化 URL 的稳定 hash，而不是把完整 URL/序号当 ID。
+		media.ID = stableMediaID(firstString(item.Get("expanded_url"), item.Get("url"), item.Get("media_url_https")))
 	}
 	return media
 }
@@ -404,6 +411,8 @@ func mediaFromDetail(item gjson.Result) Media {
 		mediaURL = ""
 	}
 	media := Media{
+		// Media.ID 语义：优先 Snowflake ID（id_str/id）；缺失时由 stableMediaID 从
+		// 归一化 URL 生成稳定 hash，下游可安全当去重/展示键使用。
 		ID:         firstString(item.Get("id_str"), item.Get("id")),
 		Type:       kind,
 		URL:        mediaURL,
@@ -416,12 +425,18 @@ func mediaFromDetail(item gjson.Result) Media {
 		if media.PreviewURL == "" {
 			media.PreviewURL = media.URL
 		}
+		if media.ID == "" {
+			media.ID = stableMediaID(mediaIdentityURL(media))
+		}
 		return media
 	}
 	if media.Type == "" {
 		media.Type = MediaPhoto
 	}
 	media.BestURL = media.URL
+	if media.ID == "" {
+		media.ID = stableMediaID(mediaIdentityURL(media))
+	}
 	return media
 }
 
@@ -465,10 +480,9 @@ func parseCardBindingMedia(binding string, mediaEntities map[string]gjson.Result
 			return items
 		}
 	}
+	seen := map[string]struct{}{}
 	for _, rawURL := range mediaURLPattern.FindAllString(binding, -1) {
-		if media := mediaFromURL(rawURL); mediaKey(media) != "" {
-			items = append(items, media)
-		}
+		appendScannedMedia(&items, seen, mediaFromURL(rawURL))
 	}
 	return items
 }
@@ -537,9 +551,7 @@ func collectMediaURLs(result gjson.Result, items *[]Media, seen map[string]struc
 	}
 	if result.Type == gjson.String {
 		for _, rawURL := range mediaURLPattern.FindAllString(result.String(), -1) {
-			if media := mediaFromURL(rawURL); mediaKey(media) != "" {
-				appendUniqueMedia(items, seen, []Media{media})
-			}
+			appendScannedMedia(items, seen, mediaFromURL(rawURL))
 		}
 		return
 	}
@@ -547,9 +559,7 @@ func collectMediaURLs(result gjson.Result, items *[]Media, seen map[string]struc
 		return
 	}
 	for _, rawURL := range mediaURLPattern.FindAllString(result.Raw, -1) {
-		if media := mediaFromURL(rawURL); mediaKey(media) != "" {
-			appendUniqueMedia(items, seen, []Media{media})
-		}
+		appendScannedMedia(items, seen, mediaFromURL(rawURL))
 	}
 	result.ForEach(func(_, value gjson.Result) bool {
 		collectMediaURLs(value, items, seen, depth+1)
@@ -641,7 +651,7 @@ func mediaFromURL(rawURL string) Media {
 		return Media{}
 	}
 	media := Media{
-		ID:         rawURL,
+		ID:         stableMediaID(rawURL),
 		Type:       kind,
 		URL:        rawURL,
 		PreviewURL: rawURL,
@@ -738,6 +748,41 @@ func appendUniqueMedia(items *[]Media, seen map[string]struct{}, mediaItems []Me
 	}
 }
 
+// appendScannedMedia 用于卡片兜底扫描：同一个视频的每个清晰度变体都会被扫到一次，
+// 它们的身份键相同（媒体 ID）。appendUniqueMedia 保留先出现的那条，可能正好是最低
+// 清晰度；这里改为保留路径里分辨率最高的那条。扫描结果都来自 mediaFromURL，替换时
+// 不会丢掉海报地址或 Snowflake ID。
+func appendScannedMedia(items *[]Media, seen map[string]struct{}, media Media) {
+	key := mediaKey(media)
+	if key == "" {
+		return
+	}
+	if _, ok := seen[key]; !ok {
+		seen[key] = struct{}{}
+		*items = append(*items, media)
+		return
+	}
+	for index, existing := range *items {
+		if mediaKey(existing) == key {
+			if resolutionPixels(media.BestURL) > resolutionPixels(existing.BestURL) {
+				(*items)[index] = media
+			}
+			return
+		}
+	}
+}
+
+// resolutionPixels 返回 URL 路径里分辨率段（如 1280x720）的像素数，没有时返回 0。
+func resolutionPixels(rawURL string) int64 {
+	width, height, ok := strings.Cut(qualityFromURL(rawURL), "x")
+	if !ok {
+		return 0
+	}
+	w, _ := strconv.ParseInt(width, 10, 64)
+	h, _ := strconv.ParseInt(height, 10, 64)
+	return w * h
+}
+
 // mediaKey 返回用于同一条推文内去重的媒体身份键。键按 downloader.MediaIdentity 归一化，
 // 使同一份媒体的不同 URL 写法（`.jpg` 与 `?format=jpg`、易变的 `?tag=`、大小写主机名）
 // 收敛到同一个键：推文自身、被转推推文与引用推文的媒体列表常常重复列出同一份媒体，
@@ -786,13 +831,99 @@ func firstString(values ...gjson.Result) string {
 	return ""
 }
 
+// v8Base36 复刻 V8 Number.prototype.toString(radix) 的 DoubleToRadixCString 算法：
+// 以 double 精度（delta = 0.5*ulp）逐位生成小数、四舍六入五成双，并在进位时回溯。
+// 这是 X 前端 ((id/1e15)*Math.PI).toString(36) 的实际行为；仅用"最短往返"
+// 会在小 ID（如 id=20）上少一位，与真实 token 不一致。
+func v8Base36(value float64) (string, bool) {
+	const radix = 36
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	if value == 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return "", false
+	}
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	integer := math.Floor(value)
+	fraction := value - integer
+	// 只计算到 double 精度：半个 ulp。
+	delta := 0.5 * (math.Nextafter(value, math.Inf(1)) - value)
+	if minDelta := math.Nextafter(0, 1); delta < minDelta {
+		delta = minDelta
+	}
+	fracDigits := make([]byte, 0, 64)
+	if fraction >= delta {
+		for {
+			fraction *= radix
+			delta *= radix
+			digit := int(fraction)
+			if digit < 0 || digit >= radix {
+				digit = 0
+			}
+			fracDigits = append(fracDigits, digits[digit])
+			fraction -= float64(digit)
+			// 四舍六入五成双；需要进位时回溯已写小数位。
+			if fraction > 0.5 || (fraction == 0.5 && digit&1 == 1) {
+				if fraction+delta > 1 {
+					carried := false
+					for len(fracDigits) > 0 {
+						last := len(fracDigits) - 1
+						previous := digitValue(fracDigits[last])
+						fracDigits = fracDigits[:last]
+						if previous+1 < radix {
+							fracDigits = append(fracDigits, digits[previous+1])
+							carried = true
+							break
+						}
+					}
+					if !carried {
+						integer += 1
+					}
+					break
+				}
+			}
+			if fraction < delta {
+				break
+			}
+		}
+	}
+	text := strconv.FormatInt(int64(integer), 36)
+	var builder strings.Builder
+	if negative {
+		builder.WriteByte('-')
+	}
+	builder.WriteString(text)
+	if len(fracDigits) > 0 {
+		builder.WriteByte('.')
+		builder.Write(fracDigits)
+	}
+	return builder.String(), true
+}
+
+func digitValue(ch byte) int {
+	switch {
+	case ch >= '0' && ch <= '9':
+		return int(ch - '0')
+	case ch >= 'a' && ch <= 'z':
+		return int(ch-'a') + 10
+	default:
+		return 0
+	}
+}
+
 func syndicationToken(tweetID string) string {
 	id, err := strconv.ParseFloat(tweetID, 64)
 	if err != nil {
 		return ""
 	}
 	value := id / 1e15 * math.Pi
-	raw := formatBase36Float(value)
+	raw, ok := v8Base36(value)
+	if !ok {
+		return ""
+	}
+	// 与 X 前端 ((id/1e15)*Math.PI).toString(36).replace(/(0+|\.)/g,"") 一致：
+	// 去掉所有 '0' 与小数点（不是只去尾部零）。
 	return strings.Map(func(ch rune) rune {
 		if ch == '0' || ch == '.' {
 			return -1
@@ -801,38 +932,45 @@ func syndicationToken(tweetID string) string {
 	}, raw)
 }
 
-func formatBase36Float(value float64) string {
-	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-	integer := math.Floor(value)
-	raw := strconv.FormatInt(int64(integer), 36)
-	fraction := value - integer
-	if fraction == 0 {
-		return raw
-	}
-	var builder strings.Builder
-	builder.WriteString(raw)
-	builder.WriteByte('.')
-	for i := 0; i < 20 && fraction > 0; i++ {
-		fraction *= 36
-		digit := int(fraction)
-		if digit >= 36 {
-			digit = 35
-		}
-		builder.WriteByte(digits[digit])
-		fraction -= float64(digit)
-	}
-	return builder.String()
-}
-
+// qualityFromURL 从 video.twimg.com 路径里的 "1280x720" 这类分辨率段提取清晰度；
+// 旧实现要求同一段同时含 'x' 和 '.'，实际 URL 永远不满足，导致 Quality 恒为空。
 func qualityFromURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return ""
 	}
-	parts := strings.Split(parsed.Path, "/")
-	for _, part := range parts {
-		if strings.Contains(part, "x") && strings.Contains(part, ".") {
-			return strings.TrimSuffix(part, ".mp4")
+	for _, part := range strings.Split(parsed.Path, "/") {
+		if match := qualityPattern.FindStringSubmatch(part); match != nil {
+			return match[1] + "x" + match[2]
+		}
+	}
+	return ""
+}
+
+// stableMediaID 对没有 Snowflake ID（id_str/id）的媒体生成稳定身份 ID：对归一化后的
+// 媒体 URL 取 FNV-64a。避免把完整 URL 当 ID（同一媒体不同写法会得到不同 ID），
+// 也比 syndication 的 photo-N 序号稳定（序号会随 photos 数组顺序/内容变化）。
+func stableMediaID(rawURL string) string {
+	key := downloader.MediaIdentity(rawURL)
+	if key == "" {
+		return ""
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(key))
+	return fmt.Sprintf("url-%016x", hash.Sum64())
+}
+
+// mediaIdentityURL 返回用于生成稳定 ID 的媒体 URL：优先下载地址，其次展示地址/变体。
+func mediaIdentityURL(media Media) string {
+	if media.BestURL != "" {
+		return media.BestURL
+	}
+	if media.URL != "" {
+		return media.URL
+	}
+	for _, variant := range media.Variants {
+		if variant.URL != "" {
+			return variant.URL
 		}
 	}
 	return ""

@@ -19,7 +19,9 @@ const alignClass = {
   center: "text-center",
 } as const;
 
-// 手写表格。语义 <table> + 粘性表头 + 横向滚动容器。
+// 手写表格。语义 <table> + 横向滚动容器（表头不吸顶：垂直滚动发生在页面/外层
+// 容器上，要吸顶得给表格加 max-height，那会改变调用方布局，所以这里不做，
+// 也不在注释里声称支持）。
 // 展开行用第二个 <tr> 承载，colSpan 跨满整行；展开按钮带 aria-expanded/aria-controls。
 export function Table<T>({
   columns,

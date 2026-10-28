@@ -12,7 +12,15 @@ export {
   Skeleton,
 } from "./Feedback";
 export { Field, Input, NumberInput, PasswordInput, SearchInput, Textarea } from "./Input";
-export { Drawer, MediaModal, Modal, Popconfirm, Tooltip, TooltipProvider } from "./Overlay";
+export {
+  Drawer,
+  MediaModal,
+  Modal,
+  Popconfirm,
+  SimplePopover,
+  Tooltip,
+  TooltipProvider,
+} from "./Overlay";
 export { Pagination, buildPageItems } from "./Pagination";
 export { SearchSelect } from "./SearchSelect";
 export { LoadingOverlay, Spinner } from "./Spinner";

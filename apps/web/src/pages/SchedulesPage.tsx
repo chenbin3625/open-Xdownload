@@ -22,7 +22,7 @@ import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Switch } from "../components/ui/Controls";
-import { Empty, Skeleton } from "../components/ui/Feedback";
+import { Alert, Empty, Skeleton } from "../components/ui/Feedback";
 import { Popconfirm } from "../components/ui/Overlay";
 import { Tag } from "../components/ui/Tag";
 import { toast } from "../components/ui/Toast";
@@ -30,12 +30,14 @@ import { toast } from "../components/ui/Toast";
 export interface SchedulesPageProps {
   schedules: ArchiveSchedule[];
   loading?: boolean;
+  error?: string;
   onOpenCreateModal: () => void;
 }
 
 export function SchedulesPage({
   schedules,
   loading = false,
+  error,
   onOpenCreateModal,
 }: SchedulesPageProps) {
   const queryClient = useQueryClient();
@@ -100,7 +102,9 @@ export function SchedulesPage({
         </Button>
       </div>
 
-      {loading && schedules.length === 0 ? (
+      {error ? (
+        <Alert type="error" showIcon message="定时计划加载失败" description={error} />
+      ) : loading && schedules.length === 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 3 }, (_, index) => (
             <Card key={index} size="sm">

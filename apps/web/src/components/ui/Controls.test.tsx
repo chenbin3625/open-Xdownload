@@ -4,7 +4,8 @@ import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { Button } from "./Button";
-import { Checkbox, Segmented, Switch, Tabs } from "./Controls";
+import { Checkbox, Select, Segmented, Switch, Tabs } from "./Controls";
+import { Field } from "./Input";
 import { SearchSelect } from "./SearchSelect";
 
 const options = [
@@ -55,6 +56,25 @@ describe("Switch", () => {
   });
 });
 
+describe("Select", () => {
+  it("uses the surrounding Field id so its label is associated", () => {
+    render(
+      <Field label="文件命名策略">
+        <Select
+          value="tweet_text"
+          onChange={() => {}}
+          options={[{ value: "tweet_text", label: "仅推文" }]}
+        />
+      </Field>,
+    );
+
+    const label = screen.getByText("文件命名策略");
+    const trigger = screen.getByRole("combobox");
+    expect(trigger.id).not.toBe("");
+    expect(label.closest("label")?.htmlFor).toBe(trigger.id);
+  });
+});
+
 describe("Checkbox", () => {
   it("点击标签也能切换（label 与控件已关联）", async () => {
     const user = userEvent.setup();
@@ -98,7 +118,7 @@ describe("SearchSelect", () => {
     const user = userEvent.setup();
     render(<SearchSelect value="all" onChange={() => {}} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("combobox", { name: "筛选" }));
+    await user.click(screen.getByRole("button", { name: "筛选" }));
     await user.type(screen.getByPlaceholderText("搜索..."), "列表");
 
     expect(screen.getAllByRole("option")).toHaveLength(1);
@@ -109,7 +129,7 @@ describe("SearchSelect", () => {
     const user = userEvent.setup();
     render(<SearchSelect value="all" onChange={() => {}} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("combobox", { name: "筛选" }));
+    await user.click(screen.getByRole("button", { name: "筛选" }));
     await user.type(screen.getByPlaceholderText("搜索..."), "zzz");
 
     expect(screen.queryAllByRole("option")).toHaveLength(0);
@@ -121,8 +141,10 @@ describe("SearchSelect", () => {
     const onChange = vi.fn();
     render(<SearchSelect value="all" onChange={onChange} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("combobox", { name: "筛选" }));
+    await user.click(screen.getByRole("button", { name: "筛选" }));
     const search = screen.getByPlaceholderText("搜索...");
+    expect(screen.getByRole("combobox", { name: "筛选" })).toBe(search);
+    expect(document.activeElement).toBe(search);
 
     await user.keyboard("{ArrowDown}");
     // aria-activedescendant 必须指向真实存在的 option，否则读屏读不出高亮
@@ -139,7 +161,7 @@ describe("SearchSelect", () => {
     const user = userEvent.setup();
     render(<SearchSelect value="list" onChange={() => {}} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("combobox", { name: "筛选" }));
+    await user.click(screen.getByRole("button", { name: "筛选" }));
     expect(screen.getByRole("option", { name: "列表归档" }).getAttribute("aria-selected")).toBe(
       "true",
     );
@@ -147,7 +169,7 @@ describe("SearchSelect", () => {
 
   it("支持 sm 尺寸并渲染对应高度样式", () => {
     render(<SearchSelect value="all" size="sm" onChange={() => {}} options={options} ariaLabel="小号选择器" />);
-    const trigger = screen.getByRole("combobox", { name: "小号选择器" });
+    const trigger = screen.getByRole("button", { name: "小号选择器" });
     expect(trigger.className).toContain("h-7");
     expect(trigger.className).toContain("text-xs");
   });

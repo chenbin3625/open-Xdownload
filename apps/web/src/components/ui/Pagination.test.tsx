@@ -77,6 +77,33 @@ describe("Pagination", () => {
     expect(screen.queryByRole("combobox", { name: "每页条数" })).toBeNull();
   });
 
+  it("pageSize 为 0 时不渲染 Infinity 页码", () => {
+    // 除零会让 Math.ceil(total / 0) = Infinity，页码里会出现 "Infinity"
+    render(<Pagination page={1} pageSize={0} total={100} onPageChange={() => {}} />);
+    expect(screen.queryByText("Infinity")).toBeNull();
+    expect(screen.getByRole("button", { name: "第 1 页" })).not.toBeNull();
+  });
+
+  it("total 为负或 page 非有限值时收敛到第 1 页", () => {
+    const { unmount } = render(
+      <Pagination page={1} pageSize={10} total={-5} onPageChange={() => {}} />,
+    );
+    expect(screen.getByText("共 0 条")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "第 1 页" })).not.toBeNull();
+    unmount();
+
+    render(<Pagination page={Number.NaN} pageSize={10} total={30} onPageChange={() => {}} />);
+    expect(screen.queryByText("NaN")).toBeNull();
+    expect(screen.getByRole("button", { name: "第 1 页" })).not.toBeNull();
+  });
+
+  it("当前页码使用品牌色的配对前景色", () => {
+    render(<Pagination page={2} pageSize={10} total={100} onPageChange={() => {}} />);
+    const current = screen.getByRole("button", { name: "第 2 页" });
+    expect(current.className).toContain("text-brand-contrast");
+    expect(current.className).not.toContain("text-white");
+  });
+
   it("totalLabel 自定义总数文案", () => {
     render(
       <Pagination

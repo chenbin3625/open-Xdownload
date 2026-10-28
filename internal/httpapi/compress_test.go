@@ -104,6 +104,61 @@ func TestCompressJSONIdentityWhenNotAccepted(t *testing.T) {
 	}
 }
 
+func TestCompressJSONRecoversWithoutPublishingPartialJSON(t *testing.T) {
+	for _, encoding := range []string{"", "gzip"} {
+		t.Run(encoding, func(t *testing.T) {
+			handler := compressJSON(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"partial":`))
+				panic("private failure")
+			}))
+			request := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+			request.Header.Set("Accept-Encoding", encoding)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "partial") || strings.Contains(response.Body.String(), "private failure") {
+				t.Fatalf("panic response = %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestCompressJSONIdentityVariesByEncoding(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		response := httptest.NewRecorder()
+		compressJSON(http.HandlerFunc(jsonHandler)).ServeHTTP(response, httptest.NewRequest(method, "/api/config", nil))
+		if !strings.Contains(response.Header().Get("Vary"), "Accept-Encoding") {
+			t.Errorf("%s lacks Vary", method)
+		}
+	}
+}
+
+func TestCompressedRequestBodyLimitClosesConnection(t *testing.T) {
+	server := httptest.NewServer(compressJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload any
+		if err := decodeJSON(w, r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	})))
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/config", strings.NewReader(`"`+strings.Repeat("x", 2<<20)+`"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept-Encoding", "gzip")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if !response.Close {
+		t.Fatal("oversized request left the connection reusable")
+	}
+}
+
 func TestCompressJSONSkipsTinyPayloads(t *testing.T) {
 	handler := compressJSON(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

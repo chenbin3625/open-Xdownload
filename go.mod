@@ -8,6 +8,7 @@ require (
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/quic-go/quic-go v0.62.0
 	github.com/tidwall/gjson v1.19.0
+	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.59.0
 )
 
@@ -22,7 +23,6 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	modernc.org/libc v1.76.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

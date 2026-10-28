@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../../lib/api";
-import { renderWithProviders, screen, waitFor } from "../../test/render";
+import { act, renderWithProviders, screen, waitFor } from "../../test/render";
 import { toast } from "../ui/Toast";
 import { CreateJobModal, detectQuickInputTab, parseScreenName } from "./CreateJobModal";
 
@@ -15,6 +15,7 @@ vi.mock("../../lib/api", async (importOriginal) => {
     createJob: vi.fn(),
     createJobsBatch: vi.fn(),
     createArchiveSchedule: vi.fn(),
+    parseTweetLink: vi.fn(),
   };
 });
 
@@ -47,7 +48,9 @@ describe("detectQuickInputTab", () => {
     ["twitter.com/OpenAI/status/1234567890?s=20", "tweet_link"],
     ["https://x.com/i/lists/1647289190", "list"],
     ["https://twitter.com/lists/1647289190", "list"],
-    ["1492019283", "list"],
+    // 纯数字 ID 按用户处理（列表链接必须带 lists/ 才判 list），避免粘用户 ID 后还要手动切 tab
+    ["1492019283", "user"],
+    ["987654321", "user"],
     ["https://x.com/OpenAI", "user"],
     ["https://x.com/OpenAI/media", "user"],
     ["x.com/OpenAI?s=20", "user"],
@@ -72,6 +75,7 @@ describe("CreateJobModal", () => {
     vi.mocked(api.createJob).mockReset();
     vi.mocked(api.createJobsBatch).mockReset();
     vi.mocked(api.createArchiveSchedule).mockReset();
+    vi.mocked(api.parseTweetLink).mockReset();
   });
 
   it("drops schedule wording once the single-tweet tab is selected", async () => {
@@ -125,5 +129,38 @@ describe("CreateJobModal", () => {
     expect(
       (screen.getByPlaceholderText("https://x.com/username/status/1234567890") as HTMLInputElement).value,
     ).toBe("https://x.com/OpenAI/status/123");
+  });
+
+  it("ignores a parse response after the tweet input changes", async () => {
+    let resolveParse!: (tweet: api.TweetData) => void;
+    vi.mocked(api.parseTweetLink).mockImplementation(() => new Promise((resolve) => { resolveParse = resolve; }));
+    const user = userEvent.setup();
+    renderModal({ initialKind: "tweet_link" });
+    const input = screen.getByPlaceholderText("https://x.com/username/status/1234567890");
+    await user.type(input, "https://x.com/first/status/1");
+    await user.click(screen.getByRole("button", { name: "解析推文" }));
+    await waitFor(() => expect(api.parseTweetLink).toHaveBeenCalled());
+    await user.clear(input);
+    await user.type(input, "https://x.com/second/status/2");
+
+    await act(async () => resolveParse({
+      id: "1", url: "https://x.com/first/status/1", text: "stale tweet", createdAt: "",
+      author: { id: "first", screenName: "first", name: "First" }, media: [],
+    }));
+
+    expect(screen.queryByText("stale tweet")).toBeNull();
+  });
+
+  it("normalizes a scheme-less tweet link typed in the single-tweet field", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.createJob).mockResolvedValue({
+      id: 10, kind: "tweet_link", status: "pending", input: "", title: "", progress: 0,
+      message: "", createdAt: "", updatedAt: "",
+    });
+    renderModal({ initialKind: "tweet_link" });
+    await user.type(screen.getByPlaceholderText("https://x.com/username/status/1234567890"), "x.com/OpenAI/status/123");
+    await user.click(screen.getByRole("button", { name: /立即下载/ }));
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledWith("tweet_link", "https://x.com/OpenAI/status/123", expect.any(String)));
   });
 });

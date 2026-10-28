@@ -1,4 +1,4 @@
-import { Check, Menu, Moon, Palette, RefreshCw, Search, Sun } from "lucide-react";
+import { Check, Menu, Moon, Palette, RefreshCw, Search, Sun, WifiOff } from "lucide-react";
 import React, { useState } from "react";
 import { cn } from "../../lib/cn";
 import { THEME_ACCENTS, useTheme } from "../../lib/useTheme";
@@ -13,6 +13,9 @@ export interface AppHeaderProps {
   onQuickSubmit: (input: string) => void;
   onToggleMobileMenu?: () => void;
   showMenuButton?: boolean;
+  /** SSE 断开时置真：顶部显示"实时更新已断开"，点击可手动重连。 */
+  realtimeDisconnected?: boolean;
+  onReconnectRealtime?: () => void;
 }
 
 export function AppHeader({
@@ -21,6 +24,8 @@ export function AppHeader({
   onQuickSubmit,
   onToggleMobileMenu,
   showMenuButton = false,
+  realtimeDisconnected = false,
+  onReconnectRealtime,
 }: AppHeaderProps) {
   const [quickInput, setQuickInput] = useState("");
   const { resolved, toggle, accent, setAccent } = useTheme();
@@ -81,6 +86,19 @@ export function AppHeader({
 
         {/* 右侧运行状态与操作 */}
         <div className="flex shrink-0 items-center gap-2">
+          {realtimeDisconnected && (
+            <button
+              type="button"
+              onClick={onReconnectRealtime}
+              title="实时更新已断开，点击重连"
+              className="flex cursor-pointer items-center gap-1 rounded-control border border-warning/40 bg-warning-soft px-2 py-1 text-[11px] font-medium text-warning transition-colors hover:border-warning"
+            >
+              <WifiOff className="size-3" />
+              <span className="hidden sm:inline">实时更新已断开</span>
+              <RefreshCw className="size-3" />
+            </button>
+          )}
+
           <Tag tone="brand" className="hidden font-mono text-[11px] shadow-2xs sm:inline-flex">
             v{__APP_VERSION__}
           </Tag>

@@ -10,9 +10,11 @@ import { Tree, type TreeNode } from "./Tree";
 function Harness({
   initial,
   loadChildren,
+  onLoadError,
 }: {
   initial: TreeNode[];
   loadChildren?: (node: TreeNode) => Promise<void> | void;
+  onLoadError?: (node: TreeNode, error: unknown) => void;
 }) {
   const [nodes, setNodes] = useState(initial);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
@@ -25,6 +27,7 @@ function Harness({
       selectedKey={selectedKey}
       onExpandedChange={setExpandedKeys}
       onSelect={(node) => setSelectedKey(node.key)}
+      onLoadError={onLoadError}
       loadChildren={
         loadChildren &&
         (async (node) => {
@@ -110,6 +113,25 @@ describe("Tree", () => {
 
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement?.getAttribute("data-key")).toBe("b");
+  });
+
+  it("懒加载失败时回调 onLoadError，不产生未处理 rejection", async () => {
+    const user = userEvent.setup();
+    const failure = new Error("network down");
+    const loadChildren = vi.fn(() => Promise.reject(failure));
+    const onLoadError = vi.fn();
+    render(<Harness initial={twoRoots} loadChildren={loadChildren} onLoadError={onLoadError} />);
+
+    await user.dblClick(screen.getByText("a"));
+
+    await waitFor(() => expect(onLoadError).toHaveBeenCalledTimes(1));
+    expect(onLoadError).toHaveBeenCalledWith(
+      expect.objectContaining({ key: "a" }),
+      failure,
+    );
+    // 失败后 loading 状态要清掉，箭头恢复可点（不能一直转圈）
+    await waitFor(() => expect(screen.queryByRole("img")).toBeNull());
+    expect(screen.getByText("a")).not.toBeNull();
   });
 
   it("Enter 选中并同步 aria-selected", async () => {

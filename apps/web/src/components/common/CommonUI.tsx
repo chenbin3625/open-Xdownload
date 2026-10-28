@@ -1,5 +1,5 @@
 import { Check, Copy } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { JobKind } from "../../lib/api";
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
@@ -144,7 +144,7 @@ export function AppPagination({
   itemName,
   onChange,
   pageSize,
-  pageSizeOptions: _pageSizeOptions,
+  pageSizeOptions,
   simple,
   total,
 }: {
@@ -161,6 +161,7 @@ export function AppPagination({
       <UiPagination
         page={current}
         pageSize={pageSize}
+        pageSizeOptions={pageSizeOptions}
         total={total}
         totalLabel={(t) => (simple ? undefined : `共 ${t} ${itemName}`)}
         onPageChange={(p) => onChange(p, pageSize)}
@@ -290,11 +291,15 @@ export async function copyToClipboard(text: string, label = "路径") {
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), []);
 
   async function handleCopy() {
     if (await writeClipboard(value)) {
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
+      window.clearTimeout(copiedTimer.current);
+      copiedTimer.current = window.setTimeout(() => setCopied(false), 1200);
       return;
     }
     setCopied(false);

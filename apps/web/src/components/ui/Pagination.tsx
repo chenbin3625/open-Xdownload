@@ -27,6 +27,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 export function Pagination({
   page,
   pageSize,
+  pageSizeOptions = PAGE_SIZE_OPTIONS,
   total,
   onPageChange,
   onPageSizeChange,
@@ -36,6 +37,7 @@ export function Pagination({
 }: {
   page: number;
   pageSize: number;
+  pageSizeOptions?: number[];
   total: number;
   onPageChange: (page: number) => void;
   onPageSizeChange?: (pageSize: number) => void;
@@ -43,8 +45,13 @@ export function Pagination({
   size?: "sm" | "md";
   className?: string;
 }) {
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const current = Math.min(Math.max(1, page), totalPages);
+  // 边界：pageSize<=0 会让 Math.ceil(total/0) 变成 Infinity（渲染出 "Infinity" 页码），
+  // total/page 非有限值时同理。这里统一收敛成"至少 1 页"，避免任何越界页码。
+  const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 1;
+  const safeTotal = Number.isFinite(total) && total > 0 ? total : 0;
+  const totalPages = Math.max(1, Math.ceil(safeTotal / safePageSize));
+  const safePage = Number.isFinite(page) ? page : 1;
+  const current = Math.min(Math.max(1, Math.trunc(safePage)), totalPages);
 
   const isSmall = size === "sm";
   const itemSizeClass = isSmall ? "size-7 text-xs" : "size-8 text-xs";
@@ -63,7 +70,7 @@ export function Pagination({
       aria-label="分页"
       className={cn("flex flex-wrap items-center justify-between gap-3", className)}
     >
-      <p className="text-xs text-fg-muted">{totalLabel?.(total) ?? `共 ${total} 条`}</p>
+      <p className="text-xs text-fg-muted">{totalLabel?.(safeTotal) ?? `共 ${safeTotal} 条`}</p>
       <div className="flex items-center gap-1.5">
         <button
           type="button"
@@ -95,7 +102,7 @@ export function Pagination({
                 "border font-medium transition-colors leading-none",
                 itemSizeClass,
                 item === current
-                  ? "border-brand-500 bg-brand-500 text-white"
+                  ? "border-brand-500 bg-brand-500 text-brand-contrast"
                   : "border-line text-fg-body hover:border-brand-400 hover:text-brand-600",
               )}
             >
@@ -118,7 +125,7 @@ export function Pagination({
             ariaLabel="每页条数"
             value={String(pageSize)}
             onChange={(next) => onPageSizeChange(Number(next))}
-            options={PAGE_SIZE_OPTIONS.map((optSize) => ({
+            options={pageSizeOptions.map((optSize) => ({
               value: String(optSize),
               label: `${optSize} 条/页`,
             }))}

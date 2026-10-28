@@ -18,6 +18,19 @@ afterEach(() => {
 });
 
 describe("toast", () => {
+  it("keeps a notification while its close button has keyboard focus", () => {
+    vi.useFakeTimers();
+    render(<Toaster />);
+    act(() => { toast.error({ message: "键盘可读的错误", duration: 1000 }); });
+    const close = screen.getByRole("button", { name: "关闭提示" });
+    act(() => { close.focus(); vi.advanceTimersByTime(500); });
+    act(() => { vi.advanceTimersByTime(1100); });
+    expect(screen.getByText("键盘可读的错误")).not.toBeNull();
+    expect(screen.getByRole("alert")).not.toBeNull();
+    act(() => close.blur());
+    act(() => { vi.advanceTimersByTime(1100); });
+    expect(screen.queryByText("键盘可读的错误")).toBeNull();
+  });
   it("在 React 树之外命令式调用即可渲染", () => {
     render(<Toaster />);
 

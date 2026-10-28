@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -538,6 +539,54 @@ func TestGetJobFilesReturnsDownloadsAndFailedMedia(t *testing.T) {
 	}
 }
 
+func TestLibraryDownloadsPaginationKeepsRetweetSearch(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, storage.JobKindMediaURL, "media", "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range []storage.DownloadRecord{
+		{JobID: job.ID, TweetID: "original", MediaURL: "https://pbs.twimg.com/shared.jpg", FilePath: filepath.Join(root, "shared.jpg")},
+		{JobID: job.ID, TweetID: "shared-status-92831", MediaURL: "https://pbs.twimg.com/shared.jpg", FilePath: filepath.Join(root, "shared.jpg")},
+		{JobID: job.ID, TweetID: "other", MediaURL: "https://pbs.twimg.com/other.jpg", FilePath: filepath.Join(root, "other.jpg")},
+	} {
+		if _, err := store.CreateDownload(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := NewServer(store, nil, nil, nil).Routes()
+	for _, query := range []struct {
+		value string
+		total int
+		tweet string
+	}{
+		{"page=1&pageSize=1", 2, "other"},
+		{"page=1&pageSize=1&search=shared-status-92831", 1, "shared-status-92831"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, newLoopbackRequest(http.MethodGet, "/api/library/downloads?"+query.value, nil))
+		var page struct {
+			Items      []storage.DownloadRecord `json:"items"`
+			Pagination storage.Pagination       `json:"pagination"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&page); err != nil {
+			t.Fatal(err)
+		}
+		if page.Pagination.Total != query.total || len(page.Items) != 1 || page.Items[0].TweetID != query.tweet {
+			t.Fatalf("invalid library page for %s: %+v", query.value, page)
+		}
+	}
+}
+
 func TestServeDownloadFileSupportsRangeAndKeepsPathContained(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -596,8 +645,8 @@ func TestServeDownloadFileSupportsRangeAndKeepsPathContained(t *testing.T) {
 	outRequest := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(outside.ID, 10)+"/file", nil)
 	outResponse := httptest.NewRecorder()
 	handler.ServeHTTP(outResponse, outRequest)
-	if outResponse.Code != http.StatusForbidden {
-		t.Fatalf("outside response = %d, want 403", outResponse.Code)
+	if outResponse.Code != http.StatusNotFound {
+		t.Fatalf("outside response = %d, want 404", outResponse.Code)
 	}
 }
 
@@ -679,6 +728,100 @@ func newLibraryTestServer(t *testing.T) (*storage.Store, http.Handler, string) {
 	return db, NewServer(db, nil, nil, nil).Routes(), root
 }
 
+func TestConfigPartialUpdatePreservesSettings(t *testing.T) {
+	db, handler, root := newLibraryTestServer(t)
+	cfg, err := db.GetStoredConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.IncrementalArchive = true
+	cfg.MaxFilenameLength = 200
+	if _, err := db.UpdateConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	request := newLoopbackRequest(http.MethodPut, "/api/config", strings.NewReader(`{"autoRetryFailed":false}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	got, err := db.GetStoredConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || got.DownloadDir != root || !got.IncrementalArchive || got.MaxFilenameLength != 200 {
+		t.Fatalf("partial update reset settings: status=%d config=%+v", response.Code, got)
+	}
+}
+
+func TestChangingDownloadDirPreservesHistoricalMedia(t *testing.T) {
+	db, handler, root := newLibraryTestServer(t)
+	ctx := context.Background()
+	path := filepath.Join(root, "clip.mp4")
+	if err := os.WriteFile(path, []byte("archived video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".preview.jpg", []byte("archived poster"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://video.twimg.com/a.mp4", "video")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := db.CreateDownload(ctx, storage.DownloadRecord{JobID: job.ID, FilePath: path, MediaURL: job.Input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := db.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DownloadDir = filepath.Join(root, "future")
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := newLoopbackRequest(http.MethodPut, "/api/config", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", response.Code, response.Body.String())
+	}
+	for suffix, want := range map[string]string{"file": "archived video", "preview": "archived poster"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, newLoopbackRequest(http.MethodGet, fmt.Sprintf("/api/library/downloads/%d/%s", record.ID, suffix), nil))
+		if response.Code != http.StatusOK || response.Body.String() != want {
+			t.Errorf("historical %s: %d %s", suffix, response.Code, response.Body.String())
+		}
+	}
+	stored, err := db.GetDownload(ctx, record.ID)
+	if err != nil || stored.FilePath != path {
+		t.Fatalf("historical file was remapped without moving it: %+v %v", stored, err)
+	}
+}
+
+func TestCreateLocalDirectoryHidesFilesystemErrors(t *testing.T) {
+	_, handler, root := newLibraryTestServer(t)
+	file := filepath.Join(root, "existing-file")
+	if err := os.WriteFile(file, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := newLoopbackRequest(http.MethodPost, "/api/local-directories", strings.NewReader(`{"path":`+strconv.Quote(filepath.Join(file, "child"))+`}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code < 400 || strings.Contains(response.Body.String(), root) || strings.Contains(response.Body.String(), "not a directory") {
+		t.Fatalf("filesystem error leaked: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestWriteErrorHidesInternalFailuresEvenWithClientStatus(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeError(response, http.StatusBadRequest, &os.PathError{Op: "open", Path: "/private/archive.db", Err: os.ErrPermission})
+	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "/private/") {
+		t.Fatalf("internal failure leaked: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestServeLibraryFileWhitelistsMediaAndKeepsPathContained(t *testing.T) {
 	_, handler, root := newLibraryTestServer(t)
 
@@ -718,8 +861,8 @@ func TestServeLibraryFileWhitelistsMediaAndKeepsPathContained(t *testing.T) {
 	request = newLoopbackRequest(http.MethodGet, "/api/library/file?path="+url.QueryEscape(outsidePath), nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("outside response = %d, want 403", response.Code)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("outside response = %d, want 404", response.Code)
 	}
 
 	// 目录内的缺失媒体文件返回 404 而非 403。
@@ -771,6 +914,46 @@ func TestServeDownloadPreviewServesLocalPoster(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "poster" {
 		t.Fatalf("preview response = %d %q, want 200 poster", response.Code, response.Body.String())
+	}
+}
+
+func TestServeDownloadPreviewRejectsPosterSymlinkOutsideDownloadRoot(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	root := t.TempDir()
+	outside := t.TempDir()
+	videoPath := filepath.Join(root, "clip.mp4")
+	posterPath := videoPath + ".preview.jpg"
+	if err := os.WriteFile(videoPath, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsidePoster := filepath.Join(outside, "secret.jpg")
+	if err := os.WriteFile(outsidePoster, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePoster, posterPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := store.UpdateConfig(context.Background(), config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(context.Background(), storage.JobKindMediaURL, "https://video.twimg.com/clip.mp4", "clip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.CreateDownload(context.Background(), storage.DownloadRecord{JobID: job.ID, MediaURL: "https://video.twimg.com/clip.mp4", FilePath: videoPath, PreviewURL: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(store, nil, nil, nil).Routes()
+	request := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/preview", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code == http.StatusOK || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("symlinked poster escaped download root: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 

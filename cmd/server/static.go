@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
@@ -105,11 +106,16 @@ func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) 
 	cache := newAssetCache(fsys)
 	fileServer := http.FileServer(fsys)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
 			api.ServeHTTP(w, r)
 			return
 		}
 		setWebAppSecurityHeaders(w)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
 		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		if name == "" {
@@ -123,7 +129,7 @@ func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) 
 
 		item, ok := cache.get(name)
 		if !ok {
-			if strings.HasPrefix(name, "assets/") || path.Ext(name) != "" {
+			if strings.HasPrefix(name, "assets/") || contentTypeFor(name) != "" {
 				http.NotFound(w, r)
 				return
 			}
@@ -133,6 +139,9 @@ func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) 
 				return
 			}
 			name = "index.html"
+		}
+		if compressibleExt[strings.ToLower(path.Ext(name))] {
+			w.Header().Add("Vary", "Accept-Encoding")
 		}
 
 		if name == "index.html" && inject != nil {
@@ -177,9 +186,10 @@ func serveInjectedHTML(w http.ResponseWriter, r *http.Request, html []byte, enco
 	header.Set("Cache-Control", "no-store")
 	header.Set("Content-Type", "text/html; charset=utf-8")
 	header.Set("ETag", etag)
+	// Vary 已由 webAppHandler 按可压缩扩展名统一添加；这里不再重复 Add，
+	// 避免响应出现两行相同的 Vary。
 	if encoding != "" {
 		header.Set("Content-Encoding", encoding)
-		header.Add("Vary", "Accept-Encoding")
 	}
 	if etagMatch(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
@@ -194,8 +204,7 @@ func serveInjectedHTML(w http.ResponseWriter, r *http.Request, html []byte, enco
 }
 
 func serveAsset(w http.ResponseWriter, r *http.Request, name string, item *cachedAsset, encoding string) {
-	body := item.body(encoding)
-	etag := item.etag(encoding)
+	body, etag := item.bodyAndETag(encoding)
 	header := w.Header()
 	setCacheControl(w, name)
 	if item.ctype != "" {
@@ -204,7 +213,6 @@ func serveAsset(w http.ResponseWriter, r *http.Request, name string, item *cache
 	header.Set("ETag", etag)
 	if encoding != "" {
 		header.Set("Content-Encoding", encoding)
-		header.Add("Vary", "Accept-Encoding")
 	}
 	if etagMatch(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
@@ -228,7 +236,8 @@ func setCacheControl(w http.ResponseWriter, name string) {
 
 func etagMatch(header, etag string) bool {
 	for _, part := range strings.Split(header, ",") {
-		if strings.TrimSpace(part) == etag {
+		part = strings.TrimSpace(part)
+		if part == "*" || strings.TrimPrefix(part, "W/") == strings.TrimPrefix(etag, "W/") {
 			return true
 		}
 	}
@@ -245,7 +254,16 @@ type cachedAsset struct {
 	gzip     []byte
 	brotli   []byte
 	ctype    string
-	hash     uint64
+	sources  [3]assetSource
+	// hashes 缓存"该表示实际发送的字节"的哈希。ETag 必须由真正发出的字节算出：
+	// 外部 webDir 部分重建时 identity 与 .br/.gz 可能来自不同版本，若 ETag 取自
+	// identity 而 body 取自 sidecar，就会出现同一 ETag 对应两份内容（缓存串味）。
+	hashes map[string]uint64
+}
+
+type assetSource struct {
+	size     int64
+	modified time.Time
 }
 
 func (a *cachedAsset) ensureIdentity() []byte {
@@ -282,11 +300,26 @@ func (a *cachedAsset) body(encoding string) []byte {
 	}
 }
 
-func (a *cachedAsset) etag(encoding string) string {
-	if encoding == "" {
-		return fmt.Sprintf(`"%x"`, a.hash)
+// bodyAndETag 返回要发送的字节与该字节对应的 ETag。两者由同一次 body() 结果派生，
+// 因此不会出现 ETag 与 body 不是同一版本的问题。
+func (a *cachedAsset) bodyAndETag(encoding string) ([]byte, string) {
+	body := a.body(encoding)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.hashes == nil {
+		a.hashes = make(map[string]uint64, 3)
 	}
-	return fmt.Sprintf(`"%x-%s"`, a.hash, encoding)
+	sum, ok := a.hashes[encoding]
+	if !ok {
+		hasher := fnv.New64a()
+		_, _ = hasher.Write(body)
+		sum = hasher.Sum64()
+		a.hashes[encoding] = sum
+	}
+	if encoding == "" {
+		return body, fmt.Sprintf(`"%x"`, sum)
+	}
+	return body, fmt.Sprintf(`"%x-%s"`, sum, encoding)
 }
 
 type assetCache struct {
@@ -300,8 +333,17 @@ func newAssetCache(fsys http.FileSystem) *assetCache {
 }
 
 func (c *assetCache) get(name string) (*cachedAsset, bool) {
+	var sources [3]assetSource
+	for i, suffix := range []string{"", ".gz", ".br"} {
+		if file, err := c.fsys.Open(name + suffix); err == nil {
+			if info, err := file.Stat(); err == nil && !info.IsDir() {
+				sources[i] = assetSource{size: info.Size(), modified: info.ModTime()}
+			}
+			_ = file.Close()
+		}
+	}
 	c.mu.Lock()
-	if item, ok := c.items[name]; ok {
+	if item, ok := c.items[name]; ok && item.sources == sources {
 		c.mu.Unlock()
 		return item, true
 	}
@@ -310,33 +352,33 @@ func (c *assetCache) get(name string) (*cachedAsset, bool) {
 	identity := readOptional(c.fsys, name)
 	gzipBody := readOptional(c.fsys, name+".gz")
 	brotliBody := readOptional(c.fsys, name+".br")
+	if len(gzipBody) > 0 && len(decompressBytes(gzipBody, httpx.EncodingGzip)) == 0 {
+		gzipBody = nil
+	}
+	if len(brotliBody) > 0 && len(decompressBytes(brotliBody, httpx.EncodingBrotli)) == 0 {
+		brotliBody = nil
+	}
 	if len(identity) == 0 && len(gzipBody) == 0 && len(brotliBody) == 0 {
 		return nil, false
 	}
-	hasher := fnv.New64a()
-	switch {
-	case len(identity) > 0:
-		_, _ = hasher.Write(identity)
-	case len(brotliBody) > 0:
-		_, _ = hasher.Write(brotliBody)
-	default:
-		_, _ = hasher.Write(gzipBody)
-	}
+	// identity 文件存在时始终保留（即使有 sidecar）：identity 请求必须返回 identity
+	// 文件的真实字节，否则 sidecar 陈旧时会用旧内容回答新 identity 的请求。
+	// 内嵌资源没有 identity 文件（sync 脚本按设计删除），因此不会额外占 RSS。
 	item := &cachedAsset{
-		gzip:   gzipBody,
-		brotli: brotliBody,
-		ctype:  contentTypeFor(name),
-		hash:   hasher.Sum64(),
-	}
-	// Sidecar 在时不把 identity 留在 RSS：浏览器走 br/gzip；无压缩客户端首次再解压。
-	if len(gzipBody) == 0 && len(brotliBody) == 0 {
-		item.identity = identity
+		identity: identity,
+		gzip:     gzipBody,
+		brotli:   brotliBody,
+		ctype:    contentTypeFor(name),
+		sources:  sources,
 	}
 
 	c.mu.Lock()
-	if existing, ok := c.items[name]; ok {
+	if existing, ok := c.items[name]; ok && existing.sources == sources {
 		c.mu.Unlock()
 		return existing, true
+	}
+	if len(c.items) >= 128 {
+		clear(c.items)
 	}
 	c.items[name] = item
 	c.mu.Unlock()

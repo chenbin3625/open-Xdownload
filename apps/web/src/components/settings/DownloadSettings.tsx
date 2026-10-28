@@ -5,6 +5,7 @@ import { Select } from "../ui/Controls";
 import { Switch } from "../ui/Controls";
 import { Field, Input, NumberInput } from "../ui/Input";
 import { Tooltip } from "../ui/Overlay";
+import { EnvOverrideNote } from "./EnvOverrideNote";
 
 export const fileNamingOptions: Array<{ value: FileNamingMode; label: string }> = [
   { value: "user_tweet", label: "用户名 + 用户 ID + 推文" },
@@ -21,7 +22,7 @@ export const downloadSettingsTips = {
   ),
   maxFilenameLength: "限制保存到磁盘或远程存储的文件名长度，长推文文件名会自动截断。",
   fileNaming: "影响新下载文件的命名方式，已下载文件不会被重命名。",
-  autoRetryFailed: "批量归档结束后，自动再次处理失败推文队列。",
+  autoRetryFailed: "自动创建独立任务，重试已到重试时间的失败推文。",
   autoFollowProtected: "遇到未关注的保护账号时，使用已配置 Cookie 尝试发起关注后再归档。",
   includeNestedTweetMedia: "开启后会把引用或转推中的媒体也纳入单条下载和批量归档；关闭时只处理当前推文本体媒体。",
   incrementalArchive: (
@@ -35,9 +36,9 @@ export const downloadSettingsTips = {
 function TipIcon({ content }: { content: React.ReactNode }) {
   return (
     <Tooltip content={content}>
-      <span className="inline-flex cursor-help text-fg-subtle hover:text-fg-muted">
+      <button type="button" aria-label="查看说明" className="inline-flex cursor-help text-fg-subtle hover:text-fg-muted">
         <HelpCircle className="size-3.5" />
-      </span>
+      </button>
     </Tooltip>
   );
 }
@@ -46,10 +47,12 @@ export function DownloadSettingsFields({
   draft,
   onChange,
   onAuthChange,
+  envOverridden = [],
 }: {
   draft: AppConfig;
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
   onAuthChange: React.Dispatch<React.SetStateAction<AppConfig>>;
+  envOverridden?: string[];
 }) {
   return (
     <div className="space-y-4">
@@ -67,6 +70,7 @@ export function DownloadSettingsFields({
               }
               placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
             />
+            <EnvOverrideNote show={envOverridden.includes("proxyUrl")} />
           </Field>
         </div>
 
@@ -94,6 +98,7 @@ export function DownloadSettingsFields({
             <Select
               value={draft.fileNamingMode}
               options={fileNamingOptions}
+              ariaLabel="文件命名策略"
               onChange={(value) =>
                 onChange((current) => ({
                   ...current,

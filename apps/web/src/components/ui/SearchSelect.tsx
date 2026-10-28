@@ -6,7 +6,7 @@ import type { SelectOption } from "./Controls";
 
 // 可搜索下拉。Radix Select 不支持在弹层里放输入框（它把按键当作 typeahead），
 // 因此这里用 Popover + 自己实现 combobox 语义：
-// role=combobox 触发器 + role=listbox 列表 + aria-activedescendant 指示高亮项。
+// 搜索输入框持有 combobox 语义与高亮项，触发按钮只负责展开弹层。
 export function SearchSelect({
   value,
   onChange,
@@ -72,10 +72,8 @@ export function SearchSelect({
       }}
     >
       <Popover.Trigger
-        role="combobox"
         aria-expanded={open}
-        aria-haspopup="listbox"
-        aria-controls={open ? listId : undefined}
+        aria-haspopup="dialog"
         aria-label={ariaLabel}
         className={cn(
           "inline-flex items-center justify-between gap-2 rounded-control",
@@ -106,6 +104,10 @@ export function SearchSelect({
           <div className="flex items-center gap-2 border-b border-line px-2.5 py-2">
             <Search className="size-3.5 shrink-0 text-fg-subtle" />
             <input
+              role="combobox"
+              aria-label={ariaLabel ?? searchPlaceholder}
+              aria-expanded={open}
+              aria-autocomplete="list"
               value={keyword}
               onChange={(event) => {
                 setKeyword(event.target.value);

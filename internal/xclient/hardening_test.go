@@ -2,6 +2,9 @@ package xclient
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -38,11 +41,92 @@ func TestParseRetryAfterHTTPDateIsClamped(t *testing.T) {
 	}
 }
 
-func TestSameHostIgnoresPortAndCase(t *testing.T) {
-	if !sameHost("X.com:443", "x.com") {
-		t.Fatal("同主机（大小写/端口不同）应视为相同")
+func TestSameOriginRequiresMatchingPortAndScheme(t *testing.T) {
+	left, _ := url.Parse("https://X.com:443/path")
+	right, _ := url.Parse("https://x.com/path")
+	if !sameOrigin(left, right) {
+		t.Fatal("显式 HTTPS 默认端口应视为同源")
 	}
-	if sameHost("x.com", "evil.example") {
-		t.Fatal("不同主机必须视为跨域，否则 ct0 会随重定向泄漏")
+	otherPort, _ := url.Parse("https://x.com:8443/path")
+	if sameOrigin(left, otherPort) {
+		t.Fatal("不同端口必须视为跨源")
+	}
+	downgrade, _ := url.Parse("http://x.com/path")
+	if sameOrigin(left, downgrade) {
+		t.Fatal("HTTPS 降级到 HTTP 必须视为跨源")
+	}
+}
+
+func TestCheckRedirectAllowsSameOrigin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	client := server.Client()
+	client.CheckRedirect = checkRedirect
+	response, err := client.Get(server.URL + "/start")
+	if err != nil {
+		t.Fatalf("same-origin redirect should be allowed: %v", err)
+	}
+	response.Body.Close()
+}
+
+func TestCheckRedirectRejectsCrossOrigin(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("target"))
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+	client := source.Client()
+	client.CheckRedirect = checkRedirect
+	response, err := client.Get(source.URL)
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "跨域重定向") {
+		t.Fatalf("cross-origin redirect error = %v, want 跨域重定向", err)
+	}
+}
+
+func TestCheckRedirectRejectsHTTPSDowngrade(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("target"))
+	}))
+	defer target.Close()
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+	client := source.Client()
+	client.CheckRedirect = checkRedirect
+	response, err := client.Get(source.URL)
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "HTTPS 降级重定向") {
+		t.Fatalf("https downgrade redirect error = %v, want HTTPS 降级重定向", err)
+	}
+}
+
+func TestCheckRedirectRejectsTooManyHops(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	defer server.Close()
+	client := server.Client()
+	client.CheckRedirect = checkRedirect
+	response, err := client.Get(server.URL + "/loop")
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "重定向次数过多") {
+		t.Fatalf("redirect loop error = %v, want 重定向次数过多", err)
 	}
 }

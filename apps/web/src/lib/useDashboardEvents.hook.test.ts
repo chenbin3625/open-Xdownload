@@ -117,3 +117,25 @@ describe("useDashboardEvents reconnect", () => {
     expect(invalidatedRoots(queryClient)).toEqual([...roots]);
   });
 });
+
+describe("useDashboardEvents 手动重连", () => {
+  it("重建 EventSource，并在重连成功后整体补拉", () => {
+    const queryClient = seededClient();
+    const { result } = renderHook(() => useDashboardEvents(queryClient, vi.fn()));
+    const first = latestSource();
+
+    act(() => first.open());
+    expect(result.current.sseConnected).toBe(true);
+
+    act(() => result.current.reconnect());
+
+    // 旧实例被关闭、新实例已创建，状态先回到"断开"
+    expect(first.readyState).toBe(FakeEventSource.CLOSED);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(result.current.sseConnected).toBe(false);
+
+    act(() => latestSource().open());
+    expect(result.current.sseConnected).toBe(true);
+    expect(invalidatedRoots(queryClient)).toEqual([...roots]);
+  });
+});

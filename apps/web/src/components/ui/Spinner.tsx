@@ -2,13 +2,16 @@ import React from "react";
 import { cn } from "../../lib/cn";
 
 // 纯 SVG 转圈，不依赖图标库；currentColor 让它自动跟随父级文字色。
+// 旋转动画用 index.css 的 .animate-spinner（自带 @keyframes spinner-rotate），
+// 不写 arbitrary 的 animate-[spin_...]：那依赖别处刚好有 animate-spin 字面量
+// 才会产出 @keyframes spin，一旦那些调用点被删，Spinner 会静默停转。
 export function Spinner({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
       fill="none"
       aria-hidden="true"
-      className={cn("size-4 shrink-0 animate-[spin_0.7s_linear_infinite]", className)}
+      className={cn("size-4 shrink-0 animate-spinner", className)}
     >
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" opacity="0.2" />
       <path

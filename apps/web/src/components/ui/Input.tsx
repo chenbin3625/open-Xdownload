@@ -1,5 +1,5 @@
 import { Eye, EyeOff, Search, X } from "lucide-react";
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 import { cn } from "../../lib/cn";
 
 // antd 的 Input 把 prefix/suffix/清除按钮画在边框内部，焦点环落在外层包裹上。
@@ -53,10 +53,13 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Inp
     className,
     onKeyDown,
     value,
+    id,
     ...rest
   },
   ref,
 ) {
+  const fieldId = useFieldId();
+  const resolvedId = id ?? fieldId;
   const innerRef = React.useRef<HTMLInputElement>(null);
   const showClear = allowClear && !rest.disabled && typeof value === "string" && value.length > 0;
 
@@ -69,6 +72,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Inp
           if (typeof ref === "function") ref(node);
           else if (ref) ref.current = node;
         }}
+        id={resolvedId}
         value={value}
         className={cn(bareInput, className)}
         onKeyDown={(event) => {
@@ -138,12 +142,19 @@ export interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextArea
 }
 
 export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea(
-  { className, containerClassName, ...rest },
+  { className, containerClassName, id, ...rest },
   ref,
 ) {
+  // 与 Input/NumberInput 一样认领 Field 分配的 id，Field + Textarea 才不会产生悬空 label
+  const fieldId = useFieldId();
   return (
     <span className={cn(affixBase, "px-3 py-2 text-sm", containerClassName)}>
-      <textarea ref={ref} className={cn(bareInput, "resize-y", className)} {...rest} />
+      <textarea
+        ref={ref}
+        id={id ?? fieldId}
+        className={cn(bareInput, "resize-y", className)}
+        {...rest}
+      />
     </span>
   );
 });
@@ -163,9 +174,11 @@ export interface NumberInputProps
 // 失焦时按 min/max 收敛，方向键步进。
 export const NumberInput = React.forwardRef<HTMLInputElement, NumberInputProps>(
   function NumberInput(
-    { value, onChange, min, max, step = 1, size = "md", addonAfter, className, ...rest },
+    { value, onChange, min, max, step = 1, size = "md", addonAfter, className, id, ...rest },
     ref,
   ) {
+    const fieldId = useFieldId();
+    const resolvedId = id ?? fieldId;
     const clamp = (next: number) => {
       let result = next;
       if (typeof min === "number") result = Math.max(min, result);
@@ -183,6 +196,7 @@ export const NumberInput = React.forwardRef<HTMLInputElement, NumberInputProps>(
       <span className={cn(affixBase, sizeClass[size], className)}>
         <input
           ref={ref}
+          id={resolvedId}
           type="number"
           inputMode="numeric"
           value={value ?? ""}
@@ -199,7 +213,7 @@ export const NumberInput = React.forwardRef<HTMLInputElement, NumberInputProps>(
               onChange(null);
               return;
             }
-            const parsed = Number(raw);
+            const parsed = parseInt(raw, 10);
             onChange(Number.isNaN(parsed) ? null : parsed);
           }}
           onBlur={() => {
@@ -228,9 +242,16 @@ export const NumberInput = React.forwardRef<HTMLInputElement, NumberInputProps>(
 
 // 表单行布局。antd 的 Form.Item 在本项目里只用到 label + tooltip 两个能力
 // （无校验、无 name、无表单状态），所以这里只做布局与 label 关联。
-// children 是一个受控表单控件时传 htmlFor，label 与控件显式关联；
-// 若不传就渲染成普通 span —— 悬空的 htmlFor 比没有 label 更糟，
-// 读屏会朗读一个指向不存在元素的标签。
+// 自动生成 ID 并通过 React Context 传递给子控件，保证 label 与 input 关联。
+// 也可以显式传 htmlFor 覆盖。
+
+const FieldIdContext = React.createContext<string | undefined>(undefined);
+
+/** 子控件用此 hook 获取 Field 自动分配的 id，以便 label 与 input 关联。 */
+export function useFieldId() {
+  return React.useContext(FieldIdContext);
+}
+
 export function Field({
   label,
   tooltip,
@@ -244,21 +265,21 @@ export function Field({
   children: React.ReactNode;
   className?: string;
 }) {
+  const generatedId = useId();
+  const fieldId = htmlFor ?? generatedId;
   const labelClass = "flex items-center gap-1 text-xs font-medium text-fg-body";
   return (
-    <div className={cn("flex flex-col gap-1.5", className)}>
-      {htmlFor ? (
-        <label htmlFor={htmlFor} className={labelClass}>
-          {label}
-          {tooltip}
-        </label>
-      ) : (
+    <FieldIdContext.Provider value={fieldId}>
+      <div className={cn("flex flex-col gap-1.5", className)}>
+        {/* tooltip 放在 label 外面：提示图标是可聚焦的 <button>，
+            塞进 <label> 里既不符合 HTML 内容模型（label 内不能有其它 labelable 元素），
+            点击时也可能触发 label 的"激活并聚焦控件"行为。 */}
         <span className={labelClass}>
-          {label}
+          <label htmlFor={fieldId}>{label}</label>
           {tooltip}
         </span>
-      )}
-      {children}
-    </div>
+        {children}
+      </div>
+    </FieldIdContext.Provider>
   );
 }

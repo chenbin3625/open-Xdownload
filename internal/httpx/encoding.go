@@ -60,13 +60,16 @@ func parseAcceptEncoding(header string) map[string]bool {
 }
 
 func parseQuality(parameter string) float64 {
-	parameter = strings.TrimSpace(parameter)
-	if !strings.HasPrefix(parameter, "q=") {
-		return 1.0
+	for _, raw := range strings.Split(parameter, ";") {
+		parts := strings.SplitN(strings.TrimSpace(raw), "=", 2)
+		if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[0]), "q") {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		if err != nil || value < 0 || value > 1 {
+			return 1.0
+		}
+		return value
 	}
-	value, err := strconv.ParseFloat(strings.TrimPrefix(parameter, "q="), 64)
-	if err != nil || value < 0 || value > 1 {
-		return 1.0
-	}
-	return value
+	return 1.0
 }

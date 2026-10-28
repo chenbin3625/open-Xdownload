@@ -65,4 +65,50 @@ describe("api error handling", () => {
     const error = (await caught(api("/api/jobs"))) as ApiError;
     expect(error.message).toBe("Service Unavailable");
   });
+
+  it("turns a successful non-JSON response into an ApiError", async () => {
+    stubResponse("upstream returned HTML", { status: 200 });
+    const error = (await caught(api("/api/jobs"))) as ApiError;
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.message).toBe("响应格式无效");
+    expect(error.status).toBe(200);
+  });
+
+  it("treats an empty 200 body as an error instead of leaking undefined", async () => {
+    stubResponse("", { status: 200 });
+    const error = (await caught(api("/api/jobs"))) as ApiError;
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.message).toBe("空响应");
+    expect(error.status).toBe(200);
+  });
+
+  it("accepts 204 without a body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    await expect(api("/api/jobs")).resolves.toBeUndefined();
+  });
+
+  it("forwards a caller-provided timeoutMs to the request signal", async () => {
+    stubResponse("{}", { status: 200 });
+    await api("/api/jobs", { timeoutMs: 1_500 });
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("falls back gracefully when AbortSignal.timeout/any are unavailable", async () => {
+    stubResponse("{}", { status: 200 });
+    const originalTimeout = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+    const originalAny = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+    Object.defineProperty(AbortSignal, "timeout", { value: undefined, configurable: true });
+    Object.defineProperty(AbortSignal, "any", { value: undefined, configurable: true });
+    try {
+      await expect(api("/api/jobs")).resolves.toEqual({});
+      // 仍然带着一个可用的 signal（由 AbortController + setTimeout 兜底）
+      const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+      expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      if (originalTimeout) Object.defineProperty(AbortSignal, "timeout", originalTimeout);
+      if (originalAny) Object.defineProperty(AbortSignal, "any", originalAny);
+    }
+  });
 });

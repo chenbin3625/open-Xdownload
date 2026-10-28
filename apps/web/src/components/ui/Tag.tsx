@@ -12,14 +12,18 @@ export type Tone =
 
 // 语义色 → 配色三元组（底色/文字/描边）。暗色下的 soft 底色在
 // index.css 里已改为低透明度叠加，因此这里不需要写 dark: 变体。
+// neutral 是 default 的历史别名（保留公开 Tone 类型以兼容调用方），
+// 两者共用同一份类名，避免以后改一处忘另一处。
+const NEUTRAL_TONE_CLASS = "bg-surface-muted text-fg-muted border-line";
+
 const toneClass: Record<Tone, string> = {
-  default: "bg-surface-muted text-fg-muted border-line",
-  neutral: "bg-surface-muted text-fg-muted border-line",
-  brand: "bg-brand-50 text-brand-700 border-brand-200 dark:bg-brand-500/12 dark:text-brand-300 dark:border-brand-500/30",
-  success: "bg-success-soft text-success border-success/30",
-  warning: "bg-warning-soft text-warning border-warning/30",
-  danger: "bg-danger-soft text-danger border-danger/30",
-  info: "bg-info-soft text-info border-info/30",
+  default: NEUTRAL_TONE_CLASS,
+  neutral: NEUTRAL_TONE_CLASS,
+  brand: "bg-brand-50 text-brand-700 border-brand-200 dark:bg-brand-500/12 dark:text-brand-400 dark:border-brand-500/30",
+  success: "bg-success-soft text-success-strong border-success/30",
+  warning: "bg-warning-soft text-warning-strong border-warning/30",
+  danger: "bg-danger-soft text-danger-strong border-danger/30",
+  info: "bg-info-soft text-info-strong border-info/30",
 };
 
 export function Tag({
@@ -52,16 +56,17 @@ export function Tag({
   );
 }
 
+const SUBTLE_DOT_CLASS = "bg-fg-subtle";
+
 const dotClass: Record<Tone, string> = {
-  default: "bg-fg-subtle",
-  neutral: "bg-fg-subtle",
+  default: SUBTLE_DOT_CLASS,
+  neutral: SUBTLE_DOT_CLASS,
   brand: "bg-brand-500",
   success: "bg-success",
   warning: "bg-warning",
   danger: "bg-danger",
   info: "bg-info",
 };
-
 // 状态点。processing 语义用 ping 动画表达“进行中”，对应 antd 的 Badge status。
 export function StatusDot({
   tone = "default",
@@ -100,15 +105,20 @@ export function CountBadge({
   className?: string;
 }) {
   if (count <= 0) return null;
+  // 实心底色必须配"配对前景色"（success/warning/danger/info 的 *-contrast），
+  // 不能写死 text-white：深色钛金下 brand-500 近白，白字等于隐形。
   const toneStyle: Record<Tone, string> = {
     default: "bg-surface-hover text-fg-muted",
     neutral: "bg-surface-hover text-fg-muted",
-    brand: "bg-brand-500 text-white",
-    success: "bg-success text-white",
-    warning: "bg-warning text-white",
-    danger: "bg-danger text-white",
-    info: "bg-info text-white",
+    brand: "bg-brand-500 text-brand-contrast",
+    success: "bg-success text-success-contrast",
+    warning: "bg-warning text-warning-contrast",
+    danger: "bg-danger text-danger-contrast",
+    info: "bg-info text-info-contrast",
   };
+  // 计数本身没有可读文本：可见数字标 aria-hidden，另给一个 sr-only 文本，
+  // 读屏读成"12 条"而不是孤零零的"12"（aria-label 放在 generic span 上不保证被朗读）。
+  const readableCount = count > overflowCount ? `${overflowCount} 条以上` : `${count} 条`;
   return (
     <span
       className={cn(
@@ -118,7 +128,8 @@ export function CountBadge({
         className,
       )}
     >
-      {count > overflowCount ? `${overflowCount}+` : count}
+      <span aria-hidden="true">{count > overflowCount ? `${overflowCount}+` : count}</span>
+      <span className="sr-only">{readableCount}</span>
     </span>
   );
 }

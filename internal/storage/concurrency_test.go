@@ -2,10 +2,17 @@ package storage
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/chenbin3625/open-Xdownload/internal/config"
 )
 
 // TestUpdateConfigSurvivesConcurrentWriters 覆盖"事务里先读后写"的锁升级问题：
@@ -34,6 +41,7 @@ func TestUpdateConfigSurvivesConcurrentWriters(t *testing.T) {
 			for i := 0; i < iterations; i++ {
 				cfg := base
 				cfg.MaxConcurrency = 2 + (w+i)%8
+				cfg.DownloadDir = filepath.Join(t.TempDir(), fmt.Sprintf("writer-%d-%d", w, i))
 				if _, err := store.UpdateConfig(ctx, cfg); err != nil && errs[w] == nil {
 					errs[w] = err
 				}
@@ -45,6 +53,17 @@ func TestUpdateConfigSurvivesConcurrentWriters(t *testing.T) {
 		if err != nil {
 			t.Fatalf("concurrent UpdateConfig writer %d failed: %v", w, err)
 		}
+	}
+	var stored config.AppConfig
+	if err := store.db.GetContext(ctx, &stored, storedConfigQuery); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := store.GetStoredConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached.DownloadDir != stored.DownloadDir {
+		t.Fatalf("cached directory = %q, database directory = %q", cached.DownloadDir, stored.DownloadDir)
 	}
 }
 
@@ -132,5 +151,188 @@ func TestDownloadLookupsUseUniqueIndexes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestConcurrentArchiveScheduleClaimCreatesJobsOnce 覆盖计划领取的并发原子性：
+// 多个调度器/多个 Store 实例同时用同一快照领取，只能有一个成功、只创建一批任务。
+func TestConcurrentArchiveScheduleClaimCreatesJobsOnce(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	schedule, err := store.CreateArchiveSchedule(ctx, ArchiveSchedule{
+		Name: "daily", Enabled: true, IntervalMinutes: MinArchiveScheduleIntervalMinutes,
+		Items: []ArchiveScheduleItem{{Kind: JobKindUser, Input: "alice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 8
+	errs := make([]error, workers)
+	var successes, alreadyClaimed atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			jobs, err := store.CreateScheduledArchiveJobs(ctx, schedule, time.Now().UTC())
+			switch {
+			case err == nil:
+				if len(jobs) != 1 {
+					errs[i] = fmt.Errorf("claimed %d jobs, want 1", len(jobs))
+					return
+				}
+				successes.Add(1)
+			case errors.Is(err, ErrArchiveScheduleAlreadyClaimed):
+				alreadyClaimed.Add(1)
+			default:
+				errs[i] = err
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+	if successes.Load() != 1 {
+		t.Fatalf("successful claims = %d, want 1 (other %d should be AlreadyClaimed)", successes.Load(), alreadyClaimed.Load())
+	}
+	if alreadyClaimed.Load() != workers-1 {
+		t.Fatalf("already-claimed count = %d, want %d", alreadyClaimed.Load(), workers-1)
+	}
+	var jobCount int
+	if err := store.db.Get(&jobCount, `SELECT COUNT(*) FROM jobs WHERE kind = ? AND input = ?`, JobKindUser, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if jobCount != 1 {
+		t.Fatalf("created %d jobs, want 1 (duplicate claims executed the schedule twice)", jobCount)
+	}
+	final, err := store.GetArchiveSchedule(ctx, schedule.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.ClaimVersion != schedule.ClaimVersion+1 {
+		t.Fatalf("claim_version = %d, want %d", final.ClaimVersion, schedule.ClaimVersion+1)
+	}
+}
+
+// TestConcurrentReserveAutomaticRetryJobCreatesOneTask 并发调用复用接口也只能产生一条任务。
+func TestConcurrentReserveAutomaticRetryJobCreatesOneTask(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	const workers = 8
+	errs := make([]error, workers)
+	var reserved atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			job, err := store.ReserveAutomaticRetryJob(ctx)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			if job != nil {
+				reserved.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+	if reserved.Load() != 1 {
+		t.Fatalf("reserved %d retry jobs, want 1", reserved.Load())
+	}
+	var rows int
+	if err := store.db.Get(&rows, `SELECT COUNT(*) FROM jobs WHERE kind = ? AND input = ?`, JobKindFailedRetry, AutomaticFailedRetryInput); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("automatic retry rows = %d, want 1", rows)
+	}
+}
+
+// TestConcurrentLibraryPageDuringWrites 覆盖分页快照与写入并发：读路径不得报错、不得把
+// 同一文件在一页里重复返回（-race 下同时覆盖缓存/快照的数据竞争）。
+func TestConcurrentLibraryPageDuringWrites(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const writers, readers, iterations = 1, 4, 15
+	errs := make([]error, readers)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			path := filepath.Join(root, fmt.Sprintf("media-%d.jpg", i))
+			if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+				return
+			}
+			if _, err := store.CreateDownload(ctx, DownloadRecord{
+				JobID: job.ID, TweetID: fmt.Sprintf("t%d", i),
+				MediaURL: fmt.Sprintf("https://pbs.twimg.com/media/%d.jpg", i), FilePath: path, Bytes: 1,
+			}); err != nil {
+				return
+			}
+		}
+	}()
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				page, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{Page: 1, PageSize: MaxLibraryPageSize})
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				seen := make(map[string]struct{}, len(page.Items))
+				for _, item := range page.Items {
+					if _, exists := seen[item.FilePath]; exists {
+						errs[i] = fmt.Errorf("duplicate file path in one page: %s", item.FilePath)
+						return
+					}
+					seen[item.FilePath] = struct{}{}
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("reader %d: %v", i, err)
+		}
+	}
+	final, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{Page: 1, PageSize: MaxLibraryPageSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Pagination.Total != iterations {
+		t.Fatalf("final total = %d, want %d", final.Pagination.Total, iterations)
 	}
 }

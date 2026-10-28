@@ -259,6 +259,35 @@ describe("TaskCenterPage", () => {
     expect(screen.queryByText("推文 456")).toBeNull();
   });
 
+  it("受控状态筛选：URL 还原值生效，切换时回调并回到第 1 页", async () => {
+    const user = userEvent.setup();
+    const onStatusFilterChange = vi.fn();
+    const onPageChange = vi.fn();
+    renderWithClient(
+      <TaskCenterPage
+        jobs={mockJobs}
+        failedTweetCount={0}
+        pagination={{ page: 3, pageSize: 20, total: 60, totalPages: 3 }}
+        onPageChange={onPageChange}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+        statusFilter="failed"
+        onStatusFilterChange={onStatusFilterChange}
+      />,
+    );
+
+    // 由 URL 还原的 "failed" 直接生效：只剩失败/部分失败两条
+    expect(screen.getByText("用户 failed_user")).not.toBeNull();
+    expect(screen.queryByText("推文 123")).toBeNull();
+
+    const completedTabs = screen.getAllByText(/^已完成/);
+    await user.click(completedTabs[completedTabs.length - 1]);
+    expect(onStatusFilterChange).toHaveBeenCalledWith("completed");
+    // 页码在 URL 里，切筛选必须同时回第 1 页（否则会停在空页）
+    expect(onPageChange).toHaveBeenCalledWith(1);
+  });
+
   it("聚合展示多账号相同报错，提供账号标签云与诊断信息复制能力", async () => {
     const user = userEvent.setup();
     const mockAggregatedJob: Job = {
@@ -410,5 +439,29 @@ describe("TaskCenterPage 复制错误信息", () => {
     cleanup();
 
     expect(clearTimeoutSpy).toHaveBeenCalledWith(resetTimer);
+  });
+});
+
+describe("TaskCenterPage 状态兜底", () => {
+  it("未知任务状态仍显示为可读的兜底状态", () => {
+    const unknownJob = {
+      ...mockJobs[0],
+      id: 99,
+      status: "server_added_status",
+      title: "未知状态任务",
+    } as unknown as Job;
+    renderWithClient(
+      <TaskCenterPage
+        jobs={[unknownJob]}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 1, totalPages: 1 }}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("未知")).not.toBeNull();
   });
 });

@@ -4,6 +4,13 @@ import { getJobProgressDisplay, parseAggregatedErrors } from "./jobErrors";
 
 describe("jobErrors", () => {
   describe("parseAggregatedErrors", () => {
+
+    it("parses the server's count and distinct-trailer formats", () => {
+      const groups = parseAggregatedErrors("读取媒体失败: timeout (共 7 次)\n另有 3 种其他异常");
+      expect(groups[0]).toMatchObject({ reason: "timeout", action: "读取媒体失败", count: 7 });
+      expect(groups[1]).toMatchObject({ reason: "其他异常", count: 3 });
+      expect(parseAggregatedErrors("读取媒体失败 (@alice): timeout")[0]).toMatchObject({ action: "读取媒体失败", targets: ["@alice"] });
+    });
     it("处理空输入", () => {
       expect(parseAggregatedErrors("")).toEqual([]);
       expect(parseAggregatedErrors(undefined)).toEqual([]);
@@ -87,9 +94,41 @@ describe("jobErrors", () => {
       expect(groups[0].count).toBe(31);
       expect(groups[0].targets).toEqual(["@u1", "@u2", "@u3"]);
     });
+
+    it("解析单目标的后端括号格式和其他异常汇总", () => {
+      const groups = parseAggregatedErrors([
+        "读取媒体时间线失败 (@alice): 连接超时",
+        "另有 2 种其他异常",
+      ].join("\n"));
+
+      expect(groups[0]).toMatchObject({
+        action: "读取媒体时间线失败",
+        reason: "连接超时",
+        targets: ["@alice"],
+        count: 1,
+      });
+      expect(groups).toHaveLength(2);
+      expect(groups[1].count).toBe(2);
+    });
+
+    it("解析没有账号列表的共 N 次格式", () => {
+      const groups = parseAggregatedErrors("读取媒体时间线失败: 连接超时 (共 3 次)");
+      expect(groups).toHaveLength(1);
+      expect(groups[0].count).toBe(3);
+      expect(groups[0].action).toBe("读取媒体时间线失败");
+    });
   });
 
   describe("getJobProgressDisplay", () => {
+    it("keeps omitted error kinds separate from failure occurrences", () => {
+      const display = getJobProgressDisplay({
+        id: 1, kind: "user", status: "completed_with_errors", input: "alice", title: "alice",
+        progress: 1, message: "完成", createdAt: "", updatedAt: "",
+        error: "读取媒体失败: timeout (共 7 次)\n另有 3 种其他异常",
+      });
+      expect(display.displayMsg).toBe("部分失败 (7项，另有3种异常)");
+      expect(display.tooltip).toContain("其他异常 [3种]");
+    });
     it("正常进行中的任务返回其进度文案", () => {
       const job: Job = {
         id: 1,
