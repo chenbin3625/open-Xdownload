@@ -40,8 +40,8 @@ export function AppHeader({
   };
 
   return (
-    <header className="sticky top-0 z-20 shrink-0 border-b border-line/80 glass-header shadow-2xs">
-      <div className="flex h-15 items-center justify-between gap-3 px-4 md:px-6">
+    <header className="app-header sticky top-0 z-20 shrink-0 border-b border-line/80 glass-header shadow-2xs">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 px-3 py-2 sm:h-15 sm:flex-nowrap sm:gap-3 sm:px-4 sm:py-0 md:px-6">
         {showMenuButton && (
           <Button
             variant="text"
@@ -51,30 +51,34 @@ export function AppHeader({
           />
         )}
 
-        {/* 全局胶囊万能解析输入框 */}
-        <div className="min-w-0 flex-1 md:max-w-140">
+        <div className="min-w-0 flex-1 truncate text-sm font-semibold text-fg sm:hidden">
+          open-Xdownload
+        </div>
+
+        {/* 手机端输入框独占一行，保留完整输入和提交空间。 */}
+        <div className="order-last w-full min-w-0 sm:order-none sm:w-auto sm:flex-1 md:max-w-140">
           <div className="relative flex items-center group">
             <Input
               value={quickInput}
               onChange={(event) => setQuickInput(event.target.value)}
               onPressEnter={handleSubmit}
-              placeholder="粘贴 X 推文链接、@用户名或列表 ID，回车快速解析"
+              placeholder="粘贴链接、@用户名或列表 ID"
               aria-label="快速解析输入"
+              enterKeyHint="go"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              containerClassName="w-full"
               className="bg-surface/90 hover:bg-surface focus:bg-surface transition-all shadow-xs"
               prefix={<Search className="size-3.5 text-fg-subtle group-hover:text-brand-500 transition-colors" />}
               suffix={
                 <div className="flex items-center gap-1.5">
-                  {!quickInput.trim() && (
-                    <kbd className="hidden sm:inline-flex items-center gap-0.5 rounded border border-line bg-surface-muted px-1.5 py-0.5 font-mono text-[10px] text-fg-subtle select-none">
-                      ↵ Enter
-                    </kbd>
-                  )}
                   <Button
                     variant="primary"
                     size="sm"
                     disabled={!quickInput.trim()}
                     onClick={handleSubmit}
-                    className="shadow-xs"
+                    className="h-9 shadow-xs sm:h-7"
                   >
                     解析
                   </Button>
@@ -85,13 +89,13 @@ export function AppHeader({
         </div>
 
         {/* 右侧运行状态与操作 */}
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
           {realtimeDisconnected && (
             <button
               type="button"
               onClick={onReconnectRealtime}
               title="实时更新已断开，点击重连"
-              className="flex cursor-pointer items-center gap-1 rounded-control border border-warning/40 bg-warning-soft px-2 py-1 text-[11px] font-medium text-warning transition-colors hover:border-warning"
+              className="flex min-h-11 cursor-pointer items-center gap-1 rounded-control border border-warning/40 bg-warning-soft px-2 py-1 text-[11px] font-medium text-warning transition-colors hover:border-warning sm:min-h-0"
             >
               <WifiOff className="size-3" />
               <span className="hidden sm:inline">实时更新已断开</span>
@@ -135,7 +139,7 @@ export function AppHeader({
                       type="button"
                       onClick={() => setAccent(opt.id)}
                       className={cn(
-                        "flex w-full items-center justify-between rounded-control px-2.5 py-1.5 text-xs transition-colors cursor-pointer",
+                        "flex min-h-11 w-full items-center justify-between rounded-control px-2.5 py-1.5 text-xs transition-colors cursor-pointer sm:min-h-0",
                         isActive
                           ? "bg-brand-500/10 text-brand-500 font-medium"
                           : "text-fg-body hover:bg-surface-hover hover:text-fg",

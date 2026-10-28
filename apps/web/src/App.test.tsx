@@ -74,6 +74,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/auth/session") return json({ configured: true, authenticated: true, username: "owner" });
       if (url.pathname === "/api/jobs") return json({ items: jobs, page: 1, pageSize: 20 });
       if (url.pathname === "/api/dashboard/meta") {
         return json({

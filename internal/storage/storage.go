@@ -105,7 +105,8 @@ const sqliteOpenOptions = "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma
 // v4：download_roots 表（历史可信下载根，修复改目录后历史媒体 404）。
 // v5：archive_schedules.claim_version（计划领取整数乐观锁）、download_roots.last_seen_at
 // （可信根上限/最近使用清理）；同时 DROP 只写不读的 user_previous_names 及其触发器。
-const schemaVersion = 5
+// v6: app_account stores the single local login and its persistent session key.
+const schemaVersion = 6
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -258,6 +259,13 @@ func (s *Store) migrate() error {
 		return err
 	}
 	schema := `
+		CREATE TABLE IF NOT EXISTS app_account (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			username TEXT NOT NULL,
+			password_hash BLOB NOT NULL,
+			session_key BLOB NOT NULL
+		);
+
 		-- max_concurrency 字段保留只为兼容旧库/API：串行执行（=1）是产品决策，
 		-- config.Normalized() 与 jobs.availableSlots() 都会强制为 1。不要根据该列
 		-- 是否存在推断"可以放开并发"；若要改并发需要产品层面重新评估调度与限速。

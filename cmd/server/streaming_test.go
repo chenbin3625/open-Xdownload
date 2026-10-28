@@ -7,12 +7,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/httpapi"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
+	"github.com/chenbin3625/open-Xdownload/internal/storage"
 )
 
 // 确认 ReadTimeout 不会掐断长连接流式响应（SSE）。
@@ -113,16 +115,34 @@ func TestWebAppSecurityHeaders(t *testing.T) {
 // 浏览器开着页面（/api/events 长连接）时，Shutdown 必须很快返回，而不是等满超时。
 func TestShutdownDoesNotWaitForOpenEventStream(t *testing.T) {
 	eventBus := jobs.NewEventBus()
-	api := httpapi.NewServer(nil, nil, nil, eventBus)
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	api := httpapi.NewServer(store, nil, nil, eventBus)
+	handler := api.Routes()
+	setup := httptest.NewRequest("POST", "/api/auth/setup", strings.NewReader(`{"username":"owner","password":"initial-password"}`))
+	setup.Header.Set("Content-Type", "application/json")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, setup)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("setup: %d %s", created.Code, created.Body.String())
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	server := newHTTPServer(listener.Addr().String(), api.Routes())
+	server := newHTTPServer(listener.Addr().String(), handler)
 	server.RegisterOnShutdown(eventBus.CloseAll)
 	go func() { _ = server.Serve(listener) }()
 
-	response, err := http.Get("http://" + listener.Addr().String() + "/api/events")
+	request, err := http.NewRequest("GET", "http://"+listener.Addr().String()+"/api/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(created.Result().Cookies()[0])
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

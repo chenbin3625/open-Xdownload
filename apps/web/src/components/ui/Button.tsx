@@ -34,15 +34,15 @@ const variantClass: Record<ButtonVariant, string> = {
 };
 
 const sizeClass: Record<ButtonSize, string> = {
-  sm: "h-7 px-2.5 text-xs gap-1.5",
-  md: "h-9 px-3.5 text-sm gap-2",
-  lg: "h-10 px-4 text-sm gap-2",
+  sm: "h-11 px-2.5 text-xs gap-1.5 sm:h-7",
+  md: "h-11 px-3.5 text-sm gap-2 sm:h-9",
+  lg: "h-11 px-4 text-sm gap-2 sm:h-10",
 };
 
 const iconOnlySizeClass: Record<ButtonSize, string> = {
-  sm: "size-7 p-0",
-  md: "size-9 p-0",
-  lg: "size-10 p-0",
+  sm: "size-11 p-0 sm:size-7",
+  md: "size-11 p-0 sm:size-9",
+  lg: "size-11 p-0 sm:size-10",
 };
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -91,7 +91,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
         : { type: rest.type ?? "button", disabled: isDisabled })}
       aria-busy={loading || undefined}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center font-medium leading-none",
+        "inline-flex shrink-0 items-center justify-center whitespace-nowrap font-medium leading-none",
         "transition-all duration-150 select-none cursor-pointer active:scale-[0.98]",
         "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
         circle ? "rounded-full" : "rounded-control",

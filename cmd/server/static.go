@@ -98,7 +98,7 @@ func setWebAppSecurityHeaders(w http.ResponseWriter) {
 	header.Set("Content-Security-Policy", webAppCSP)
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Referrer-Policy", "no-referrer")
-	// 该服务无内置鉴权，被 iframe 嵌套没有正当用途。
+	// 禁止 iframe 嵌套，防止点击劫持。
 	header.Set("X-Frame-Options", "DENY")
 }
 

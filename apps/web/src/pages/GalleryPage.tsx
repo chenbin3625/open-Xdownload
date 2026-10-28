@@ -146,8 +146,8 @@ const GalleryCard = React.memo(function GalleryCard({
     <Card
       hoverable
       size="sm"
-      className="group rounded-2xl border-line/80 hover:border-brand-500/40 hover:-translate-y-1 transition-all duration-300 shadow-xs hover:shadow-raised"
-      bodyClassName="p-3"
+      className="group min-w-0 rounded-lg border-line/80 hover:border-brand-500/40 hover:-translate-y-1 transition-all duration-300 shadow-xs hover:shadow-raised sm:rounded-2xl"
+      bodyClassName="p-2 sm:p-3"
       cover={
         <div className="aspect-square relative flex items-center justify-center overflow-hidden bg-surface-muted border-b border-line">
           {isVideo ? (
@@ -193,13 +193,13 @@ const GalleryCard = React.memo(function GalleryCard({
         </div>
 
         <div className="truncate font-mono text-[11px] text-fg-muted flex items-center gap-1">
-          <span className="truncate">{item.userName || "未识别用户"}</span>
+          <span className="min-w-0 truncate">{item.userName || "未识别用户"}</span>
           {item.userScreenName && (
-            <span className="text-brand-500 font-medium shrink-0">@{item.userScreenName}</span>
+            <span className="min-w-0 truncate text-brand-500 font-medium">@{item.userScreenName}</span>
           )}
         </div>
 
-        <div className="flex items-center justify-between pt-2 border-t border-line/70 text-[11px] text-fg-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-1 pt-2 border-t border-line/70 text-[11px] text-fg-subtle">
           <span className="font-mono tabular-nums text-[10px]">{formatDateTime(item.createdAt)}</span>
           <div className="flex items-center gap-1">
             <Tooltip title="复制本地路径">
@@ -408,30 +408,33 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-fg">媒体归档库</h1>
-          <p className="mt-0.5 text-xs text-fg-muted">
+          <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
             集中浏览所有已下载的高清图片、动态 GIF 与 4K 视频原片
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <Segmented
-            size="md"
-            value={filter.kind}
-            onChange={(val) => updateFilter({ kind: val, page: 1 })}
-            options={[
-              { label: `全部 (${categoryCounts.all})`, value: "all" },
-              { label: `图片 (${categoryCounts.images})`, value: "images" },
-              { label: `视频 (${categoryCounts.videos})`, value: "videos" },
-              { label: `动图 (${categoryCounts.gifs})`, value: "gifs" },
-            ]}
-          />
+        <div className="flex w-full min-w-0 flex-wrap items-center gap-2.5 xl:w-auto">
+          <div className="w-full min-w-0 sm:w-auto">
+            <Segmented
+              size="md"
+              value={filter.kind}
+              onChange={(val) => updateFilter({ kind: val, page: 1 })}
+              options={[
+                { label: `全部 (${categoryCounts.all})`, value: "all" },
+                { label: `图片 (${categoryCounts.images})`, value: "images" },
+                { label: `视频 (${categoryCounts.videos})`, value: "videos" },
+                { label: `动图 (${categoryCounts.gifs})`, value: "gifs" },
+              ]}
+            />
+          </div>
 
-          <div className="w-56">
+          <div className="w-full min-w-0 sm:w-56">
             <SearchSelect
               value={filter.user}
               onChange={(val) => updateFilter({ user: val, page: 1 })}
               options={[{ value: "all", label: "全部用户" }, ...userOptions]}
               placeholder="按用户筛选..."
+              className="h-11 w-full sm:h-9"
             />
           </div>
 
@@ -440,7 +443,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             value={filter.search}
             onChange={(e) => updateFilter({ search: e.target.value, page: 1 }, { replace: true })}
             allowClear
-            className="w-52"
+            containerClassName="w-full sm:w-52"
           />
         </div>
       </div>
@@ -544,7 +547,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
           return (
             <div className="flex flex-col">
-              <div className="relative flex min-h-[50vh] max-h-[72vh] items-center justify-center bg-black/95 p-2 overflow-hidden">
+              <div className="relative flex min-h-[35dvh] max-h-[60dvh] items-center justify-center bg-black/95 p-2 overflow-hidden sm:min-h-[50dvh] sm:max-h-[72dvh]">
                 {isVideo ? (
                   <video
                     key={item.id}
@@ -552,13 +555,13 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                     controls
                     autoPlay
                     playsInline
-                    className="max-h-[68vh] max-w-full rounded shadow-2xl"
+                    className="max-h-[56dvh] max-w-full rounded shadow-2xl sm:max-h-[68dvh]"
                   />
                 ) : (
                   <img
                     src={previewURL}
                     alt={fileName}
-                    className="max-h-[68vh] max-w-full object-contain rounded shadow-2xl"
+                    className="max-h-[56dvh] max-w-full object-contain rounded shadow-2xl sm:max-h-[68dvh]"
                   />
                 )}
 
@@ -583,7 +586,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
               {/* 弹窗底部操作与详情栏 */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface px-4 py-3 text-xs">
-                <div className="min-w-0 max-w-md">
+                <div className="w-full min-w-0 sm:w-auto sm:max-w-md">
                   <div className="font-medium text-fg truncate" title={fileName}>
                     {fileName}
                   </div>

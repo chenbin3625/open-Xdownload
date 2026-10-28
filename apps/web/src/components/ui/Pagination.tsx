@@ -54,7 +54,7 @@ export function Pagination({
   const current = Math.min(Math.max(1, Math.trunc(safePage)), totalPages);
 
   const isSmall = size === "sm";
-  const itemSizeClass = isSmall ? "size-7 text-xs" : "size-8 text-xs";
+  const itemSizeClass = isSmall ? "size-11 text-xs sm:size-7" : "size-11 text-xs sm:size-8";
   const iconSizeClass = isSmall ? "size-3.5" : "size-4";
 
   const stepClass = cn(
@@ -68,10 +68,10 @@ export function Pagination({
   return (
     <nav
       aria-label="分页"
-      className={cn("flex flex-wrap items-center justify-between gap-3", className)}
+      className={cn("grid min-w-0 grid-cols-[1fr_auto] items-center gap-3 sm:flex sm:flex-wrap sm:justify-between", className)}
     >
       <p className="text-xs text-fg-muted">{totalLabel?.(safeTotal) ?? `共 ${safeTotal} 条`}</p>
-      <div className="flex items-center gap-1.5">
+      <div className="col-span-2 row-start-2 flex items-center justify-center gap-1.5">
         <button
           type="button"
           aria-label="上一页"
@@ -81,35 +81,40 @@ export function Pagination({
         >
           <ChevronLeft className={iconSizeClass} />
         </button>
-        {buildPageItems(current, totalPages).map((item, index) =>
-          item === "gap" ? (
-            <span
-              key={`gap-${index}`}
-              aria-hidden="true"
-              className={cn("inline-flex items-center justify-center text-fg-subtle select-none", itemSizeClass)}
-            >
-              …
-            </span>
-          ) : (
-            <button
-              key={item}
-              type="button"
-              aria-label={`第 ${item} 页`}
-              aria-current={item === current ? "page" : undefined}
-              onClick={() => onPageChange(item)}
-              className={cn(
-                "inline-flex cursor-pointer items-center justify-center rounded-control",
-                "border font-medium transition-colors leading-none",
-                itemSizeClass,
-                item === current
-                  ? "border-brand-500 bg-brand-500 text-brand-contrast"
-                  : "border-line text-fg-body hover:border-brand-400 hover:text-brand-600",
-              )}
-            >
-              {item}
-            </button>
-          ),
-        )}
+        <span className="min-w-16 text-center font-mono text-xs text-fg-body sm:hidden" aria-live="polite">
+          {current} / {totalPages}
+        </span>
+        <div className="hidden items-center gap-1.5 sm:flex">
+          {buildPageItems(current, totalPages).map((item, index) =>
+            item === "gap" ? (
+              <span
+                key={`gap-${index}`}
+                aria-hidden="true"
+                className={cn("inline-flex items-center justify-center text-fg-subtle select-none", itemSizeClass)}
+              >
+                …
+              </span>
+            ) : (
+              <button
+                key={item}
+                type="button"
+                aria-label={`第 ${item} 页`}
+                aria-current={item === current ? "page" : undefined}
+                onClick={() => onPageChange(item)}
+                className={cn(
+                  "inline-flex cursor-pointer items-center justify-center rounded-control",
+                  "border font-medium transition-colors leading-none",
+                  itemSizeClass,
+                  item === current
+                    ? "border-brand-500 bg-brand-500 text-brand-contrast"
+                    : "border-line text-fg-body hover:border-brand-400 hover:text-brand-600",
+                )}
+              >
+                {item}
+              </button>
+            ),
+          )}
+        </div>
         <button
           type="button"
           aria-label="下一页"
@@ -119,20 +124,20 @@ export function Pagination({
         >
           <ChevronRight className={iconSizeClass} />
         </button>
-        {onPageSizeChange && (
-          <Select
-            size="sm"
-            ariaLabel="每页条数"
-            value={String(pageSize)}
-            onChange={(next) => onPageSizeChange(Number(next))}
-            options={pageSizeOptions.map((optSize) => ({
-              value: String(optSize),
-              label: `${optSize} 条/页`,
-            }))}
-            className={cn("ml-1 w-[6.5rem]", !isSmall && "h-8 text-xs")}
-          />
-        )}
       </div>
+      {onPageSizeChange && (
+        <Select
+          size="sm"
+          ariaLabel="每页条数"
+          value={String(pageSize)}
+          onChange={(next) => onPageSizeChange(Number(next))}
+          options={pageSizeOptions.map((optSize) => ({
+            value: String(optSize),
+            label: `${optSize} 条/页`,
+          }))}
+          className={cn("w-[6.5rem]", !isSmall && "sm:h-8 sm:text-xs")}
+        />
+      )}
     </nav>
   );
 }

@@ -145,14 +145,13 @@ Available service flags:
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `127.0.0.1:8787` | HTTP listen address. The service has no built-in auth, so it binds to localhost by default; set `0.0.0.0:8787` for LAN access, preferably behind an authenticating reverse proxy. |
+| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `127.0.0.1:8787` | HTTP listen address. Set `0.0.0.0:8787` for LAN access. Create the single local account on first use and use HTTPS for remote access. |
 | `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite database directory; the database file is `open-xdownload.db`. |
 | `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | Frontend static file directory; falls back to the built-in Web UI if the directory doesn't exist. |
 | n/a | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | `downloads` in the current directory | Default download directory used when the config is first generated. |
 | `-tls-cert` | `OPEN_XDOWNLOAD_TLS_CERT` | empty | TLS certificate file; enables HTTPS, HTTP/2 and HTTP/3. Must be set together with `-tls-key`. |
 | `-tls-key` | `OPEN_XDOWNLOAD_TLS_KEY` | empty | TLS private key file. |
 | `-tls-auto` | `OPEN_XDOWNLOAD_TLS_AUTO` | off | Issue a self-signed localhost certificate into `<data-dir>/tls` and serve HTTPS. For local use only. |
-| n/a | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | empty (IP addresses and `localhost` only) | Comma-separated `Host` allowlist that blocks DNS-rebinding attacks (an attacker-controlled domain resolved to your machine). Unset means only IP literals and `localhost` are accepted, so access by IP and Docker port mappings keep working. If you reach the service through a domain name (reverse proxy, `nas.local`, etc.), list those names here, e.g. `nas.local,xdl.example.com`; requests with any other `Host` get HTTP 421. |
 | n/a | `OPEN_XDOWNLOAD_PROXY_URL` | empty | Proxy used before a config row exists (first start / auth check). The proxy configured in the Web UI takes precedence afterwards. |
 | n/a | `OPEN_XDOWNLOAD_GUEST_BEARER` | built-in public web token | Overrides the guest bearer token used for unauthenticated endpoints. Only needed if X rotates the public token. |
 | n/a | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | empty | Supplies X credentials via the environment instead of the database. Env-provided values are never persisted and are always redacted in the API. |
@@ -299,7 +298,11 @@ downloads/
 
 ## Security Notes
 
-open-Xdownload targets personal, local archiving; the service itself has no built-in user login or access control. It binds to the loopback address `127.0.0.1:8787` by default. LAN access requires explicitly opting in with `-addr 0.0.0.0:8787` or `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` (the Docker image sets `0.0.0.0` by default for port mapping — restrict the published port accordingly), and the service should then sit behind a reverse proxy with authentication.
+open-Xdownload uses a single local account. On first use, create a username and password in the web UI. Existing installations also enter account setup after upgrading to this version; their tasks, settings, and media records are preserved. Passwords require at least 8 characters and at most 72 bytes and are stored as bcrypt hashes.
+
+Login tokens have no server-side expiry and survive service restarts. The browser saves the token and renews a persistent HttpOnly cookie used for media and realtime events. Changing the password under Settings > Account Security invalidates every existing token and requires signing in again. Clearing browser storage also removes the saved login. Scripts can use the token returned by `POST /api/auth/login` as `Authorization: Bearer <token>`; create the account with `POST /api/auth/setup` first. Both endpoints accept JSON `username` and `password` fields.
+
+Access by domain name, IP address, and reverse proxy works without a Host allowlist or Origin/Host comparison. The service binds to `127.0.0.1:8787` by default; use `-addr 0.0.0.0:8787` or `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` for LAN access. Docker listens on `0.0.0.0` for port mapping. Complete account setup before exposing a new or upgraded instance and use HTTPS for remote access.
 
 The Docker Compose example maps the port as:
 
@@ -461,14 +464,13 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `127.0.0.1:8787` | HTTP 监听地址。服务无内置鉴权，默认只绑定本机；如需局域网访问可设为 `0.0.0.0:8787`，并建议前置带鉴权的反向代理。 |
+| `-addr` | `OPEN_XDOWNLOAD_ADDR` | `127.0.0.1:8787` | HTTP 监听地址，默认只绑定本机；局域网访问可设为 `0.0.0.0:8787`。首次使用创建单用户账号，远程访问请使用 HTTPS。 |
 | `-data-dir` | `OPEN_XDOWNLOAD_DATA_DIR` | `data` | SQLite 数据库目录，数据库文件为 `open-xdownload.db`。 |
 | `-web-dir` | `OPEN_XDOWNLOAD_WEB_DIR` | `apps/web/dist` | 前端静态文件目录；目录不存在时使用二进制内置的 Web UI。 |
 | 无 | `OPEN_XDOWNLOAD_DOWNLOAD_DIR` | 当前目录下的 `downloads` | 首次生成配置时使用的默认下载目录。 |
 | `-tls-cert` | `OPEN_XDOWNLOAD_TLS_CERT` | 空 | TLS 证书文件；启用后提供 HTTPS、HTTP/2 与 HTTP/3。需与 `-tls-key` 同时设置。 |
 | `-tls-key` | `OPEN_XDOWNLOAD_TLS_KEY` | 空 | TLS 私钥文件。 |
 | `-tls-auto` | `OPEN_XDOWNLOAD_TLS_AUTO` | 关闭 | 在 `<data-dir>/tls` 下自动签发 localhost 自签证书并启用 HTTPS，仅供本机使用。 |
-| 无 | `OPEN_XDOWNLOAD_ALLOWED_HOSTS` | 空（仅放行 IP 地址与 `localhost`） | 逗号分隔的 `Host` 白名单，用于阻断 DNS rebinding（攻击者把自己的域名解析到你的机器）。不设置时只放行 IP 字面量与 `localhost`，按 IP 访问和 Docker 端口映射不受影响；如果通过域名访问（反向代理、`nas.local` 等），需要把这些域名填进来，如 `nas.local,xdl.example.com`，其他 `Host` 的请求返回 HTTP 421。 |
 | 无 | `OPEN_XDOWNLOAD_PROXY_URL` | 空 | 配置记录尚不存在时（首次启动 / 鉴权检查）使用的代理；此后以 Web UI 中配置的代理为准。 |
 | 无 | `OPEN_XDOWNLOAD_GUEST_BEARER` | 内置公开 web token | 覆盖免登录接口使用的 guest bearer。仅当 X 轮换了该公开 token 时才需要设置。 |
 | 无 | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | 空 | 通过环境变量提供 X 凭据，替代存库方式。环境变量提供的值不会写入数据库，且在 API 中始终脱敏。 |
@@ -615,7 +617,11 @@ downloads/
 
 ## 安全说明
 
-open-Xdownload 面向个人本地归档场景，服务本身没有内置用户登录和访问鉴权。默认只监听本机回环地址 `127.0.0.1:8787`；如需局域网访问，需通过 `-addr 0.0.0.0:8787` 或 `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` 显式放开（Docker 镜像为便于端口映射默认设置了 `0.0.0.0`，发布端口时请自行限制），并把服务放在带鉴权的反向代理后面。
+open-Xdownload 使用单用户账号。首次使用时在网页创建用户名和密码；旧版本升级到此版本后也会进入创建账号流程，原有任务、配置和媒体记录保留。密码至少 8 个字符、最多 72 字节，以 bcrypt 哈希存储。
+
+登录 token 在服务端没有过期时间，重启服务后继续有效。浏览器保存 token，并续期用于媒体和实时事件的持久化 HttpOnly Cookie。在「设置 > 账号安全」修改密码后，所有旧 token 立即失效，需要重新登录；清理浏览器存储也会移除已保存的登录状态。脚本可使用 `POST /api/auth/login` 返回的 token，通过 `Authorization: Bearer <token>` 调用 API；首次建号使用 `POST /api/auth/setup`，两个接口均提交包含 `username` 和 `password` 的 JSON。
+
+域名、IP 和反向代理访问均无需配置 Host 白名单，也不再比较 Origin 与 Host。默认监听 `127.0.0.1:8787`；局域网访问可通过 `-addr 0.0.0.0:8787` 或 `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` 放开，Docker 镜像为端口映射默认监听 `0.0.0.0`。新安装或升级后请先完成账号创建，再开放外部访问；远程访问请使用 HTTPS。
 
 Docker Compose 示例中的端口映射为：
 

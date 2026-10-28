@@ -29,14 +29,16 @@ import (
 )
 
 type Server struct {
-	store    *storage.Store
-	parser   *parser.Service
-	manager  *jobs.Manager
-	eventBus *jobs.EventBus
+	store       *storage.Store
+	parser      *parser.Service
+	manager     *jobs.Manager
+	eventBus    *jobs.EventBus
+	authMu      sync.RWMutex
+	authChanged chan struct{}
 }
 
 func NewServer(store *storage.Store, parserService *parser.Service, manager *jobs.Manager, eventBus *jobs.EventBus) *Server {
-	return &Server{store: store, parser: parserService, manager: manager, eventBus: eventBus}
+	return &Server{store: store, parser: parserService, manager: manager, eventBus: eventBus, authChanged: make(chan struct{})}
 }
 
 func (s *Server) publish(event jobs.Event) {
@@ -67,7 +69,7 @@ func (s *Server) Routes() http.Handler {
 			next.ServeHTTP(w, req)
 		})
 	})
-	r.Use(guardCrossOrigin)
+	r.Use(s.requireLogin)
 	// read 同时注册 GET 与 HEAD：chi 的 Get 只匹配 GET，此前所有 HEAD 请求都在
 	// 路由层拿到 405（压缩中间件里的 HEAD 分支因此是死代码）。HEAD 与 GET 共用
 	// handler，由 net/http 负责丢弃 body 并按实际写入量生成 Content-Length。
@@ -79,6 +81,10 @@ func (s *Server) Routes() http.Handler {
 		}
 	}
 	read("/api/health", s.health)
+	read("/api/auth/session", s.sessionStatus)
+	r.Post("/api/auth/setup", s.setupAccount)
+	r.Post("/api/auth/login", s.login)
+	r.Put("/api/auth/password", s.changePassword)
 	read("/api/config", s.getConfig)
 	r.Put("/api/config", s.updateConfig)
 	read("/api/local-directories", s.listLocalDirectories)
@@ -797,6 +803,7 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	session := r.Context().Value(authContextKey{}).(authenticatedSession)
 	if s.eventBus == nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("事件总线不可用"))
 		return
@@ -818,6 +825,11 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	// 类型断言（quic-go / 中间件包装的 ResponseWriter 常常没有该接口）。
 	rc := http.NewResponseController(w)
 	write := func(data []byte) bool {
+		select {
+		case <-session.revoked:
+			return false
+		default:
+		}
 		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 		if _, err := w.Write(data); err != nil {
@@ -836,6 +848,8 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-session.revoked:
 			return
 		case <-ticker.C:
 			if !write([]byte(": ping\n\n")) {

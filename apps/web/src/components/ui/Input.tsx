@@ -5,14 +5,14 @@ import { cn } from "../../lib/cn";
 // antd 的 Input 把 prefix/suffix/清除按钮画在边框内部，焦点环落在外层包裹上。
 // 这里用同一套结构：外层 affix 容器负责边框与焦点态，内部 input 去掉自身边框。
 const affixBase =
-  "flex items-center gap-2 rounded-control border border-line bg-surface " +
+  "flex min-w-0 max-w-full items-center gap-2 rounded-control border border-line bg-surface " +
   "transition-colors focus-within:border-brand-500 " +
   "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-brand-500 " +
   "has-disabled:cursor-not-allowed has-disabled:opacity-60";
 
 const sizeClass = {
-  sm: "h-7 px-2.5 text-xs",
-  md: "h-9 px-3 text-sm",
+  sm: "h-11 px-2.5 text-base sm:h-7 sm:text-xs",
+  md: "h-11 px-3 text-base sm:h-9 sm:text-sm",
 } as const;
 
 const bareInput =
@@ -90,7 +90,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Inp
             else clearControlledInput(innerRef.current);
             innerRef.current?.focus();
           }}
-          className="flex shrink-0 cursor-pointer items-center rounded-full p-0.5 text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg-body"
+          className="flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-full p-0.5 text-fg-subtle transition-colors hover:bg-surface-hover hover:text-fg-body sm:size-auto"
         >
           <X className="size-3.5" />
         </button>
@@ -126,7 +126,7 @@ export const PasswordInput = React.forwardRef<HTMLInputElement, InputProps>(func
             aria-label={revealed ? "隐藏内容" : "显示内容"}
             aria-pressed={revealed}
             onClick={() => setRevealed((current) => !current)}
-            className="flex cursor-pointer items-center rounded p-0.5 text-fg-subtle transition-colors hover:text-fg-body"
+            className="flex size-10 cursor-pointer items-center justify-center rounded p-0.5 text-fg-subtle transition-colors hover:text-fg-body sm:size-auto"
           >
             {revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
           </button>
@@ -148,7 +148,7 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(fun
   // 与 Input/NumberInput 一样认领 Field 分配的 id，Field + Textarea 才不会产生悬空 label
   const fieldId = useFieldId();
   return (
-    <span className={cn(affixBase, "px-3 py-2 text-sm", containerClassName)}>
+    <span className={cn(affixBase, "px-3 py-2 text-base sm:text-sm", containerClassName)}>
       <textarea
         ref={ref}
         id={id ?? fieldId}

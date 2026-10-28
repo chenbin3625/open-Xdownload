@@ -94,7 +94,7 @@ export default defineConfig({
     },
   },
   // 监听地址由 npm script 决定（见 package.json）：
-  //   npm run dev / preview        → 127.0.0.1（默认，仅本机，服务本身无鉴权）
+  //   npm run dev / preview        → 127.0.0.1（默认，仅本机）
   //   npm run dev:lan / preview:lan → 0.0.0.0（局域网调试用，确认网络可信）
   server: {
     port: 5173,

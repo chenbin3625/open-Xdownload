@@ -113,6 +113,12 @@ func (s *Server) InjectIndexHTML(r *http.Request, html []byte) []byte {
 	if s == nil || s.store == nil {
 		return html
 	}
+	s.authMu.RLock()
+	account, err := s.requestAccount(r)
+	s.authMu.RUnlock()
+	if err != nil || account == nil {
+		return html
+	}
 	page, pageSize := parseWorkbenchPage(r)
 	payload, ok := s.loadAppBootstrap(r.Context(), r.URL.Path, page, pageSize)
 	if !ok {

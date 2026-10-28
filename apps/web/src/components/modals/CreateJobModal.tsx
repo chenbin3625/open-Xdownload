@@ -321,8 +321,8 @@ export function CreateJobModal({
 
           {parsedTweet && (
             <div className="rounded-card border border-line bg-surface-muted/60 p-3.5 space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-fg">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="min-w-0 break-all font-semibold text-fg">
                   @{parsedTweet.author.screenName} ({parsedTweet.author.name})
                 </span>
                 <span className="font-medium text-success">
@@ -332,7 +332,7 @@ export function CreateJobModal({
               <p className="line-clamp-2 text-fg-body">
                 {parsedTweet.text || "无正文"}
               </p>
-              <div className="flex items-center gap-2 text-[11px] text-fg-subtle">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-subtle">
                 <span>推文 ID: {parsedTweet.id}</span>
                 <span>·</span>
                 <span>发布于: {parsedTweet.createdAt || "未知"}</span>
@@ -353,24 +353,24 @@ export function CreateJobModal({
     <Modal
       open={open}
       onClose={handleClose}
-      className="w-[min(92vw,44rem)]"
+      className="sm:w-[min(92vw,44rem)]"
       title={
         <div className="flex items-center gap-3">
-          <div className="flex size-8 items-center justify-center rounded-control bg-brand-50 text-brand-600 font-bold dark:bg-brand-500/12">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600 font-bold dark:bg-brand-500/12">
             <Plus className="size-4" />
           </div>
-          <div>
-            <div className="text-base font-semibold text-fg">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-fg sm:text-base">
               新建下载任务 / 归档计划
             </div>
-            <div className="text-xs text-fg-muted font-normal">
+            <div className="hidden text-xs text-fg-muted font-normal sm:block">
               支持单条推文、批量用户时间线、列表与关注关系媒体高速入库
             </div>
           </div>
         </div>
       }
       footer={
-        <div className="flex w-full items-center justify-between">
+        <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <span className="text-xs text-fg-subtle">
             {activeTab === "tweet_link"
               ? "解析后点击立即下载入库"
@@ -378,7 +378,7 @@ export function CreateJobModal({
               ? `将保存为包含 ${currentBatchItems.length} 个目标的定时计划`
               : `将同时创建 ${currentBatchItems.length} 个后台下载任务`}
           </span>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-end gap-2">
             <Button variant="ghost" onClick={handleClose}>
               取消
             </Button>
@@ -412,9 +412,9 @@ export function CreateJobModal({
         {/* 存为定时归档计划选项 (单条推文除外) */}
         {activeTab !== "tweet_link" && (
           <div className="space-y-3 rounded-card border border-line bg-surface-muted/50 p-3.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Clock className="size-4 text-brand-500" />
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <Clock className="size-4 shrink-0 text-brand-500" />
                 <span className="text-xs font-semibold text-fg">
                   是否保存为自动归档计划（定期抓取）？
                 </span>

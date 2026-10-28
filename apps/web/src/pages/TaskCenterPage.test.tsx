@@ -17,6 +17,8 @@ vi.mock("../lib/api", async (importOriginal) => {
     ...actual,
     getJobFiles: vi.fn(),
     retryFailedTweets: vi.fn(),
+    cancelJob: vi.fn(),
+    retryJob: vi.fn(),
   };
 });
 
@@ -111,6 +113,70 @@ const mockFailedMedia: FailedMedia[] = [
     createdAt: "2026-09-15T10:00:20Z",
   },
 ];
+
+beforeEach(() => {
+  vi.stubGlobal("matchMedia", vi.fn(() => ({
+    matches: true,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  })));
+});
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("TaskCenterPage 移动端", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+  });
+
+  const props = {
+    jobs: mockJobs,
+    failedTweetCount: 0,
+    pagination: { page: 1, pageSize: 20, total: 3, totalPages: 1 },
+    onPageChange: vi.fn(),
+    onPageSizeChange: vi.fn(),
+    onOpenCreateModal: vi.fn(),
+    onOpenFailedDrawer: vi.fn(),
+  };
+
+  it("用任务列表展示状态和进度，展开时才读取详情", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getJobFiles).mockResolvedValue({ downloads: mockDownloads, failed: [] });
+    renderWithClient(<TaskCenterPage {...props} />);
+
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.getByRole("list", { name: "任务列表" })).toBeTruthy();
+    expect(screen.getByText("部分媒体链接已过期")).toBeTruthy();
+    expect(api.getJobFiles).not.toHaveBeenCalled();
+
+    await user.click(screen.getAllByRole("button", { name: "展开详情" })[0]);
+    await waitFor(() => expect(screen.getByText("pic1.jpg")).toBeTruthy());
+    expect(api.getJobFiles).toHaveBeenCalledWith(1, expect.any(AbortSignal));
+    await user.click(screen.getByRole("button", { name: "收起详情" }));
+    expect(screen.queryByText("pic1.jpg")).toBeNull();
+  });
+
+  it("保留取消、重试与搜索操作", async () => {
+    const user = userEvent.setup();
+    const activeJob = { ...mockJobs[0], id: 4, status: "downloading" as const };
+    vi.mocked(api.cancelJob).mockResolvedValue(activeJob);
+    vi.mocked(api.retryJob).mockResolvedValue(mockJobs[1]);
+    renderWithClient(<TaskCenterPage {...props} jobs={[activeJob, mockJobs[1]]} />);
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith(4, expect.anything()));
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(api.retryJob).toHaveBeenCalledWith(2, expect.anything()));
+    await user.type(screen.getByPlaceholderText("按标题、用户名、错误信息或 ID 搜索..."), "failed_user");
+    expect(screen.queryByText("推文 123")).toBeNull();
+    expect(screen.getByText("用户 failed_user")).toBeTruthy();
+  });
+});
 
 describe("TaskCenterPage", () => {
   beforeEach(() => {

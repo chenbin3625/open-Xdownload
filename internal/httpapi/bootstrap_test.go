@@ -80,7 +80,9 @@ func TestInjectIndexHTMLIncludesCreatedJob(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	api := NewServer(db, nil, nil, nil)
+	token := testSession(t, api)
 	request := httptest.NewRequest(http.MethodGet, "/overview", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	html := api.InjectIndexHTML(request, []byte("<html><head></head></html>"))
 	if !strings.Contains(string(html), "https://example.com/a.mp4") {
 		t.Fatalf("expected job input in bootstrap html: %s", html)
@@ -90,6 +92,7 @@ func TestInjectIndexHTMLIncludesCreatedJob(t *testing.T) {
 	}
 
 	settings := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	settings.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	settingsHTML := api.InjectIndexHTML(settings, []byte("<html><head></head></html>"))
 	if !strings.Contains(string(settingsHTML), "app-bootstrap") {
 		t.Fatalf("settings html should embed redacted config: %s", settingsHTML)

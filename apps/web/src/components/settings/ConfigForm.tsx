@@ -207,15 +207,15 @@ export function ConfigForm({
   return (
     <div className="flex flex-col gap-5">
       {/* 页头 + 浮动操作区 */}
-      <div className="sticky top-0 z-10 -mx-4 -mt-4 bg-canvas/80 px-4 pt-4 pb-3 backdrop-blur-md border-b border-line flex flex-wrap items-center justify-between gap-4">
+      <div className="sticky top-0 z-10 -mx-3 -mt-3 bg-canvas/80 px-3 pt-3 pb-3 backdrop-blur-md border-b border-line flex flex-wrap items-center justify-between gap-3 sm:-mx-4 sm:-mt-4 sm:px-4 sm:pt-4">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-fg">系统与存储配置</h1>
-          <p className="mt-0.5 text-xs text-fg-muted">
+          <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
             存储位置、网络代理与 X Cookie 集中管理，修改后点击右上角统一保存
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
           {draftDirty ? (
             // 有未保存修改：二次确认后再丢弃
             <Popconfirm

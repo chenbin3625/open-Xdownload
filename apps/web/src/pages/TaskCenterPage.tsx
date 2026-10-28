@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Copy,
   FolderCheck,
@@ -46,6 +47,7 @@ import {
   retryableStatuses,
 } from "../lib/jobStatus";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
+import { useBreakpointUp } from "../lib/useMediaQuery";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Segmented, Select, Tabs } from "../components/ui/Controls";
@@ -53,7 +55,7 @@ import { Alert, Descriptions, Empty, Progress } from "../components/ui/Feedback"
 import { SearchInput } from "../components/ui/Input";
 import { Tooltip } from "../components/ui/Overlay";
 import { Pagination } from "../components/ui/Pagination";
-import { Spinner } from "../components/ui/Spinner";
+import { LoadingOverlay, Spinner } from "../components/ui/Spinner";
 import { Table, type TableColumn } from "../components/ui/Table";
 import { Avatar, StatusDot, Tag, type Tone } from "../components/ui/Tag";
 import { toast } from "../components/ui/Toast";
@@ -119,6 +121,7 @@ export function TaskCenterPage({
   onStatusFilterChange,
 }: TaskCenterPageProps) {
   const queryClient = useQueryClient();
+  const isMobile = !useBreakpointUp("md");
   const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilterType>("all");
   const statusFilter = controlledStatusFilter ?? localStatusFilter;
   // 筛选是当前页的客户端过滤，切筛选后回到第 1 页更符合直觉（页码也要写回 URL）。
@@ -217,6 +220,31 @@ export function TaskCenterPage({
     total: stats ? stats.total : pagination.total,
   };
 
+  const renderJobActions = (record: Job) => (
+    <div className="flex items-center justify-end gap-1.5">
+      {cancelableStatuses.includes(record.status) && (
+        <Button
+          variant="danger"
+          size="sm"
+          loading={cancel.isPending && cancel.variables === record.id}
+          onClick={() => cancel.mutate(record.id)}
+        >
+          取消
+        </Button>
+      )}
+      {retryableStatuses.includes(record.status) && (
+        <Button
+          variant="default"
+          size="sm"
+          loading={retry.isPending && retry.variables === record.id}
+          onClick={() => retry.mutate(record.id)}
+        >
+          重试
+        </Button>
+      )}
+    </div>
+  );
+
   const columns: TableColumn<Job>[] = [
     {
       key: "title",
@@ -265,47 +293,7 @@ export function TaskCenterPage({
       key: "progress",
       title: "执行进度",
       width: 220,
-      render: (record) => {
-        const percent = clampPercent(record.progress);
-        const pStatus = progressStatus(record);
-        const { displayMsg, tooltip, hasError } = getJobProgressDisplay(record);
-
-        return (
-          <div className="space-y-1 py-0.5">
-            <div className="flex justify-between font-mono text-xs">
-              <span
-                className={cn(
-                  "truncate max-w-[140px]",
-                  hasError ? "font-medium text-danger" : "text-fg-muted",
-                )}
-                title={tooltip}
-              >
-                {displayMsg}
-              </span>
-              <span
-                className={cn(
-                  "font-semibold",
-                  hasError ? "text-danger" : "text-brand-600 dark:text-brand-400",
-                )}
-              >
-                {percent}%
-              </span>
-            </div>
-            <Progress
-              percent={percent}
-              status={
-                hasError || pStatus === "exception"
-                  ? "exception"
-                  : pStatus === "active"
-                  ? "active"
-                  : pStatus === "success"
-                  ? "success"
-                  : "normal"
-              }
-            />
-          </div>
-        );
-      },
+      render: (record) => <JobProgress job={record} />,
     },
     {
       key: "updatedAt",
@@ -322,39 +310,26 @@ export function TaskCenterPage({
       title: "操作",
       width: 130,
       align: "right",
-      render: (record) => {
-        const canCancel = cancelableStatuses.includes(record.status);
-        const canRetry = retryableStatuses.includes(record.status);
-        const isCanceling = cancel.isPending && cancel.variables === record.id;
-        const isRetrying = retry.isPending && retry.variables === record.id;
-
-        return (
-          <div className="flex items-center justify-end gap-1.5">
-            {canCancel && (
-              <Button
-                variant="danger"
-                size="sm"
-                loading={isCanceling}
-                onClick={() => cancel.mutate(record.id)}
-              >
-                取消
-              </Button>
-            )}
-            {canRetry && (
-              <Button
-                variant="default"
-                size="sm"
-                loading={isRetrying}
-                onClick={() => retry.mutate(record.id)}
-              >
-                重试
-              </Button>
-            )}
-          </div>
-        );
-      },
+      render: renderJobActions,
     },
   ];
+
+  const paginationFooter = (
+    <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      <span className="text-xs text-fg-muted">
+        {hasActiveFilter
+          ? `本页匹配 ${filteredJobs.length} 条（筛选仅作用于当前第 ${pagination.page} 页）`
+          : `共 ${pagination.total} 个下载任务`}
+      </span>
+      <Pagination
+        page={hasActiveFilter ? 1 : pagination.page}
+        pageSize={pagination.pageSize}
+        total={hasActiveFilter ? filteredJobs.length : pagination.total}
+        onPageChange={onPageChange}
+        onPageSizeChange={onPageSizeChange}
+      />
+    </div>
+  );
 
   return (
     <div className="flex flex-col gap-4">
@@ -362,16 +337,17 @@ export function TaskCenterPage({
       <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-fg">任务调度中心</h1>
-          <p className="mt-0.5 text-xs text-fg-muted">
+          <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
             监控所有已创建的推文与归档任务、过滤检索并查看下载文件记录
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:gap-2.5">
           {failedTweetCount > 0 && (
             <Button
               variant="danger"
               icon={<AlertCircle className="size-4" />}
               onClick={onOpenFailedDrawer}
+              className="flex-1 sm:flex-none"
             >
               失败记录 ({failedTweetCount})
             </Button>
@@ -380,85 +356,90 @@ export function TaskCenterPage({
             variant="primary"
             icon={<Plus className="size-4" />}
             onClick={onOpenCreateModal}
+            className="flex-1 sm:flex-none"
           >
-            新建下载 / 归档
+            新建任务
           </Button>
         </div>
       </div>
 
       {/* 核心指标统计卡片 (现代玻璃风格) */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
         <Card
           size="sm"
+          bodyClassName="p-3 sm:p-4"
           className="relative overflow-hidden border-t-2 border-t-brand-500 bg-gradient-to-b from-brand-500/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">下载中任务</span>
-            <div className="flex size-7 items-center justify-center rounded-lg bg-brand-500/10">
+            <div className="hidden size-7 items-center justify-center rounded-lg bg-brand-500/10 sm:flex">
               <StatusDot tone={displayStats.active > 0 ? "brand" : "default"} pulse={displayStats.active > 0} />
             </div>
           </div>
-          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
             {displayStats.active}
           </div>
-          <p className="mt-0.5 text-[11px] text-fg-subtle">当前正在排队与拉取</p>
+          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">当前正在排队与拉取</p>
         </Card>
 
         <Card
           size="sm"
+          bodyClassName="p-3 sm:p-4"
           className="relative overflow-hidden border-t-2 border-t-success bg-gradient-to-b from-success/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">已完成</span>
-            <div className="flex size-7 items-center justify-center rounded-lg bg-success-soft">
+            <div className="hidden size-7 items-center justify-center rounded-lg bg-success-soft sm:flex">
               <CheckCircle2 className="size-3.5 text-success" />
             </div>
           </div>
-          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
             {displayStats.completed}
           </div>
-          <p className="mt-0.5 text-[11px] text-fg-subtle">媒体已全部入库</p>
+          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">媒体已全部入库</p>
         </Card>
 
         <Card
           size="sm"
+          bodyClassName="p-3 sm:p-4"
           className="relative overflow-hidden border-t-2 border-t-danger bg-gradient-to-b from-danger/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">异常 / 失败</span>
-            <div className="flex size-7 items-center justify-center rounded-lg bg-danger-soft">
+            <div className="hidden size-7 items-center justify-center rounded-lg bg-danger-soft sm:flex">
               <AlertCircle className="size-3.5 text-danger" />
             </div>
           </div>
-          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
             {displayStats.failed}
           </div>
-          <p className="mt-0.5 text-[11px] text-fg-subtle">包含部分失败与致命失败</p>
+          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">包含部分失败与致命失败</p>
         </Card>
 
         <Card
           size="sm"
+          bodyClassName="p-3 sm:p-4"
           className="relative overflow-hidden border-t-2 border-t-line-strong bg-gradient-to-b from-surface-muted/50 to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-fg-muted">任务总数</span>
-            <div className="flex size-7 items-center justify-center rounded-lg bg-surface-muted border border-line">
+            <div className="hidden size-7 items-center justify-center rounded-lg bg-surface-muted border border-line sm:flex">
               <FolderCheck className="size-3.5 text-brand-500" />
             </div>
           </div>
-          <div className="mt-2 text-3xl font-bold tracking-tight font-mono tabular-nums text-fg">
+          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
             {displayStats.total}
           </div>
-          <p className="mt-0.5 text-[11px] text-fg-subtle">库内已记录的任务总规模</p>
+          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">库内已记录的任务总规模</p>
         </Card>
       </div>
 
       {/* 过滤筛选工具栏 */}
-      <Card size="sm" bodyClassName="p-3">
+      <div className="min-w-0 border-y border-line py-3">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between flex-wrap">
           {/* 状态分类 Segmented */}
           <Tooltip title="括号内为当前页的任务计数，全局统计见侧边栏与上方卡片">
-            <div>
+            <div className="min-w-0 max-w-full">
               <Segmented
                 size="md"
                 value={statusFilter}
@@ -490,19 +471,20 @@ export function TaskCenterPage({
           </Tooltip>
 
           {/* 搜索与类型选择 */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <SearchInput
               placeholder="按标题、用户名、错误信息或 ID 搜索..."
               value={searchKeyword}
               onChange={(e) => setSearchKeyword(e.target.value)}
               allowClear
-              className="w-56"
+              containerClassName="w-full sm:w-56"
             />
 
             <Select
               value={kindFilter}
               onChange={setKindFilter}
-              className="w-36"
+              className="min-w-0 flex-1 sm:w-36 sm:flex-none"
+              ariaLabel="任务类型"
               options={[
                 { value: "all", label: "全部任务类型" },
                 { value: "tweet_link", label: "单条推文" },
@@ -527,41 +509,117 @@ export function TaskCenterPage({
             )}
           </div>
         </div>
-      </Card>
+      </div>
 
       {/* 任务核心数据表格 */}
-      <Card size="sm" bodyClassName="p-0">
-        <Table<Job>
-          columns={columns}
-          data={filteredJobs}
-          rowKey={(r) => r.id}
-          loading={tableLoading}
-          minWidth={860}
-          expandedRowRender={(record) => (
-            <ExpandedJobDetails
-              job={record}
-              onRetry={() => retry.mutate(record.id)}
-            />
-          )}
-          footer={
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs text-fg-muted">
-                {hasActiveFilter
-                  ? `本页匹配 ${filteredJobs.length} 条（筛选仅作用于当前第 ${pagination.page} 页）`
-                  : `共 ${pagination.total} 个下载任务`}
-              </span>
-              <Pagination
-                page={hasActiveFilter ? 1 : pagination.page}
-                pageSize={pagination.pageSize}
-                total={hasActiveFilter ? filteredJobs.length : pagination.total}
-                onPageChange={(page) => onPageChange(page)}
-                onPageSizeChange={(size) => onPageSizeChange(size)}
+      {isMobile ? (
+        <div className="min-w-0 space-y-4">
+          <LoadingOverlay loading={tableLoading}>
+            {filteredJobs.length === 0 ? (
+              <Empty description="暂无数据" />
+            ) : (
+              <ul aria-label="任务列表" className="space-y-3">
+                {filteredJobs.map((job) => (
+                  <MobileJobCard
+                    key={job.id}
+                    job={job}
+                    actions={renderJobActions(job)}
+                    onRetry={() => retry.mutate(job.id)}
+                  />
+                ))}
+              </ul>
+            )}
+          </LoadingOverlay>
+          {paginationFooter}
+        </div>
+      ) : (
+        <Card size="sm" bodyClassName="p-0">
+          <Table<Job>
+            columns={columns}
+            data={filteredJobs}
+            rowKey={(r) => r.id}
+            loading={tableLoading}
+            minWidth={860}
+            expandedRowRender={(record) => (
+              <ExpandedJobDetails
+                job={record}
+                onRetry={() => retry.mutate(record.id)}
               />
-            </div>
-          }
-        />
-      </Card>
+            )}
+            footer={paginationFooter}
+          />
+        </Card>
+      )}
     </div>
+  );
+}
+
+function JobProgress({ job }: { job: Job }) {
+  const percent = clampPercent(job.progress);
+  const status = progressStatus(job);
+  const { displayMsg, tooltip, hasError } = getJobProgressDisplay(job);
+  return (
+    <div className="min-w-0 space-y-2 py-0.5">
+      <div className="flex items-start justify-between gap-3 text-xs">
+        <span
+          className={cn(
+            "min-w-0 flex-1 break-words md:truncate",
+            hasError ? "font-medium text-danger" : "text-fg-muted",
+          )}
+          title={tooltip}
+        >
+          {displayMsg}
+        </span>
+        <span className={cn("shrink-0 font-mono font-semibold", hasError ? "text-danger" : "text-brand-600 dark:text-brand-400")}>
+          {percent}%
+        </span>
+      </div>
+      <Progress percent={percent} status={hasError ? "exception" : status} />
+    </div>
+  );
+}
+
+function MobileJobCard({ job, actions, onRetry }: { job: Job; actions: React.ReactNode; onRetry: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const panelId = React.useId();
+  const status = getJobStatusPresentation(job.status);
+  return (
+    <li className="min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
+      <div className="space-y-3 p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <h2 className="break-words text-sm font-semibold text-fg">{job.title || kindLabel(job.kind)}</h2>
+            <p className="mt-1 break-all font-mono text-xs text-fg-muted">{job.input}</p>
+          </div>
+          <Tag tone={status.tone} icon={status.icon}>{status.label}</Tag>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
+          <Tag>{kindLabel(job.kind)}</Tag>
+          <span className="font-mono">#JOB-{job.id}</span>
+          <time className="ml-auto font-mono text-[11px]" dateTime={job.updatedAt}>{formatDateTime(job.updatedAt)}</time>
+        </div>
+        <JobProgress job={job} />
+        <div className="flex items-center justify-between border-t border-line pt-2">
+          <Button
+            variant="text"
+            size="sm"
+            aria-label={expanded ? "收起详情" : "展开详情"}
+            aria-expanded={expanded}
+            aria-controls={expanded ? panelId : undefined}
+            onClick={() => setExpanded(!expanded)}
+            icon={<ChevronDown className={cn("size-4 transition-transform", expanded && "rotate-180")} />}
+          >
+            {expanded ? "收起详情" : "查看详情"}
+          </Button>
+          {actions}
+        </div>
+      </div>
+      {expanded && (
+        <div id={panelId} className="border-t border-line">
+          <ExpandedJobDetails job={job} onRetry={onRetry} />
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -615,7 +673,7 @@ function JobErrorAlert({ job }: { job: Job }) {
       showIcon
       className="border-danger/30"
       message={
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <span>{title}</span>
           <Button
             size="sm"
@@ -707,9 +765,9 @@ function JobErrorAlert({ job }: { job: Job }) {
           )}
 
           {job.message && (
-            <div className="pt-1 text-xs text-fg-muted flex items-center gap-1.5 border-t border-danger/15">
-              <span className="font-medium text-fg-subtle">状态概况:</span>
-              <span>{job.message}</span>
+            <div className="flex min-w-0 flex-wrap items-start gap-1.5 border-t border-danger/15 pt-1 text-xs text-fg-muted">
+              <span className="shrink-0 font-medium text-fg-subtle">状态概况:</span>
+              <span className="min-w-0 break-all">{job.message}</span>
             </div>
           )}
         </div>
@@ -778,14 +836,14 @@ function ExpandedJobDetails({
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-fg-muted">
                   <span
-                    className="truncate max-w-sm sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
+                    className="max-w-full truncate sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
                     title={item.filePath}
                   >
                     {item.filePath}
                   </span>
                   {item.mediaUrl && (
                     <span
-                      className="truncate max-w-xs text-fg-subtle/70"
+                      className="max-w-full truncate sm:max-w-xs text-fg-subtle/70"
                       title={item.mediaUrl}
                     >
                       · {item.mediaUrl}
@@ -830,7 +888,7 @@ function ExpandedJobDetails({
               </div>
               <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-fg-muted">
                 <span
-                  className="truncate max-w-sm sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
+                  className="max-w-full truncate sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
                   title={item.mediaUrl}
                 >
                   {item.mediaUrl}
@@ -861,7 +919,7 @@ function ExpandedJobDetails({
   );
 
   return (
-    <div className="space-y-3 rounded-card border border-line bg-surface-muted/50 p-4">
+    <div className="space-y-3 bg-surface-muted/50 p-3 md:rounded-card md:border md:border-line md:p-4">
       {/* 顶部元信息与操作栏 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Descriptions

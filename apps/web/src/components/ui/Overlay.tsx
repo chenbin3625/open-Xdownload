@@ -32,13 +32,13 @@ export function Modal({
         <Dialog.Content
           className={cn(
             "animate-dialog-in fixed top-1/2 left-1/2 z-[1201] -translate-x-1/2 -translate-y-1/2",
-            "flex max-h-[88vh] w-[min(92vw,42rem)] flex-col",
+            "flex max-h-[calc(100dvh-1.5rem)] w-[calc(100%-1.5rem)] flex-col sm:max-h-[88dvh] sm:w-[min(92vw,42rem)]",
             "rounded-card border border-line bg-surface shadow-overlay",
             className,
           )}
         >
           {title ? (
-            <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-line px-4 py-3 sm:px-5 sm:py-4">
               <div className="min-w-0">
                 <Dialog.Title className="text-base font-semibold text-fg">{title}</Dialog.Title>
                 {description && (
@@ -61,11 +61,11 @@ export function Modal({
               </div>
             </>
           )}
-          <div className={cn("min-h-0 flex-1 overflow-y-auto px-5 py-4", bodyClassName)}>
+          <div className={cn("min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-5 sm:py-4", bodyClassName)}>
             {children}
           </div>
           {footer && (
-            <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3.5">
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-3 sm:px-5 sm:py-3.5">
               {footer}
             </div>
           )}
@@ -96,7 +96,7 @@ export function MediaModal({
         <Dialog.Content
           className={cn(
             "animate-dialog-in fixed top-1/2 left-1/2 z-[1201] -translate-x-1/2 -translate-y-1/2",
-            "w-[min(94vw,68rem)] rounded-card border border-line bg-surface shadow-overlay",
+            "max-h-[calc(100dvh-1.5rem)] w-[calc(100%-1.5rem)] overflow-y-auto rounded-card border border-line bg-surface shadow-overlay sm:w-[min(94vw,68rem)]",
             className,
           )}
         >
@@ -140,7 +140,7 @@ export function Drawer({
         <Dialog.Content
           style={{ width: `min(100vw, ${width})` }}
           className={cn(
-            "fixed inset-y-0 z-[1201] flex flex-col bg-surface shadow-overlay",
+            "drawer-panel fixed top-0 z-[1201] flex h-dvh flex-col bg-surface shadow-overlay",
             side === "left"
               ? "animate-drawer-in-left left-0 border-r border-line"
               : "animate-drawer-in-right right-0 border-l border-line",
@@ -150,7 +150,7 @@ export function Drawer({
           {/* Radix 要求 Content 内必须有 Title 以供读屏定位；
               无可见标题时用 VisuallyHidden 提供一个。 */}
           {title ? (
-            <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
               <Dialog.Title className="min-w-0 text-sm font-semibold text-fg">{title}</Dialog.Title>
               <Dialog.Close asChild>
                 <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />

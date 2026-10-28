@@ -35,9 +35,9 @@ ENV OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787 \
   OPEN_XDOWNLOAD_DOWNLOAD_DIR=/downloads \
   PUID=1000 \
   PGID=1000
-# 服务本身无鉴权。容器内需监听 0.0.0.0 才能被端口映射访问；
+# 容器内需监听 0.0.0.0 才能被端口映射访问；
 # 如只在本机使用，请用 `docker run -p 127.0.0.1:8787:8787` 限制仅本机可达，
-# 暴露到网络时请前置带鉴权的反向代理。
+# 暴露到网络前请完成单用户账号创建，远程访问使用 HTTPS。
 #
 # 关于 root：镜像故意不写 USER。entrypoint 需要 root 才能把挂载卷 chown 给 PUID/PGID
 # （NFS/只读卷 chown 失败会告警但不退出），随后用 su-exec 降权执行本程序——即

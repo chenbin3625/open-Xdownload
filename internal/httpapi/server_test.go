@@ -23,12 +23,36 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 )
 
-// newLoopbackRequest 构造 Host 为回环地址的请求。httptest.NewRequest 默认 Host 是
-// example.com，会被 DNS rebinding 防护（hostAllowed）当作域名拒绝。
+// newLoopbackRequest keeps existing request fixtures on the local server address.
 func newLoopbackRequest(method string, target string, body io.Reader) *http.Request {
 	request := httptest.NewRequest(method, target, body)
 	request.Host = "127.0.0.1:8787"
 	return request
+}
+
+func testSession(t *testing.T, s *Server) string {
+	t.Helper()
+	account, err := s.store.GetAccount(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account == nil {
+		account = &storage.Account{Username: "test-owner", PasswordHash: []byte("unused-in-route-tests"), SessionKey: randomSessionKey()}
+		if err := s.store.CreateAccount(context.Background(), *account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return signSession(account.SessionKey)
+}
+
+func authenticatedRoutes(t *testing.T, s *Server) http.Handler {
+	t.Helper()
+	token := testSession(t, s)
+	handler := s.Routes()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+token)
+		handler.ServeHTTP(w, r)
+	})
 }
 
 func TestRetryActiveJobReturnsBusinessError(t *testing.T) {
@@ -43,7 +67,7 @@ func TestRetryActiveJobReturnsBusinessError(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodPost, "/api/jobs/"+strconv.FormatInt(job.ID, 10)+"/retry", nil)
 	response := httptest.NewRecorder()
 
@@ -77,7 +101,7 @@ func TestRetryTerminalJobCreatesNewJob(t *testing.T) {
 
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
-	handler := NewServer(db, nil, manager, eventBus).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, manager, eventBus))
 	request := newLoopbackRequest(http.MethodPost, "/api/jobs/"+strconv.FormatInt(original.ID, 10)+"/retry", nil)
 	response := httptest.NewRecorder()
 
@@ -111,7 +135,7 @@ func TestCancelNonexistentJobReturnsNotFound(t *testing.T) {
 
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
-	handler := NewServer(db, nil, manager, eventBus).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, manager, eventBus))
 	request := newLoopbackRequest(http.MethodPost, "/api/jobs/999999/cancel", nil)
 	response := httptest.NewRecorder()
 
@@ -129,7 +153,7 @@ func TestRetryNonexistentJobReturnsNotFound(t *testing.T) {
 	}
 	defer db.Close()
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodPost, "/api/jobs/999999/retry", nil)
 	response := httptest.NewRecorder()
 
@@ -149,7 +173,7 @@ func TestCreateTweetJobOnlyValidatesURLShape(t *testing.T) {
 
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
-	handler := NewServer(db, nil, manager, eventBus).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, manager, eventBus))
 	request := newLoopbackRequest(http.MethodPost, "/api/jobs", strings.NewReader(`{
 		"kind": "tweet_link",
 		"input": "https://x.com/openai/status/1234567890"
@@ -180,7 +204,7 @@ func TestCreateMediaURLRejectsNonTwimgHost(t *testing.T) {
 
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
-	handler := NewServer(db, nil, manager, eventBus).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, manager, eventBus))
 	request := newLoopbackRequest(http.MethodPost, "/api/jobs", strings.NewReader(`{
 		"kind": "media_url",
 		"input": "http://127.0.0.1/latest/meta-data"
@@ -213,7 +237,7 @@ func TestCreateLocalDirectoryCreatesAndReturnsListing(t *testing.T) {
 	}
 
 	target := filepath.Join(allowedRoot, "new", "downloads")
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodPost, "/api/local-directories", strings.NewReader(`{"path":`+strconv.Quote(target)+`}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -248,7 +272,7 @@ func TestCreateLocalDirectoryRejectsPathOutsideAllowedRoots(t *testing.T) {
 		t.Fatalf("update config: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodPost, "/api/local-directories", strings.NewReader(`{"path":"/etc/open-xdownload-blocked"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -326,7 +350,7 @@ func TestListFailedTweetsSupportsPagination(t *testing.T) {
 		}
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/failed-tweets?page=2&pageSize=2", nil)
 	response := httptest.NewRecorder()
 
@@ -379,7 +403,7 @@ func TestDashboardOmitsFailedTweetBodies(t *testing.T) {
 		t.Fatalf("create failed tweet: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/dashboard", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -429,7 +453,7 @@ func TestDashboardMetaReturnsStatsWithoutJobs(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/dashboard/meta", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -462,7 +486,7 @@ func TestListJobsPageOmitsStats(t *testing.T) {
 		}
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/jobs?page=1&pageSize=2", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -513,7 +537,7 @@ func TestGetJobFilesReturnsDownloadsAndFailedMedia(t *testing.T) {
 		t.Fatalf("create failed media: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/jobs/"+strconv.FormatInt(job.ID, 10)+"/files", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -563,7 +587,7 @@ func TestLibraryDownloadsPaginationKeepsRetweetSearch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	handler := NewServer(store, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(store, nil, nil, nil))
 	for _, query := range []struct {
 		value string
 		total int
@@ -620,7 +644,7 @@ func TestServeDownloadFileSupportsRangeAndKeepsPathContained(t *testing.T) {
 		t.Fatalf("create download: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/file", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -657,7 +681,7 @@ func TestEventsNilBusReturnsServiceUnavailable(t *testing.T) {
 	}
 	defer db.Close()
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/events", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -674,7 +698,7 @@ func TestEventsStreamsWithoutFlusherAssertion(t *testing.T) {
 	defer db.Close()
 
 	eventBus := jobs.NewEventBus()
-	server := httptest.NewServer(NewServer(db, nil, nil, eventBus).Routes())
+	server := httptest.NewServer(authenticatedRoutes(t, NewServer(db, nil, nil, eventBus)))
 	defer server.Close()
 
 	resp, err := http.Get(server.URL + "/api/events")
@@ -725,7 +749,7 @@ func newLibraryTestServer(t *testing.T) (*storage.Store, http.Handler, string) {
 	if _, err := db.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	return db, NewServer(db, nil, nil, nil).Routes(), root
+	return db, authenticatedRoutes(t, NewServer(db, nil, nil, nil)), root
 }
 
 func TestConfigPartialUpdatePreservesSettings(t *testing.T) {
@@ -948,7 +972,7 @@ func TestServeDownloadPreviewRejectsPosterSymlinkOutsideDownloadRoot(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewServer(store, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(store, nil, nil, nil))
 	request := newLoopbackRequest(http.MethodGet, "/api/library/downloads/"+strconv.FormatInt(record.ID, 10)+"/preview", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -993,7 +1017,7 @@ func TestUpdateConfigRejectsDownloadDirOutsideAllowedRoots(t *testing.T) {
 	if err := db.EnsureConfig(context.Background()); err != nil {
 		t.Fatalf("ensure config: %v", err)
 	}
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 
 	request := newLoopbackRequest(http.MethodPut, "/api/config", strings.NewReader(`{"downloadDir":"/"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -1028,7 +1052,7 @@ func TestUpdateConfigAcceptsDownloadDirWithinAllowedRoots(t *testing.T) {
 		t.Fatalf("get config: %v", err)
 	}
 	target := filepath.Join(stored.DownloadDir, "nested")
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 
 	body, err := json.Marshal(map[string]string{"downloadDir": target})
 	if err != nil {

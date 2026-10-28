@@ -63,7 +63,7 @@ export function AppSidebar({
   ];
 
   return (
-    <aside className="flex w-48 shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none">
+    <aside className="flex min-h-full w-full shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none lg:w-48">
       <div className="p-3">
         {/* 品牌区 */}
         <div className="flex items-center gap-2.5 px-1 pt-1 pb-3">
@@ -87,7 +87,7 @@ export function AppSidebar({
                 aria-current={active ? "page" : undefined}
                 onClick={() => onSectionChange(item.key)}
                 className={cn(
-                  "flex h-9 cursor-pointer items-center gap-2.5 rounded-control px-2.5",
+                  "flex h-11 cursor-pointer items-center gap-2.5 rounded-control px-2.5 lg:h-9",
                   "text-sm transition-all duration-150 relative",
                   active
                     ? "bg-brand-500/10 font-semibold text-brand-500 border border-brand-500/20 shadow-2xs"

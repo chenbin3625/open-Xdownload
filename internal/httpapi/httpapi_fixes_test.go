@@ -67,7 +67,7 @@ func TestUpdateConfigNullBodyRejectedWithoutChanges(t *testing.T) {
 		t.Fatalf("stored config: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	response := doRequest(t, handler, http.MethodPut, "/api/config", "null", map[string]string{"Content-Type": "application/json"})
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s, want 400", response.Code, response.Body.String())
@@ -97,7 +97,7 @@ func TestUpdateConfigEmptyObjectIsNoOp(t *testing.T) {
 	}
 	before, _ := db.GetStoredConfig(ctx)
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	response := doRequest(t, handler, http.MethodPut, "/api/config", "{}", map[string]string{"Content-Type": "application/json"})
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s, want 200", response.Code, response.Body.String())
@@ -112,7 +112,7 @@ func TestUpdateConfigEmptyObjectIsNoOp(t *testing.T) {
 // `json: cannot unmarshal string into Go struct field archiveScheduleRequest...`）。
 func TestJSONDecodeErrorsAreSanitized(t *testing.T) {
 	db := openConfigStore(t)
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 
 	cases := []struct {
 		name     string
@@ -151,7 +151,7 @@ func TestJSONDecodeErrorsAreSanitized(t *testing.T) {
 // 必须用真实 server：httptest.ResponseRecorder 不会像 net/http 那样丢弃 HEAD 的 body。
 func TestHEADMatchesGETHeaders(t *testing.T) {
 	db := openConfigStore(t)
-	server := httptest.NewServer(NewServer(db, nil, nil, nil).Routes())
+	server := httptest.NewServer(authenticatedRoutes(t, NewServer(db, nil, nil, nil)))
 	defer server.Close()
 
 	do := func(method string) *http.Response {
@@ -202,7 +202,7 @@ func TestHEADMatchesGETHeaders(t *testing.T) {
 // 压缩响应只允许出现一个 Vary 头（此前中间件与 finish() 各 Add 一次）。
 func TestCompressedResponseHasSingleVary(t *testing.T) {
 	db := openConfigStore(t)
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	response := doRequest(t, handler, http.MethodGet, "/api/dashboard", "", map[string]string{"Accept-Encoding": "gzip"})
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
@@ -228,7 +228,7 @@ func TestLibraryMediaEndpointStreamsThrough(t *testing.T) {
 		t.Fatalf("write media: %v", err)
 	}
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	headers := map[string]string{"Accept-Encoding": "gzip"}
 	get := doRequest(t, handler, http.MethodGet, "/api/library/file?path="+mediaPath, "", headers)
 	if get.Code != http.StatusOK {
@@ -359,7 +359,7 @@ func TestUpdateConfigAcceptsEnvDownloadDirEcho(t *testing.T) {
 	}
 	t.Setenv(config.EnvDownloadDir, envDir)
 
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	body := `{"downloadDir":"` + envDir + `","maxFilenameLength":150}`
 	response := doRequest(t, handler, http.MethodPut, "/api/config", body, map[string]string{"Content-Type": "application/json"})
 	if response.Code != http.StatusOK {
@@ -392,7 +392,7 @@ func TestLibraryMediaEndpointSupportsRange(t *testing.T) {
 	if err := os.WriteFile(mediaPath, []byte(payload), 0o600); err != nil {
 		t.Fatalf("write media: %v", err)
 	}
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	response := doRequest(t, handler, http.MethodGet, "/api/library/file?path="+mediaPath, "", map[string]string{"Range": "bytes=2-5"})
 	if response.Code != http.StatusPartialContent {
 		t.Fatalf("status = %d, want 206", response.Code)
@@ -418,7 +418,7 @@ func TestLegacyLibraryArrayMarksTruncated(t *testing.T) {
 			t.Fatalf("write media: %v", err)
 		}
 	}
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	response := doRequest(t, handler, http.MethodGet, "/api/library/downloads?limit=2", "", nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
@@ -456,7 +456,7 @@ func TestLibraryDownloadsPagedContract(t *testing.T) {
 			t.Fatalf("write media: %v", err)
 		}
 	}
-	handler := NewServer(db, nil, nil, nil).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
 	response := doRequest(t, handler, http.MethodGet, "/api/library/downloads?page=1&pageSize=2", "", nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -527,7 +527,7 @@ func TestCheckAuthProbesWithIsolatedPool(t *testing.T) {
 	}
 	before := productionPool.Diagnostics()
 
-	handler := NewServer(db, nil, manager, eventBus).Routes()
+	handler := authenticatedRoutes(t, NewServer(db, nil, manager, eventBus))
 	response := doRequest(t, handler, http.MethodPost, "/api/auth/check", "", map[string]string{"Content-Type": "application/json"})
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())

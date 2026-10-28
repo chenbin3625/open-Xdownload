@@ -45,7 +45,7 @@ export function Select({
           "inline-flex items-center justify-between gap-2 rounded-control",
           "border border-line bg-surface text-fg transition-colors",
           "hover:border-brand-400 data-[placeholder]:text-fg-subtle",
-          size === "sm" ? "h-7 px-2.5 text-xs" : "h-9 px-3 text-sm",
+          size === "sm" ? "h-11 px-2.5 text-sm sm:h-7 sm:text-xs" : "h-11 px-3 text-sm sm:h-9",
           className,
         )}
       >
@@ -69,7 +69,7 @@ export function Select({
                 key={option.value}
                 value={option.value}
                 className={cn(
-                  "relative flex cursor-pointer items-center gap-2 rounded-control py-1.5 pr-2 pl-7",
+                  "relative flex min-h-11 cursor-pointer items-center gap-2 rounded-control py-1.5 pr-2 pl-7 sm:min-h-0",
                   "text-sm text-fg-body outline-none select-none",
                   "data-highlighted:bg-surface-hover data-highlighted:text-fg",
                   "data-[state=checked]:font-medium data-[state=checked]:text-brand-600",
@@ -200,8 +200,8 @@ export function Segmented({
       }}
       aria-label={ariaLabel}
       className={cn(
-        "inline-flex items-center rounded-control border border-line bg-surface-muted",
-        size === "sm" ? "h-7 gap-0.5 p-0.5" : "h-9 gap-1 p-1",
+        "inline-flex max-w-full items-center overflow-x-auto rounded-control border border-line bg-surface-muted",
+        size === "sm" ? "gap-0.5 p-0.5 sm:h-7" : "gap-1 p-1 sm:h-9",
         className,
       )}
     >
@@ -210,10 +210,10 @@ export function Segmented({
           key={option.value}
           value={option.value}
           className={cn(
-            "inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-[0.375rem] font-medium whitespace-nowrap text-fg-muted transition-colors select-none",
+            "inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 rounded-[0.375rem] font-medium whitespace-nowrap text-fg-muted transition-colors select-none",
             "hover:text-fg-body",
             "data-[state=on]:bg-surface data-[state=on]:text-fg data-[state=on]:shadow-xs",
-            size === "sm" ? "h-5.5 px-2.5 text-xs" : "h-7 px-3 text-sm",
+            size === "sm" ? "h-11 px-2.5 text-xs sm:h-5.5" : "h-11 px-3 text-sm sm:h-7",
           )}
         >
           {option.label}
@@ -242,13 +242,13 @@ export function Tabs({
 }) {
   return (
     <RadixTabs.Root value={value} onValueChange={onChange} className={className}>
-      <RadixTabs.List className="flex items-center gap-1 border-b border-line">
+      <RadixTabs.List className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-line">
         {items.map((item) => (
           <RadixTabs.Trigger
             key={item.key}
             value={item.key}
             className={cn(
-              "relative cursor-pointer px-3 py-2 text-sm font-medium transition-colors",
+              "relative min-h-11 shrink-0 cursor-pointer whitespace-nowrap px-3 py-2 text-sm font-medium transition-colors sm:min-h-0",
               "text-fg-muted hover:text-fg-body",
               "data-[state=active]:text-brand-600",
               // 下划线用 after 伪元素，避免布局跳动

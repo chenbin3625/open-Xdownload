@@ -670,6 +670,22 @@ func TestUpgradeRekeysVideoVariantsToMediaID(t *testing.T) {
 // "missing destination name"：本测试让这种遗漏在 CI 里直接失败。结构变更时：递增
 // schemaVersion，并在这里登记新版本的完整列集合。
 var schemaColumnsForVersion = map[int]string{
+	6: "app_account(id,password_hash,session_key,username);" +
+		"app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
+		"archive_schedules(claim_version,created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
+		"dashboard_counters(active,completed,failed,failed_tweet_count,id,total);" +
+		"download_roots(last_seen_at,path);" +
+		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,tweet_id);" +
+		"failed_media(created_at,error,id,job_id,media_url);" +
+		"failed_tweets(created_at,entity_id,error,id,job_id,next_retry_at,payload,retry_count,tweet_id,updated_at);" +
+		"jobs(created_at,error,id,input,kind,message,progress,status,title,updated_at);" +
+		"list_entities(id,list_id,name,parent_dir,updated_at);" +
+		"schema_migrations(applied_at,name);" +
+		"twitter_lists(id,name,owner_user_id,updated_at);" +
+		"unavailable_media(created_at,error,media_url,tweet_id,updated_at);" +
+		"user_entities(id,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id);" +
+		"user_links(id,list_entity_id,name,updated_at,user_id);" +
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
 	// v5：archive_schedules.claim_version、download_roots.last_seen_at；
 	// 删除只写不读的 user_previous_names（表与触发器）。
 	5: "app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +

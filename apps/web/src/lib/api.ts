@@ -1,3 +1,5 @@
+import { invalidateSession, readSessionToken } from "./session";
+
 export type JobStatus =
   | "pending"
   | "resolving"
@@ -339,16 +341,22 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
   const { timeoutMs = DEFAULT_TIMEOUT_MS, ...requestInit } = init ?? {};
   const method = (requestInit.method ?? "GET").toUpperCase();
   const composed = createRequestSignal(requestInit.signal, timeoutMs);
+  const token = readSessionToken();
   try {
     const response = await fetch(path, {
       ...requestInit,
+      credentials: "same-origin",
       signal: composed.signal,
       headers: {
-        ...(method !== "GET" && method !== "HEAD" ? { "Content-Type": "application/json" } : {}),
+        ...(method !== "GET" && method !== "HEAD" ? { "Content-Type": "application/json", "X-XDownload-Request": "1" } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(requestInit.headers ?? {}),
       },
     });
     if (!response.ok) {
+      if (response.status === 401 && path !== "/api/auth/login" && token === readSessionToken()) {
+        invalidateSession();
+      }
       const payload: { error?: string } | null = await response.json().catch(() => null);
       // 空串 error、{}、HTTP/2 下为空的 statusText 都要继续回退，保证提示里总有内容。
       const message =
@@ -375,6 +383,27 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
     composed.dispose();
   }
 }
+
+export interface LoginSession {
+  configured: boolean;
+  authenticated: boolean;
+  username?: string;
+}
+
+export interface LoginResult {
+  username: string;
+  token: string;
+}
+
+export const getLoginSession = () => api<LoginSession>("/api/auth/session");
+export const loginAccount = (username: string, password: string, setup: boolean) =>
+  api<LoginResult>(setup ? "/api/auth/setup" : "/api/auth/login", {
+    method: "POST", body: JSON.stringify({ username, password }),
+  });
+export const changeAccountPassword = (currentPassword: string, newPassword: string) =>
+  api<{ ok: boolean }>("/api/auth/password", {
+    method: "PUT", body: JSON.stringify({ currentPassword, newPassword }),
+  });
 
 export const getJobsPage = ({
   page = 1,

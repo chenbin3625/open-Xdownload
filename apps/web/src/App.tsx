@@ -35,11 +35,16 @@ import { TaskCenterPage } from "./pages/TaskCenterPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
 import { GalleryPage } from "./pages/GalleryPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { AuthGate } from "./components/auth/AuthGate";
 
 // 侧边栏的 overview / workbench / tasks 都指向任务调度中心这一个页面。
 const taskCenterSections = ["overview", "workbench", "tasks"];
 
 export default function App() {
+  return <AuthGate><Workbench /></AuthGate>;
+}
+
+function Workbench() {
   const queryClient = useQueryClient();
   // 与 Tailwind 的 lg 断点同源，避免 992–1024px 区间里布局与可见性错位。
   const isCompact = !useBreakpointUp("lg");
@@ -188,7 +193,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-canvas">
+    <div className="app-shell flex h-dvh w-full overflow-hidden bg-canvas">
       {/* 任意接口请求在途时的全局顶部加载进度条 */}
       <GlobalLoadingBar />
 
@@ -237,7 +242,7 @@ export default function App() {
 
         {/* 页面主内容滚动容器 */}
         <main className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto flex w-full max-w-[100rem] flex-col gap-4 p-4 lg:p-6">
+          <div className="page-content mx-auto flex w-full min-w-0 max-w-[100rem] flex-col gap-4 p-3 sm:p-4 lg:p-6">
             {/* 异常状态提示 */}
             {isWorkbenchActive && jobs.isError && (
               <Alert
