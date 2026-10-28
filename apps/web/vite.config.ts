@@ -48,7 +48,10 @@ function precompress(): Plugin {
         const ext = path.extname(file).toLowerCase();
         if (!compressibleExt.has(ext)) continue;
         const source = readFileSync(file);
-        writeFileSync(file + ".gz", gzipSync(source, { level: 9 }));
+        const gzip = gzipSync(source, { level: 9 });
+        // Gzip's OS byte varies across build hosts; 255 keeps embedded assets reproducible.
+        gzip[9] = 255;
+        writeFileSync(file + ".gz", gzip);
         writeFileSync(
           file + ".br",
           brotliCompressSync(source, {
