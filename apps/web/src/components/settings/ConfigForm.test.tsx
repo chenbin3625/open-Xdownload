@@ -55,7 +55,8 @@ it("associates settings controls with their visible labels", () => {
   expect(screen.getByRole("textbox", { name: "网络代理 (Proxy)" })).not.toBeNull();
   expect(screen.getByRole("spinbutton", { name: "最大文件名长度" })).not.toBeNull();
   expect(screen.getByRole("combobox", { name: "文件命名策略" })).not.toBeNull();
-  expect(screen.getByRole("button", { name: "跟随系统偏好" }).getAttribute("aria-pressed")).not.toBeNull();
+  expect(screen.queryByRole("group", { name: "明暗主题模式" })).toBeNull();
+  expect(screen.queryByRole("group", { name: "主题强调色" })).toBeNull();
 });
 
 it("syncs the latest GET config when a saved response cannot be confirmed", async () => {

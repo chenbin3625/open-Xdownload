@@ -9,6 +9,11 @@ function setUrl(path: string) {
 describe("URL 路由状态往返", () => {
   afterEach(() => setUrl("/"));
 
+  it("任务中心默认展示第一页最近 10 条", () => {
+    setUrl("/tasks");
+    expect(readRouteState()).toMatchObject({ jobPage: 1, jobPageSize: 10, shouldReplace: false });
+  });
+
   it("从 URL 还原媒体库筛选（刷新/分享）", () => {
     setUrl("/gallery?page=3&kind=videos&user=alice&q=cat");
     const state = readRouteState();

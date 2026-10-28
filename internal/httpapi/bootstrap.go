@@ -27,11 +27,11 @@ func includeWorkbenchBootstrap(path string) bool {
 
 func parseWorkbenchPage(r *http.Request) (page int, pageSize int) {
 	page = parsePositiveInt(r, "page", 1, 1, 1000000)
-	pageSize = parsePositiveInt(r, "pageSize", 20, 1, 100)
+	pageSize = parsePositiveInt(r, "pageSize", 10, 1, 100)
 	switch pageSize {
 	case 10, 20, 50, 100:
 	default:
-		pageSize = 20
+		pageSize = 10
 	}
 	return page, pageSize
 }

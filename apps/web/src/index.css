@@ -1,20 +1,13 @@
 @import "tailwindcss";
 
 /* =========================================================
-   暗色模式：由 <html class="dark"> 驱动，不用 media query，
-   这样用户的显式选择能覆盖系统偏好（见 lib/useTheme.ts）。
-   ========================================================= */
-@custom-variant dark (&:where(.dark, .dark *));
-
-/* =========================================================
    设计令牌
    语义命名（surface / border / text-muted），不是色阶命名。
-   组件只引用语义令牌，明暗两套值在下方 :root / .dark 里各给一份，
-   页面代码因此无需写任何 dark: 变体来处理配色。
+   组件统一引用下方定义的浅色语义令牌。
    ========================================================= */
 
 @theme {
-  /* 品牌色阶由 CSS 变量控制，支持动态主题切换 */
+  /* 品牌色阶 */
   --color-brand-50: var(--color-brand-50);
   --color-brand-100: var(--color-brand-100);
   --color-brand-200: var(--color-brand-200);
@@ -50,9 +43,7 @@
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
 
-  /* 状态色前景配对色：实心底色上的文字必须用它，不能写死 text-white。
-     浅色/深色两套取值在 :root / .dark 里各自给出（按底色亮度选深字或白字），
-     与 --brand-contrast 同一套思路，保证 5 套强调色 × 明暗都达 WCAG AA。 */
+  /* 状态色前景配对色，保证实心底色上的文字对比度。 */
   --color-success-contrast: var(--success-contrast);
   --color-warning-contrast: var(--warning-contrast);
   --color-danger-contrast: var(--danger-contrast);
@@ -79,9 +70,7 @@
 }
 
 @layer base {
-  /* 默认主题色：𝕏 电光蓝 */
-  :root,
-  [data-accent="x-blue"] {
+  :root {
     --brand-contrast: #09090b;
     --color-brand-50: #f0f9ff;
     --color-brand-100: #e0f2fe;
@@ -94,70 +83,7 @@
     --color-brand-800: #075985;
     --color-brand-900: #0c4a6e;
     --brand-glow: rgba(29, 155, 240, 0.18);
-  }
 
-  [data-accent="titanium"] {
-    --brand-contrast: #ffffff;
-    --color-brand-50: #fafafa;
-    --color-brand-100: #f4f4f5;
-    --color-brand-200: #e4e4e7;
-    --color-brand-300: #d4d4d8;
-    --color-brand-400: #a1a1aa;
-    --color-brand-500: #71717a;
-    --color-brand-600: #52525b;
-    --color-brand-700: #3f3f46;
-    --color-brand-800: #27272a;
-    --color-brand-900: #18181b;
-    --brand-glow: rgba(113, 113, 122, 0.2);
-  }
-
-  [data-accent="indigo"] {
-    --brand-contrast: #ffffff;
-    --color-brand-50: #eef2ff;
-    --color-brand-100: #e0e7ff;
-    --color-brand-200: #c7d2fe;
-    --color-brand-300: #a5b4fc;
-    --color-brand-400: #818cf8;
-    --color-brand-500: #6366f1;
-    --color-brand-600: #4f46e5;
-    --color-brand-700: #4338ca;
-    --color-brand-800: #3730a3;
-    --color-brand-900: #312e81;
-    --brand-glow: rgba(99, 102, 241, 0.2);
-  }
-
-  [data-accent="emerald"] {
-    --brand-contrast: #09090b;
-    --color-brand-50: #ecfdf5;
-    --color-brand-100: #d1fae5;
-    --color-brand-200: #a7f3d0;
-    --color-brand-300: #6ee7b7;
-    --color-brand-400: #34d399;
-    --color-brand-500: #10b981;
-    --color-brand-600: #059669;
-    --color-brand-700: #047857;
-    --color-brand-800: #065f46;
-    --color-brand-900: #064e3b;
-    --brand-glow: rgba(16, 185, 129, 0.2);
-  }
-
-  [data-accent="amber"] {
-    --brand-contrast: #09090b;
-    --color-brand-50: #fffbeb;
-    --color-brand-100: #fef3c7;
-    --color-brand-200: #fde68a;
-    --color-brand-300: #fcd34d;
-    --color-brand-400: #fbbf24;
-    --color-brand-500: #f59e0b;
-    --color-brand-600: #d97706;
-    --color-brand-700: #b45309;
-    --color-brand-800: #92400e;
-    --color-brand-900: #78350f;
-    --brand-glow: rgba(245, 158, 11, 0.2);
-  }
-
-  /* 基础浅色模式画布与表面 */
-  :root {
     --canvas: #f8fafc;
     --surface: #ffffff;
     --surface-muted: #f1f5f9;
@@ -203,108 +129,8 @@
     --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.15);
   }
 
-  /* 基础暗色模式：黑曜石沉浸视觉 */
-  .dark {
-    --canvas: #09090b;
-    --surface: #111114;
-    --surface-muted: #18181c;
-    --surface-hover: #222228;
-    --line: #26262e;
-    --line-strong: #383844;
-    --fg: #f4f4f6;
-    --fg-body: #d1d1d6;
-    --fg-muted: #8e8e98;
-    --fg-subtle: #85858f;
-
-    --success: #10b981;
-    --success-soft: rgb(16 185 129 / 0.14);
-    --warning: #f59e0b;
-    --warning-soft: rgb(245 158 11 / 0.14);
-    --danger: #ef4444;
-    --danger-soft: rgb(239 68 68 / 0.14);
-    --info: #0ea5e9;
-    --info-soft: rgb(14 165 233 / 0.14);
-
-    /* 暗色的状态色整体更亮，白字全部不达标（2.15–3.76），统一用深字：
-       success 7.84 ｜ warning 9.26 ｜ danger 5.29 ｜ info 7.18 */
-    --success-contrast: #09090b;
-    --warning-contrast: #09090b;
-    --danger-contrast: #09090b;
-    --info-contrast: #09090b;
-
-    /* 深色 soft 底是半透明叠加，直接用原始亮色即可；danger 略暗（4.39）提亮一档 */
-    --success-strong: #10b981;
-    --warning-strong: #f59e0b;
-    --danger-strong: #f87171;
-    --info-strong: #0ea5e9;
-
-    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
-    --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.5), 0 8px 10px -6px rgb(0 0 0 / 0.5);
-    --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.7);
-  }
-
-  /* 钛金暗色特别优化：暗色下主文字提亮 */
-  .dark[data-accent="titanium"],
-  .dark [data-accent="titanium"] {
-    --brand-contrast: #09090b;
-    --color-brand-50: #18181b;
-    --color-brand-100: #27272a;
-    --color-brand-200: #3f3f46;
-    --color-brand-300: #52525b;
-    --color-brand-400: #a1a1aa;
-    --color-brand-500: #f4f4f5;
-    --color-brand-600: #ffffff;
-    --color-brand-700: #ffffff;
-    --color-brand-800: #fafafa;
-    --color-brand-900: #ffffff;
-    --brand-glow: rgba(255, 255, 255, 0.15);
-  }
-
   html {
     color-scheme: light;
-  }
-
-  html.dark {
-    color-scheme: dark;
-  }
-
-  /* 首屏防闪：CSP 为 script-src 'self'，不能用内联脚本在 CSS 前抢先写类名。
-     这里让「未显式选择过主题」的访客直接按系统偏好上暗色令牌，
-     JS 起来后 useTheme 再写上明确的 .dark / .light 类接管。 */
-  @media (prefers-color-scheme: dark) {
-    html:not(.light):not(.dark) {
-      color-scheme: dark;
-
-      --canvas: #09090b;
-      --surface: #111114;
-      --surface-muted: #18181c;
-      --surface-hover: #222228;
-      --line: #26262e;
-      --line-strong: #383844;
-      --fg: #f4f4f6;
-      --fg-body: #d1d1d6;
-      --fg-muted: #8e8e98;
-      --fg-subtle: #85858f;
-
-      --success: #10b981;
-      --success-soft: rgb(16 185 129 / 0.14);
-      --warning: #f59e0b;
-      --warning-soft: rgb(245 158 11 / 0.14);
-      --danger: #ef4444;
-      --danger-soft: rgb(239 68 68 / 0.14);
-      --info: #0ea5e9;
-      --info-soft: rgb(14 165 233 / 0.14);
-
-      /* 与 .dark 保持一致（首屏防闪路径） */
-      --success-contrast: #09090b;
-      --warning-contrast: #09090b;
-      --danger-contrast: #09090b;
-      --info-contrast: #09090b;
-      --success-strong: #10b981;
-      --warning-strong: #f59e0b;
-      --danger-strong: #f87171;
-      --info-strong: #0ea5e9;
-    }
   }
 
   body {
@@ -333,8 +159,7 @@
     vertical-align: middle;
   }
 
-  /* 选中文字用强调色的配对前景色，不能写死 #fff：
-     深色钛金的 brand-500 近白，白字选中等于看不见。 */
+  /* 选中文字使用品牌色的配对前景色。 */
   ::selection {
     background-color: var(--color-brand-500);
     color: var(--brand-contrast);

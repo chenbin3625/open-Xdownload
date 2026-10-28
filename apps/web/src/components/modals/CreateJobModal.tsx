@@ -271,7 +271,7 @@ export function CreateJobModal({
         <div className="space-y-3 pt-1">
           <div className="flex items-center justify-between text-xs text-fg-muted">
             <span>{tab.hint}</span>
-            <span className="font-mono font-medium text-brand-600 dark:text-brand-400">
+            <span className="font-mono font-medium text-brand-600">
               已识别: {currentBatchItems.length} 个
             </span>
           </div>
@@ -356,7 +356,7 @@ export function CreateJobModal({
       className="sm:w-[min(92vw,44rem)]"
       title={
         <div className="flex items-center gap-3">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600 font-bold dark:bg-brand-500/12">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600 font-bold">
             <Plus className="size-4" />
           </div>
           <div className="min-w-0">

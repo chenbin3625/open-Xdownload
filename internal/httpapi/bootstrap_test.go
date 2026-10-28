@@ -30,10 +30,15 @@ func TestParseWorkbenchPage(t *testing.T) {
 	if page != 3 || pageSize != 50 {
 		t.Fatalf("page=%d pageSize=%d, want 3/50", page, pageSize)
 	}
+	request = httptest.NewRequest(http.MethodGet, "/tasks", nil)
+	page, pageSize = parseWorkbenchPage(request)
+	if page != 1 || pageSize != 10 {
+		t.Fatalf("page=%d pageSize=%d, want 1/10", page, pageSize)
+	}
 	request = httptest.NewRequest(http.MethodGet, "/?pageSize=15", nil)
 	_, pageSize = parseWorkbenchPage(request)
-	if pageSize != 20 {
-		t.Fatalf("invalid pageSize should fall back to 20, got %d", pageSize)
+	if pageSize != 10 {
+		t.Fatalf("invalid pageSize should fall back to 10, got %d", pageSize)
 	}
 }
 

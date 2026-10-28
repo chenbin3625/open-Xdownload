@@ -1,10 +1,8 @@
-import { Check, Menu, Moon, Palette, RefreshCw, Search, Sun, WifiOff } from "lucide-react";
+import { Menu, RefreshCw, Search, WifiOff } from "lucide-react";
 import React, { useState } from "react";
-import { cn } from "../../lib/cn";
-import { THEME_ACCENTS, useTheme } from "../../lib/useTheme";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
-import { SimplePopover, Tooltip } from "../ui/Overlay";
+import { Tooltip } from "../ui/Overlay";
 import { Tag } from "../ui/Tag";
 
 export interface AppHeaderProps {
@@ -28,9 +26,6 @@ export function AppHeader({
   onReconnectRealtime,
 }: AppHeaderProps) {
   const [quickInput, setQuickInput] = useState("");
-  const { resolved, toggle, accent, setAccent } = useTheme();
-
-  const currentAccent = THEME_ACCENTS.find((a) => a.id === accent) || THEME_ACCENTS[0];
 
   const handleSubmit = () => {
     const trimmed = quickInput.trim();
@@ -41,22 +36,18 @@ export function AppHeader({
 
   return (
     <header className="app-header sticky top-0 z-20 shrink-0 border-b border-line/80 glass-header shadow-2xs">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 px-3 py-2 sm:h-15 sm:flex-nowrap sm:gap-3 sm:px-4 sm:py-0 md:px-6">
+      <div className="flex items-center gap-2 px-3 py-2 sm:h-15 sm:gap-3 sm:px-4 sm:py-0 md:px-6">
         {showMenuButton && (
           <Button
             variant="text"
             icon={<Menu className="size-4" />}
             onClick={onToggleMobileMenu}
             aria-label="打开导航菜单"
+            className="hidden sm:inline-flex"
           />
         )}
 
-        <div className="min-w-0 flex-1 truncate text-sm font-semibold text-fg sm:hidden">
-          open-Xdownload
-        </div>
-
-        {/* 手机端输入框独占一行，保留完整输入和提交空间。 */}
-        <div className="order-last w-full min-w-0 sm:order-none sm:w-auto sm:flex-1 md:max-w-140">
+        <div className="min-w-0 flex-1 md:max-w-140">
           <div className="relative flex items-center group">
             <Input
               value={quickInput}
@@ -89,7 +80,7 @@ export function AppHeader({
         </div>
 
         {/* 右侧运行状态与操作 */}
-        <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
+        <div className="ml-auto hidden shrink-0 items-center gap-2 sm:flex">
           {realtimeDisconnected && (
             <button
               type="button"
@@ -106,72 +97,6 @@ export function AppHeader({
           <Tag tone="brand" className="hidden font-mono text-[11px] shadow-2xs sm:inline-flex">
             v{__APP_VERSION__}
           </Tag>
-
-          {/* 主题强调色选择器 */}
-          <SimplePopover
-            align="end"
-            trigger={
-              <Button
-                variant="text"
-                aria-label="选择主题强调色"
-                icon={
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      className={cn(
-                        "size-3 rounded-full border border-black/10 dark:border-white/20 shadow-xs transition-colors",
-                        currentAccent.dotColor,
-                      )}
-                    />
-                    <Palette className="size-3.5 text-fg-muted" />
-                  </div>
-                }
-              />
-            }
-          >
-            <div className="w-52 space-y-2">
-              <div className="text-xs font-semibold text-fg px-1">主题强调色</div>
-              <div className="space-y-1">
-                {THEME_ACCENTS.map((opt) => {
-                  const isActive = accent === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setAccent(opt.id)}
-                      className={cn(
-                        "flex min-h-11 w-full items-center justify-between rounded-control px-2.5 py-1.5 text-xs transition-colors cursor-pointer sm:min-h-0",
-                        isActive
-                          ? "bg-brand-500/10 text-brand-500 font-medium"
-                          : "text-fg-body hover:bg-surface-hover hover:text-fg",
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={cn(
-                            "size-2.5 rounded-full border border-black/10 dark:border-white/20",
-                            opt.dotColor,
-                          )}
-                        />
-                        <span>{opt.name}</span>
-                      </div>
-                      {isActive && <Check className="size-3 text-brand-500" />}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </SimplePopover>
-
-          <Tooltip title={resolved === "dark" ? "切换到浅色模式" : "切换到深色模式"}>
-            <Button
-              variant="text"
-              onClick={toggle}
-              aria-label="切换主题"
-              icon={
-                resolved === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />
-              }
-            />
-          </Tooltip>
 
           <Tooltip title="刷新数据">
             <Button

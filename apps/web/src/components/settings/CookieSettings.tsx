@@ -209,7 +209,7 @@ export function CookieHelpAlert() {
         <button
           type="button"
           onClick={() => setOpen((c) => !c)}
-          className="cursor-pointer text-xs font-medium text-brand-600 dark:text-brand-400 hover:underline"
+          className="cursor-pointer text-xs font-medium text-brand-600 hover:underline"
         >
           {open ? "收起指引" : "展开指引"}
         </button>

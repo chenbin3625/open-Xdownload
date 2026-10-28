@@ -10,8 +10,7 @@ export type Tone =
   | "danger"
   | "info";
 
-// 语义色 → 配色三元组（底色/文字/描边）。暗色下的 soft 底色在
-// index.css 里已改为低透明度叠加，因此这里不需要写 dark: 变体。
+// 语义色 → 配色三元组（底色/文字/描边）。
 // neutral 是 default 的历史别名（保留公开 Tone 类型以兼容调用方），
 // 两者共用同一份类名，避免以后改一处忘另一处。
 const NEUTRAL_TONE_CLASS = "bg-surface-muted text-fg-muted border-line";
@@ -19,7 +18,7 @@ const NEUTRAL_TONE_CLASS = "bg-surface-muted text-fg-muted border-line";
 const toneClass: Record<Tone, string> = {
   default: NEUTRAL_TONE_CLASS,
   neutral: NEUTRAL_TONE_CLASS,
-  brand: "bg-brand-50 text-brand-700 border-brand-200 dark:bg-brand-500/12 dark:text-brand-400 dark:border-brand-500/30",
+  brand: "bg-brand-50 text-brand-700 border-brand-200",
   success: "bg-success-soft text-success-strong border-success/30",
   warning: "bg-warning-soft text-warning-strong border-warning/30",
   danger: "bg-danger-soft text-danger-strong border-danger/30",
@@ -145,7 +144,7 @@ export function Avatar({
     <span
       className={cn(
         "inline-flex size-8 shrink-0 items-center justify-center rounded-full",
-        "bg-brand-50 text-sm font-bold text-brand-600 dark:bg-brand-500/15 dark:text-brand-300",
+        "bg-brand-50 text-sm font-bold text-brand-600",
         className,
       )}
       aria-hidden="true"

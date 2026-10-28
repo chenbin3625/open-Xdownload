@@ -2,7 +2,7 @@
 import { renderWithProviders as render, screen } from "../../test/render";
 import userEvent from "@testing-library/user-event";
 import React from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AppHeader } from "./AppHeader";
 
 const baseProps = {
@@ -10,20 +10,6 @@ const baseProps = {
   onRefresh: () => {},
   onQuickSubmit: () => {},
 };
-
-beforeEach(() => {
-  document.documentElement.className = "";
-  window.localStorage.clear();
-  // useTheme 通过 matchMedia 读系统偏好，jsdom 未实现
-  if (!window.matchMedia) {
-    window.matchMedia = ((query: string) => ({
-      matches: false,
-      media: query,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    })) as unknown as typeof window.matchMedia;
-  }
-});
 
 describe("AppHeader", () => {
   it("回车与点击解析都提交并清空输入", async () => {
@@ -62,18 +48,11 @@ describe("AppHeader", () => {
     expect(screen.queryByText(/运行中/)).toBeNull();
   });
 
-  it("主题按钮切换 html 上的类名", async () => {
-    const user = userEvent.setup();
+  it("不再提供主题或强调色切换入口", () => {
     render(<AppHeader {...baseProps} />);
 
-    await user.click(screen.getByRole("button", { name: "切换主题" }));
-    expect(document.documentElement.classList.contains("dark")).toBe(true);
-
-    await user.click(screen.getByRole("button", { name: "切换主题" }));
-    expect(document.documentElement.classList.contains("dark")).toBe(false);
-    // 显式选择浅色时必须带上 .light，否则 CSS 里
-    // html:not(.light):not(.dark) 的系统兜底会把它又拉回深色
-    expect(document.documentElement.classList.contains("light")).toBe(true);
+    expect(screen.queryByRole("button", { name: "切换主题" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择主题强调色" })).toBeNull();
   });
 
   it("SSE 断开时显示提示且点击可重连", async () => {

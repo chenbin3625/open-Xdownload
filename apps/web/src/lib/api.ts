@@ -407,7 +407,7 @@ export const changeAccountPassword = (currentPassword: string, newPassword: stri
 
 export const getJobsPage = ({
   page = 1,
-  pageSize = 20,
+  pageSize = 10,
   signal,
 }: { page?: number; pageSize?: number; signal?: AbortSignal } = {}) =>
   api<JobsPage>(`/api/jobs?page=${page}&pageSize=${pageSize}`, { signal });

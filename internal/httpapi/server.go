@@ -704,7 +704,7 @@ type jobListPage struct {
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	page := parsePositiveInt(r, "page", 1, 1, 1000000)
-	pageSize := parsePositiveInt(r, "pageSize", 20, 1, 100)
+	pageSize := parsePositiveInt(r, "pageSize", 10, 1, 100)
 	offset := (page - 1) * pageSize
 	items, err := s.store.ListJobsPage(r.Context(), pageSize, offset)
 	if err != nil {
@@ -1450,7 +1450,7 @@ func (s *Server) clearFailedTweets(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	page := parsePositiveInt(r, "page", 1, 1, 1000000)
-	pageSize := parsePositiveInt(r, "pageSize", 20, 1, 100)
+	pageSize := parsePositiveInt(r, "pageSize", 10, 1, 100)
 	stats, failedTweetCount, err := s.store.DashboardMeta(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

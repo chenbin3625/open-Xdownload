@@ -42,7 +42,7 @@ export type RouteState = {
 };
 
 export const defaultJobPage = 1;
-export const defaultJobPageSize = 20;
+export const defaultJobPageSize = 10;
 export const defaultJobStatus: StatusFilterType = "all";
 
 export const sectionRoutes: Record<SectionKey, string> = {

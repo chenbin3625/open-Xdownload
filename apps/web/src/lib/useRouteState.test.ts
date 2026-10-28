@@ -30,9 +30,11 @@ describe("useRouteState helpers", () => {
   });
 
   it("restricts page sizes to known options", () => {
+    expect(parseJobPageSize(null)).toBe(10);
+    expect(parseJobPageSize("10")).toBe(10);
     expect(parseJobPageSize("20")).toBe(20);
     expect(parseJobPageSize("100")).toBe(100);
-    expect(parseJobPageSize("15")).toBe(20); // 不在选项内，回落默认
+    expect(parseJobPageSize("15")).toBe(10); // 不在选项内，回落默认
   });
 
   it("sanitizes status / kind / search query values", () => {
@@ -49,6 +51,8 @@ describe("useRouteState helpers", () => {
   it("builds route paths with query params", () => {
     expect(buildRoutePath({ section: "overview" })).toBe("/overview");
     expect(buildRoutePath({ section: "overview", jobPage: 3 })).toBe("/overview?page=3");
+    expect(buildRoutePath({ section: "tasks", jobPageSize: 10 })).toBe("/tasks");
+    expect(buildRoutePath({ section: "tasks", jobPageSize: 20 })).toBe("/tasks?pageSize=20");
     expect(buildRoutePath({ section: "overview", jobPage: 3, jobPageSize: 50 })).toBe(
       "/overview?page=3&pageSize=50",
     );
@@ -89,7 +93,7 @@ describe("readRouteState without window", () => {
     const state = readRouteState();
     expect(state.section).toBe("overview");
     expect(state.jobPage).toBe(1);
-    expect(state.jobPageSize).toBe(20);
+    expect(state.jobPageSize).toBe(10);
     expect(state.jobStatus).toBe("all");
     expect(state.gallery).toEqual(defaultGalleryFilter);
   });

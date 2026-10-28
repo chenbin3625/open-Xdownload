@@ -94,7 +94,7 @@ export function SectionCard({
     >
       <div className="flex items-start gap-3 border-b border-line px-5 py-4">
         {icon && (
-          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600 dark:bg-brand-500/12">
+          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600">
             {icon}
           </span>
         )}

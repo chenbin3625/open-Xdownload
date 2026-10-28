@@ -75,7 +75,7 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/auth/session") return json({ configured: true, authenticated: true, username: "owner" });
-      if (url.pathname === "/api/jobs") return json({ items: jobs, page: 1, pageSize: 20 });
+      if (url.pathname === "/api/jobs") return json({ items: jobs, page: 1, pageSize: Number(url.searchParams.get("pageSize")) });
       if (url.pathname === "/api/dashboard/meta") {
         return json({
           stats: { total: jobs.length, active: 0, completed: 1, failed: 1 },
@@ -103,6 +103,16 @@ afterEach(() => {
 });
 
 describe("App 的 URL 状态", () => {
+  it("默认请求最近 10 条任务", async () => {
+    renderApp();
+    await screen.findByText("成功任务");
+
+    const requests = vi.mocked(fetch).mock.calls.map(([input]) => new URL(String(input), "http://localhost"));
+    const request = requests.find((url) => url.pathname === "/api/jobs");
+    expect(request?.searchParams.get("page")).toBe("1");
+    expect(request?.searchParams.get("pageSize")).toBe("10");
+  });
+
   it("启动时按 URL 还原任务中心的状态筛选", async () => {
     window.history.replaceState(null, "", "/tasks?status=failed");
     renderApp();

@@ -570,7 +570,7 @@ function JobProgress({ job }: { job: Job }) {
         >
           {displayMsg}
         </span>
-        <span className={cn("shrink-0 font-mono font-semibold", hasError ? "text-danger" : "text-brand-600 dark:text-brand-400")}>
+        <span className={cn("shrink-0 font-mono font-semibold", hasError ? "text-danger" : "text-brand-600")}>
           {percent}%
         </span>
       </div>
@@ -704,7 +704,7 @@ function JobErrorAlert({ job }: { job: Job }) {
                 return (
                   <div
                     key={group.id}
-                    className="rounded-card border border-danger/20 bg-surface/90 dark:bg-surface-elevated/90 p-2.5 shadow-xs space-y-2"
+                    className="rounded-card border border-danger/20 bg-surface/90 p-2.5 shadow-xs space-y-2"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5 min-w-0">
@@ -733,7 +733,7 @@ function JobErrorAlert({ job }: { job: Job }) {
                             <button
                               type="button"
                               onClick={() => toggleExpand(group.id)}
-                              className="text-[11px] text-brand-600 dark:text-brand-400 hover:underline cursor-pointer"
+                              className="text-[11px] text-brand-600 hover:underline cursor-pointer"
                             >
                               {isExpanded ? "收起" : `展开更多 (+${group.targets.length - 8})`}
                             </button>
@@ -820,7 +820,7 @@ function ExpandedJobDetails({
         return (
           <div className="flex items-center justify-between gap-3 text-xs">
             <div className="flex min-w-0 flex-1 items-start gap-2.5">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded bg-brand-500/10 font-mono text-[10px] font-bold text-brand-600 dark:text-brand-400">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded bg-brand-500/10 font-mono text-[10px] font-bold text-brand-600">
                 {ext}
               </span>
               <div className="min-w-0 flex-1 space-y-0.5">

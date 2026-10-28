@@ -202,13 +202,10 @@ export function Tooltip({
         <RadixTooltip.Content
           side={side}
           sideOffset={6}
-          className={cn(
-            "z-[1300] max-w-xs rounded-control bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 shadow-md",
-            "dark:bg-slate-100 dark:text-slate-900",
-          )}
+          className="z-[1300] max-w-xs rounded-control bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 shadow-md"
         >
           {displayTitle}
-          <RadixTooltip.Arrow className="fill-slate-900 dark:fill-slate-100" />
+          <RadixTooltip.Arrow className="fill-slate-900" />
         </RadixTooltip.Content>
       </RadixTooltip.Portal>
     </RadixTooltip.Root>

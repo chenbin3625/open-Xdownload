@@ -422,6 +422,9 @@ func TestDashboardOmitsFailedTweetBodies(t *testing.T) {
 	if dashboard.FailedTweetCount != 1 {
 		t.Fatalf("failedTweetCount = %d, want 1", dashboard.FailedTweetCount)
 	}
+	if dashboard.Pagination.PageSize != 10 {
+		t.Fatalf("pageSize = %d, want 10", dashboard.Pagination.PageSize)
+	}
 	if len(dashboard.FailedTweets) != 0 {
 		t.Fatalf("dashboard should not embed failed tweet bodies, got %d", len(dashboard.FailedTweets))
 	}
@@ -480,32 +483,50 @@ func TestListJobsPageOmitsStats(t *testing.T) {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	for i := 0; i < 3; i++ {
-		if _, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://example.com/media.mp4", "media"); err != nil {
+	var created []storage.Job
+	for i := 0; i < 12; i++ {
+		job, err := db.CreateJob(ctx, storage.JobKindMediaURL, "https://example.com/media.mp4", "media")
+		if err != nil {
 			t.Fatalf("create job: %v", err)
 		}
+		created = append(created, job)
 	}
 
 	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
-	request := newLoopbackRequest(http.MethodGet, "/api/jobs?page=1&pageSize=2", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
-	}
-	var page jobListPage
-	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if page.Page != 1 || page.PageSize != 2 {
-		t.Fatalf("page=%d pageSize=%d", page.Page, page.PageSize)
-	}
-	if len(page.Items) != 2 {
-		t.Fatalf("items = %d, want 2", len(page.Items))
-	}
-	raw := response.Body.String()
-	if strings.Contains(raw, `"stats"`) || strings.Contains(raw, `"failedTweetCount"`) {
-		t.Fatal("jobs page must not include dashboard stats")
+	for _, tc := range []struct {
+		url      string
+		pageSize int
+	}{
+		{url: "/api/jobs", pageSize: 10},
+		{url: "/api/jobs?page=1&pageSize=2", pageSize: 2},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			request := newLoopbackRequest(http.MethodGet, tc.url, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			var page jobListPage
+			if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if page.Page != 1 || page.PageSize != tc.pageSize {
+				t.Fatalf("page=%d pageSize=%d, want 1/%d", page.Page, page.PageSize, tc.pageSize)
+			}
+			if len(page.Items) != tc.pageSize {
+				t.Fatalf("items = %d, want %d", len(page.Items), tc.pageSize)
+			}
+			for i, job := range page.Items {
+				if job.ID != created[len(created)-1-i].ID {
+					t.Fatalf("items[%d].ID = %d, want newest first", i, job.ID)
+				}
+			}
+			raw := response.Body.String()
+			if strings.Contains(raw, `"stats"`) || strings.Contains(raw, `"failedTweetCount"`) {
+				t.Fatal("jobs page must not include dashboard stats")
+			}
+		})
 	}
 }
 

@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Menu, RefreshCw, WifiOff } from "lucide-react";
 import React, { useCallback, useEffect, useState } from "react";
 import {
   archiveScheduleQueryRoot,
@@ -23,6 +24,7 @@ import { useBreakpointUp } from "./lib/useMediaQuery";
 import { useRouteState } from "./lib/useRouteState";
 
 import { Alert, ListSkeleton } from "./components/ui/Feedback";
+import { Button } from "./components/ui/Button";
 import { Drawer } from "./components/ui/Overlay";
 
 import { AppSidebar } from "./components/layout/AppSidebar";
@@ -323,6 +325,31 @@ function Workbench() {
             )}
           </div>
         </main>
+        <div className="flex shrink-0 items-center gap-2 border-t border-line bg-surface px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:hidden">
+          <Button
+            variant="text"
+            icon={<Menu className="size-4" />}
+            onClick={() => setMobileMenuOpen(true)}
+            aria-label="打开导航菜单"
+          />
+          <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg-muted">open-Xdownload</span>
+          {!sseConnected && (
+            <Button
+              variant="text"
+              icon={<WifiOff className="size-4 text-warning" />}
+              onClick={reconnectEvents}
+              aria-label="实时更新已断开，点击重连"
+              title="实时更新已断开，点击重连"
+            />
+          )}
+          <Button
+            variant="text"
+            icon={<RefreshCw className="size-4" />}
+            loading={manualRefreshPending}
+            onClick={handleManualRefresh}
+            aria-label="刷新数据"
+          />
+        </div>
       </div>
 
       {/* 统一新建任务/归档模态框 */}

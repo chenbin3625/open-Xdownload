@@ -77,6 +77,8 @@ it("keeps login across reloads and clears it after a password change", async () 
   await screen.findByRole("heading", { name: "账号安全" });
   const lastStatus = fetchMock.mock.calls.filter(([path]) => path === "/api/auth/session").at(-1);
   expect(new Headers(lastStatus?.[1]?.headers).get("Authorization")).toBe("Bearer permanent-token");
+  expect(screen.queryByLabelText("当前密码")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "修改密码" }));
   await userEvent.type(screen.getByLabelText("当前密码"), "initial-password");
   await userEvent.type(screen.getByLabelText("新密码"), "replacement-password");
   await userEvent.type(screen.getByLabelText("确认新密码"), "replacement-password");
@@ -85,6 +87,26 @@ it("keeps login across reloads and clears it after a password change", async () 
   expect(Object.values(localStorage)).not.toContain("permanent-token");
   const passwordRequest = fetchMock.mock.calls.find(([path]) => path === "/api/auth/password");
   expect(JSON.parse(String(passwordRequest?.[1]?.body))).toEqual({ currentPassword: "initial-password", newPassword: "replacement-password" });
+});
+
+it("clears password fields when the password dialog is closed", async () => {
+  const fetchMock = vi.fn(async (path: string) => path === "/api/auth/session"
+    ? json({ configured: true, authenticated: true, username: "owner" }) : protectedResponse(path));
+  vi.stubGlobal("fetch", fetchMock);
+  renderApp();
+  await screen.findByRole("heading", { name: "账号安全" });
+  await userEvent.click(screen.getByRole("button", { name: "修改密码" }));
+  await userEvent.type(screen.getByLabelText("当前密码"), "initial-password");
+  await userEvent.type(screen.getByLabelText("新密码"), "replacement-password");
+  await userEvent.type(screen.getByLabelText("确认新密码"), "replacement-password");
+  await userEvent.click(screen.getByRole("button", { name: "取消" }));
+
+  expect(screen.queryByLabelText("当前密码")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "修改密码" }));
+  for (const label of ["当前密码", "新密码", "确认新密码"]) {
+    expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe("");
+  }
+  expect(fetchMock.mock.calls.some(([path]) => path === "/api/auth/password")).toBe(false);
 });
 
 it("returns to login when a previously valid token is rejected", async () => {

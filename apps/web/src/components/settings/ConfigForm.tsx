@@ -1,14 +1,9 @@
 import {
-  Check,
   Download,
   HardDrive,
-  Monitor,
-  Moon,
-  Palette,
   RefreshCw,
   Save,
   ShieldCheck,
-  Sun,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useRef, useState } from "react";
@@ -19,8 +14,6 @@ import {
   type AppConfig,
   type AuthCheck,
 } from "../../lib/api";
-import { THEME_ACCENTS, useTheme } from "../../lib/useTheme";
-import { cn } from "../../lib/cn";
 import { getErrorMessage, notifyError } from "../common/CommonUI";
 import { Button } from "../ui/Button";
 import { SectionCard } from "../ui/Card";
@@ -293,98 +286,7 @@ export function ConfigForm({
           envOverridden={envOverridden}
         />
       </SectionCard>
-
-      <ThemeSettingsSection />
     </div>
-  );
-}
-
-function ThemeSettingsSection() {
-  const { preference, setPreference, accent, setAccent } = useTheme();
-
-  // 强调色色卡上的对勾前景色：各 accent 的色卡底色亮度不同，
-  // 不能统一写 text-white（深色钛金的色卡是近白，白勾等于隐形）。
-  // 值取自 index.css 里各 accent 的 --color-brand-500 或色卡的 dark 变体。
-  const swatchCheckClass: Record<string, string> = {
-    "x-blue": "text-[#09090b]",
-    titanium: "text-white dark:text-[#09090b]",
-    indigo: "text-white",
-    emerald: "text-[#09090b]",
-    amber: "text-[#09090b]",
-  };
-
-  return (
-    <SectionCard
-      icon={<Palette className="size-4 text-brand-500" />}
-      title="界面外观与个性化主题"
-      description="定制系统的明暗视觉风格与强调色，设置即刻生效并持久保存在本地"
-    >
-      <div className="space-y-4">
-        <div role="group" aria-label="明暗主题模式">
-          <span className="text-xs font-semibold text-fg">明暗主题模式</span>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {[
-              { id: "system", label: "跟随系统偏好", icon: <Monitor className="size-3.5" /> },
-              { id: "light", label: "浅色明亮模式", icon: <Sun className="size-3.5" /> },
-              { id: "dark", label: "深色黑曜石模式 (OLED)", icon: <Moon className="size-3.5" /> },
-            ].map((mode) => (
-              <button
-                key={mode.id}
-                type="button"
-                aria-pressed={preference === mode.id}
-                onClick={() => setPreference(mode.id as any)}
-                className={cn(
-                  "flex items-center gap-2 rounded-control border px-3.5 py-2 text-xs font-medium cursor-pointer transition-all",
-                  preference === mode.id
-                    ? "border-brand-500 bg-brand-500/10 text-brand-500 shadow-2xs"
-                    : "border-line bg-surface text-fg-body hover:bg-surface-hover hover:border-line-strong",
-                )}
-              >
-                {mode.icon}
-                <span>{mode.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div role="group" aria-label="主题强调色">
-          <span className="text-xs font-semibold text-fg">主题强调色 (Theme Accent)</span>
-          <div className="mt-2 grid grid-cols-2 gap-2.5 sm:grid-cols-5">
-            {THEME_ACCENTS.map((opt) => {
-              const active = accent === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => setAccent(opt.id)}
-                  className={cn(
-                    "flex flex-col items-center gap-1.5 rounded-control border p-3 text-center cursor-pointer transition-all",
-                    active
-                      ? "border-brand-500 bg-brand-500/10 shadow-2xs"
-                      : "border-line bg-surface hover:bg-surface-hover hover:border-line-strong",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "size-6 rounded-full border border-black/10 dark:border-white/20 shadow-xs flex items-center justify-center",
-                      swatchCheckClass[opt.id] ?? "text-white",
-                      opt.dotColor,
-                    )}
-                  >
-                    {active && <Check className="size-3.5 stroke-[3]" />}
-                  </span>
-                  <span className="text-xs font-semibold text-fg">{opt.name}</span>
-                  <span className="text-[10px] text-fg-subtle truncate max-w-full">
-                    {opt.description}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    </SectionCard>
   );
 }
 
