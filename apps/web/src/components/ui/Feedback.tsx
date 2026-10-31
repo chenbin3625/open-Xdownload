@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { AlertCircle, CheckCircle2, Info, Inbox, TriangleAlert } from "lucide-react";
 import React from "react";
 import { cn } from "../../lib/cn";
@@ -37,6 +38,7 @@ export function Alert({
   showIcon?: boolean;
   className?: string;
 }) {
+  useTranslation();
   const tone = alertTone[type];
   return (
     <div
@@ -59,6 +61,7 @@ export function Alert({
 }
 
 export function Skeleton({ className }: { className?: string }) {
+  useTranslation();
   return (
     <div
       aria-hidden="true"
@@ -69,8 +72,9 @@ export function Skeleton({ className }: { className?: string }) {
 
 // 列表骨架：标题宽度交替，避免整列等宽显得呆板。
 export function ListSkeleton({ rows = 4, avatar = true }: { rows?: number; avatar?: boolean }) {
+  useTranslation();
   return (
-    <div className="flex flex-col gap-3" role="status" aria-label="加载中">
+    <div className="flex flex-col gap-3" role="status" aria-label={t("加载中")}>
       {Array.from({ length: rows }, (_, index) => (
         <div key={index} className="flex items-start gap-3">
           {avatar && <Skeleton className="size-9 shrink-0 rounded-full" />}
@@ -94,6 +98,7 @@ export function Empty({
   children?: React.ReactNode;
   className?: string;
 }) {
+  useTranslation();
   return (
     <div className={cn("flex flex-col items-center justify-center gap-2 py-8", className)}>
       <Inbox className="size-8 text-fg-subtle" aria-hidden="true" />
@@ -119,6 +124,7 @@ export function Progress({
   status?: "normal" | "active" | "success" | "exception";
   className?: string;
 }) {
+  useTranslation();
   const clamped = Math.min(100, Math.max(0, percent));
   return (
     <div
@@ -143,6 +149,7 @@ export function Progress({
 }
 
 export function Divider({ className }: { className?: string }) {
+  useTranslation();
   return <hr className={cn("my-3 border-0 border-t border-line", className)} />;
 }
 
@@ -156,6 +163,7 @@ export function Descriptions({
   columns?: 1 | 2 | 3;
   className?: string;
 }) {
+  useTranslation();
   const columnClass = {
     1: "sm:grid-cols-1",
     2: "sm:grid-cols-2",

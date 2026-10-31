@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../lib/i18n";
 import {
   Clock,
   Play,
@@ -40,6 +41,7 @@ export function SchedulesPage({
   error,
   onOpenCreateModal,
 }: SchedulesPageProps) {
+  useTranslation();
   const queryClient = useQueryClient();
 
   const toggleEnabled = useMutation({
@@ -53,11 +55,11 @@ export function SchedulesPage({
     onSuccess: (updated) => {
       void invalidateWorkbenchQueries(queryClient);
       toast.success({
-        message: updated.enabled ? "定时计划已启用" : "定时计划已暂停",
-        description: `计划 “${updated.name}” 状态更新成功`,
+        message: updated.enabled ? t("定时计划已启用") : t("定时计划已暂停"),
+        description: t("计划 “{{value0}}” 状态更新成功", { value0: updated.name }),
       });
     },
-    onError: notifyError("更新失败"),
+    onError: notifyError(t("更新失败")),
   });
 
   const runSchedule = useMutation({
@@ -65,11 +67,11 @@ export function SchedulesPage({
     onSuccess: (jobs) => {
       void invalidateWorkbenchQueries(queryClient);
       toast.success({
-        message: "计划运行已触发",
-        description: `已生成并排入 ${jobs.length} 个下载任务`,
+        message: t("计划运行已触发"),
+        description: t("已生成并排入 {{value0}} 个下载任务", { value0: jobs.length }),
       });
     },
-    onError: notifyError("执行失败"),
+    onError: notifyError(t("执行失败")),
   });
 
   const removeSchedule = useMutation({
@@ -77,10 +79,10 @@ export function SchedulesPage({
     onSuccess: () => {
       void invalidateWorkbenchQueries(queryClient);
       toast.success({
-        message: "计划已删除",
+        message: t("计划已删除"),
       });
     },
-    onError: notifyError("删除失败"),
+    onError: notifyError(t("删除失败")),
   });
 
   return (
@@ -88,22 +90,20 @@ export function SchedulesPage({
       {/* 顶部标题与行动 */}
       <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">自动归档计划</h1>
+          <h1 className="text-xl font-bold tracking-tight text-fg">{t("自动归档计划")}</h1>
           <p className="mt-0.5 text-xs text-fg-muted">
-            配置定时轮询任务，定时扫描指定用户时间线、列表或关注成员，自动同步最新媒体
-          </p>
+            {t("配置定时轮询任务，定时扫描指定用户时间线、列表或关注成员，自动同步最新媒体")}</p>
         </div>
         <Button
           variant="primary"
           icon={<Plus className="size-4" />}
           onClick={onOpenCreateModal}
         >
-          新建归档计划
-        </Button>
+          {t("新建归档计划")}</Button>
       </div>
 
       {error ? (
-        <Alert type="error" showIcon message="定时计划加载失败" description={error} />
+        <Alert type="error" showIcon message={t("定时计划加载失败")} description={error} />
       ) : loading && schedules.length === 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 3 }, (_, index) => (
@@ -122,10 +122,9 @@ export function SchedulesPage({
           <Empty
             description={
               <div className="space-y-1.5">
-                <div className="font-semibold text-sm text-fg">暂无定时归档计划</div>
+                <div className="font-semibold text-sm text-fg">{t("暂无定时归档计划")}</div>
                 <p className="text-xs text-fg-muted max-w-md mx-auto">
-                  您可以把常用关注的 X 博主、列表或推文账号加入自动计划，系统将按设置的频率自动同步最新媒体，免去手动重复输入的繁琐。
-                </p>
+                  {t("您可以把常用关注的 X 博主、列表或推文账号加入自动计划，系统将按设置的频率自动同步最新媒体，免去手动重复输入的繁琐。")}</p>
               </div>
             }
           >
@@ -136,8 +135,7 @@ export function SchedulesPage({
               onClick={onOpenCreateModal}
               className="mt-2"
             >
-              立即创建第一个计划
-            </Button>
+              {t("立即创建第一个计划")}</Button>
           </Empty>
         </Card>
       ) : (
@@ -158,13 +156,13 @@ export function SchedulesPage({
               extra={
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] text-fg-muted font-normal">
-                    {schedule.enabled ? "运行中" : "已暂停"}
+                    {schedule.enabled ? t("运行中") : t("已暂停")}
                   </span>
                   <Switch
                     checked={schedule.enabled}
                     loading={toggleEnabled.isPending && toggleEnabled.variables?.id === schedule.id}
                     onChange={() => toggleEnabled.mutate(schedule)}
-                    ariaLabel={`切换计划 ${schedule.name} 状态`}
+                    ariaLabel={t("切换计划 {{value0}} 状态", { value0: schedule.name })}
                   />
                 </div>
               }
@@ -173,15 +171,15 @@ export function SchedulesPage({
               {/* 核心参数 */}
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <div className="rounded-control bg-surface-muted/60 p-2 border border-line/60">
-                  <span className="text-fg-subtle block text-[11px]">执行周期</span>
+                  <span className="text-fg-subtle block text-[11px]">{t("执行周期")}</span>
                   <span className="font-medium text-fg mt-0.5 block">
                     {formatIntervalMinutes(schedule.intervalMinutes)}
                   </span>
                 </div>
                 <div className="rounded-control bg-surface-muted/60 p-2 border border-line/60">
-                  <span className="text-fg-subtle block text-[11px]">下次运行</span>
+                  <span className="text-fg-subtle block text-[11px]">{t("下次运行")}</span>
                   <span className="font-mono text-fg mt-0.5 block truncate" title={schedule.nextRunAt}>
-                    {schedule.nextRunAt ? formatDateTime(schedule.nextRunAt) : "计算中"}
+                    {schedule.nextRunAt ? formatDateTime(schedule.nextRunAt) : t("计算中")}
                   </span>
                 </div>
               </div>
@@ -189,8 +187,8 @@ export function SchedulesPage({
               {/* 目标列表标签 */}
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-[11px] text-fg-subtle">
-                  <span>目标清单</span>
-                  <span>{schedule.items.length} 个目标</span>
+                  <span>{t("目标清单")}</span>
+                  <span>{schedule.items.length} {t(" 个目标")}</span>
                 </div>
                 <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
                   {schedule.items.map((item, idx) => (
@@ -209,15 +207,15 @@ export function SchedulesPage({
               {/* 上次运行与操作栏 */}
               <div className="flex items-center justify-between pt-2 border-t border-line text-xs">
                 <span className="text-[11px] text-fg-subtle font-mono truncate max-w-[150px]">
-                  上次: {schedule.lastRunAt ? formatDateTime(schedule.lastRunAt) : "从未"}
+                  {t("上次: ")}{schedule.lastRunAt ? formatDateTime(schedule.lastRunAt) : t("从未")}
                 </span>
 
                 <div className="flex items-center gap-1.5">
                   <Popconfirm
-                    title="删除定时计划"
-                    description={`确定删除计划 “${schedule.name}”？已下载的媒体文件不受影响。`}
-                    okText="删除"
-                    cancelText="取消"
+                    title={t("删除定时计划")}
+                    description={t("确定删除计划 “{{value0}}”？已下载的媒体文件不受影响。", { value0: schedule.name })}
+                    okText={t("删除")}
+                    cancelText={t("取消")}
                     onConfirm={() => removeSchedule.mutate(schedule.id)}
                   >
                     <Button
@@ -225,7 +223,7 @@ export function SchedulesPage({
                       size="sm"
                       icon={<Trash2 className="size-3.5 text-danger" />}
                       loading={removeSchedule.isPending && removeSchedule.variables === schedule.id}
-                      aria-label="删除计划"
+                      aria-label={t("删除计划")}
                     />
                   </Popconfirm>
 
@@ -236,8 +234,7 @@ export function SchedulesPage({
                     loading={runSchedule.isPending && runSchedule.variables === schedule.id}
                     onClick={() => runSchedule.mutate(schedule.id)}
                   >
-                    立即执行
-                  </Button>
+                    {t("立即执行")}</Button>
                 </div>
               </div>
             </Card>

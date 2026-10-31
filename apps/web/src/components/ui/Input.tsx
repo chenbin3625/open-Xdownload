@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { Eye, EyeOff, Search, X } from "lucide-react";
 import React, { useId, useState } from "react";
 import { cn } from "../../lib/cn";
@@ -58,6 +59,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Inp
   },
   ref,
 ) {
+  useTranslation();
   const fieldId = useFieldId();
   const resolvedId = id ?? fieldId;
   const innerRef = React.useRef<HTMLInputElement>(null);
@@ -84,7 +86,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Inp
       {showClear && (
         <button
           type="button"
-          aria-label="清空"
+          aria-label={t("清空")}
           onClick={() => {
             if (onClear) onClear();
             else clearControlledInput(innerRef.current);
@@ -106,6 +108,7 @@ export const SearchInput = React.forwardRef<HTMLInputElement, InputProps>(functi
   props,
   ref,
 ) {
+  useTranslation();
   return <Input ref={ref} type="search" prefix={<Search className="size-3.5" />} {...props} />;
 });
 
@@ -113,6 +116,7 @@ export const PasswordInput = React.forwardRef<HTMLInputElement, InputProps>(func
   { suffix, ...rest },
   ref,
 ) {
+  useTranslation();
   const [revealed, setRevealed] = useState(false);
   return (
     <Input
@@ -123,7 +127,7 @@ export const PasswordInput = React.forwardRef<HTMLInputElement, InputProps>(func
           {suffix}
           <button
             type="button"
-            aria-label={revealed ? "隐藏内容" : "显示内容"}
+            aria-label={revealed ? t("隐藏内容") : t("显示内容")}
             aria-pressed={revealed}
             onClick={() => setRevealed((current) => !current)}
             className="flex size-10 cursor-pointer items-center justify-center rounded p-0.5 text-fg-subtle transition-colors hover:text-fg-body sm:size-auto"
@@ -145,6 +149,7 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(fun
   { className, containerClassName, id, ...rest },
   ref,
 ) {
+  useTranslation();
   // 与 Input/NumberInput 一样认领 Field 分配的 id，Field + Textarea 才不会产生悬空 label
   const fieldId = useFieldId();
   return (
@@ -177,6 +182,7 @@ export const NumberInput = React.forwardRef<HTMLInputElement, NumberInputProps>(
     { value, onChange, min, max, step = 1, size = "md", addonAfter, className, id, ...rest },
     ref,
   ) {
+  useTranslation();
     const fieldId = useFieldId();
     const resolvedId = id ?? fieldId;
     const clamp = (next: number) => {
@@ -265,6 +271,7 @@ export function Field({
   children: React.ReactNode;
   className?: string;
 }) {
+  useTranslation();
   const generatedId = useId();
   const fieldId = htmlFor ?? generatedId;
   const labelClass = "flex items-center gap-1 text-xs font-medium text-fg-body";

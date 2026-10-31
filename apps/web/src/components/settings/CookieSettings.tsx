@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import {
   AlertCircle,
   AlertTriangle,
@@ -21,44 +22,50 @@ import { EnvOverrideNote } from "./EnvOverrideNote";
 
 export type CookieClientStatus = ClientStatus;
 
-export const cookieHelpSteps = [
-  "在浏览器中登录 x.com，建议使用独立浏览器配置或无痕窗口，避免影响日常登录状态。",
-  "打开开发者工具：F12，或 macOS 上 Cmd+Option+I、Windows / Linux 上 Ctrl+Shift+I。",
-  "切换到「应用 / Application」面板（Firefox 为「存储 / Storage」），左侧展开「Cookies」并选择 https://x.com。",
-  "复制 auth_token 一行的 Value 填入上方 auth_token，再复制 ct0 一行的 Value 填入 ct0；两者必须来自同一个浏览器、同一个账号。",
-  "保存配置后点击「检测 Cookie」，确认状态显示为有效。",
-];
+function cookieHelpSteps() {
+  return [
+    t("在浏览器中登录 x.com，建议使用独立浏览器配置或无痕窗口，避免影响日常登录状态。"),
+    t("打开开发者工具：F12，或 macOS 上 Cmd+Option+I、Windows / Linux 上 Ctrl+Shift+I。"),
+    t("切换到「应用 / Application」面板（Firefox 为「存储 / Storage」），左侧展开「Cookies」并选择 https://x.com。"),
+    t("复制 auth_token 一行的 Value 填入上方 auth_token，再复制 ct0 一行的 Value 填入 ct0；两者必须来自同一个浏览器、同一个账号。"),
+    t("保存配置后点击「检测 Cookie」，确认状态显示为有效。"),
+  ];
+}
 
-export const cookieHelpNotes = [
-  "auth_token 是 HttpOnly Cookie，控制台执行 document.cookie 读不到，必须用开发者工具的 Cookies 面板复制。",
-  "退出登录、修改密码或 X 主动失效会话后 Cookie 会失效，按同样步骤重新复制即可。",
-  "一个浏览器配置只保留一个 X 登录态；备用 Cookie 可用无痕窗口或另一个浏览器配置登录其他账号后获取。",
-  "Cookie 等同于账号密码，只会保存在本地数据库中，请勿分享或粘贴到其他站点。",
-];
+function cookieHelpNotes() {
+  return [
+    t("auth_token 是 HttpOnly Cookie，控制台执行 document.cookie 读不到，必须用开发者工具的 Cookies 面板复制。"),
+    t("退出登录、修改密码或 X 主动失效会话后 Cookie 会失效，按同样步骤重新复制即可。"),
+    t("一个浏览器配置只保留一个 X 登录态；备用 Cookie 可用无痕窗口或另一个浏览器配置登录其他账号后获取。"),
+    t("Cookie 等同于账号密码，只会保存在本地数据库中，请勿分享或粘贴到其他站点。"),
+  ];
+}
 
-export const cookieSettingsTips = {
-  authToken: "X/Twitter 登录 Cookie 中的 auth_token，用于鉴权。位置：开发者工具「应用 → Cookies → https://x.com」，需与 ct0 来自同一账号。",
-  csrfToken: "X/Twitter 登录 Cookie 中的 ct0（CSRF Token），与 auth_token 对应。位置同上，取 Cookies 面板中 ct0 一行的 Value。",
-  backupCookie: (
-    <div className="space-y-1 text-xs">
-      <div>用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。</div>
-      <div>
-        可点「批量粘贴」一次导入多个账号：每行一个，支持{" "}
-        <code className="font-mono">auth_token=xxx; ct0=yyy</code> 或 JSON 数组。
+function cookieSettingsTips() {
+  return {
+    authToken: t("X/Twitter 登录 Cookie 中的 auth_token，用于鉴权。位置：开发者工具「应用 → Cookies → https://x.com」，需与 ct0 来自同一账号。"),
+    csrfToken: t("X/Twitter 登录 Cookie 中的 ct0（CSRF Token），与 auth_token 对应。位置同上，取 Cookies 面板中 ct0 一行的 Value。"),
+    backupCookie: (
+      <div className="space-y-1 text-xs">
+        <div>{t("用于多账号轮询下载，降低单个账号被 Twitter 限流的概率。")}</div>
+        <div>
+          {t("可点「批量粘贴」一次导入多个账号：每行一个，支持")}{" "}
+          <code className="font-mono">auth_token=xxx; ct0=yyy</code> {t(" 或 JSON 数组。")}</div>
+        <div>{t("已保存的 Cookie 在此界面会以 ******** 脱敏显示，新增或修改不受影响。")}</div>
       </div>
-      <div>已保存的 Cookie 在此界面会以 ******** 脱敏显示，新增或修改不受影响。</div>
-    </div>
-  ),
-};
+    ),
+  };
+}
 
 // 与 DownloadSettings 的 TipIcon 保持一致：用可聚焦的 <button>，
 // 键盘用户也能读到说明；<span> 只能悬停触发，读屏/键盘用户拿不到。
 function TipIcon({ content }: { content: React.ReactNode }) {
+  useTranslation();
   return (
     <Tooltip content={content}>
       <button
         type="button"
-        aria-label="查看说明"
+        aria-label={t("查看说明")}
         className="inline-flex cursor-help text-fg-subtle hover:text-fg-muted"
       >
         <HelpCircle className="size-3.5" />
@@ -88,6 +95,7 @@ export function CookieSettingsFields({
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
   envOverridden?: string[];
 }) {
+  useTranslation();
   const clients = authResult?.diagnostics?.clients ?? [];
   const primaryClient = clients.find((client) => client.primary) ?? clients[0];
   const backupClients = clients.filter((client) => !client.primary);
@@ -112,7 +120,7 @@ export function CookieSettingsFields({
       {/* 主 Cookie */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-sm font-semibold text-fg">主账号 Cookie (Primary)</span>
+          <span className="text-sm font-semibold text-fg">{t("主账号 Cookie (Primary)")}</span>
           {primaryConfigured && (
             <Button
               size="sm"
@@ -126,17 +134,16 @@ export function CookieSettingsFields({
               }
             >
               <Trash2 className="size-3.5" />
-              清除
-            </Button>
+              {t("清除")}</Button>
           )}
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field
             label="auth_token"
-            tooltip={<TipIcon content={cookieSettingsTips.authToken} />}
+            tooltip={<TipIcon content={cookieSettingsTips().authToken} />}
           >
             <PasswordInput
-              aria-label="主 Cookie auth_token"
+              aria-label={t("主 Cookie auth_token")}
               prefix={<Key className="size-3.5 text-fg-subtle" />}
               suffix={
                 <CookieTokenStatus
@@ -150,17 +157,17 @@ export function CookieSettingsFields({
               onChange={(event) =>
                 onChange((current) => ({ ...current, authToken: event.target.value }))
               }
-              placeholder="输入 auth_token"
+              placeholder={t("输入 auth_token")}
             />
             <EnvOverrideNote show={envOverridden.includes("authToken")} />
           </Field>
 
           <Field
             label="ct0 (CSRF Token)"
-            tooltip={<TipIcon content={cookieSettingsTips.csrfToken} />}
+            tooltip={<TipIcon content={cookieSettingsTips().csrfToken} />}
           >
             <PasswordInput
-              aria-label="主 Cookie ct0"
+              aria-label={t("主 Cookie ct0")}
               prefix={<Key className="size-3.5 text-fg-subtle" />}
               suffix={
                 <CookieTokenStatus
@@ -174,7 +181,7 @@ export function CookieSettingsFields({
               onChange={(event) =>
                 onChange((current) => ({ ...current, csrfToken: event.target.value }))
               }
-              placeholder="输入 ct0"
+              placeholder={t("输入 ct0")}
             />
             <EnvOverrideNote show={envOverridden.includes("csrfToken")} />
           </Field>
@@ -198,32 +205,33 @@ export function CookieSettingsFields({
 }
 
 export function CookieHelpAlert() {
+  useTranslation();
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-card border border-info/30 bg-info-soft/60 p-3.5 text-xs text-fg-body">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 font-medium text-fg">
           <HelpCircle className="size-4 text-info" />
-          <span>如何获取 X Cookie（auth_token / ct0）？</span>
+          <span>{t("如何获取 X Cookie（auth_token / ct0）？")}</span>
         </div>
         <button
           type="button"
           onClick={() => setOpen((c) => !c)}
           className="cursor-pointer text-xs font-medium text-brand-600 hover:underline"
         >
-          {open ? "收起指引" : "展开指引"}
+          {open ? t("收起指引") : t("展开指引")}
         </button>
       </div>
 
       {open && (
         <div className="mt-3 space-y-2 border-t border-info/20 pt-3">
           <ol className="list-decimal pl-4 space-y-1">
-            {cookieHelpSteps.map((step) => (
+            {cookieHelpSteps().map((step) => (
               <li key={step}>{step}</li>
             ))}
           </ol>
           <div className="space-y-1 text-fg-muted pt-1">
-            {cookieHelpNotes.map((note) => (
+            {cookieHelpNotes().map((note) => (
               <p key={note} className="text-[11px]">
                 · {note}
               </p>
@@ -252,23 +260,24 @@ export function CookieTokenStatus({
   hasValue: boolean;
   pairComplete: boolean;
 }) {
+  useTranslation();
   let tone: Tone = "neutral";
-  let label = "待检测";
-  let detail = "保存或输入 Cookie 后可进行检测";
+  let label = t("待检测");
+  let detail = t("保存或输入 Cookie 后可进行检测");
   let icon: React.ReactNode = null;
 
   if (!hasValue) {
-    label = "待配置";
-    detail = "尚未填写此 token";
+    label = t("待配置");
+    detail = t("尚未填写此 token");
   } else if (!pairComplete) {
     tone = "warning";
-    label = "待补全";
-    detail = "auth_token 与 ct0 需要成对填写";
+    label = t("待补全");
+    detail = t("auth_token 与 ct0 需要成对填写");
     icon = <AlertTriangle className="size-3" />;
   } else if (checking) {
     tone = "brand";
-    label = "检测中";
-    detail = "正在检查 Cookie 状态";
+    label = t("检测中");
+    detail = t("正在检查 Cookie 状态");
     icon = <RefreshCw className="size-3 animate-spin" />;
   } else if (aggregateClients?.length) {
     const available = aggregateClients.filter((item) => item.ok).length;
@@ -279,7 +288,7 @@ export function CookieTokenStatus({
         : available === 0
         ? "danger"
         : "warning";
-    label = `${available}/${aggregateClients.length} 可用`;
+    label = t("{{value0}}/{{value1}} 可用", { value0: available, value1: aggregateClients.length });
     detail = aggregateClients.map((item) => cookieClientStatusDetail(item)).join("；");
     icon =
       tone === "success" ? (
@@ -292,27 +301,27 @@ export function CookieTokenStatus({
   } else if (client) {
     if (!client.ok || client.disabled) {
       tone = "danger";
-      label = "异常";
+      label = t("异常");
       icon = <AlertCircle className="size-3" />;
     } else if (client.error) {
       tone = "warning";
-      label = "暂时受限";
+      label = t("暂时受限");
       icon = <AlertTriangle className="size-3" />;
     } else {
       tone = "success";
-      label = "有效";
+      label = t("有效");
       icon = <CheckCircle2 className="size-3" />;
     }
     detail = cookieClientStatusDetail(client);
   } else if (errorMessage) {
     tone = "danger";
-    label = "检测失败";
+    label = t("检测失败");
     detail = errorMessage;
     icon = <AlertCircle className="size-3" />;
   } else if (checked) {
     tone = "neutral";
-    label = "未检测";
-    detail = "此 Cookie 未进入检测队列，可能未填写完整或与其他 Cookie 重复";
+    label = t("未检测");
+    detail = t("此 Cookie 未进入检测队列，可能未填写完整或与其他 Cookie 重复");
   }
 
   return (
@@ -327,11 +336,11 @@ export function CookieTokenStatus({
 }
 
 export function cookieClientStatusDetail(client: CookieClientStatus) {
-  const account = client.screenName ? `@${client.screenName}` : `账号 ${client.index + 1}`;
+  const account = client.screenName ? `@${client.screenName}` : t("账号 {{value0}}", { value0: client.index + 1 });
   if (client.error) {
     return `${account}：${client.error}`;
   }
-  return `${account}：Cookie 有效`;
+  return t("{{value0}}：Cookie 有效", { value0: account });
 }
 
 export function BackupCookieInputs({
@@ -349,6 +358,7 @@ export function BackupCookieInputs({
   value: string;
   onChange: (value: string) => void;
 }) {
+  const { i18n } = useTranslation();
   const redactedCookieValue = "********";
   const [rows, setRows] = useState<BackupCookieRow[]>(() => parseBackupCookieRows(value));
   const [batchOpen, setBatchOpen] = useState(false);
@@ -357,7 +367,7 @@ export function BackupCookieInputs({
   // 只在面板打开时解析，并按文本记忆：每次按键都 emptyBackupCookieRow() 生成 id 太浪费。
   const parsedBatch = React.useMemo(
     () => (batchOpen ? parsePastedCookieRows(batchText) : null),
-    [batchOpen, batchText],
+    [batchOpen, batchText, i18n.resolvedLanguage],
   );
 
   useEffect(() => {
@@ -415,8 +425,8 @@ export function BackupCookieInputs({
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
-          <span className="text-sm font-semibold text-fg">备用 Cookie 多账号池</span>
-          <TipIcon content={cookieSettingsTips.backupCookie} />
+          <span className="text-sm font-semibold text-fg">{t("备用 Cookie 多账号池")}</span>
+          <TipIcon content={cookieSettingsTips().backupCookie} />
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -427,16 +437,14 @@ export function BackupCookieInputs({
             aria-expanded={batchOpen}
             aria-controls={`${batchHelpId}-panel`}
           >
-            批量粘贴
-          </Button>
+            {t("批量粘贴")}</Button>
           <Button
             size="sm"
             variant="secondary"
             icon={<Plus className="size-3.5" />}
             onClick={addRow}
           >
-            添加备用账号
-          </Button>
+            {t("添加备用账号")}</Button>
         </div>
       </div>
 
@@ -448,13 +456,11 @@ export function BackupCookieInputs({
             className="space-y-2 rounded-control border border-line bg-surface-muted/40 p-2.5"
           >
             <p id={batchHelpId} className="text-xs text-fg-muted">
-              每行一个账号，支持{" "}
-              <code className="font-mono">auth_token=xxx; ct0=yyy</code> 或 JSON 数组；
-              粘贴后点「导入」，已保存的账号不受影响。
-            </p>
+              {t("每行一个账号，支持")}{" "}
+              <code className="font-mono">auth_token=xxx; ct0=yyy</code> {t(" 或 JSON 数组； 粘贴后点「导入」，已保存的账号不受影响。")}</p>
             <Textarea
               rows={4}
-              aria-label="批量粘贴 Cookie 内容"
+              aria-label={t("批量粘贴 Cookie 内容")}
               aria-describedby={batchHelpId}
               value={batchText}
               onChange={(event) => setBatchText(event.target.value)}
@@ -475,10 +481,9 @@ export function BackupCookieInputs({
                   setBatchText("");
                 }}
               >
-                取消
-              </Button>
+                {t("取消")}</Button>
               <Button size="sm" variant="primary" disabled={!canImport} onClick={importPastedRows}>
-                导入{canImport ? ` ${parsedBatch.rows.length} 个账号` : ""}
+                {t("导入")}{canImport ? t(" {{value0}} 个账号", { value0: parsedBatch.rows.length }) : ""}
               </Button>
             </div>
           </div>
@@ -514,7 +519,7 @@ export function BackupCookieInputs({
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <div className="flex-1">
                   <PasswordInput
-                    aria-label={`备用 Cookie ${index + 1} auth_token`}
+                    aria-label={t("备用 Cookie {{value0}} auth_token", { value0: index + 1 })}
                     prefix={<Key className="size-3.5 text-fg-subtle" />}
                     suffix={
                       <CookieTokenStatus
@@ -524,14 +529,14 @@ export function BackupCookieInputs({
                     }
                     value={row.authToken}
                     onChange={(event) => updateRow(index, "authToken", event.target.value)}
-                    placeholder={`备用 ${index + 1} auth_token`}
+                    placeholder={t("备用 {{value0}} auth_token", { value0: index + 1 })}
                     size="sm"
                   />
                 </div>
 
                 <div className="flex-1">
                   <PasswordInput
-                    aria-label={`备用 Cookie ${index + 1} ct0`}
+                    aria-label={t("备用 Cookie {{value0}} ct0", { value0: index + 1 })}
                     prefix={<Key className="size-3.5 text-fg-subtle" />}
                     suffix={
                       <CookieTokenStatus
@@ -541,20 +546,20 @@ export function BackupCookieInputs({
                     }
                     value={row.csrfToken}
                     onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
-                    placeholder={`备用 ${index + 1} ct0`}
+                    placeholder={t("备用 {{value0}} ct0", { value0: index + 1 })}
                     size="sm"
                   />
                 </div>
 
                 <div className="flex shrink-0 items-center justify-end">
-                  <Tooltip content="删除此备用 Cookie">
+                  <Tooltip content={t("删除此备用 Cookie")}>
                     <Button
                       size="sm"
                       variant="ghost"
                       circle
                       icon={<Trash2 className="size-3.5 text-danger" />}
                       onClick={() => removeRow(index)}
-                      aria-label={`删除备用 Cookie ${index + 1}`}
+                      aria-label={t("删除备用 Cookie {{value0}}", { value0: index + 1 })}
                     />
                   </Tooltip>
                 </div>
@@ -562,8 +567,7 @@ export function BackupCookieInputs({
               {showIncompleteHint && (
                 <p className="flex items-center gap-1 text-[11px] text-warning-strong">
                   <AlertTriangle className="size-3 shrink-0" aria-hidden="true" />
-                  缺少 {missingField}：只填一半的账号不会参与轮询，请补全或删除这一行。
-                </p>
+                  {t("缺少 ")}{missingField}{t("：只填一半的账号不会参与轮询，请补全或删除这一行。")}</p>
               )}
             </div>
           );
@@ -662,7 +666,7 @@ export type PastedCookieParseResult = {
 export function parsePastedCookieRows(text: string): PastedCookieParseResult {
   const trimmed = text.trim();
   if (!trimmed) {
-    return { rows: [], error: "粘贴内容为空" };
+    return { rows: [], error: t("粘贴内容为空") };
   }
 
   if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
@@ -670,7 +674,7 @@ export function parsePastedCookieRows(text: string): PastedCookieParseResult {
     if (jsonRows.length > 0) {
       return { rows: jsonRows, error: "" };
     }
-    return { rows: [], error: "JSON 无法解析出 auth_token / ct0，请检查格式" };
+    return { rows: [], error: t("JSON 无法解析出 auth_token / ct0，请检查格式") };
   }
 
   const rows: BackupCookieRow[] = [];
@@ -694,7 +698,7 @@ export function parsePastedCookieRows(text: string): PastedCookieParseResult {
   if (rows.length === 0) {
     return {
       rows: [],
-      error: "没有识别到账号：每行应为 auth_token=xxx; ct0=yyy，或粘贴 JSON 数组",
+      error: t("没有识别到账号：每行应为 auth_token=xxx; ct0=yyy，或粘贴 JSON 数组"),
     };
   }
   const incomplete = rows.filter((row) => !row.authToken.trim() || !row.csrfToken.trim()).length;
@@ -702,7 +706,7 @@ export function parsePastedCookieRows(text: string): PastedCookieParseResult {
     rows,
     error:
       incomplete > 0
-        ? `有 ${incomplete} 行只识别到一个字段，导入后需要补全（缺字段的账号不参与轮询）`
+        ? t("有 {{value0}} 行只识别到一个字段，导入后需要补全（缺字段的账号不参与轮询）", { value0: incomplete })
         : "",
   };
 }

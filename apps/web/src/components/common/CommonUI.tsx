@@ -1,3 +1,4 @@
+import i18n, { t, useTranslation } from "../../lib/i18n";
 import { Check, Copy } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import type { JobKind } from "../../lib/api";
@@ -18,22 +19,25 @@ export const tablePageSizeOptions = [10, 20, 50, 100];
 export const failedTweetPageSizeOptions = [10, 20, 50];
 
 export function AppEmpty({ description, className }: { description: string; className?: string }) {
+  useTranslation();
   return <UiEmpty description={description} className={cn("my-2", className)} />;
 }
 
 export function ListSkeleton({ rows = 4, avatar = true }: { rows?: number; avatar?: boolean }) {
+  useTranslation();
   return <UiListSkeleton rows={rows} avatar={avatar} />;
 }
 
 export function LoadingSurface({
   children,
   loading,
-  tip = "加载中",
+  tip = t("加载中"),
 }: {
   children: React.ReactNode;
   loading?: boolean;
   tip?: string;
 }) {
+  useTranslation();
   return (
     <LoadingOverlay loading={!!loading} tip={tip}>
       <div className="min-w-0">{children}</div>
@@ -52,6 +56,7 @@ export function Stack({
   style?: React.CSSProperties;
   className?: string;
 }) {
+  useTranslation();
   return (
     <div
       style={{ gap: `${size}px`, ...style }}
@@ -63,6 +68,7 @@ export function Stack({
 }
 
 export function Toolbar({ children, className }: { children: React.ReactNode; className?: string }) {
+  useTranslation();
   return (
     <div className={cn("flex w-full flex-wrap items-center justify-between gap-2.5", className)}>
       {children}
@@ -85,6 +91,7 @@ export function EllipsisText({
   type?: TextTone;
   className?: string;
 }) {
+  useTranslation();
   const toneClass = {
     secondary: "text-fg-muted",
     success: "text-success",
@@ -156,6 +163,7 @@ export function AppPagination({
   simple?: boolean;
   total: number;
 }) {
+  useTranslation();
   return (
     <div className="flex w-full justify-end">
       <UiPagination
@@ -163,7 +171,7 @@ export function AppPagination({
         pageSize={pageSize}
         pageSizeOptions={pageSizeOptions}
         total={total}
-        totalLabel={(t) => (simple ? undefined : `共 ${t} ${itemName}`)}
+        totalLabel={(count) => (simple ? undefined : t("共 {{value0}} {{value1}}", { value0: count, value1: itemName }))}
         onPageChange={(p) => onChange(p, pageSize)}
         onPageSizeChange={(ps) => onChange(1, ps)}
       />
@@ -195,6 +203,7 @@ export function PaginatedList<TItem>({
   skeletonRows?: number;
   size?: "small" | "default" | "large";
 }) {
+  useTranslation();
   const pagination = useClientPagination(items, pageSize);
 
   if (loading && items.length === 0) {
@@ -273,23 +282,24 @@ export async function writeClipboard(text: string) {
   }
 }
 
-export async function copyToClipboard(text: string, label = "路径") {
+export async function copyToClipboard(text: string, label = t("路径")) {
   const copied = await writeClipboard(text);
   if (copied) {
     toast.success({
-      message: "复制成功",
-      description: `已复制${label}到剪贴板`,
+      message: t("复制成功"),
+      description: t("已复制{{value0}}到剪贴板", { value0: label }),
     });
   } else {
     toast.warning({
-      message: "复制失败",
-      description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
+      message: t("复制失败"),
+      description: t("当前浏览器环境不支持自动复制，请手动复制{{value0}}", { value0: label }),
     });
   }
   return copied;
 }
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
+  useTranslation();
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<number | undefined>(undefined);
 
@@ -304,13 +314,13 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
     }
     setCopied(false);
     toast.warning({
-      message: "复制失败",
-      description: `当前浏览器环境不支持自动复制，请手动复制${label}`,
+      message: t("复制失败"),
+      description: t("当前浏览器环境不支持自动复制，请手动复制{{value0}}", { value0: label }),
     });
   }
 
   return (
-    <Tooltip content={copied ? "已复制" : label}>
+    <Tooltip content={copied ? t("已复制") : label}>
       <Button
         size="sm"
         variant={copied ? "primary" : "ghost"}
@@ -324,34 +334,38 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
 
 export function formatIntervalMinutes(minutes: number) {
   if (!Number.isFinite(minutes) || minutes <= 0) {
-    return "未设置";
+    return t("未设置");
   }
   if (minutes % 1440 === 0) {
     const days = minutes / 1440;
-    return `每 ${days} 天`;
+    return t("每 {{value0}} 天", { value0: days, count: days });
   }
   if (minutes % 60 === 0) {
     const hours = minutes / 60;
-    return `每 ${hours} 小时`;
+    return t("每 {{value0}} 小时", { value0: hours, count: hours });
   }
-  return `每 ${minutes} 分钟`;
+  return t("每 {{value0}} 分钟", { value0: minutes, count: minutes });
 }
 
-// 表格每一行、媒体库每张卡片都会调用，formatter 提到模块级只构造一次。
-const dateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+// Reuse formatters across table rows and media cards in each language.
+const dateTimeOptions: Intl.DateTimeFormatOptions = {
   year: "numeric",
   month: "2-digit",
   day: "2-digit",
   hour: "2-digit",
   minute: "2-digit",
-});
+};
+const dateTimeFormatters = {
+  "zh-CN": new Intl.DateTimeFormat("zh-CN", dateTimeOptions),
+  en: new Intl.DateTimeFormat("en", dateTimeOptions),
+};
 
 export function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return dateTimeFormatter.format(date);
+  return dateTimeFormatters[i18n.resolvedLanguage === "en" ? "en" : "zh-CN"].format(date);
 }
 
 export function clampPercent(value: number) {
@@ -363,22 +377,22 @@ export function clampPercent(value: number) {
 
 export function kindLabel(kind: JobKind) {
   const labels: Record<string, string> = {
-    tweet_link: "推文链接",
-    media_url: "媒体地址",
-    user: "用户",
-    list: "列表",
-    following: "关注",
-    failed_retry: "失败重试",
+    tweet_link: t("推文链接"),
+    media_url: t("媒体地址"),
+    user: t("用户"),
+    list: t("列表"),
+    following: t("关注"),
+    failed_retry: t("失败重试"),
   };
-  return labels[kind] ?? "未知类型";
+  return labels[kind] ?? t("未知类型");
 }
 
 export function mediaTypeLabel(type: "photo" | "video" | "animated_gif" | "file") {
   return {
-    photo: "图片",
-    video: "视频",
+    photo: t("图片"),
+    video: t("视频"),
     animated_gif: "GIF",
-    file: "文件",
+    file: t("文件"),
   }[type];
 }
 
@@ -389,7 +403,7 @@ export function getErrorMessage(error: unknown) {
   if (typeof error === "string") {
     return error;
   }
-  return "未知错误";
+  return t("未知错误");
 }
 
 export function notifyError(title: string) {

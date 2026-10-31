@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../lib/i18n";
 import {
   ChevronLeft,
   ChevronRight,
@@ -84,6 +85,7 @@ function VideoPoster({
   fileName: string;
   onOpen: () => void;
 }) {
+  useTranslation();
   const sources = useMemo(() => {
     const list: { url: string; remote: boolean }[] = [];
     if (item.id > 0) {
@@ -101,11 +103,11 @@ function VideoPoster({
       type="button"
       className="group relative h-full w-full cursor-pointer border-0 bg-slate-950 p-0 overflow-hidden"
       onClick={onOpen}
-      aria-label={`预览视频 ${fileName}`}
+      aria-label={t("预览视频 {{value0}}", { value0: fileName })}
     >
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 text-slate-400">
         <Video className="size-8 text-brand-400" />
-        <span className="text-xs">播放视频</span>
+        <span className="text-xs">{t("播放视频")}</span>
       </div>
       {sourceIndex < sources.length && (
         <img
@@ -138,6 +140,7 @@ const GalleryCard = React.memo(function GalleryCard({
   isPreviewableImage: boolean;
   onOpen: (previewId: string) => void;
 }) {
+  useTranslation();
   const fileName = displayFileName(item);
   const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
   const previewURL = fileURL(item);
@@ -157,7 +160,7 @@ const GalleryCard = React.memo(function GalleryCard({
               type="button"
               className="group/img relative block h-full w-full cursor-pointer border-0 bg-transparent p-0 overflow-hidden"
               onClick={() => onOpen(entryKey(item))}
-              aria-label={`查看图片 ${fileName}`}
+              aria-label={t("查看图片 {{value0}}", { value0: fileName })}
             >
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-fg-subtle">
                 <ImageIcon className="size-8" />
@@ -177,7 +180,7 @@ const GalleryCard = React.memo(function GalleryCard({
           ) : (
             <div className="flex flex-col items-center gap-1 text-fg-subtle">
               <Film className="size-8" />
-              <span className="text-xs font-mono font-medium">{ext} 文件</span>
+              <span className="text-xs font-mono font-medium">{ext} {t(" 文件")}</span>
             </div>
           )}
 
@@ -193,7 +196,7 @@ const GalleryCard = React.memo(function GalleryCard({
         </div>
 
         <div className="truncate font-mono text-[11px] text-fg-muted flex items-center gap-1">
-          <span className="min-w-0 truncate">{item.userName || "未识别用户"}</span>
+          <span className="min-w-0 truncate">{item.userName || t("未识别用户")}</span>
           {item.userScreenName && (
             <span className="min-w-0 truncate text-brand-500 font-medium">@{item.userScreenName}</span>
           )}
@@ -202,24 +205,24 @@ const GalleryCard = React.memo(function GalleryCard({
         <div className="flex flex-wrap items-center justify-between gap-1 pt-2 border-t border-line/70 text-[11px] text-fg-subtle">
           <span className="font-mono tabular-nums text-[10px]">{formatDateTime(item.createdAt)}</span>
           <div className="flex items-center gap-1">
-            <Tooltip title="复制本地路径">
+            <Tooltip title={t("复制本地路径")}>
               <Button
                 size="sm"
                 variant="text"
                 circle
                 icon={<Copy className="size-3" />}
-                onClick={() => void copyToClipboard(item.filePath, "本地路径")}
-                aria-label="复制本地路径"
+                onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
+                aria-label={t("复制本地路径")}
               />
             </Tooltip>
-            <Tooltip title="复制媒体直链">
+            <Tooltip title={t("复制媒体直链")}>
               <Button
                 size="sm"
                 variant="text"
                 circle
                 icon={<ExternalLink className="size-3" />}
-                onClick={() => void copyToClipboard(item.mediaUrl, "原始下载直链")}
-                aria-label="复制下载直链"
+                onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
+                aria-label={t("复制下载直链")}
               />
             </Tooltip>
           </div>
@@ -230,6 +233,7 @@ const GalleryCard = React.memo(function GalleryCard({
 });
 
 export function GalleryPage({ filter: controlledFilter, onFilterChange }: GalleryPageProps) {
+  useTranslation();
   const [localFilter, setLocalFilter] = useState<GalleryRouteState>(defaultGalleryFilter);
   const filter = controlledFilter ?? localFilter;
   const updateFilter = useCallback(
@@ -407,10 +411,9 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       {/* 顶部标题与筛选工具栏 */}
       <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">媒体归档库</h1>
+          <h1 className="text-xl font-bold tracking-tight text-fg">{t("媒体归档库")}</h1>
           <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
-            集中浏览所有已下载的高清图片、动态 GIF 与 4K 视频原片
-          </p>
+            {t("集中浏览所有已下载的高清图片、动态 GIF 与 4K 视频原片")}</p>
         </div>
 
         <div className="flex w-full min-w-0 flex-wrap items-center gap-2.5 xl:w-auto">
@@ -420,10 +423,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               value={filter.kind}
               onChange={(val) => updateFilter({ kind: val, page: 1 })}
               options={[
-                { label: `全部 (${categoryCounts.all})`, value: "all" },
-                { label: `图片 (${categoryCounts.images})`, value: "images" },
-                { label: `视频 (${categoryCounts.videos})`, value: "videos" },
-                { label: `动图 (${categoryCounts.gifs})`, value: "gifs" },
+                { label: t("全部 ({{value0}})", { value0: categoryCounts.all }), value: "all" },
+                { label: t("图片 ({{value0}})", { value0: categoryCounts.images }), value: "images" },
+                { label: t("视频 ({{value0}})", { value0: categoryCounts.videos }), value: "videos" },
+                { label: t("动图 ({{value0}})", { value0: categoryCounts.gifs }), value: "gifs" },
               ]}
             />
           </div>
@@ -432,14 +435,14 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             <SearchSelect
               value={filter.user}
               onChange={(val) => updateFilter({ user: val, page: 1 })}
-              options={[{ value: "all", label: "全部用户" }, ...userOptions]}
-              placeholder="按用户筛选..."
+              options={[{ value: "all", label: t("全部用户") }, ...userOptions]}
+              placeholder={t("按用户筛选...")}
               className="h-11 w-full sm:h-9"
             />
           </div>
 
           <SearchInput
-            placeholder="搜索文件名、推文 ID..."
+            placeholder={t("搜索文件名、推文 ID...")}
             value={filter.search}
             onChange={(e) => updateFilter({ search: e.target.value, page: 1 }, { replace: true })}
             allowClear
@@ -449,7 +452,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       </div>
 
       {libraryQuery.data?.truncated && (
-        <Alert type="warning" message="媒体库索引已达上限，当前仅显示最近的记录" />
+        <Alert type="warning" message={t("媒体库索引已达上限，当前仅显示最近的记录")} />
       )}
 
       {/* 媒体内容流展示 */}
@@ -468,7 +471,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           <Alert
             type="error"
             showIcon
-            message="媒体库加载失败"
+            message={t("媒体库加载失败")}
             description={getErrorMessage(libraryQuery.error)}
             action={
               <Button
@@ -477,8 +480,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 loading={libraryQuery.isFetching}
                 onClick={() => void libraryQuery.refetch()}
               >
-                重试
-              </Button>
+                {t("重试")}</Button>
             }
           />
         </Card>
@@ -487,8 +489,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           <Empty
             description={
               hasActiveFilter
-                ? "没有匹配的媒体文件，试试调整筛选或搜索关键词。"
-                : "暂无归档文件记录。完成下载任务后，媒体文件将自动在此呈现。"
+                ? t("没有匹配的媒体文件，试试调整筛选或搜索关键词。")
+                : t("暂无归档文件记录。完成下载任务后，媒体文件将自动在此呈现。")
             }
           />
         </Card>
@@ -519,7 +521,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             page={filter.page}
             pageSize={pageSize}
             total={totalEntries}
-            totalLabel={(total) => `共 ${total} 项`}
+            totalLabel={(total) => t("共 {{value0}} 项", { value0: total })}
             onPageChange={goToPage}
           />
         </div>
@@ -534,7 +536,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         }}
         title={
           previewEntry
-            ? `${previewEntry.item.userName || "未识别用户"}${
+            ? `${previewEntry.item.userName || t("未识别用户")}${
                 previewEntry.item.userScreenName ? `  @${previewEntry.item.userScreenName}` : ""
               }`
             : ""
@@ -568,7 +570,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 {/* 左右切图浮动按钮（当前服务端分页内循环） */}
                 <button
                   type="button"
-                  aria-label="上一个媒体文件"
+                  aria-label={t("上一个媒体文件")}
                   onClick={() => stepPreview(-1)}
                   className="absolute left-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
                 >
@@ -576,7 +578,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 </button>
                 <button
                   type="button"
-                  aria-label="下一个媒体文件"
+                  aria-label={t("下一个媒体文件")}
                   onClick={() => stepPreview(1)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
                 >
@@ -600,18 +602,16 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                     size="sm"
                     variant="default"
                     icon={<Copy className="size-3.5" />}
-                    onClick={() => void copyToClipboard(item.filePath, "本地路径")}
+                    onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
                   >
-                    复制本地路径
-                  </Button>
+                    {t("复制本地路径")}</Button>
                   <Button
                     size="sm"
                     variant="default"
                     icon={<ExternalLink className="size-3.5" />}
-                    onClick={() => void copyToClipboard(item.mediaUrl, "原始下载直链")}
+                    onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
                   >
-                    复制直链
-                  </Button>
+                    {t("复制直链")}</Button>
                 </div>
               </div>
             </div>

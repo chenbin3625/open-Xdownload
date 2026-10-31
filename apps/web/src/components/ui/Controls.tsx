@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { Check, ChevronDown } from "lucide-react";
 import {
   Checkbox as RadixCheckbox,
@@ -20,7 +21,7 @@ export function Select({
   value,
   onChange,
   options,
-  placeholder = "请选择",
+  placeholder = t("请选择"),
   size = "md",
   className,
   ariaLabel,
@@ -35,6 +36,7 @@ export function Select({
   ariaLabel?: string;
   id?: string;
 }) {
+  useTranslation();
   const fieldId = useFieldId();
   return (
     <RadixSelect.Root value={value} onValueChange={onChange}>
@@ -101,6 +103,7 @@ export function Switch({
   disabled?: boolean;
   ariaLabel?: string;
 }) {
+  useTranslation();
   return (
     <RadixSwitch.Root
       checked={checked}
@@ -141,6 +144,7 @@ export function Checkbox({
   label?: React.ReactNode;
   id?: string;
 }) {
+  useTranslation();
   const generatedId = React.useId();
   const controlId = id ?? generatedId;
   return (
@@ -191,6 +195,7 @@ export function Segmented({
   className?: string;
   ariaLabel?: string;
 }) {
+  useTranslation();
   return (
     <ToggleGroup.Root
       type="single"
@@ -240,6 +245,7 @@ export function Tabs({
   items: TabItem[];
   className?: string;
 }) {
+  useTranslation();
   return (
     <RadixTabs.Root value={value} onValueChange={onChange} className={className}>
       <RadixTabs.List className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-line">

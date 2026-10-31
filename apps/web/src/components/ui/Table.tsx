@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { ChevronRight } from "lucide-react";
 import React, { useState } from "react";
 import { cn } from "../../lib/cn";
@@ -30,7 +31,7 @@ export function Table<T>({
   loading = false,
   minWidth,
   expandedRowRender,
-  emptyText = "暂无数据",
+  emptyText = t("暂无数据"),
   footer,
   className,
 }: {
@@ -44,6 +45,7 @@ export function Table<T>({
   footer?: React.ReactNode;
   className?: string;
 }) {
+  useTranslation();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const baseId = React.useId();
 
@@ -105,7 +107,7 @@ export function Table<T>({
                               type="button"
                               aria-expanded={isOpen}
                               aria-controls={panelId}
-                              aria-label={isOpen ? "收起详情" : "展开详情"}
+                              aria-label={isOpen ? t("收起详情") : t("展开详情")}
                               onClick={() => toggle(key)}
                               className={cn(
                                 "flex size-7 cursor-pointer items-center justify-center rounded-control",

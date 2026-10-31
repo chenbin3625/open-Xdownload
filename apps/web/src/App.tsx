@@ -1,3 +1,4 @@
+import { t, useTranslation } from "./lib/i18n";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Menu, RefreshCw, WifiOff } from "lucide-react";
 import React, { useCallback, useEffect, useState } from "react";
@@ -43,10 +44,12 @@ import { AuthGate } from "./components/auth/AuthGate";
 const taskCenterSections = ["overview", "workbench", "tasks"];
 
 export default function App() {
+  useTranslation();
   return <AuthGate><Workbench /></AuthGate>;
 }
 
 function Workbench() {
+  useTranslation();
   const queryClient = useQueryClient();
   // 与 Tailwind 的 lg 断点同源，避免 992–1024px 区间里布局与可见性错位。
   const isCompact = !useBreakpointUp("lg");
@@ -250,28 +253,28 @@ function Workbench() {
               <Alert
                 type="error"
                 showIcon
-                message="任务数据加载失败"
+                message={t("任务数据加载失败")}
                 description={
                   jobs.error instanceof Error
                     ? jobs.error.message
-                    : "请检查后台服务连接"
+                    : t("请检查后台服务连接")
                 }
               />
             )}
 
             {isWorkbenchActive && meta.isError && (
-              <Alert type="error" showIcon message="任务统计加载失败" description={meta.error.message} />
+              <Alert type="error" showIcon message={t("任务统计加载失败")} description={meta.error.message} />
             )}
 
             {activeSection === "settings" && config.isError && (
               <Alert
                 type="error"
                 showIcon
-                message="配置数据加载失败"
+                message={t("配置数据加载失败")}
                 description={
                   config.error instanceof Error
                     ? config.error.message
-                    : "请检查后台服务连接"
+                    : t("请检查后台服务连接")
                 }
               />
             )}
@@ -330,7 +333,7 @@ function Workbench() {
             variant="text"
             icon={<Menu className="size-4" />}
             onClick={() => setMobileMenuOpen(true)}
-            aria-label="打开导航菜单"
+            aria-label={t("打开导航菜单")}
           />
           <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg-muted">open-Xdownload</span>
           {!sseConnected && (
@@ -338,8 +341,8 @@ function Workbench() {
               variant="text"
               icon={<WifiOff className="size-4 text-warning" />}
               onClick={reconnectEvents}
-              aria-label="实时更新已断开，点击重连"
-              title="实时更新已断开，点击重连"
+              aria-label={t("实时更新已断开，点击重连")}
+              title={t("实时更新已断开，点击重连")}
             />
           )}
           <Button
@@ -347,7 +350,7 @@ function Workbench() {
             icon={<RefreshCw className="size-4" />}
             loading={manualRefreshPending}
             onClick={handleManualRefresh}
-            aria-label="刷新数据"
+            aria-label={t("刷新数据")}
           />
         </div>
       </div>

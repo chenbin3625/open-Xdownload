@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { Popover } from "radix-ui";
 import React, { useMemo, useRef, useState } from "react";
@@ -11,8 +12,8 @@ export function SearchSelect({
   value,
   onChange,
   options,
-  placeholder = "请选择",
-  searchPlaceholder = "搜索...",
+  placeholder = t("请选择"),
+  searchPlaceholder = t("搜索..."),
   size = "md",
   className,
   ariaLabel,
@@ -26,6 +27,7 @@ export function SearchSelect({
   className?: string;
   ariaLabel?: string;
 }) {
+  useTranslation();
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -135,7 +137,7 @@ export function SearchSelect({
           </div>
           <div ref={listRef} id={listId} role="listbox" className="max-h-64 overflow-y-auto p-1">
             {filtered.length === 0 ? (
-              <p className="px-2 py-3 text-center text-xs text-fg-muted">无匹配项</p>
+              <p className="px-2 py-3 text-center text-xs text-fg-muted">{t("无匹配项")}</p>
             ) : (
               filtered.map((option, index) => (
                 <div

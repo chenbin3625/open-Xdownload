@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { Info } from "lucide-react";
 import React from "react";
 import { cn } from "../../lib/cn";
@@ -7,13 +8,14 @@ import { cn } from "../../lib/cn";
 // 在对应输入框下给出说明，避免用户以为"保存后 env 值就被改掉了"。
 export function EnvOverrideNote({
   show,
-  children = "由环境变量提供，保存不会覆盖",
+  children = t("由环境变量提供，保存不会覆盖"),
   className,
 }: {
   show?: boolean;
   children?: React.ReactNode;
   className?: string;
 }) {
+  useTranslation();
   if (!show) return null;
   return (
     <p className={cn("mt-1 flex items-center gap-1 text-[11px] text-fg-muted", className)}>

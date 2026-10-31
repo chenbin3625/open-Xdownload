@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import React from "react";
 import type { AppConfig } from "../../lib/api";
 import { Stack } from "../common/CommonUI";
@@ -5,7 +6,7 @@ import { EnvOverrideNote } from "./EnvOverrideNote";
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
 
 export function storageTargetLabel(config: AppConfig) {
-  return config.downloadDir || "本地目录未配置";
+  return config.downloadDir || t("本地目录未配置");
 }
 
 export function StorageSettings({
@@ -17,6 +18,7 @@ export function StorageSettings({
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
   envOverridden?: string[];
 }) {
+  useTranslation();
   return (
     <Stack size={16}>
       <LocalDirectoryPicker

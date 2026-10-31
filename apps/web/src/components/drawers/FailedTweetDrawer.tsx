@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { AlertCircle } from "lucide-react";
 import React from "react";
 import { Drawer } from "../ui/Overlay";
@@ -15,6 +16,7 @@ export function FailedTweetDrawer({
   onClose,
   total,
 }: FailedTweetDrawerProps) {
+  useTranslation();
   return (
     <Drawer
       open={open}
@@ -23,7 +25,7 @@ export function FailedTweetDrawer({
       title={
         <div className="flex items-center gap-2">
           <AlertCircle className="size-4 text-danger shrink-0" />
-          <span className="font-semibold text-fg">失败推文队列</span>
+          <span className="font-semibold text-fg">{t("失败推文队列")}</span>
           <Tag tone="danger" className="font-mono">
             {total}
           </Tag>

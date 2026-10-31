@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import {
   Download,
   HardDrive,
@@ -33,6 +34,7 @@ export function ConfigForm({
   onRefresh?: () => void;
   refreshPending?: boolean;
 }) {
+  useTranslation();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(() => normalizeConfig(config));
   const [draftDirty, setDraftDirty] = useState(false);
@@ -112,9 +114,9 @@ export function ConfigForm({
       }
       void queryClient.invalidateQueries({ queryKey: configQueryRoot });
       onRefresh?.();
-      toast.success({ message: "配置已保存" });
+      toast.success({ message: t("配置已保存") });
     },
-    onError: notifyError("保存失败"),
+    onError: notifyError(t("保存失败")),
   });
 
   async function runAuthCheck(submitted: AppConfig, notify: boolean) {
@@ -134,13 +136,13 @@ export function ConfigForm({
       }
       if (result.ok) {
         toast.success({
-          message: "Cookie 检测通过",
+          message: t("Cookie 检测通过"),
           description: result.screenName ? `@${result.screenName}` : result.message,
         });
         return;
       }
       toast.warning({
-        message: "Cookie 检测未通过",
+        message: t("Cookie 检测未通过"),
         description: result.message,
       });
     } catch (error) {
@@ -152,7 +154,7 @@ export function ConfigForm({
       setAuthError(message);
       if (notify) {
         toast.error({
-          message: "Cookie 检测失败",
+          message: t("Cookie 检测失败"),
           description: message,
         });
       }
@@ -193,7 +195,7 @@ export function ConfigForm({
       circle
       icon={<RefreshCw className={`size-3.5 ${refreshPending ? "animate-spin" : ""}`} />}
       loading={refreshPending}
-      aria-label="重新加载配置"
+      aria-label={t("重新加载配置")}
     />
   );
 
@@ -202,33 +204,32 @@ export function ConfigForm({
       {/* 页头 + 浮动操作区 */}
       <div className="sticky top-0 z-10 -mx-3 -mt-3 bg-canvas/80 px-3 pt-3 pb-3 backdrop-blur-md border-b border-line flex flex-wrap items-center justify-between gap-3 sm:-mx-4 sm:-mt-4 sm:px-4 sm:pt-4">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">系统与存储配置</h1>
+          <h1 className="text-xl font-bold tracking-tight text-fg">{t("系统与存储配置")}</h1>
           <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
-            存储位置、网络代理与 X Cookie 集中管理，修改后点击右上角统一保存
-          </p>
+            {t("存储位置、网络代理与 X Cookie 集中管理，修改后点击右上角统一保存")}</p>
         </div>
 
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
           {draftDirty ? (
             // 有未保存修改：二次确认后再丢弃
             <Popconfirm
-              title="放弃未保存的修改？"
-              description="将重新加载服务器上的最新配置，当前编辑内容会丢失。"
-              okText="重新加载"
-              cancelText="取消"
+              title={t("放弃未保存的修改？")}
+              description={t("将重新加载服务器上的最新配置，当前编辑内容会丢失。")}
+              okText={t("重新加载")}
+              cancelText={t("取消")}
               onConfirm={reloadConfig}
             >
               {reloadButton}
             </Popconfirm>
           ) : (
-            <Tooltip content="重新加载配置">
+            <Tooltip content={t("重新加载配置")}>
               <Button
                 variant="secondary"
                 circle
                 icon={<RefreshCw className={`size-3.5 ${refreshPending ? "animate-spin" : ""}`} />}
                 loading={refreshPending}
                 onClick={reloadConfig}
-                aria-label="重新加载配置"
+                aria-label={t("重新加载配置")}
               />
             </Tooltip>
           )}
@@ -238,31 +239,29 @@ export function ConfigForm({
             loading={authChecking}
             onClick={() => void runAuthCheck(draft, true)}
           >
-            检测 Cookie
-          </Button>
+            {t("检测 Cookie")}</Button>
           <Button
             variant="primary"
             icon={<Save className="size-4" />}
             loading={mutation.isPending}
             onClick={() => mutation.mutate(draft)}
           >
-            保存配置
-          </Button>
+            {t("保存配置")}</Button>
         </div>
       </div>
 
       <SectionCard
         icon={<HardDrive className="size-4" />}
-        title="存储设置"
-        description="选择媒体下载文件的保存方式与目标目录"
+        title={t("存储设置")}
+        description={t("选择媒体下载文件的保存方式与目标目录")}
       >
         <StorageSettings draft={draft} onChange={updateDraft} envOverridden={envOverridden} />
       </SectionCard>
 
       <SectionCard
         icon={<Download className="size-4" />}
-        title="网络与下载调度"
-        description="控制代理连接、文件命名方式与下载相关开关"
+        title={t("网络与下载调度")}
+        description={t("控制代理连接、文件命名方式与下载相关开关")}
       >
         <DownloadSettingsFields
           draft={draft}
@@ -274,8 +273,8 @@ export function ConfigForm({
 
       <SectionCard
         icon={<ShieldCheck className="size-4" />}
-        title="X / Twitter Cookie 凭证"
-        description="配置主账号与备用多账号凭证池，用于规避 API 频率限制"
+        title={t("X / Twitter Cookie 凭证")}
+        description={t("配置主账号与备用多账号凭证池，用于规避 API 频率限制")}
       >
         <CookieSettingsFields
           authError={authError}

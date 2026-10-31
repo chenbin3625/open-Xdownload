@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import type { Job } from "./api";
 
 export interface AggregatedErrorGroup {
@@ -146,7 +147,7 @@ export function parseAggregatedErrors(errorText?: string): AggregatedErrorGroup[
 
   // 累加 trailer 计数（如 "另有 23 个错误"）
   if (distinctTrailerCount > 0) {
-    groups.push({ id: `err-${groups.length + 1}`, reason: "其他异常", targets: [], count: distinctTrailerCount, countUnit: "kinds" });
+    groups.push({ id: `err-${groups.length + 1}`, reason: t("其他异常"), targets: [], count: distinctTrailerCount, countUnit: "kinds" });
   }
   if (trailerCount > 0) {
     if (groups.length > 0) {
@@ -155,7 +156,7 @@ export function parseAggregatedErrors(errorText?: string): AggregatedErrorGroup[
     } else {
       groups.push({
         id: "err-1",
-        reason: "其他未明确原因异常",
+        reason: t("其他未明确原因异常"),
         targets: [],
         count: trailerCount,
       });
@@ -182,17 +183,17 @@ export function getJobProgressDisplay(job: Job): {
     job.status === "downloading" ||
     job.status === "resolving"
   ) {
-    const msg = job.message || "执行中...";
+    const msg = job.message || t("执行中...");
     return { displayMsg: msg, tooltip: msg, hasError: false };
   }
 
   if (job.status === "completed" && !job.error) {
-    const msg = job.message || "已完成";
+    const msg = job.message || t("已完成");
     return { displayMsg: msg, tooltip: msg, hasError: false };
   }
 
   if (job.status === "canceled") {
-    const msg = job.message || "已取消";
+    const msg = job.message || t("已取消");
     return { displayMsg: msg, tooltip: msg, hasError: false };
   }
 
@@ -200,14 +201,14 @@ export function getJobProgressDisplay(job: Job): {
 
   // 无可解析的错误组
   if (groups.length === 0) {
-    const msg = job.error || job.message || (isFailed ? "任务失败" : "执行中...");
+    const msg = job.error || job.message || (isFailed ? t("任务失败") : t("执行中..."));
     return { displayMsg: msg, tooltip: msg, hasError };
   }
 
   // 单一错误且仅针对单个目标/单次
   if (groups.length === 1 && !groups[0].countUnit && groups[0].count <= 1 && groups[0].targets.length <= 1) {
-    const msg = groups[0].reason || job.error || (isFailed ? "任务失败" : "部分异常");
-    const tooltip = job.message && job.message !== msg ? `${msg}\n状态: ${job.message}` : msg;
+    const msg = groups[0].reason || job.error || (isFailed ? t("任务失败") : t("部分异常"));
+    const tooltip = job.message && job.message !== msg ? t("{{value0}}\n状态: {{value1}}", { value0: msg, value1: job.message }) : msg;
     return { displayMsg: msg, tooltip, hasError };
   }
 
@@ -216,9 +217,9 @@ export function getJobProgressDisplay(job: Job): {
   const otherKinds = groups.reduce((acc, g) => acc + (g.countUnit ? g.count : 0), 0);
   let displayMsg: string;
   if (groups.length === 1) {
-    displayMsg = `${groups[0].reason} (${groups[0].count}${groups[0].countUnit ? "种" : "项"})`;
+    displayMsg = `${groups[0].reason} (${groups[0].count}${groups[0].countUnit ? t("种") : t("项")})`;
   } else {
-    displayMsg = `部分失败 (${totalCount}项${otherKinds ? `，另有${otherKinds}种异常` : ""})`;
+    displayMsg = t("部分失败 ({{value0}}项{{value1}})", { value0: totalCount, value1: otherKinds ? t("，另有{{value0}}种异常", { value0: otherKinds }) : "" });
   }
 
   const tooltipLines: string[] = [];
@@ -228,9 +229,9 @@ export function getJobProgressDisplay(job: Job): {
   for (const g of groups) {
     const targetsStr =
       g.targets.length > 0
-        ? ` (${g.targets.slice(0, 5).join("、")}${g.targets.length > 5 ? " 等" : ""})`
+        ? ` (${g.targets.slice(0, 5).join("、")}${g.targets.length > 5 ? t(" 等") : ""})`
         : "";
-    tooltipLines.push(`• ${g.reason} [${g.count}${g.countUnit ? "种" : "项"}]${targetsStr}`);
+    tooltipLines.push(`• ${g.reason} [${g.count}${g.countUnit ? t("种") : t("项")}]${targetsStr}`);
   }
 
   return {

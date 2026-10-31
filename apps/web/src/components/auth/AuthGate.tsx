@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { useQueryClient } from "@tanstack/react-query";
 import { LogIn, RefreshCw, UserPlus } from "lucide-react";
 import React, { createContext, useCallback, useEffect, useRef, useState } from "react";
@@ -10,6 +11,7 @@ import { Spinner } from "../ui/Spinner";
 export const AccountContext = createContext("");
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
+  useTranslation();
   const queryClient = useQueryClient();
   const [session, setSession] = useState<LoginSession | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -29,7 +31,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       setSession(current);
     } catch (error) {
       if (check !== sessionCheck.current) return;
-      setLoadError(error instanceof Error ? error.message : "无法连接服务器");
+      setLoadError(error instanceof Error ? error.message : t("无法连接服务器"));
     }
   }, [queryClient]);
 
@@ -39,7 +41,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       sessionCheck.current += 1;
       queryClient.clear();
       setSession({ configured: true, authenticated: false });
-      setNotice("登录已失效，请重新登录");
+      setNotice(t("登录已失效，请重新登录"));
     };
     const storageChanged = (event: StorageEvent) => {
       if (event.key === sessionTokenKey) void checkSession();
@@ -69,7 +71,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         {loadError ? (
           <div className="space-y-4">
             <p role="alert" className="break-words text-sm text-danger-strong">{loadError}</p>
-            <Button icon={<RefreshCw className="size-4" />} onClick={() => void checkSession()}>重试</Button>
+            <Button icon={<RefreshCw className="size-4" />} onClick={() => void checkSession()}>{t("重试")}</Button>
           </div>
         ) : session ? (
           <LoginForm
@@ -84,7 +86,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               setSession({ configured: true, authenticated: true, username });
             }}
           />
-        ) : <div role="status" aria-label="正在检查登录状态"><Spinner className="size-5 text-brand-500" /></div>}
+        ) : <div role="status" aria-label={t("正在检查登录状态")}><Spinner className="size-5 text-brand-500" /></div>}
       </div>
     </main>
   );
@@ -96,6 +98,7 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
   onLogin: (username: string, token: string) => void;
   onConfigured: () => void;
 }) {
+  useTranslation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -107,7 +110,7 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
     if (pending) return;
     setError("");
     if (setup && password !== confirmation) {
-      setError("两次输入的密码不一致");
+      setError(t("两次输入的密码不一致"));
       return;
     }
     setPending(true);
@@ -116,26 +119,26 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
       onLogin(result.username, result.token);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) onConfigured();
-      setError(error instanceof Error ? error.message : "登录失败");
+      setError(error instanceof Error ? error.message : t("登录失败"));
     } finally { setPending(false); }
   }
 
   return (
     <form onSubmit={submit} className="space-y-5">
-      <h1 className="text-xl font-semibold text-fg">{setup ? "创建账号" : "登录"}</h1>
+      <h1 className="text-xl font-semibold text-fg">{setup ? t("创建账号") : t("登录")}</h1>
       {notice && <p role="status" className="text-sm text-fg-muted">{notice}</p>}
-      <Field label="用户名">
+      <Field label={t("用户名")}>
         <Input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required maxLength={64} autoFocus disabled={pending} />
       </Field>
-      <Field label="密码">
+      <Field label={t("密码")}>
         <Input type="password" autoComplete={setup ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} minLength={setup ? 8 : undefined} required disabled={pending} />
       </Field>
-      {setup && <Field label="确认密码">
+      {setup && <Field label={t("确认密码")}>
         <Input type="password" autoComplete="new-password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)} minLength={8} required disabled={pending} />
       </Field>}
       {error && <p role="alert" className="break-words text-sm text-danger-strong">{error}</p>}
       <Button type="submit" variant="primary" block loading={pending} icon={setup ? <UserPlus className="size-4" /> : <LogIn className="size-4" />}>
-        {setup ? "创建账号" : "登录"}
+        {setup ? t("创建账号") : t("登录")}
       </Button>
     </form>
   );

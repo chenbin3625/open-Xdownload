@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { ChevronRight, Folder, FolderOpen } from "lucide-react";
 import React, { useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/cn";
@@ -49,6 +50,7 @@ export function Tree({
   onLoadError?: (node: TreeNode, error: unknown) => void;
   className?: string;
 }) {
+  useTranslation();
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set());
   const [activeKey, setActiveKey] = useState<string | undefined>(selectedKey);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -149,7 +151,7 @@ export function Tree({
     <div
       ref={containerRef}
       role="tree"
-      aria-label="目录树"
+      aria-label={t("目录树")}
       onKeyDown={handleKeyDown}
       className={cn("max-h-72 overflow-auto p-1", className)}
     >
