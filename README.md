@@ -27,6 +27,7 @@ open-Xdownload is a local-first X / Twitter media downloader. It comes with a bu
 - Failure retry: Retryable failed posts from a batch archive go into a failure queue that can be retried manually in a dedicated drawer, or automatically when a task finishes; re-running a task creates a new task and keeps the original record.
 - Cookie pool: Supports a primary cookie plus multiple backup cookie groups, used for list / user / followed-account archiving and API rate-limit rotation.
 - Local-directory storage: the download directory can be browsed, typed in, or created in the configuration UI.
+- Chinese and English UI: Settings > Interface language offers Browser default, 中文 and English. The browser preference is used initially (Chinese variants use Simplified Chinese; unsupported languages fall back to English). Explicit choices are stored in this browser. Backend status and error messages retain their original text; existing notifications keep the language used when they appeared.
 
 ## Task Types
 
@@ -346,6 +347,7 @@ open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web
 - 失败重试：批量归档中可重试的失败推文会进入失败队列，可在独立抽屉中手动重试，也可开启任务结束后的自动重试；重新执行任务会创建新任务并保留原任务记录。
 - Cookie 池：支持主 Cookie 和多组备用 Cookie，用于列表、用户、关注归档以及 API 限流轮换。
 - 本地目录存储：可在配置界面中浏览、直接输入或创建下载目录。
+- 中英文界面：在“系统配置 > 界面语言”选择跟随浏览器、中文或 English；默认按浏览器偏好选择，中文变体使用简体中文，未支持的语言回退到英文。手动选择保存在当前浏览器；后端状态和错误保留原文，已有通知保留出现时的语言。
 
 ## 任务类型
 

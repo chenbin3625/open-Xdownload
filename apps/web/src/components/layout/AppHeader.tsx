@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { Menu, RefreshCw, Search, WifiOff } from "lucide-react";
 import React, { useState } from "react";
 import { Button } from "../ui/Button";
@@ -25,6 +26,7 @@ export function AppHeader({
   realtimeDisconnected = false,
   onReconnectRealtime,
 }: AppHeaderProps) {
+  useTranslation();
   const [quickInput, setQuickInput] = useState("");
 
   const handleSubmit = () => {
@@ -42,7 +44,7 @@ export function AppHeader({
             variant="text"
             icon={<Menu className="size-4" />}
             onClick={onToggleMobileMenu}
-            aria-label="打开导航菜单"
+            aria-label={t("打开导航菜单")}
             className="hidden sm:inline-flex"
           />
         )}
@@ -53,8 +55,8 @@ export function AppHeader({
               value={quickInput}
               onChange={(event) => setQuickInput(event.target.value)}
               onPressEnter={handleSubmit}
-              placeholder="粘贴链接、@用户名或列表 ID"
-              aria-label="快速解析输入"
+              placeholder={t("粘贴链接、@用户名或列表 ID")}
+              aria-label={t("快速解析输入")}
               enterKeyHint="go"
               autoCapitalize="none"
               autoCorrect="off"
@@ -71,8 +73,7 @@ export function AppHeader({
                     onClick={handleSubmit}
                     className="h-9 shadow-xs sm:h-7"
                   >
-                    解析
-                  </Button>
+                    {t("解析")}</Button>
                 </div>
               }
             />
@@ -85,11 +86,11 @@ export function AppHeader({
             <button
               type="button"
               onClick={onReconnectRealtime}
-              title="实时更新已断开，点击重连"
+              title={t("实时更新已断开，点击重连")}
               className="flex min-h-11 cursor-pointer items-center gap-1 rounded-control border border-warning/40 bg-warning-soft px-2 py-1 text-[11px] font-medium text-warning transition-colors hover:border-warning sm:min-h-0"
             >
               <WifiOff className="size-3" />
-              <span className="hidden sm:inline">实时更新已断开</span>
+              <span className="hidden sm:inline">{t("实时更新已断开")}</span>
               <RefreshCw className="size-3" />
             </button>
           )}
@@ -98,12 +99,12 @@ export function AppHeader({
             v{__APP_VERSION__}
           </Tag>
 
-          <Tooltip title="刷新数据">
+          <Tooltip title={t("刷新数据")}>
             <Button
               icon={<RefreshCw className="size-4" />}
               loading={refreshPending}
               onClick={onRefresh}
-              aria-label="刷新数据"
+              aria-label={t("刷新数据")}
             />
           </Tooltip>
         </div>

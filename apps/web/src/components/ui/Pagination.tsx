@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import React from "react";
 import { cn } from "../../lib/cn";
@@ -45,6 +46,7 @@ export function Pagination({
   size?: "sm" | "md";
   className?: string;
 }) {
+  useTranslation();
   // 边界：pageSize<=0 会让 Math.ceil(total/0) 变成 Infinity（渲染出 "Infinity" 页码），
   // total/page 非有限值时同理。这里统一收敛成"至少 1 页"，避免任何越界页码。
   const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 1;
@@ -67,14 +69,14 @@ export function Pagination({
 
   return (
     <nav
-      aria-label="分页"
+      aria-label={t("分页")}
       className={cn("grid min-w-0 grid-cols-[1fr_auto] items-center gap-3 sm:flex sm:flex-wrap sm:justify-between", className)}
     >
-      <p className="text-xs text-fg-muted">{totalLabel?.(safeTotal) ?? `共 ${safeTotal} 条`}</p>
+      <p className="text-xs text-fg-muted">{totalLabel?.(safeTotal) ?? t("共 {{value0}} 条", { value0: safeTotal })}</p>
       <div className="col-span-2 row-start-2 flex items-center justify-center gap-1.5">
         <button
           type="button"
-          aria-label="上一页"
+          aria-label={t("上一页")}
           disabled={current <= 1}
           onClick={() => onPageChange(current - 1)}
           className={stepClass}
@@ -98,7 +100,7 @@ export function Pagination({
               <button
                 key={item}
                 type="button"
-                aria-label={`第 ${item} 页`}
+                aria-label={t("第 {{value0}} 页", { value0: item })}
                 aria-current={item === current ? "page" : undefined}
                 onClick={() => onPageChange(item)}
                 className={cn(
@@ -117,7 +119,7 @@ export function Pagination({
         </div>
         <button
           type="button"
-          aria-label="下一页"
+          aria-label={t("下一页")}
           disabled={current >= totalPages}
           onClick={() => onPageChange(current + 1)}
           className={stepClass}
@@ -128,12 +130,12 @@ export function Pagination({
       {onPageSizeChange && (
         <Select
           size="sm"
-          ariaLabel="每页条数"
+          ariaLabel={t("每页条数")}
           value={String(pageSize)}
           onChange={(next) => onPageSizeChange(Number(next))}
           options={pageSizeOptions.map((optSize) => ({
             value: String(optSize),
-            label: `${optSize} 条/页`,
+            label: t("{{value0}} 条/页", { value0: optSize }),
           }))}
           className={cn("w-[6.5rem]", !isSmall && "sm:h-8 sm:text-xs")}
         />

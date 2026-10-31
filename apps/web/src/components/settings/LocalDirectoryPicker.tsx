@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { ArrowUp, Folder, FolderPlus, RefreshCw } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import React, { useEffect, useRef, useState } from "react";
@@ -35,6 +36,7 @@ export function LocalDirectoryPicker({
   path: string;
   onSelect: (path: string) => void;
 }) {
+  useTranslation();
   const [rootPath, setRootPath] = useState(path);
   const [selectedPath, setSelectedPath] = useState(path);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
@@ -56,9 +58,9 @@ export function LocalDirectoryPicker({
       const rootNode = listingToDirectoryTreeRoot(data);
       setTreeData([rootNode]);
       setExpandedKeys([rootNode.key]);
-      toast.success({ message: "目录已创建并选择" });
+      toast.success({ message: t("目录已创建并选择") });
     },
-    onError: notifyError("创建目录失败"),
+    onError: notifyError(t("创建目录失败")),
   });
 
   const resolvedPath = listing.isError ? rootPath : listing.data?.path ?? rootPath;
@@ -125,7 +127,7 @@ export function LocalDirectoryPicker({
       <div className="flex flex-wrap items-center gap-2">
         <div className="min-w-[240px] flex-1">
           <Input
-            aria-label="下载目录"
+            aria-label={t("下载目录")}
             prefix={<Folder className="size-4 text-fg-subtle" />}
             value={selectedPath}
             onChange={(event) => setSelectedPath(event.target.value)}
@@ -138,8 +140,7 @@ export function LocalDirectoryPicker({
           onClick={openSelectedPath}
           disabled={!selectedPath.trim() || listing.isLoading}
         >
-          打开
-        </Button>
+          {t("打开")}</Button>
         <Button
           variant="secondary"
           icon={<FolderPlus className="size-3.5" />}
@@ -147,15 +148,13 @@ export function LocalDirectoryPicker({
           loading={createDirectory.isPending}
           disabled={!selectedPath.trim()}
         >
-          创建
-        </Button>
+          {t("创建")}</Button>
         <Button
           variant="primary"
           onClick={() => onSelect(selectedPath.trim())}
           disabled={!selectedPath.trim()}
         >
-          选择此目录
-        </Button>
+          {t("选择此目录")}</Button>
       </div>
 
       <Card size="sm" bodyClassName="p-3">
@@ -168,22 +167,21 @@ export function LocalDirectoryPicker({
               disabled={!listing.data?.parent || listing.isLoading || listing.isError}
               onClick={() => listing.data?.parent && setRootPath(listing.data.parent)}
             >
-              上级目录
-            </Button>
+              {t("上级目录")}</Button>
             <EllipsisText
               title={resolvedPath}
               className="flex-1 text-xs font-mono text-fg-muted px-2 min-w-0"
             >
               {resolvedPath}
             </EllipsisText>
-            <Tooltip content="刷新目录">
+            <Tooltip content={t("刷新目录")}>
               <Button
                 size="sm"
                 variant="ghost"
                 circle
                 icon={<RefreshCw className={`size-3.5 ${listing.isFetching ? "animate-spin" : ""}`} />}
                 onClick={() => listing.refetch()}
-                aria-label="刷新目录"
+                aria-label={t("刷新目录")}
               />
             </Tooltip>
           </Toolbar>
@@ -191,7 +189,7 @@ export function LocalDirectoryPicker({
           {listing.isError && (
             <Alert
               type="error"
-              message="读取目录失败"
+              message={t("读取目录失败")}
               description={listing.error.message}
             />
           )}
@@ -199,7 +197,7 @@ export function LocalDirectoryPicker({
           {inlineError && !listing.isError && (
             <Alert
               type="warning"
-              message="读取子目录失败"
+              message={t("读取子目录失败")}
               description={inlineError}
             />
           )}
@@ -219,7 +217,7 @@ export function LocalDirectoryPicker({
                 loadChildren={loadDirectoryNode}
               />
             ) : (
-              <AppEmpty description="没有子目录" />
+              <AppEmpty description={t("没有子目录")} />
             )}
           </div>
         </Stack>

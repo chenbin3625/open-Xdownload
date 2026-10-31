@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import { X } from "lucide-react";
 import { Dialog, Popover, Tooltip as RadixTooltip } from "radix-ui";
 import React from "react";
@@ -25,6 +26,7 @@ export function Modal({
   className?: string;
   bodyClassName?: string;
 }) {
+  useTranslation();
   return (
     <Dialog.Root open={open} onOpenChange={(next) => !next && onClose()}>
       <Dialog.Portal>
@@ -48,15 +50,15 @@ export function Modal({
                 )}
               </div>
               <Dialog.Close asChild>
-                <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
+                <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label={t("关闭")} />
               </Dialog.Close>
             </div>
           ) : (
             <>
-              <Dialog.Title className="sr-only">对话框</Dialog.Title>
+              <Dialog.Title className="sr-only">{t("对话框")}</Dialog.Title>
               <div className="flex justify-end px-5 pt-3">
                 <Dialog.Close asChild>
-                  <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
+                  <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label={t("关闭")} />
                 </Dialog.Close>
               </div>
             </>
@@ -89,6 +91,7 @@ export function MediaModal({
   children: React.ReactNode;
   className?: string;
 }) {
+  useTranslation();
   return (
     <Dialog.Root open={open} onOpenChange={(next) => !next && onClose()}>
       <Dialog.Portal>
@@ -105,7 +108,7 @@ export function MediaModal({
               {title}
             </Dialog.Title>
             <Dialog.Close asChild>
-              <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
+              <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label={t("关闭")} />
             </Dialog.Close>
           </div>
           {children}
@@ -133,6 +136,7 @@ export function Drawer({
   children: React.ReactNode;
   className?: string;
 }) {
+  useTranslation();
   return (
     <Dialog.Root open={open} onOpenChange={(next) => !next && onClose()}>
       <Dialog.Portal>
@@ -153,15 +157,15 @@ export function Drawer({
             <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
               <Dialog.Title className="min-w-0 text-sm font-semibold text-fg">{title}</Dialog.Title>
               <Dialog.Close asChild>
-                <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
+                <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label={t("关闭")} />
               </Dialog.Close>
             </div>
           ) : (
             <>
-              <Dialog.Title className="sr-only">导航菜单</Dialog.Title>
+              <Dialog.Title className="sr-only">{t("导航菜单")}</Dialog.Title>
               <div className="flex justify-end px-4 pt-2">
                 <Dialog.Close asChild>
-                  <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label="关闭" />
+                  <Button variant="text" size="sm" circle icon={<X className="size-4" />} aria-label={t("关闭")} />
                 </Dialog.Close>
               </div>
             </>
@@ -174,6 +178,7 @@ export function Drawer({
 }
 
 export function TooltipProvider({ children }: { children: React.ReactNode }) {
+  useTranslation();
   return (
     <RadixTooltip.Provider delayDuration={300} skipDelayDuration={150}>
       {children}
@@ -192,6 +197,7 @@ export function Tooltip({
   children: React.ReactNode;
   side?: "top" | "right" | "bottom" | "left";
 }) {
+  useTranslation();
   const displayTitle = title ?? content;
   if (!displayTitle) return <>{children}</>;
   return (
@@ -216,8 +222,8 @@ export function Tooltip({
 export function Popconfirm({
   title,
   description,
-  okText = "确定",
-  cancelText = "取消",
+  okText = t("确定"),
+  cancelText = t("取消"),
   danger = false,
   disabled = false,
   onConfirm,
@@ -232,6 +238,7 @@ export function Popconfirm({
   onConfirm: () => void;
   children: React.ReactNode;
 }) {
+  useTranslation();
   const [open, setOpen] = React.useState(false);
   const titleId = React.useId();
   const descriptionId = React.useId();
@@ -298,6 +305,7 @@ export function SimplePopover({
   align?: "start" | "center" | "end";
   className?: string;
 }) {
+  useTranslation();
   const [open, setOpen] = React.useState(false);
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>

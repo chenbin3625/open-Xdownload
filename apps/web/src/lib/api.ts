@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { invalidateSession, readSessionToken } from "./session";
 
 export type JobStatus =
@@ -362,7 +363,7 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
       const message =
         (typeof payload?.error === "string" && payload.error) ||
         response.statusText ||
-        `请求失败 (${response.status})`;
+        t("请求失败 ({{value0}})", { value0: response.status });
       throw new ApiError(message, response.status);
     }
     // 204/205 按协议就没有响应体，返回 undefined 由调用方决定是否使用。
@@ -372,12 +373,12 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
     const body = await response.text();
     if (!body.trim()) {
       // 期望 JSON 的接口返回空体多半是反代/网关截断，必须显式报错，避免 undefined 流进缓存。
-      throw new ApiError("空响应", response.status);
+      throw new ApiError(t("空响应"), response.status);
     }
     try {
       return JSON.parse(body) as T;
     } catch {
-      throw new ApiError("响应格式无效", response.status);
+      throw new ApiError(t("响应格式无效"), response.status);
     }
   } finally {
     composed.dispose();

@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import React from "react";
 import { cn } from "../../lib/cn";
 
@@ -39,6 +40,7 @@ export function Tag({
   size?: "sm" | "md";
   className?: string;
 } & React.HTMLAttributes<HTMLSpanElement>) {
+  useTranslation();
   return (
     <span
       className={cn(
@@ -76,6 +78,7 @@ export function StatusDot({
   pulse?: boolean;
   className?: string;
 }) {
+  useTranslation();
   return (
     <span className={cn("relative inline-flex size-1.5 shrink-0", className)}>
       <span className={cn("size-1.5 rounded-full", dotClass[tone])} />
@@ -103,6 +106,7 @@ export function CountBadge({
   tone?: Tone;
   className?: string;
 }) {
+  useTranslation();
   if (count <= 0) return null;
   // 实心底色必须配"配对前景色"（success/warning/danger/info 的 *-contrast），
   // 不能写死 text-white：深色钛金下 brand-500 近白，白字等于隐形。
@@ -117,7 +121,7 @@ export function CountBadge({
   };
   // 计数本身没有可读文本：可见数字标 aria-hidden，另给一个 sr-only 文本，
   // 读屏读成"12 条"而不是孤零零的"12"（aria-label 放在 generic span 上不保证被朗读）。
-  const readableCount = count > overflowCount ? `${overflowCount} 条以上` : `${count} 条`;
+  const readableCount = count > overflowCount ? t("{{value0}} 条以上", { value0: overflowCount }) : t("{{value0}} 条", { value0: count });
   return (
     <span
       className={cn(
@@ -140,6 +144,7 @@ export function Avatar({
   children: React.ReactNode;
   className?: string;
 }) {
+  useTranslation();
   return (
     <span
       className={cn(

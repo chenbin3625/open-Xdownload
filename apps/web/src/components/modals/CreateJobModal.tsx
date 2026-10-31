@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import {
   Clock,
   Download,
@@ -40,35 +41,37 @@ const tabKeys: string[] = ["user", "tweet_link", "list", "following"];
 
 type BatchKind = Extract<JobKind, "user" | "list" | "following">;
 
-const batchTabs: {
+function getBatchTabs(): {
   kind: BatchKind;
   label: string;
   icon: React.ReactNode;
   hint: string;
   placeholder: string;
-}[] = [
-  {
-    kind: "user",
-    label: "用户归档",
-    icon: <User className="size-4" />,
-    hint: "支持用户名、@screen_name 或数字 ID，每行一个",
-    placeholder: "elonmusk\n@sama\n44196397\nhttps://x.com/OpenAI",
-  },
-  {
-    kind: "list",
-    label: "列表归档",
-    icon: <ListIcon className="size-4" />,
-    hint: "输入 X 列表 ID 或完整列表 URL，自动获取列表成员推文媒体",
-    placeholder: "1492019283\nhttps://x.com/i/lists/1647289190",
-  },
-  {
-    kind: "following",
-    label: "关注关系归档",
-    icon: <UserPlus className="size-4" />,
-    hint: "输入目标账号，自动获取其关注的所有账号并进行媒体归档",
-    placeholder: "elonmusk\n@OpenAI",
-  },
-];
+}[] {
+  return [
+    {
+      kind: "user",
+      label: t("用户归档"),
+      icon: <User className="size-4" />,
+      hint: t("支持用户名、@screen_name 或数字 ID，每行一个"),
+      placeholder: "elonmusk\n@sama\n44196397\nhttps://x.com/OpenAI",
+    },
+    {
+      kind: "list",
+      label: t("列表归档"),
+      icon: <ListIcon className="size-4" />,
+      hint: t("输入 X 列表 ID 或完整列表 URL，自动获取列表成员推文媒体"),
+      placeholder: "1492019283\nhttps://x.com/i/lists/1647289190",
+    },
+    {
+      kind: "following",
+      label: t("关注关系归档"),
+      icon: <UserPlus className="size-4" />,
+      hint: t("输入目标账号，自动获取其关注的所有账号并进行媒体归档"),
+      placeholder: "elonmusk\n@OpenAI",
+    },
+  ];
+}
 
 // 可选协议 / www. / mobile.，x.com 或 twitter.com，可选 @，1-15 位用户名，其后只能是 / ? # 或结尾。
 const profileLinkPattern =
@@ -135,6 +138,7 @@ export function CreateJobModal({
   initialInput = "",
   initialKind = "user",
 }: CreateJobModalProps) {
+  useTranslation();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<string>("user");
 
@@ -183,12 +187,12 @@ export function CreateJobModal({
       if (request.sequence !== parseSequence.current) return;
       setParsedTweet(data);
       toast.success({
-        message: "推文解析成功",
-        description: `包含 ${data.media.length} 个媒体，作者 @${data.author.screenName}`,
+        message: t("推文解析成功"),
+        description: t("包含 {{value0}} 个媒体，作者 @{{value1}}", { value0: data.media.length, value1: data.author.screenName }),
       });
     },
     onError: (error, request) => {
-      if (request.sequence === parseSequence.current) notifyError("解析失败")(error);
+      if (request.sequence === parseSequence.current) notifyError(t("解析失败"))(error);
     },
   });
 
@@ -196,22 +200,22 @@ export function CreateJobModal({
     mutationFn: async () => {
       if (activeTab === "tweet_link") {
         const targetUrl = normalizeTweetURL(tweetUrl);
-        if (!targetUrl) throw new Error("请输入推文链接");
+        if (!targetUrl) throw new Error(t("请输入推文链接"));
         const title = parsedTweet
-          ? `推文 @${parsedTweet.author.screenName} (${parsedTweet.id})`
+          ? t("推文 @{{value0}} ({{value1}})", { value0: parsedTweet.author.screenName, value1: parsedTweet.id })
           : `Tweet ${targetUrl.split("/").pop() || targetUrl}`;
         return [await createJob("tweet_link", targetUrl, title)];
       }
 
       if (currentBatchItems.length === 0) {
-        throw new Error("请至少输入一个有效目标");
+        throw new Error(t("请至少输入一个有效目标"));
       }
 
       if (scheduleMode) {
         const payload: ArchiveScheduleRequest = {
           name:
             scheduleName.trim() ||
-            `自动归档 (${currentBatchItems.length} 个目标)`,
+            t("自动归档 ({{value0}} 个目标)", { value0: currentBatchItems.length }),
           enabled: true,
           intervalMinutes,
           items: currentBatchItems,
@@ -226,18 +230,18 @@ export function CreateJobModal({
       void invalidateWorkbenchQueries(queryClient);
       if (scheduleMode) {
         toast.success({
-          message: "定时归档计划已保存",
-          description: `执行频率: 每 ${intervalMinutes} 分钟`,
+          message: t("定时归档计划已保存"),
+          description: t("执行频率: 每 {{value0}} 分钟", { value0: intervalMinutes }),
         });
       } else {
         toast.success({
-          message: "任务创建成功",
-          description: `已成功入库 ${jobs.length} 个任务并开始后台下载`,
+          message: t("任务创建成功"),
+          description: t("已成功入库 {{value0}} 个任务并开始后台下载", { value0: jobs.length }),
         });
       }
       handleClose();
     },
-    onError: notifyError("创建失败"),
+    onError: notifyError(t("创建失败")),
   });
 
   const handleClose = () => {
@@ -259,7 +263,7 @@ export function CreateJobModal({
   };
 
   const tabItems: TabItem[] = [
-    ...batchTabs.map((tab) => ({
+    ...getBatchTabs().map((tab) => ({
       key: tab.kind,
       label: (
         <span className="flex items-center gap-1.5">
@@ -272,8 +276,7 @@ export function CreateJobModal({
           <div className="flex items-center justify-between text-xs text-fg-muted">
             <span>{tab.hint}</span>
             <span className="font-mono font-medium text-brand-600">
-              已识别: {currentBatchItems.length} 个
-            </span>
+              {t("已识别: ")}{currentBatchItems.length} {t(" 个")}</span>
           </div>
           <Textarea
             rows={6}
@@ -292,7 +295,7 @@ export function CreateJobModal({
       label: (
         <span className="flex items-center gap-1.5">
           <LinkIcon className="size-4" />
-          <span>单条推文</span>
+          <span>{t("单条推文")}</span>
         </span>
       ),
       children: (
@@ -315,8 +318,7 @@ export function CreateJobModal({
               onClick={handleParseTweet}
               className="shrink-0"
             >
-              解析推文
-            </Button>
+              {t("解析推文")}</Button>
           </div>
 
           {parsedTweet && (
@@ -326,16 +328,15 @@ export function CreateJobModal({
                   @{parsedTweet.author.screenName} ({parsedTweet.author.name})
                 </span>
                 <span className="font-medium text-success">
-                  {parsedTweet.media.length} 个可用媒体
-                </span>
+                  {parsedTweet.media.length} {t(" 个可用媒体")}</span>
               </div>
               <p className="line-clamp-2 text-fg-body">
-                {parsedTweet.text || "无正文"}
+                {parsedTweet.text || t("无正文")}
               </p>
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-subtle">
-                <span>推文 ID: {parsedTweet.id}</span>
+                <span>{t("推文 ID: ")}{parsedTweet.id}</span>
                 <span>·</span>
-                <span>发布于: {parsedTweet.createdAt || "未知"}</span>
+                <span>{t("发布于: ")}{parsedTweet.createdAt || t("未知")}</span>
               </div>
             </div>
           )}
@@ -361,11 +362,9 @@ export function CreateJobModal({
           </div>
           <div className="min-w-0">
             <div className="text-sm font-semibold text-fg sm:text-base">
-              新建下载任务 / 归档计划
-            </div>
+              {t("新建下载任务 / 归档计划")}</div>
             <div className="hidden text-xs text-fg-muted font-normal sm:block">
-              支持单条推文、批量用户时间线、列表与关注关系媒体高速入库
-            </div>
+              {t("支持单条推文、批量用户时间线、列表与关注关系媒体高速入库")}</div>
           </div>
         </div>
       }
@@ -373,15 +372,14 @@ export function CreateJobModal({
         <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <span className="text-xs text-fg-subtle">
             {activeTab === "tweet_link"
-              ? "解析后点击立即下载入库"
+              ? t("解析后点击立即下载入库")
               : scheduleMode
-              ? `将保存为包含 ${currentBatchItems.length} 个目标的定时计划`
-              : `将同时创建 ${currentBatchItems.length} 个后台下载任务`}
+              ? t("将保存为包含 {{value0}} 个目标的定时计划", { value0: currentBatchItems.length })
+              : t("将同时创建 {{value0}} 个后台下载任务", { value0: currentBatchItems.length })}
           </span>
           <div className="flex items-center justify-end gap-2">
             <Button variant="ghost" onClick={handleClose}>
-              取消
-            </Button>
+              {t("取消")}</Button>
             <Button
               variant="primary"
               disabled={!canSubmit}
@@ -390,10 +388,10 @@ export function CreateJobModal({
               icon={<Download className="size-4" />}
             >
               {scheduleMode
-                ? "保存定时计划"
+                ? t("保存定时计划")
                 : activeTab === "tweet_link"
-                ? "立即下载"
-                : `批量下载 (${currentBatchItems.length})`}
+                ? t("立即下载")
+                : t("批量下载 ({{value0}})", { value0: currentBatchItems.length })}
             </Button>
           </div>
         </div>
@@ -416,8 +414,7 @@ export function CreateJobModal({
               <div className="flex min-w-0 items-center gap-2">
                 <Clock className="size-4 shrink-0 text-brand-500" />
                 <span className="text-xs font-semibold text-fg">
-                  是否保存为自动归档计划（定期抓取）？
-                </span>
+                  {t("是否保存为自动归档计划（定期抓取）？")}</span>
               </div>
               <Checkbox
                 checked={isSchedule}
@@ -428,23 +425,23 @@ export function CreateJobModal({
             {isSchedule && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-line text-xs">
                 <div>
-                  <div className="mb-1 text-fg-muted font-medium">计划名称</div>
+                  <div className="mb-1 text-fg-muted font-medium">{t("计划名称")}</div>
                   <Input
                     value={scheduleName}
                     onChange={(e) => setScheduleName(e.target.value)}
-                    placeholder="例如：重点博主媒体日常归档"
+                    placeholder={t("例如：重点博主媒体日常归档")}
                     size="sm"
                   />
                 </div>
                 <div>
-                  <div className="mb-1 text-fg-muted font-medium">调度频率 (分钟)</div>
+                  <div className="mb-1 text-fg-muted font-medium">{t("调度频率 (分钟)")}</div>
                   <NumberInput
                     min={5}
                     max={43200}
                     value={intervalMinutes}
                     onChange={(val) => setIntervalMinutes(val ?? 360)}
                     size="sm"
-                    addonAfter="分钟"
+                    addonAfter={t("分钟")}
                   />
                 </div>
               </div>

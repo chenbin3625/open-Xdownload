@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../lib/i18n";
 import {
   Clock,
   FolderOpen,
@@ -33,6 +34,7 @@ export function AppSidebar({
   storageType = "local",
   storagePath = "/downloads",
 }: AppSidebarProps) {
+  useTranslation();
   const currentKey = taskCenterSections.includes(activeSection) ? "tasks" : activeSection;
 
   const navItems: {
@@ -43,22 +45,22 @@ export function AppSidebar({
     {
       key: "tasks",
       icon: <ListChecks className="size-4 shrink-0" />,
-      label: "任务中心",
+      label: t("任务中心"),
     },
     {
       key: "schedules",
       icon: <Clock className="size-4 shrink-0" />,
-      label: "归档计划",
+      label: t("归档计划"),
     },
     {
       key: "gallery",
       icon: <Images className="size-4 shrink-0" />,
-      label: "媒体归档",
+      label: t("媒体归档"),
     },
     {
       key: "settings",
       icon: <Settings className="size-4 shrink-0" />,
-      label: "系统配置",
+      label: t("系统配置"),
     },
   ];
 
@@ -72,12 +74,12 @@ export function AppSidebar({
           </span>
           <div className="min-w-0">
             <div className="truncate text-sm font-bold tracking-tight text-fg">open-Xdownload</div>
-            <p className="text-[11px] text-fg-muted font-medium truncate">推文多媒体归档工作台</p>
+            <p className="text-[11px] text-fg-muted font-medium truncate">{t("推文多媒体归档工作台")}</p>
           </div>
         </div>
 
         {/* 手写导航列表：单选语义用 aria-current 表达，不需要 Menu 的全部键盘模型 */}
-        <nav aria-label="主导航" className="mt-1 flex flex-col gap-1">
+        <nav aria-label={t("主导航")} className="mt-1 flex flex-col gap-1">
           {navItems.map((item) => {
             const active = item.key === currentKey;
             return (
@@ -109,12 +111,10 @@ export function AppSidebar({
               <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-xs font-medium text-danger">
                   <TriangleAlert className="size-3.5 text-danger" />
-                  失败队列
-                </span>
+                  {t("失败队列")}</span>
               </div>
               <Button variant="danger" size="sm" block onClick={onOpenFailedDrawer}>
-                处理失败
-              </Button>
+                {t("处理失败")}</Button>
             </div>
           </>
         )}
@@ -125,7 +125,7 @@ export function AppSidebar({
         <div className="mb-1.5 flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <FolderOpen className="size-3.5 text-brand-500" />
-            <span className="text-xs font-medium text-fg">本地存储</span>
+            <span className="text-xs font-medium text-fg">{t("本地存储")}</span>
           </div>
           <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] font-mono text-fg-muted border border-line">
             {storageType.toUpperCase()}
