@@ -1,4 +1,9 @@
-import { afterEach } from "vitest";
+import { afterEach, beforeEach } from "vitest";
+import i18n from "../lib/i18n";
+
+beforeEach(async () => {
+  await i18n.changeLanguage("zh-CN");
+});
 
 // 本项目没开 vitest globals，Testing Library 的自动清理不会生效，
 // 这里显式挂一次。node 环境下 cleanup 无 DOM 可清，直接跳过。
@@ -36,4 +41,8 @@ if (typeof globalThis.DOMRect === "undefined") {
       return this;
     }
   } as unknown as typeof DOMRect;
+}
+
+if (typeof HTMLElement !== "undefined" && !HTMLElement.prototype.scrollIntoView) {
+  HTMLElement.prototype.scrollIntoView = () => {};
 }

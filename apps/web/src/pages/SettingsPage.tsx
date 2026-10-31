@@ -2,6 +2,7 @@ import React from "react";
 import type { AppConfig } from "../lib/api";
 import { ConfigForm } from "../components/settings/ConfigForm";
 import { AccountSecurity } from "../components/settings/AccountSecurity";
+import { LanguageSettings } from "../components/settings/LanguageSettings";
 
 export interface SettingsPageProps {
   config: AppConfig;
@@ -16,6 +17,7 @@ export function SettingsPage({
 }: SettingsPageProps) {
   return (
     <div className="space-y-6">
+      <LanguageSettings />
       <ConfigForm
         config={config}
         onRefresh={onRefresh}
