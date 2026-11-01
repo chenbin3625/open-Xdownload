@@ -2582,6 +2582,7 @@ RETURNING *`,
 	if err != nil {
 		return User{}, err
 	}
+	s.invalidateLibraryDownloadsCache()
 	return user, nil
 }
 
@@ -2666,6 +2667,9 @@ ON CONFLICT(user_id, parent_dir) DO UPDATE SET
 	name = excluded.name,
 	updated_at = excluded.updated_at
 RETURNING *`, userID, name, parentDir, now)
+	if err == nil {
+		s.invalidateLibraryDownloadsCache()
+	}
 	return entity, err
 }
 
@@ -2939,11 +2943,12 @@ RETURNING *`, JobPending, "排队中", now, current.ID); err != nil {
 }
 
 // PruneAutomaticRetryJobs 删除 updated_at 早于 olderThan 的自动重试任务行（只删该 input 的
-// 终态行，避免误删正在跑的行）。由启动/定期维护调用，防止复用行之外的历史脏数据堆积。
+// 终态且没有下载记录的行，避免级联删除已成功归档的媒体记录）。
 func (s *Store) PruneAutomaticRetryJobs(ctx context.Context, olderThan time.Time) (int, error) {
 	result, err := s.db.ExecContext(ctx, `
 DELETE FROM jobs
-WHERE kind = ? AND input = ? AND updated_at < ? AND status NOT IN (`+activeJobStatusesSQL+`)`,
+WHERE kind = ? AND input = ? AND updated_at < ? AND status NOT IN (`+activeJobStatusesSQL+`)
+AND NOT EXISTS (SELECT 1 FROM downloads WHERE downloads.job_id = jobs.id)`,
 		JobKindFailedRetry, AutomaticFailedRetryInput, olderThan.UTC())
 	if err != nil {
 		return 0, err

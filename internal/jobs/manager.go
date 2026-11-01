@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -250,7 +251,7 @@ func (m *Manager) RunArchiveScheduleNow(ctx context.Context, id int64) ([]storag
 			return nil, err
 		}
 		if active {
-			return nil, fmt.Errorf("该计划上次创建的任务仍在运行")
+			return nil, &storage.UserFacingError{Status: http.StatusConflict, Message: "该计划上次创建的任务仍在运行"}
 		}
 	}
 	jobs, err := m.store.CreateJobsForArchiveSchedule(ctx, schedule, time.Now().UTC())
@@ -1156,7 +1157,27 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 	if len(users) == 0 {
 		return stats, nil
 	}
-	tasks, skippedUsers, skippedIssues, err := m.archiveUserTasks(ctx, cfg, users)
+	// 私密时间线固定使用主账号；过滤和自动关注也必须使用相同账号的关系信息。
+	resolvedUsers := make([]xclient.User, 0, len(users))
+	for _, user := range users {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		if user.Protected && user.ID != "" && pool != nil && pool.Primary() != nil {
+			refreshed, err := pool.Primary().GetUserByID(ctx, user.ID)
+			if err != nil {
+				if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) {
+					return stats, err
+				}
+				stats.Failed++
+				stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的主账号关系失败: %v", fallbackUserName(user), err))
+				continue
+			}
+			user = refreshed
+		}
+		resolvedUsers = append(resolvedUsers, user)
+	}
+	tasks, skippedUsers, skippedIssues, err := m.archiveUserTasks(ctx, cfg, resolvedUsers)
 	if err != nil {
 		return stats, err
 	}
@@ -1332,7 +1353,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 	}
 	if user.Protected && !user.Following {
 		if cfg.AutoFollowProtected && !user.Requested && pool != nil && pool.Primary() != nil {
-			_ = pool.FollowUser(ctx, user)
+			_ = pool.Primary().FollowUser(ctx, user)
 		}
 		return stats, nil
 	}
@@ -1367,7 +1388,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 	}
 	if len(tweets) == 0 {
 		// 没有可用推文也必须推进游标，否则毒丸是哪一轮的最新推文就会永远重扫。
-		if fetchStats.LastSeenTweetID != "" {
+		if fetchStats.LastSeenTweetID != "" && newerTweetID(fetchStats.LastSeenTweetID, entity.LastSeenTweetID) {
 			if err := m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, fetchStats.LastSeenTweetID); err != nil {
 				return stats, err
 			}
@@ -1380,6 +1401,7 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 	stats.SkippedUsers += downloaded.SkippedUsers
 	stats.SkippedMedia += downloaded.SkippedMedia
 	stats.Failed += downloaded.Failed
+	stats.Issues = append(stats.Issues, downloaded.Issues...)
 	if err != nil {
 		return stats, err
 	}
@@ -1453,13 +1475,14 @@ func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Con
 		// 游标——否则一条长期失败的推文会让"增量归档"退化为每次全量扫描。真正需要阻塞
 		// 推进的只有"失败未能入队/写入失败"，那些路径直接 return error（本轮不写游标）。
 		cursor := newestTweetID(tweets)
-		if seenLastID > cursor {
-			// snowflake ID 是等长十进制字符串，字符串比较即数值比较（与 newestTweetID 一致）。
+		if newerTweetID(seenLastID, cursor) {
 			cursor = seenLastID
 		}
 		// 游标只前进不回退：并发/重扫场景下（例如同一用户被两个任务先后处理，或上层传入
 		// 的 entity 快照较旧）不能让一次旧结果把已推进的游标写回去，否则会重复归档。
-		if current, err := m.store.GetUserEntity(saveCtx, entity.ID); err == nil && current.LastSeenTweetID >= cursor {
+		if current, err := m.store.GetUserEntity(saveCtx, entity.ID); err != nil {
+			return stats, err
+		} else if newerTweetID(current.LastSeenTweetID, cursor) {
 			cursor = current.LastSeenTweetID
 		}
 		if err := m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, cursor); err != nil {
@@ -1935,16 +1958,24 @@ func bestMediaURL(media parser.Media) string {
 
 // newestTweetID 返回 tweets 中数值最大的推文 ID，作为增量归档的早停游标。timeline 按
 // 时间倒序，但首页可能含置顶推文（ID 较旧却排在最前），直接取 tweets[0] 会让下次增量
-// 归档在首页对该置顶推文精确命中而立即早停，漏掉比它更新的推文。雪花 ID 等长，字符串
-// 比较等价于数值比较。调用方保证 tweets 非空。
+// 归档在首页对该置顶推文精确命中而立即早停，漏掉比它更新的推文。调用方保证 tweets 非空。
 func newestTweetID(tweets []parser.TweetData) string {
 	newest := tweets[0].ID
 	for _, t := range tweets[1:] {
-		if t.ID > newest {
+		if newerTweetID(t.ID, newest) {
 			newest = t.ID
 		}
 	}
 	return newest
+}
+
+func newerTweetID(candidate, current string) bool {
+	value, err := strconv.ParseUint(candidate, 10, 64)
+	if err != nil {
+		return false
+	}
+	previous, _ := strconv.ParseUint(current, 10, 64)
+	return value > previous
 }
 
 func isPhotoURL(raw string) bool {

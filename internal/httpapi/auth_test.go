@@ -196,6 +196,20 @@ func TestPasswordChangeClosesOldEventStreams(t *testing.T) {
 	newStream.Body.Close()
 }
 
+func TestCompletedSetupRejectsRequestsBeforeReadingBody(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewServer(db, nil, nil, nil)
+	_ = testSession(t, s)
+	w := authRequest(s.Routes(), "POST", "/api/auth/setup", "invalid-json", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("closed setup must reject before parsing or hashing: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestSetupIsAtomic(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {

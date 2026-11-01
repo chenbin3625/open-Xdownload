@@ -147,6 +147,7 @@ export function CreateJobModal({
 
   const [parsedTweet, setParsedTweet] = useState<TweetData | null>(null);
   const parseSequence = useRef(0);
+  const createSequence = useRef(0);
 
   const [isSchedule, setIsSchedule] = useState(false);
   const [scheduleName, setScheduleName] = useState("");
@@ -154,6 +155,7 @@ export function CreateJobModal({
 
   useEffect(() => {
     parseSequence.current += 1;
+    createSequence.current += 1;
     setParsedTweet(null);
     if (!open) return;
     if (initialInput) {
@@ -197,6 +199,7 @@ export function CreateJobModal({
   });
 
   const createJobsMutation = useMutation({
+    onMutate: () => ({ sequence: createSequence.current, scheduleMode, intervalMinutes }),
     mutationFn: async () => {
       if (activeTab === "tweet_link") {
         const targetUrl = normalizeTweetURL(tweetUrl);
@@ -226,12 +229,13 @@ export function CreateJobModal({
 
       return await createJobsBatch({ items: currentBatchItems });
     },
-    onSuccess: (jobs) => {
+    onSuccess: (jobs, _variables, request) => {
       void invalidateWorkbenchQueries(queryClient);
-      if (scheduleMode) {
+      if (request?.sequence !== createSequence.current) return;
+      if (request.scheduleMode) {
         toast.success({
           message: t("定时归档计划已保存"),
-          description: t("执行频率: 每 {{value0}} 分钟", { value0: intervalMinutes }),
+          description: t("执行频率: 每 {{value0}} 分钟", { value0: request.intervalMinutes }),
         });
       } else {
         toast.success({
@@ -241,11 +245,14 @@ export function CreateJobModal({
       }
       handleClose();
     },
-    onError: notifyError(t("创建失败")),
+    onError: (error, _variables, request) => {
+      if (request?.sequence === createSequence.current) notifyError(t("创建失败"))(error);
+    },
   });
 
   const handleClose = () => {
     parseSequence.current += 1;
+    createSequence.current += 1;
     setTweetUrl("");
     setBatchInputs({});
     setParsedTweet(null);

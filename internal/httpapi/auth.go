@@ -150,6 +150,13 @@ func validatePassword(password string) error {
 }
 
 func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
+	if account, err := s.store.GetAccount(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	} else if account != nil {
+		writeError(w, http.StatusConflict, errors.New("账号已创建，请登录"))
+		return
+	}
 	var req struct{ Username, Password string }
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -162,6 +169,15 @@ func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validatePassword(req.Password); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if account, err := s.store.GetAccount(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	} else if account != nil {
+		writeError(w, http.StatusConflict, errors.New("账号已创建，请登录"))
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)

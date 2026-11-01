@@ -454,12 +454,14 @@ func (snap *librarySnapshot) prefixesForUser(user string) []string {
 }
 
 func filterLibraryOrphans(orphans []DownloadRecord, filter LibraryFilter) []DownloadRecord {
-	if filter.User != libraryKindAll && filter.User != libraryUserUnknown {
-		// 孤儿文件没有归属目录，因此任何具体用户的过滤都不匹配。
-		return nil
-	}
 	items := make([]DownloadRecord, 0, len(orphans))
 	for _, item := range orphans {
+		if filter.User == libraryUserUnknown && item.UserScreenName != "" {
+			continue
+		}
+		if filter.User != libraryKindAll && filter.User != libraryUserUnknown && item.UserScreenName != filter.User {
+			continue
+		}
 		if !libraryKindMatches(item.FilePath, filter.Kind) {
 			continue
 		}
@@ -622,9 +624,10 @@ ORDER BY ue.id`); err != nil {
 		addUser(entity.ScreenName, entity.UserName)
 	}
 
-	// 单次流式扫描 downloads：建立"已记录路径"小写集合（孤儿排除用）、去重后的分类
+	// 单次流式扫描 downloads：建立已记录路径集合（孤儿排除用）、去重后的分类
 	// 计数、用户 facet 与无归属数量。不在 Go 侧保留全部记录，内存与行数无关。
 	known := make(map[string]struct{})
+	pathVariants := make(map[string][]string)
 	seenEntries := make(map[string]struct{})
 	rows, err := s.db.QueryxContext(ctx, `SELECT id, file_path FROM downloads`)
 	if err != nil {
@@ -641,7 +644,12 @@ ORDER BY ue.id`); err != nil {
 		if filePath == "" {
 			entryKey = "record:" + strconv.FormatInt(id, 10)
 		} else if abs, absErr := filepath.Abs(filePath); absErr == nil {
-			known[libraryMatchPath(filepath.Clean(abs))] = struct{}{}
+			cleaned := filepath.Clean(abs)
+			if _, exists := known[cleaned]; !exists {
+				key := libraryMatchPath(cleaned)
+				pathVariants[key] = append(pathVariants[key], cleaned)
+				known[cleaned] = struct{}{}
+			}
 		}
 		if _, seen := seenEntries[entryKey]; seen {
 			continue
@@ -688,18 +696,30 @@ ORDER BY ue.id`); err != nil {
 				return nil
 			}
 			cleaned := filepath.Clean(path)
-			if _, recorded := known[libraryMatchPath(cleaned)]; recorded {
+			if _, recorded := known[cleaned]; recorded {
 				return nil
 			}
 			info, infoErr := entry.Info()
 			if infoErr != nil {
 				return nil
 			}
-			snap.orphans = append(snap.orphans, DownloadRecord{
+			for _, recorded := range pathVariants[libraryMatchPath(cleaned)] {
+				if recordedInfo, err := os.Stat(recorded); err == nil && os.SameFile(info, recordedInfo) {
+					return nil
+				}
+			}
+			item := DownloadRecord{
 				FilePath:  cleaned,
 				Bytes:     info.Size(),
 				CreatedAt: info.ModTime().UTC(),
-			})
+			}
+			if prefix, ok := snap.matchUser(cleaned); ok {
+				item.UserScreenName = prefix.screen
+				item.UserName = prefix.name
+			} else {
+				snap.unknownEntries++
+			}
+			snap.orphans = append(snap.orphans, item)
 			snap.counts.all++
 			switch libraryCategory(cleaned) {
 			case libraryKindImages:
@@ -719,7 +739,7 @@ ORDER BY ue.id`); err != nil {
 	sort.SliceStable(snap.orphans, func(i, j int) bool {
 		return snap.orphans[i].CreatedAt.After(snap.orphans[j].CreatedAt)
 	})
-	if snap.unknownEntries > 0 || len(snap.orphans) > 0 {
+	if snap.unknownEntries > 0 {
 		userByScreen[libraryUserUnknown] = LibraryUserOption{Value: libraryUserUnknown, Label: "未识别用户"}
 	}
 	snap.users = make([]LibraryUserOption, 0, len(userByScreen))

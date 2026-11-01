@@ -234,6 +234,33 @@ it("页码超出总页数时收敛到最后一页", async () => {
   expect(onFilterChange.mock.calls.some(([patch, options]) => patch.page === 2 && options?.replace === true)).toBe(true);
 });
 
+it.each(["category", "search"])("does not clamp restored pagination using stale %s data", async (mode) => {
+  let release!: () => void;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const params = requestParams(input);
+    const page = Number(params.get("page"));
+    const oldFilter = mode === "category" ? params.get("kind") === "images" : params.get("search") === "needle";
+    if (oldFilter) return pagedResponse(records, { page, total: 1, totalPages: 1 });
+    await new Promise<void>((resolve) => { release = resolve; });
+    return pagedResponse([{ ...records[0], filePath: "/downloads/restored.jpg" }], { page, total: 121, totalPages: 3 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const onFilterChange = vi.fn();
+  const view = (filter: GalleryRouteState) => <QueryClientProvider client={client}><TooltipProvider>
+    <GalleryPage filter={filter} onFilterChange={onFilterChange} />
+  </TooltipProvider></QueryClientProvider>;
+  const initial = { ...defaultGalleryFilter, ...(mode === "category" ? { kind: "images" as const } : { search: "needle" }) };
+  const rendered = render(view(initial));
+  await waitFor(() => expect(screen.getByText("shared.jpg")).toBeTruthy());
+  rendered.rerender(view({ ...defaultGalleryFilter, page: mode === "category" ? 3 : 2 }));
+  await waitFor(() => expect(release).toBeTypeOf("function"));
+  expect(onFilterChange).not.toHaveBeenCalled();
+  release();
+  await waitFor(() => expect(screen.getByText("restored.jpg")).toBeTruthy());
+  expect(onFilterChange).not.toHaveBeenCalled();
+});
+
 it("加载失败展示错误并可重试", async () => {
   let attempt = 0;
   const fetchMock = vi.fn(async () => {

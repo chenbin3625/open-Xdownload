@@ -313,11 +313,11 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
   // 数据变少（删除/筛选后总数下降）时把页码收敛到最后一页，避免停在空页。
   useEffect(() => {
-    if (!libraryQuery.data) return;
+    if (!libraryQuery.data || libraryQuery.isPlaceholderData || debouncedSearch !== filter.search) return;
     if (filter.page > totalPages) {
       updateFilter({ page: totalPages }, { replace: true });
     }
-  }, [libraryQuery.data, filter.page, totalPages, updateFilter]);
+  }, [libraryQuery.data, libraryQuery.isPlaceholderData, debouncedSearch, filter.search, filter.page, totalPages, updateFilter]);
 
   const visibleEntries = indexedDownloads;
   const hasActiveFilter =

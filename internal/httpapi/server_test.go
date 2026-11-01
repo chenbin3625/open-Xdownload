@@ -55,6 +55,32 @@ func authenticatedRoutes(t *testing.T, s *Server) http.Handler {
 	})
 }
 
+func TestRunActiveArchiveScheduleReturnsConflict(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	schedule, err := db.CreateArchiveSchedule(ctx, storage.ArchiveSchedule{
+		Name: "daily", Enabled: true, IntervalMinutes: 60,
+		Items: []storage.ArchiveScheduleItem{{Kind: storage.JobKindUser, Input: "alice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := jobs.NewManager(db, nil, nil)
+	if _, err := manager.RunArchiveScheduleNow(ctx, schedule.ID); err != nil {
+		t.Fatal(err)
+	}
+	handler := authenticatedRoutes(t, NewServer(db, nil, manager, nil))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, newLoopbackRequest("POST", fmt.Sprintf("/api/archive-schedules/%d/run", schedule.ID), nil))
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "仍在运行") {
+		t.Fatalf("active schedule conflict: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestRetryActiveJobReturnsBusinessError(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

@@ -28,11 +28,26 @@ case "$PGID" in
     ;;
 esac
 
+validate_dir() {
+  dir="$1"
+  mkdir -p "$dir"
+  logical="$(CDPATH= cd -L "$dir" && pwd -P)"
+  physical="$(CDPATH= cd -P "$dir" && pwd -P)"
+  for resolved in "$logical" "$physical"; do
+    case "$resolved" in
+      *[!/]*) ;;
+      *)
+        echo "data and download directories must not resolve to filesystem root: $dir" >&2
+        exit 1
+        ;;
+    esac
+  done
+}
+
 fix_owner() {
   dir="$1"
   mode="${2:-auto}"
   [ -n "$dir" ] || return 0
-  mkdir -p "$dir"
 
   current="$(stat -c '%u:%g' "$dir" 2>/dev/null || true)"
   if [ "$mode" = "always" ] || [ "$current" != "$PUID:$PGID" ] || [ "${OPEN_XDOWNLOAD_FORCE_CHOWN:-0}" = "1" ]; then
@@ -45,6 +60,8 @@ fix_owner() {
 }
 
 if [ "$PUID" != "0" ]; then
+  validate_dir "$OPEN_XDOWNLOAD_DATA_DIR"
+  validate_dir "$OPEN_XDOWNLOAD_DOWNLOAD_DIR"
   fix_owner "$OPEN_XDOWNLOAD_DATA_DIR" always
   fix_owner "$OPEN_XDOWNLOAD_DOWNLOAD_DIR"
   exec su-exec "$PUID:$PGID" "$@"

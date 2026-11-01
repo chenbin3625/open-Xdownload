@@ -190,6 +190,7 @@ type List struct {
 	Name        string
 	MemberCount int
 	Creator     User
+	viewer      *Client
 }
 
 type APIError struct {
@@ -590,7 +591,15 @@ func getListByID(ctx context.Context, requester timelineRequester, id string) (L
 	values := url.Values{}
 	values.Set("variables", encodeVariables(map[string]any{"listId": id}))
 	values.Set("features", `{"rweb_tipjar_consumption_enabled":true,"responsive_web_graphql_exclude_directive_enabled":true,"verified_phone_label_enabled":false,"responsive_web_graphql_skip_user_profile_image_extensions_enabled":false,"responsive_web_graphql_timeline_navigation_enabled":true}`)
-	payload, err := requester.graphQL(ctx, listByRestIDPath, values)
+	var payload []byte
+	var viewer *Client
+	var err error
+	if pool, ok := requester.(*Pool); ok {
+		payload, viewer, err = pool.graphQLWithClient(ctx, listByRestIDPath, values)
+	} else {
+		payload, err = requester.graphQL(ctx, listByRestIDPath, values)
+		viewer, _ = requester.(*Client)
+	}
 	if err != nil {
 		return List{}, err
 	}
@@ -604,6 +613,7 @@ func getListByID(ctx context.Context, requester timelineRequester, id string) (L
 		Name:        raw.Get("name").String(),
 		MemberCount: int(raw.Get("member_count").Int()),
 		Creator:     creator,
+		viewer:      viewer,
 	}, nil
 }
 
@@ -844,10 +854,13 @@ func (c *Client) GetListMembers(ctx context.Context, list List) ([]User, error) 
 	return getListMembers(ctx, c, list)
 }
 
-// GetListMembers 先由 Pool 选择一次客户端，再用同一个客户端拉完所有分页。
+// GetListMembers 复用读取列表元信息的客户端，并用同一个客户端拉完所有分页。
 // 列表成员对"观看者身份"敏感（私有列表只有成员可见），分页中途换 Cookie 会导致
 // 视角不一致/列表截断；因此这里只做一次 select，不在每页重新挑选。
 func (p *Pool) GetListMembers(ctx context.Context, list List) ([]User, error) {
+	if list.viewer != nil {
+		return getListMembers(ctx, list.viewer, list)
+	}
 	client, err := p.Select(ctx, listMembersPath)
 	if err != nil {
 		return nil, err
@@ -1080,6 +1093,11 @@ func yieldsOnRateLimit(ctx context.Context) bool {
 }
 
 func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]byte, error) {
+	payload, _, err := p.graphQLWithClient(ctx, path, values)
+	return payload, err
+}
+
+func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Values) ([]byte, *Client, error) {
 	var lastErr error
 	failures, handoffs := 0, 0
 	// 限流交还不计入失败次数，但总数有界：限流复位后若仍反复 429，最终按失败处理。
@@ -1090,20 +1108,20 @@ func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]b
 			// "全部限流"必须原样上抛（保留最后一次失败作上下文）：manager 靠这个分类中止
 			// 批量归档，被 lastErr（通常是一个 429）覆盖后会继续对后面每个用户撞限流。
 			if IsAllClientsRateLimited(err) && lastErr != nil {
-				return nil, fmt.Errorf("%w: %w", err, lastErr)
+				return nil, nil, fmt.Errorf("%w: %w", err, lastErr)
 			}
 			if lastErr != nil {
-				return nil, lastErr
+				return nil, nil, lastErr
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		payload, err := client.graphQL(withYieldOnRateLimit(ctx), path, values)
 		if err == nil {
-			return payload, nil
+			return payload, client, nil
 		}
 		lastErr = err
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
 		// 限流/本地限流忙碌/WAF 挑战：立即交还 Pool，换用其他 Cookie，而不是在原
 		// client 上重试等待（Client-only 路径已在 do() 里直接返回，无重试放大）。
@@ -1112,17 +1130,17 @@ func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]b
 				handoffs++
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		if !client.isDisabled() && !isTransientError(err) {
-			return nil, err
+			return nil, nil, err
 		}
 		failures++
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, nil, lastErr
 	}
-	return nil, errors.New("没有可用 X 客户端")
+	return nil, nil, errors.New("没有可用 X 客户端")
 }
 
 func (c *Client) do(ctx context.Context, method string, path string, query url.Values, form url.Values) ([]byte, error) {

@@ -78,6 +78,49 @@ describe("CreateJobModal", () => {
     vi.mocked(api.parseTweetLink).mockReset();
   });
 
+  it.each(["success", "error"])("preserves a reopened draft after an old creation %s", async (outcome) => {
+    let resolveCreate!: (job: api.Job) => void;
+    let rejectCreate!: (error: Error) => void;
+    vi.mocked(api.createJob).mockImplementation(() => new Promise((resolve, reject) => {
+      resolveCreate = resolve;
+      rejectCreate = reject;
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const onClose = vi.fn();
+    const errorToast = vi.spyOn(toast, "error");
+    function Harness() {
+      const [open, setOpen] = React.useState(true);
+      return <>
+        <button onClick={() => setOpen(true)}>Reopen</button>
+        <CreateJobModal open={open} initialKind="tweet_link" onClose={() => { onClose(); setOpen(false); }} />
+      </>;
+    }
+    renderWithProviders(<QueryClientProvider client={client}><Harness /></QueryClientProvider>);
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText("https://x.com/username/status/1234567890"), "https://x.com/first/status/1");
+    await user.click(screen.getByRole("button", { name: /立即下载/ }));
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(screen.getByRole("button", { name: "Reopen" }));
+    await user.type(screen.getByPlaceholderText("https://x.com/username/status/1234567890"), "https://x.com/second/status/2");
+    await act(async () => {
+      if (outcome === "success") {
+        resolveCreate({ id: 1, kind: "tweet_link", status: "pending", input: "", title: "", progress: 0, message: "", createdAt: "", updatedAt: "" });
+      } else {
+        rejectCreate(new Error("stale failure"));
+      }
+    });
+    await waitFor(() => {
+      if (outcome === "success") expect(invalidate).toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: /立即下载/ }).hasAttribute("disabled")).toBe(false);
+    });
+    expect((screen.getByPlaceholderText("https://x.com/username/status/1234567890") as HTMLInputElement).value).toBe("https://x.com/second/status/2");
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(errorToast).not.toHaveBeenCalled();
+    errorToast.mockRestore();
+  });
+
   it("drops schedule wording once the single-tweet tab is selected", async () => {
     const user = userEvent.setup();
     renderModal({ initialKind: "schedule" });
