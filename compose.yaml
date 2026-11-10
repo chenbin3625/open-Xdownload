@@ -1,0 +1,20 @@
+services:
+  x-archive:
+    build: .
+    image: x-archive:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      X_ARCHIVE_PASSWORD: "${X_ARCHIVE_PASSWORD:?请在 .env 中配置至少 12 位访问密码}"
+      TZ: Asia/Shanghai
+      RUST_LOG: x_archive=info,tower_http=warn
+    volumes:
+      - archive-data:/data
+      - archive-config:/config
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  archive-data:
+  archive-config:

@@ -1,0 +1,13 @@
+.git
+.env
+.tools
+.local
+target
+data
+config
+cookies*.txt
+**/node_modules
+frontend/dist
+frontend/test-results
+**/*.tsbuildinfo
+docs/screenshots

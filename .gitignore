@@ -1,0 +1,13 @@
+/target/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/test-results/
+*.tsbuildinfo
+/.tools/
+/.local/
+/.env
+/data/
+/config/
+cookies*.txt
+*.log
+.DS_Store
