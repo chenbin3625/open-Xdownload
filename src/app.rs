@@ -20,7 +20,7 @@ impl Default for CookieStatus {
     fn default() -> Self {
         Self {
             status: "missing".into(),
-            reason: "请导入自己的 X 登录 Cookie".into(),
+            reason: "请填写自己的 X 登录 Cookie".into(),
             checked_at: None,
             revision: String::new(),
         }
@@ -93,7 +93,7 @@ impl App {
         })
     }
     pub async fn set_cookie_status(&self, status: CookieStatus) -> Result<()> {
-        // Only the current upload may change the visible session status.
+        // Only the current saved session may change the visible session status.
         let mut current = self.cookie.write().await;
         if current.revision == status.revision {
             private_write(

@@ -1,10 +1,9 @@
 services:
   x-archive:
-    build: .
-    image: x-archive:local
+    image: "${X_ARCHIVE_IMAGE:-ghcr.io/chenbin3625/x-archive:latest}"
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3000:3000"
+      - "${X_ARCHIVE_HOST:-127.0.0.1}:${X_ARCHIVE_PORT:-3000}:3000"
     environment:
       X_ARCHIVE_PASSWORD: "${X_ARCHIVE_PASSWORD:?请在 .env 中配置至少 12 位访问密码}"
       TZ: Asia/Shanghai

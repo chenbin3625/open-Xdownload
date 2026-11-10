@@ -22,7 +22,7 @@ pub async fn session_cookie(app: &App) -> Result<CookieLease> {
     let _guard = app.config_gate.lock().await;
     let bytes = tokio::fs::read(app.config.join("cookies.txt"))
         .await
-        .context("尚未导入 Cookie，请先在设置中导入自己的 X 登录 Cookie")?;
+        .context("尚未设置 Cookie，请先在设置中填写自己的 X 登录 Cookie")?;
     let directory = app.config.join(".sessions");
     private_dir(&directory).await?;
     let path = directory.join(format!("{}.txt", uuid::Uuid::new_v4()));
@@ -166,7 +166,7 @@ pub async fn extract(
 ) -> Result<ToolOutput> {
     ensure!(
         app.config.join("cookies.txt").exists(),
-        "尚未导入 Cookie，请先在设置中导入自己的 X 登录 Cookie"
+        "尚未设置 Cookie，请先在设置中填写自己的 X 登录 Cookie"
     );
     let cookie = session_cookie(app).await?;
     let mut args = gallery_args(&cookie.0);

@@ -153,31 +153,30 @@ async fn authentication_and_request_origin_protect_all_private_routes() {
 }
 
 #[tokio::test]
-async fn cookie_upload_never_returns_credentials_and_tools_cannot_overwrite_original() {
+async fn entered_cookie_never_returns_credentials_and_tools_cannot_overwrite_original() {
     let (_dir, app, router) = app(None).await;
-    let contents = "# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tTEST_SECRET_AUTH\n.x.com\tTRUE\t/\tTRUE\t0\tct0\tTEST_SECRET_CSRF\n.evil.test\tTRUE\t/\tTRUE\t0\tsession\tOTHER_SECRET\n";
-    let payload = format!(
-        "--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"cookies.txt\"\r\nContent-Type: text/plain\r\n\r\n{contents}\r\n--boundary--\r\n"
-    );
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/cookies")
-                .header("Host", "127.0.0.1:3000")
-                .header("Content-Type", "multipart/form-data; boundary=boundary")
-                .body(Body::from(payload))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(!String::from_utf8_lossy(&bytes).contains("SECRET"));
+    let (status, response) = call(
+        &router,
+        "POST",
+        "/api/cookies",
+        json!({"cookie":"Cookie: auth_token=TEST_SECRET_AUTH; ct0=TEST_SECRET_CSRF; session=OTHER_SECRET"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["cookie"]["status"], "unknown");
+    assert_eq!(response["task"]["kind"], "cookie_check");
+    assert_eq!(response["task"]["status"], "queued");
+    assert_eq!(response["task"]["target"], app.cookie.read().await.revision);
+    assert!(response["cookie"].get("revision").is_none());
+    assert!(!response.to_string().contains("SECRET"));
+    let (_, status_response) = call(&router, "GET", "/api/cookies", json!(null)).await;
+    assert!(!status_response.to_string().contains("SECRET"));
     let saved = tokio::fs::read_to_string(app.config.join("cookies.txt"))
         .await
         .unwrap();
+    assert!(x_archive::domain::validate_cookies(&saved).is_ok());
+    assert!(saved.contains("\tauth_token\tTEST_SECRET_AUTH\n"));
+    assert!(saved.contains("\tct0\tTEST_SECRET_CSRF\n"));
     assert!(!saved.contains("OTHER_SECRET"));
     #[cfg(unix)]
     {
@@ -212,6 +211,66 @@ async fn cookie_upload_never_returns_credentials_and_tools_cannot_overwrite_orig
         StatusCode::OK
     );
     assert!(!app.config.join("cookies.txt").exists());
+}
+
+#[tokio::test]
+async fn invalid_cookie_input_preserves_the_session_and_does_not_queue_checks() {
+    let (_dir, app, router) = app(None).await;
+    let (status, response) = call(
+        &router,
+        "POST",
+        "/api/cookies",
+        json!({"cookie":"auth_token=SECRET_ONLY"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!response.to_string().contains("SECRET"));
+    assert!(!app.config.join("cookies.txt").exists());
+    assert_eq!(app.cookie.read().await.status, "missing");
+    let task_count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tasks")
+            .fetch_one(&app.store.pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(task_count().await, 0);
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/api/cookies",
+            json!({"cookie":"auth_token=SECRET_AUTH; ct0=SECRET_CSRF"}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let original = tokio::fs::read(app.config.join("cookies.txt"))
+        .await
+        .unwrap();
+    let revision = app.cookie.read().await.revision.clone();
+    for input in [
+        json!({"cookie":""}),
+        json!({"cookie":"auth_token=SECRET_AUTH; ct0="}),
+        json!({"cookie":"auth_token=SECRET_AUTH; ct0=SECRET_CSRF; ct0=SECRET_OTHER"}),
+        json!({"cookie":"auth_token=SECRET_AUTH; ct0=SECRET_CSRF\n"}),
+        json!({"cookie":"A".repeat(1024 * 1024 + 1)}),
+        json!("auth_token=SECRET_AUTH; ct0=SECRET_CSRF"),
+        json!({"cookie": ["SECRET_AUTH", "SECRET_CSRF"]}),
+        json!({"missing":"SECRET_AUTH"}),
+    ] {
+        let (status, response) = call(&router, "POST", "/api/cookies", input).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!response.to_string().contains("SECRET"));
+        assert_eq!(
+            tokio::fs::read(app.config.join("cookies.txt"))
+                .await
+                .unwrap(),
+            original
+        );
+        assert_eq!(app.cookie.read().await.revision, revision);
+        assert_eq!(task_count().await, 1);
+    }
 }
 
 #[tokio::test]
@@ -345,6 +404,41 @@ async fn cancelling_queued_downloads_leaves_a_retryable_media_state() {
 }
 
 #[tokio::test]
+async fn tweet_previews_group_media_in_order_and_respect_pagination_and_filters() {
+    let (_dir, app, router) = app(None).await;
+    sqlx::query("INSERT INTO tweets(id,author,author_name,text,published_at,url) VALUES('1','alice','Alice','with media','2026-11-10T12:00:00Z','https://x.com/alice/status/1'),('2','bob','Bob','another tweet','2026-11-09T12:00:00Z','https://x.com/bob/status/2'),('3','alice','Alice','text only','2026-11-08T12:00:00Z','https://x.com/alice/status/3')")
+        .execute(&app.store.pool).await.unwrap();
+    sqlx::query("INSERT INTO media(id,tweet_id,ordinal,kind,extension,remote_url) VALUES('first-2','1',2,'video','mp4','https://video.twimg.com/test.mp4'),('first-1','1',1,'image','jpg','https://pbs.twimg.com/media/test.jpg'),('second-1','2',1,'gif','mp4','https://video.twimg.com/test.mp4')")
+        .execute(&app.store.pool).await.unwrap();
+    let (status, page) = call(&router, "GET", "/api/tweets?limit=2", json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    let first = &page["items"][0];
+    assert_eq!(first["id"], "1");
+    assert_eq!(first["media_count"], 2);
+    assert_eq!(first["ready_count"], 0);
+    assert_eq!(first["media"][0]["id"], "first-1");
+    assert_eq!(first["media"][1]["id"], "first-2");
+    assert_eq!(first["media"][1]["kind"], "video");
+    assert_eq!(first["media"][1]["has_file"], false);
+    assert_eq!(first["media"][1]["status"], "pending");
+    assert!(first["media"][0].get("remote_url").is_none());
+    let second = &page["items"][1];
+    assert_eq!(second["id"], "2");
+    assert_eq!(second["media"].as_array().unwrap().len(), 1);
+    assert_eq!(second["media"][0]["id"], "second-1");
+    let (_, page) = call(&router, "GET", "/api/tweets?limit=2&page=2", json!(null)).await;
+    assert_eq!(page["items"][0]["id"], "3");
+    assert_eq!(page["items"][0]["media"], json!([]));
+    let (_, page) = call(&router, "GET", "/api/tweets?search=bob", json!(null)).await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["media"][0]["id"], "second-1");
+    let (_, page) = call(&router, "GET", "/api/tweets?search=absent", json!(null)).await;
+    assert_eq!(page["items"], json!([]));
+}
+
+#[tokio::test]
 async fn media_filters_tags_favorites_and_http_ranges_use_real_persisted_files() {
     let (_dir, app, router) = app(None).await;
     app.store
@@ -373,10 +467,20 @@ async fn media_filters_tags_favorites_and_http_ranges_use_real_persisted_files()
     tokio::fs::write(app.data.join("videos/test.mp4"), b"0123456789")
         .await
         .unwrap();
-    sqlx::query("UPDATE media SET status='ready',file_path='videos/test.mp4',size=10")
-        .execute(&app.store.pool)
+    tokio::fs::create_dir(app.data.join("thumbnails"))
         .await
         .unwrap();
+    let thumbnail_path = format!("thumbnails/{id}.jpg");
+    tokio::fs::write(app.data.join(&thumbnail_path), b"legacy-thumbnail")
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE media SET status='ready',file_path='videos/test.mp4',thumbnail_path=?,size=10",
+    )
+    .bind(&thumbnail_path)
+    .execute(&app.store.pool)
+    .await
+    .unwrap();
     assert_eq!(
         call(
             &router,
@@ -397,7 +501,11 @@ async fn media_filters_tags_favorites_and_http_ranges_use_real_persisted_files()
     .await;
     assert_eq!(page["total"], 1);
     assert!(page["items"][0].get("remote_url").is_none());
+    let (_, tweets) = call(&router, "GET", "/api/tweets", json!(null)).await;
+    assert_eq!(tweets["items"][0]["media"][0], page["items"][0]);
+    assert_eq!(tweets["items"][0]["ready_count"], 1);
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/api/media/{id}/file"))
@@ -413,6 +521,22 @@ async fn media_filters_tags_favorites_and_http_ranges_use_real_persisted_files()
     assert_eq!(
         response.into_body().collect().await.unwrap().to_bytes(),
         "2345"
+    );
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/media/{id}/thumbnail"))
+                .header("Host", "127.0.0.1:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/jpeg");
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "legacy-thumbnail"
     );
 }
 

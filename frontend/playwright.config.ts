@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const baseURL = `http://127.0.0.1:${process.env.X_ARCHIVE_TEST_PORT || "3101"}`;
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
@@ -7,7 +9,7 @@ export default defineConfig({
   timeout: 90000,
   expect: { timeout: 15000 },
   use: {
-    baseURL: "http://127.0.0.1:3101",
+    baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
@@ -26,7 +28,7 @@ export default defineConfig({
   ],
   webServer: {
     command: "cargo run --manifest-path ../Cargo.toml --example fixture_server",
-    url: "http://127.0.0.1:3101/api/health",
+    url: `${baseURL}/api/health`,
     timeout: 120000,
     reuseExistingServer: false,
   },

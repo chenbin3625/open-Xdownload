@@ -61,8 +61,14 @@ async fn main() -> Result<()> {
         .route("/__fixture/reset", post(reset))
         .with_state(app.clone());
     let router = api::router(app).merge(fixture_routes);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3101").await?;
-    println!("Offline browser fixture server on http://127.0.0.1:3101");
+    let port = std::env::var("X_ARCHIVE_TEST_PORT")
+        .unwrap_or_else(|_| "3101".into())
+        .parse::<u16>()?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    println!(
+        "Offline browser fixture server on http://{}",
+        listener.local_addr()?
+    );
     axum::serve(listener, router).await?;
     drop(scheduler);
     drop(temp);

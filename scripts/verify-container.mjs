@@ -15,7 +15,7 @@ for (const [index, architecture] of architectures.entries()) {
   const docker = (args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   let cookie = '';
   async function api(path, method = 'GET', body) {
-    const response = await fetch(`${base}/api${path}`, { method, headers: { Cookie: cookie, ...(body instanceof FormData ? {} : { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body) });
+    const response = await fetch(`${base}/api${path}`, { method, headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
     if (path === '/session') cookie = response.headers.get('set-cookie')?.split(';')[0] || '';
     const json = await response.json();
     assert.equal(response.ok, true, `${path}: ${JSON.stringify(json).replaceAll(password, '[redacted]')}`);
@@ -43,10 +43,9 @@ for (const [index, architecture] of architectures.entries()) {
     settings.download_concurrency = 2;
     settings.image_path = 'persisted-images';
     await api('/settings', 'PUT', settings);
-    const form = new FormData();
-    form.append('file', new Blob(['# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tOFFLINE_FIXTURE\n.x.com\tTRUE\t/\tTRUE\t0\tct0\tOFFLINE_CSRF\n']), 'cookies.txt');
-    const upload = JSON.stringify(await api('/cookies', 'POST', form));
-    assert.equal(upload.includes('OFFLINE_FIXTURE'), false);
+    const savedCookie = JSON.stringify(await api('/cookies', 'POST', { cookie: 'auth_token=OFFLINE_FIXTURE; ct0=OFFLINE_CSRF' }));
+    assert.equal(savedCookie.includes('OFFLINE_FIXTURE'), false);
+    assert.equal(savedCookie.includes('OFFLINE_CSRF'), false);
     const seed = `import sqlite3,pathlib,base64,os,json
 p=pathlib.Path('/data/persisted-images');p.mkdir(exist_ok=True)
 p.joinpath('probe.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII='))

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import {
   Link,
   NavLink,
@@ -31,6 +31,7 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -44,6 +45,8 @@ import {
   ListFilter,
   LockKeyhole,
   LogOut,
+  Maximize2,
+  Play,
   Plus,
   RefreshCw,
   Search,
@@ -55,6 +58,7 @@ import {
   X,
 } from "lucide-react";
 import PhotoSwipe from "photoswipe";
+import { version } from "../package.json";
 import { bytes, date, params, request, send } from "./api";
 import type {
   CookieStatus,
@@ -66,6 +70,7 @@ import type {
   SettingsResponse,
   Snapshot,
   Task,
+  TaskGroup,
   Tweet,
   User,
 } from "./api";
@@ -83,7 +88,7 @@ const statusNames: Record<string, string> = {
   ready: "已下载",
   complete: "完整",
   partial: "部分",
-  missing: "未导入",
+  missing: "未设置",
   unknown: "待检测",
   valid: "有效",
   invalid: "已失效",
@@ -355,7 +360,7 @@ function Shell({ canLogout }: { canLogout: boolean }) {
         </nav>
         <div className="sidebar-bottom">
           <span className="connection-dot" />
-          本地归档<span>V1.0</span>
+          本地归档<span>V{version}</span>
         </div>
       </aside>
       <div className="workspace">
@@ -471,7 +476,7 @@ function ImportModal() {
 function Home() {
   const q = useApi<Dashboard>("/dashboard", 5000);
   const media = useApi<Page<Media>>("/media?limit=12", 5000);
-  const tasks = useApi<Page<Task>>("/tasks?limit=5", 3000);
+  const tasks = useApi<Page<Task>>("/tasks?grouped=true&limit=5", 3000);
   const setImportOpen = useUI((s) => s.setImportOpen);
   if (!q.data) return <Loading query={q} />;
   const d = q.data;
@@ -883,6 +888,7 @@ function UserDetail() {
 function TweetsPage() {
   const [sp, setSp] = useSearchParams();
   const [search, setSearch] = useState(sp.get("search") || "");
+  const [detail, setDetail] = useState<Media | null>(null);
   const page = Number(sp.get("page") || 1);
   const users = useApi<User[]>("/users");
   const q = useApi<Page<Tweet>>(
@@ -964,6 +970,19 @@ function TweetsPage() {
                   <time>{date(t.published_at)}</time>
                 </div>
                 <p>{t.text || "无正文"}</p>
+                {t.media.length > 0 && (
+                  <div
+                    className={`tweet-media ${t.media.length === 1 ? "single" : t.media.length === 3 ? "three" : ""}`}
+                  >
+                    {t.media.map((m) => (
+                      <MediaPreview
+                        key={m.id}
+                        item={m}
+                        onClick={() => setDetail(m)}
+                      />
+                    ))}
+                  </div>
+                )}
                 <div className="tweet-actions">
                   {t.media_count > 0 && (
                     <Link to={`/media?tweet=${t.id}`}>
@@ -988,6 +1007,20 @@ function TweetsPage() {
             next.set("page", String(page));
             setSp(next);
           }}
+        />
+      )}
+      {detail && (
+        <MediaDetail
+          item={
+            q.data?.items
+              .flatMap((t) => t.media)
+              .find((m) => m.id === detail.id) || detail
+          }
+          items={
+            q.data?.items.find((t) => t.id === detail.tweet_id)?.media || [detail]
+          }
+          onSelect={setDetail}
+          onClose={() => setDetail(null)}
         />
       )}
     </>
@@ -1134,7 +1167,12 @@ function MediaPage({
   );
 }
 
-function openPhoto(item: Media, items: Media[]) {
+function openPhoto(
+  item: Media,
+  items: Media[],
+  onSelect: (item: Media) => void,
+  onClose: () => void,
+) {
   const images = items.filter(
     (m) => m.has_file && (m.kind === "image" || m.extension === "gif"),
   );
@@ -1154,7 +1192,78 @@ function openPhoto(item: Media, items: Media[]) {
     arrowPrevTitle: "上一张",
     arrowNextTitle: "下一张",
   });
+  lightbox.on("change", () => onSelect(images[lightbox.currIndex]));
+  lightbox.on("destroy", onClose);
   lightbox.init();
+  return lightbox;
+}
+
+function MediaPreview({
+  item: m,
+  onClick,
+}: {
+  item: Media;
+  onClick: () => void;
+}) {
+  const video = m.kind !== "image" && m.extension !== "gif";
+  return (
+    <button
+      className={`media-preview ${!m.has_file ? "not-ready" : ""}`}
+      onClick={onClick}
+      aria-label={`预览 @${m.author} 的${m.kind === "image" ? "图片" : m.kind === "gif" ? "GIF" : "视频"}`}
+      style={
+        {
+          "--media-aspect": Math.max(
+            0.6,
+            Math.min(1.6, m.width && m.height ? m.width / m.height : 1),
+          ),
+        } as CSSProperties
+      }
+    >
+      {m.has_file ? (
+        <>
+          {video && !m.has_thumbnail ? (
+            <video
+              src={`/api/media/${m.id}/file`}
+              muted
+              playsInline
+              preload="metadata"
+            />
+          ) : (
+            <img
+              src={`/api/media/${m.id}/${m.extension === "gif" ? "file" : m.has_thumbnail ? "thumbnail" : "file"}`}
+              alt={m.text || `@${m.author} 的媒体`}
+              loading="lazy"
+            />
+          )}
+          {video && (
+            <span className="media-play">
+              <Play size={23} fill="currentColor" />
+            </span>
+          )}
+          {m.kind !== "image" && (
+            <span className="media-kind">
+              {m.kind === "gif" ? (
+                "GIF"
+              ) : (
+                <>
+                  <Video size={13} />
+                  {m.duration
+                    ? `${Math.floor(m.duration / 60)}:${String(Math.floor(m.duration % 60)).padStart(2, "0")}`
+                    : "视频"}
+                </>
+              )}
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          <Image size={25} />
+          <Status value={m.status} />
+        </>
+      )}
+    </button>
+  );
 }
 
 function MediaGrid({
@@ -1165,6 +1274,9 @@ function MediaGrid({
   compact?: boolean;
 }) {
   const [detail, setDetail] = useState<Media | null>(null);
+  useEffect(() => {
+    if (detail && !items.some((item) => item.id === detail.id)) setDetail(null);
+  }, [detail, items]);
   const favorite = useAction(
     (m: Media) => send(`/media/${m.id}`, { favorite: !m.favorite }, "PATCH"),
     "收藏已更新",
@@ -1174,47 +1286,7 @@ function MediaGrid({
       <div className={`media-grid ${compact ? "compact" : ""}`}>
         {items.map((m) => (
           <article className="media-card" key={m.id}>
-            <button
-              className={`media-preview ${!m.has_file ? "not-ready" : ""}`}
-              onClick={() =>
-                m.has_file && m.kind === "image"
-                  ? openPhoto(m, items)
-                  : setDetail(m)
-              }
-              aria-label={`预览 @${m.author} 的${m.kind === "image" ? "图片" : m.kind === "gif" ? "GIF" : "视频"}`}
-              style={{
-                aspectRatio: `${Math.max(0.6, Math.min(1.6, m.width && m.height ? m.width / m.height : 1))}`,
-              }}
-            >
-              {m.has_file ? (
-                <>
-                  <img
-                    src={`/api/media/${m.id}/${m.extension === "gif" ? "file" : m.has_thumbnail ? "thumbnail" : "file"}`}
-                    alt={m.text || `@${m.author} 的媒体`}
-                    loading="lazy"
-                  />
-                  {m.kind !== "image" && (
-                    <span className="media-kind">
-                      {m.kind === "gif" ? (
-                        "GIF"
-                      ) : (
-                        <>
-                          <Video size={13} />
-                          {m.duration
-                            ? `${Math.floor(m.duration / 60)}:${String(Math.floor(m.duration % 60)).padStart(2, "0")}`
-                            : "视频"}
-                        </>
-                      )}
-                    </span>
-                  )}
-                </>
-              ) : (
-                <>
-                  <Image size={25} />
-                  <Status value={m.status} />
-                </>
-              )}
-            </button>
+            <MediaPreview item={m} onClick={() => setDetail(m)} />
             <div className="media-info">
               <div>
                 <span>@{m.author}</span>
@@ -1257,10 +1329,10 @@ function MediaGrid({
       </div>
       {detail && (
         <MediaDetail
-          key={detail.id}
           item={items.find((i) => i.id === detail.id) || detail}
+          items={items}
+          onSelect={setDetail}
           onClose={() => setDetail(null)}
-          onZoom={() => openPhoto(detail, items)}
         />
       )}
     </>
@@ -1269,14 +1341,183 @@ function MediaGrid({
 
 function MediaDetail({
   item: m,
+  items,
+  onSelect,
   onClose,
-  onZoom,
 }: {
   item: Media;
+  items: Media[];
+  onSelect: (item: Media) => void;
   onClose: () => void;
-  onZoom: () => void;
 }) {
-  const [tags, setTags] = useState(m.tags);
+  const index = items.findIndex((item) => item.id === m.id);
+  const video = m.kind !== "image" && m.extension !== "gif";
+  const [zoomed, setZoomed] = useState(false);
+  const lightbox = useRef<PhotoSwipe | null>(null);
+  const player = useRef<HTMLVideoElement>(null);
+  const thumbnails = useRef<HTMLDivElement>(null);
+  useEffect(() => () => lightbox.current?.destroy(), []);
+  useEffect(() => {
+    const element = player.current;
+    if (element?.autoplay) void element.play().catch(() => {});
+    return () => element?.pause();
+  }, [m.id, m.has_file, video]);
+  useEffect(() => {
+    thumbnails.current
+      ?.querySelector('[aria-current="true"]')
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [m.id]);
+  useEffect(() => {
+    function navigate(event: KeyboardEvent) {
+      if (
+        zoomed ||
+        event.defaultPrevented ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        (event.target instanceof Element &&
+          event.target.closest("input, textarea, select, [contenteditable], video"))
+      )
+        return;
+      const next =
+        event.key === "ArrowLeft"
+          ? items[index - 1]
+          : event.key === "ArrowRight"
+            ? items[index + 1]
+            : undefined;
+      if (next) {
+        event.preventDefault();
+        onSelect(next);
+      }
+    }
+    document.addEventListener("keydown", navigate);
+    return () => document.removeEventListener("keydown", navigate);
+  }, [index, items, onSelect, zoomed]);
+  function zoom() {
+    setZoomed(true);
+    lightbox.current = openPhoto(m, items, onSelect, () => {
+      lightbox.current = null;
+      setZoomed(false);
+    });
+  }
+  return (
+    <Modal
+      className="media-modal"
+      title={`@${m.author} · ${m.kind === "image" ? "图片" : m.kind === "gif" ? "GIF" : "视频"}`}
+      visible
+      centered
+      closeOnEsc={!zoomed}
+      onCancel={onClose}
+      footer={null}
+      width="calc(100vw - 48px)"
+    >
+      <div className="media-detail">
+        <div className="detail-viewer">
+          <div className="detail-preview">
+            {m.has_file ? (
+              video ? (
+                <video
+                  key={m.id}
+                  ref={player}
+                  src={`/api/media/${m.id}/file`}
+                  poster={
+                    m.has_thumbnail ? `/api/media/${m.id}/thumbnail` : undefined
+                  }
+                  controls
+                  playsInline
+                  loop={m.kind === "gif"}
+                  autoPlay={m.kind === "gif"}
+                  muted={m.kind === "gif"}
+                  preload="metadata"
+                />
+              ) : (
+                <button
+                  className="detail-image"
+                  onClick={zoom}
+                  aria-label="放大原图"
+                >
+                  <img
+                    key={m.id}
+                    src={`/api/media/${m.id}/file`}
+                    alt={m.text || `@${m.author} 的媒体`}
+                  />
+                  <span className="detail-zoom">
+                    <Maximize2 size={17} />
+                  </span>
+                </button>
+              )
+            ) : (
+              <Empty title={statusNames[m.status] || m.status} />
+            )}
+          </div>
+          {items.length > 1 && (
+            <>
+              <div className="detail-navigation">
+                <IconButton
+                  label="上一个媒体"
+                  icon={<ChevronLeft size={20} />}
+                  disabled={index <= 0}
+                  onClick={() => onSelect(items[index - 1])}
+                />
+                <span aria-live="polite">{index + 1} / {items.length}</span>
+                <IconButton
+                  label="下一个媒体"
+                  icon={<ChevronRight size={20} />}
+                  disabled={index < 0 || index >= items.length - 1}
+                  onClick={() => onSelect(items[index + 1])}
+                />
+              </div>
+              <div
+                className="detail-thumbnails"
+                ref={thumbnails}
+                aria-label="切换媒体"
+              >
+                {items.map((item, i) => (
+                  <button
+                    key={item.id}
+                    className="detail-thumbnail"
+                    aria-label={`切换到第 ${i + 1} 个媒体`}
+                    aria-current={item.id === m.id ? "true" : undefined}
+                    onClick={() => onSelect(item)}
+                  >
+                    {item.has_file &&
+                    (item.has_thumbnail ||
+                      item.kind === "image" ||
+                      item.extension === "gif") ? (
+                      <img
+                        src={`/api/media/${item.id}/${item.has_thumbnail ? "thumbnail" : "file"}`}
+                        alt=""
+                        loading="lazy"
+                      />
+                    ) : item.kind === "image" ? (
+                      <Image size={19} />
+                    ) : (
+                      <Video size={19} />
+                    )}
+                    {item.kind !== "image" && (
+                      <span>
+                        {item.kind === "gif" ? (
+                          "GIF"
+                        ) : (
+                          <Play size={10} fill="currentColor" />
+                        )}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+        <MediaMetadata key={m.id} item={m} />
+      </div>
+    </Modal>
+  );
+}
+
+function MediaMetadata({ item: m }: { item: Media }) {
+  const [draftTags, setDraftTags] = useState<string | null>(null);
+  const tags = draftTags ?? m.tags;
   const save = useAction(
     () =>
       send(
@@ -1299,115 +1540,75 @@ function MediaDetail({
     () => send(`/media/${m.id}`, { favorite: !m.favorite }, "PATCH"),
     "收藏已更新",
   );
-  const video = m.kind !== "image" && m.extension !== "gif";
   return (
-    <Modal
-      className="media-modal"
-      title={`@${m.author} · ${m.kind === "image" ? "图片" : m.kind === "gif" ? "GIF" : "视频"}`}
-      visible
-      onCancel={onClose}
-      footer={null}
-      width={1000}
-    >
-      <div className="media-detail">
-        <div className="detail-preview">
-          {m.has_file ? (
-            video ? (
-              <video
-                src={`/api/media/${m.id}/file`}
-                poster={
-                  m.has_thumbnail ? `/api/media/${m.id}/thumbnail` : undefined
-                }
-                controls
-                playsInline
-                loop={m.kind === "gif"}
-                autoPlay={m.kind === "gif"}
-                muted={m.kind === "gif"}
-                preload="metadata"
-              />
-            ) : (
-              <img
-                src={`/api/media/${m.id}/file`}
-                alt={m.text}
-                onClick={onZoom}
-              />
-            )
-          ) : (
-            <Empty title={statusNames[m.status]} />
-          )}
-        </div>
-        <div className="detail-meta">
-          <div className="detail-author">
-            <Avatar name={m.author} />
-            <div>
-              <strong>@{m.author}</strong>
-              <time>{date(m.published_at)}</time>
-            </div>
-          </div>
-          <p className="detail-text">{m.text || "无正文"}</p>
-          <a href={m.url} target="_blank" rel="noreferrer">
-            查看原始推文 <ExternalLink size={14} />
-          </a>
-          <dl>
-            <dt>状态</dt>
-            <dd>
-              <Status value={m.status} />
-            </dd>
-            <dt>尺寸</dt>
-            <dd>
-              {m.width} × {m.height}
-            </dd>
-            <dt>文件</dt>
-            <dd>
-              {m.extension.toUpperCase()} · {bytes(m.size)}
-            </dd>
-          </dl>
-          {m.error && <p className="error-text">{m.error}</p>}
-          <div className="detail-commands">
-            <Button
-              icon={
-                <Heart size={15} fill={m.favorite ? "currentColor" : "none"} />
-              }
-              onClick={() => favorite.mutate()}
-              loading={favorite.isPending}
-            >
-              {m.favorite ? "已收藏" : "收藏"}
-            </Button>
-            <Button
-              icon={<ArrowDownToLine size={15} />}
-              onClick={() => download.mutate()}
-              loading={download.isPending}
-            >
-              {m.has_file ? "重新下载" : "下载"}
-            </Button>
-            {!video && m.has_file && (
-              <IconButton
-                label="放大原图"
-                icon={<Search size={16} />}
-                onClick={onZoom}
-              />
-            )}
-          </div>
-          <label className="field-label" htmlFor="media-tags">
-            <Tags size={14} />
-            标签
-          </label>
-          <Input
-            id="media-tags"
-            value={tags}
-            onChange={setTags}
-            placeholder="以逗号分隔"
-          />
-          <Button
-            icon={<Check size={15} />}
-            onClick={() => save.mutate()}
-            loading={save.isPending}
-          >
-            保存标签
-          </Button>
+    <div className="detail-meta">
+      <div className="detail-author">
+        <Avatar name={m.author} />
+        <div>
+          <strong>@{m.author}</strong>
+          <time>{date(m.published_at)}</time>
         </div>
       </div>
-    </Modal>
+      <p className="detail-text">{m.text || "无正文"}</p>
+      <a href={m.url} target="_blank" rel="noreferrer">
+        查看原始推文 <ExternalLink size={14} />
+      </a>
+      <dl>
+        <dt>状态</dt>
+        <dd>
+          <Status value={m.status} />
+        </dd>
+        <dt>尺寸</dt>
+        <dd>
+          {m.width} × {m.height}
+        </dd>
+        <dt>文件</dt>
+        <dd>
+          {m.extension.toUpperCase()} · {bytes(m.size)}
+        </dd>
+      </dl>
+      {m.error && <p className="error-text">{m.error}</p>}
+      <div className="detail-commands">
+        <Button
+          size="small"
+          icon={<Heart size={15} fill={m.favorite ? "currentColor" : "none"} />}
+          onClick={() => favorite.mutate()}
+          loading={favorite.isPending}
+        >
+          {m.favorite ? "已收藏" : "收藏"}
+        </Button>
+        <Button
+          size="small"
+          icon={<ArrowDownToLine size={15} />}
+          onClick={() => download.mutate()}
+          loading={download.isPending}
+        >
+          {m.has_file ? "重新下载" : "下载"}
+        </Button>
+      </div>
+      <label className="field-label" htmlFor="media-tags">
+        <Tags size={14} />
+        标签
+      </label>
+      <Input
+        id="media-tags"
+        size="small"
+        value={tags}
+        onChange={setDraftTags}
+        disabled={save.isPending}
+        placeholder="以逗号分隔"
+      />
+      <Button
+        size="small"
+        icon={<Check size={15} />}
+        onClick={() =>
+          save.mutate(undefined, { onSuccess: () => setDraftTags(null) })
+        }
+        loading={save.isPending}
+      >
+        保存标签
+      </Button>
+    </div>
   );
 }
 
@@ -1415,8 +1616,8 @@ function TasksPage() {
   const [sp, setSp] = useSearchParams();
   const status = sp.get("status") || "";
   const page = Number(sp.get("page") || 1);
-  const q = useApi<Page<Task>>(
-    `/tasks?${params({ status: status || undefined, page, limit: 30 })}`,
+  const q = useApi<Page<TaskGroup>>(
+    `/tasks?${params({ grouped: true, status: status || undefined, page, limit: 30 })}`,
     2000,
   );
   const retry = useAction(
@@ -1464,84 +1665,108 @@ function TasksPage() {
       ) : !q.data.items.length ? (
         <Empty icon={<Download size={34} />} title="暂无任务" />
       ) : (
-        <div className="task-list">
-          {q.data.items.map((t) => (
-            <article className="task-row" key={t.id}>
-              <div className={`task-type ${t.status}`}>
-                <Download size={19} />
-              </div>
-              <div className="task-main">
-                <div className="task-title">
-                  <strong>{t.label}</strong>
-                  <Status value={t.status} />
-                </div>
-                <div className="task-facts">
-                  <time>{date(t.created_at)}</time>
-                  <span>
-                    尝试 {t.attempts} / {t.max_attempts}
-                  </span>
-                  <span>
-                    {
-                      (
-                        {
+        <div className="table-wrap task-table-wrap">
+          <table className="task-table" aria-label="下载任务">
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>状态</th>
+                <th>下载 / 大小</th>
+                <th>结果</th>
+                <th>创建时间</th>
+                <th className="right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {q.data.items.map((t) => (
+                <tr className="task-row" key={t.id}>
+                  <td className="task-name-cell">
+                    <strong>{t.label}</strong>
+                    <div className="task-facts">
+                      <span>
+                        {({
                           tweet: "推文归档",
                           sync: "用户同步",
                           relationships: "关系快照",
                           cookie_check: "会话检测",
-                          download: "媒体下载",
-                        } as Record<string, string>
-                      )[t.kind]
-                    }
-                  </span>
-                </div>
-                {t.status === "running" && (
-                  <div className="task-progress">
-                    <Progress percent={t.progress} showInfo={false} />
-                    <span>
-                      {t.progress < 20
-                        ? "准备与连接"
-                        : t.progress < 70
-                          ? "提取或下载"
-                          : t.progress < 95
-                            ? "处理与保存"
-                            : "即将完成"}
-                    </span>
-                  </div>
-                )}
-                {t.error && (
-                  <p
-                    className={
-                      t.status === "cancelled" ? "muted" : "task-error"
-                    }
-                  >
-                    {t.error}
-                    {t.status === "queued" && (
-                      <span> · 下次尝试 {date(t.available_at, true)}</span>
+                          download: t.download_total > 0 ? "媒体下载" : "手动下载",
+                        } as Record<string, string>)[t.kind] || t.kind}
+                      </span>
+                      <span>尝试 {t.attempts} / {t.max_attempts}</span>
+                    </div>
+                  </td>
+                  <td className="task-status-cell">
+                    <Status value={t.status} />
+                    {t.status === "running" && (
+                      <div className="task-progress">
+                        <Progress percent={t.progress} showInfo={false} />
+                        <span>{t.progress}%</span>
+                      </div>
                     )}
-                  </p>
-                )}
-                {t.result && <p className="task-result">{t.result}</p>}
-              </div>
-              <div className="task-controls">
-                {["failed", "cancelled"].includes(t.status) && (
-                  <IconButton
-                    label="重试任务"
-                    icon={<RefreshCw size={17} />}
-                    onClick={() => retry.mutate(t.id)}
-                    disabled={retry.isPending}
-                  />
-                )}
-                {["queued", "running"].includes(t.status) && (
-                  <IconButton
-                    label="取消任务"
-                    icon={<X size={17} />}
-                    onClick={() => cancel.mutate(t.id)}
-                    disabled={cancel.isPending}
-                  />
-                )}
-              </div>
-            </article>
-          ))}
+                  </td>
+                  <td className="task-download-cell">
+                    {t.download_total > 0 ? (
+                      <>
+                        <span>{t.download_completed} / {t.download_total} 完成</span>
+                        <small>{bytes(t.download_size)}</small>
+                      </>
+                    ) : t.kind === "download" && t.result_size > 0 ? (
+                      bytes(t.result_size)
+                    ) : (
+                      <span className="muted">-</span>
+                    )}
+                  </td>
+                  <td className="task-result-cell">
+                    {(t.error || t.download_error) && (
+                      <p className={t.status === "cancelled" ? "muted" : "task-error"}>
+                        {t.error || t.download_error}
+                        {t.status === "queued" && (
+                          <span> · 下次尝试 {date(t.available_at, true)}</span>
+                        )}
+                      </p>
+                    )}
+                    {(t.download_failed > 0 || t.download_cancelled > 0) && (
+                      <p className="task-error">
+                        {[
+                          t.download_failed > 0 && `${t.download_failed} 个下载失败`,
+                          t.download_cancelled > 0 && `${t.download_cancelled} 个已取消`,
+                        ].filter(Boolean).join("，")}
+                      </p>
+                    )}
+                    {t.result && (
+                      <p className="task-result">
+                        {t.result.replace(/(\d+)\s*字节/g, (_, size: string) => bytes(Number(size)))}
+                      </p>
+                    )}
+                    {!t.result && !t.error && !t.download_error && (
+                      <span className="muted">-</span>
+                    )}
+                  </td>
+                  <td className="task-time-cell">
+                    <time dateTime={t.created_at}>{date(t.created_at, true)}</time>
+                  </td>
+                  <td className="task-controls">
+                    {["failed", "cancelled"].includes(t.status) && (
+                      <IconButton
+                        label="重试任务"
+                        icon={<RefreshCw size={15} />}
+                        onClick={() => retry.mutate(t.id)}
+                        disabled={retry.isPending}
+                      />
+                    )}
+                    {["queued", "running"].includes(t.status) && (
+                      <IconButton
+                        label="取消任务"
+                        icon={<X size={15} />}
+                        onClick={() => cancel.mutate(t.id)}
+                        disabled={cancel.isPending}
+                      />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
       {q.data && (
@@ -1809,12 +2034,16 @@ function MemberList({ members, title }: { members: Member[]; title?: string }) {
 
 function SettingsPage() {
   const q = useApi<SettingsResponse>("/settings", 15000);
-  const file = useRef<HTMLInputElement>(null);
+  const [authToken, setAuthToken] = useState("");
+  const [ct0, setCt0] = useState("");
   const [draft, setDraft] = useState<Settings | null>(null);
   const [dirty, setDirty] = useState(false);
   const save = useAction(() => send("/settings", draft, "PUT"), "设置已保存");
-  const upload = useAction(
-    (data: FormData) => request("/cookies", { method: "POST", body: data }),
+  const saveCookie = useAction(
+    () =>
+      send("/cookies", {
+        cookie: `auth_token=${authToken.trim()}; ct0=${ct0.trim()}`,
+      }),
     "Cookie 已保存，检测已排队",
   );
   const check = useAction(
@@ -1870,55 +2099,134 @@ function SettingsPage() {
                 : "尚未检测"}
             </span>
           </div>
-          <div className="settings-actions">
-            <input
-              ref={file}
-              type="file"
-              accept=".txt,text/plain"
-              aria-label="Cookie 文件"
-              hidden
-              onChange={(e) => {
-                const selected = e.target.files?.[0];
-                if (selected) {
-                  const data = new FormData();
-                  data.append("file", selected);
-                  upload.mutate(data);
-                }
-                e.target.value = "";
-              }}
-            />
-            <Button
-              icon={<ArrowDownToLine size={15} />}
-              loading={upload.isPending}
-              onClick={() => file.current?.click()}
-            >
-              {data.cookie.status === "missing"
-                ? "导入 cookies.txt"
-                : "更新 Cookie"}
-            </Button>
-            <Button
-              icon={<RefreshCw size={15} />}
-              disabled={data.cookie.status === "missing"}
-              loading={check.isPending}
-              onClick={() => check.mutate()}
-            >
-              检测
-            </Button>
-            <IconButton
-              label="删除 Cookie"
-              icon={<Trash2 size={16} />}
-              disabled={data.cookie.status === "missing"}
-              onClick={() =>
-                Modal.confirm({
-                  title: "删除登录 Cookie？",
-                  content: "需要认证的同步将停止，归档内容会保留。",
-                  okText: "删除",
-                  cancelText: "取消",
-                  onOk: () => remove.mutateAsync(),
+          <form
+            className="cookie-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!authToken.trim() || !ct0.trim() || saveCookie.isPending) return;
+              void saveCookie
+                .mutateAsync()
+                .then(() => {
+                  setAuthToken("");
+                  setCt0("");
                 })
-              }
-            />
-          </div>
+                .catch(() => {});
+            }}
+          >
+            <div className="cookie-fields">
+              <div className="cookie-field">
+                <label htmlFor="x-auth-token">auth_token</label>
+                <Input
+                  id="x-auth-token"
+                  aria-label="auth_token"
+                  aria-describedby="x-cookie-values-hint"
+                  name="x-auth-token"
+                  mode="password"
+                  value={authToken}
+                  onChange={setAuthToken}
+                  placeholder="粘贴 auth_token 的 Value"
+                  maxLength={1024 * 1024}
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  required
+                  disabled={saveCookie.isPending}
+                />
+              </div>
+              <div className="cookie-field">
+                <label htmlFor="x-ct0">ct0</label>
+                <Input
+                  id="x-ct0"
+                  aria-label="ct0"
+                  aria-describedby="x-cookie-values-hint"
+                  name="x-ct0"
+                  mode="password"
+                  value={ct0}
+                  onChange={setCt0}
+                  placeholder="粘贴 ct0 的 Value"
+                  maxLength={1024 * 1024}
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  required
+                  disabled={saveCookie.isPending}
+                />
+              </div>
+            </div>
+            <p id="x-cookie-values-hint" className="cookie-values-hint">
+              只粘贴各自的 Value（值），无需填写 <code>auth_token=</code> 或{" "}
+              <code>ct0=</code>。已保存的值不会回显。
+            </p>
+            <div className="settings-actions">
+              <Button
+                htmlType="submit"
+                theme="solid"
+                icon={<Check size={15} />}
+                loading={saveCookie.isPending}
+                disabled={!authToken.trim() || !ct0.trim()}
+              >
+                保存并检测
+              </Button>
+              <Button
+                icon={<RefreshCw size={15} />}
+                disabled={data.cookie.status === "missing" || saveCookie.isPending}
+                loading={check.isPending}
+                onClick={() => check.mutate()}
+              >
+                检测
+              </Button>
+              <IconButton
+                label="删除 Cookie"
+                icon={<Trash2 size={16} />}
+                disabled={data.cookie.status === "missing" || saveCookie.isPending}
+                onClick={() =>
+                  Modal.confirm({
+                    title: "删除登录 Cookie？",
+                    content: "需要认证的同步将停止，归档内容会保留。",
+                    okText: "删除",
+                    cancelText: "取消",
+                    onOk: () => remove.mutateAsync(),
+                  })
+                }
+              />
+            </div>
+          </form>
+          <details
+            className="cookie-guide"
+            open={data.cookie.status === "missing"}
+          >
+            <summary>
+              <Info size={15} />
+              如何获取 Cookie
+              <ChevronRight size={15} className="cookie-guide-chevron" />
+            </summary>
+            <ol>
+              <li>
+                在电脑浏览器打开{" "}
+                <a href="https://x.com" target="_blank" rel="noreferrer">
+                  X <ExternalLink size={12} />
+                </a>
+                ，登录自己的账号。
+              </li>
+              <li>
+                右键页面选择“检查”，打开开发者工具。Chrome / Edge 进入{" "}
+                <strong>Application（应用） &gt; Storage &gt; Cookies</strong>；Firefox
+                进入 <strong>Storage（存储） &gt; Cookies</strong>。
+              </li>
+              <li>
+                选择 <code>https://x.com</code>，在 Name（名称）列找到{" "}
+                <code>auth_token</code> 和 <code>ct0</code>，分别复制对应的{" "}
+                <strong>Value（值）</strong>。若未找到，刷新 X 页面后重试。
+              </li>
+              <li>
+                将两个值填入上方对应输入框，点击“保存并检测”，等待状态变为“有效”。
+                会话失效时，从同一登录会话重新复制这两个值并更新。
+              </li>
+            </ol>
+            <p className="cookie-guide-note">
+              Cookie 等同登录凭据，请勿分享给他人。
+            </p>
+          </details>
         </div>
       </section>
       <section className="settings-section">
@@ -1987,6 +2295,7 @@ function SettingsPage() {
               value={draft.image_path}
               onChange={(v) => change("image_path", v)}
             />
+            <span>/ 用户名 /</span>
           </div>
         </SettingRow>
         <SettingRow label="视频保存路径">
@@ -1997,6 +2306,7 @@ function SettingsPage() {
               value={draft.video_path}
               onChange={(v) => change("video_path", v)}
             />
+            <span>/ 用户名 /</span>
           </div>
         </SettingRow>
         <div className="storage-settings">
@@ -2022,7 +2332,7 @@ function SettingsPage() {
         <div className="settings-section-title">
           <SettingsIcon size={18} />
           <h2>运行环境</h2>
-          <span className="muted">V1.0.0</span>
+          <span className="muted">V{version}</span>
         </div>
         {Object.entries(data.tools).map(([tool, state]) => (
           <div className="tool-row" key={tool}>

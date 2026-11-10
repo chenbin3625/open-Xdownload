@@ -41,6 +41,7 @@ export interface Tweet {
   url: string;
   media_count: number;
   ready_count: number;
+  media: Media[];
 }
 export interface Media {
   id: string;
@@ -76,6 +77,16 @@ export interface Task {
   created_at: string;
   updated_at: string;
   available_at: string;
+  parent_id: string | null;
+  result_size: number;
+}
+export interface TaskGroup extends Task {
+  download_total: number;
+  download_completed: number;
+  download_failed: number;
+  download_cancelled: number;
+  download_size: number;
+  download_error: string | null;
 }
 export interface Snapshot {
   id: string;
@@ -150,10 +161,10 @@ export function params(
   return query.toString();
 }
 export function bytes(value: number) {
-  if (value === 0) return "0 B";
+  if (!Number.isFinite(value) || value <= 0) return "0 KB";
   const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(value) / Math.log(1024)), 4);
-  return `${(value / 1024 ** i).toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
+  const i = Math.max(1, Math.min(Math.floor(Math.log(value) / Math.log(1024)), 4));
+  return `${Number((value / 1024 ** i).toFixed(i > 1 ? 1 : 2))} ${units[i]}`;
 }
 export function date(value: string | null, short = false) {
   if (!value) return "尚未同步";

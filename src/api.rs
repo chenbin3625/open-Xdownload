@@ -8,7 +8,7 @@ use crate::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -151,7 +151,7 @@ pub fn router(app: App) -> Router {
         .route("/api/settings", get(settings).put(save_settings))
         .route(
             "/api/cookies",
-            get(cookies).post(upload_cookies).delete(delete_cookies),
+            get(cookies).post(save_cookies).delete(delete_cookies),
         )
         .route("/api/cookies/check", post(check_cookies))
         .route("/api/users", get(users).post(add_user))
@@ -229,7 +229,7 @@ pub async fn storage(app: &App) -> Value {
     json!({"media_bytes":used,"database_bytes":tokio::fs::metadata(app.data.join("archive.sqlite")).await.map(|m|m.len()).unwrap_or(0),"free_bytes":fs2::available_space(&app.data).unwrap_or(0),"total_bytes":fs2::total_space(&app.data).unwrap_or(0)})
 }
 async fn dashboard(State(app): State<App>) -> Result<Json<Value>> {
-    let row = sqlx::query("SELECT (SELECT COUNT(*) FROM users) users,(SELECT COUNT(*) FROM tweets) tweets,(SELECT COUNT(*) FROM media WHERE status='ready') media,(SELECT COUNT(*) FROM tasks WHERE status IN ('queued','running')) active_tasks,(SELECT COUNT(*) FROM tasks WHERE status='failed') failed_tasks").fetch_one(&app.store.pool).await?;
+    let row = sqlx::query(&format!("{TASK_GROUPS} SELECT (SELECT COUNT(*) FROM users) users,(SELECT COUNT(*) FROM tweets) tweets,(SELECT COUNT(*) FROM media WHERE status='ready') media,(SELECT COUNT(*) FROM task_groups WHERE group_status IN ('queued','running','cancelling')) active_tasks,(SELECT COUNT(*) FROM task_groups WHERE group_status='failed') failed_tasks")).fetch_one(&app.store.pool).await?;
     Ok(Json(
         json!({"users":row.get::<i64,_>("users"),"tweets":row.get::<i64,_>("tweets"),"media":row.get::<i64,_>("media"),"active_tasks":row.get::<i64,_>("active_tasks"),"failed_tasks":row.get::<i64,_>("failed_tasks"),"storage":storage(&app).await,"cookie":app.cookie.read().await.clone()}),
     ))
@@ -262,33 +262,16 @@ async fn save_settings(
 async fn cookies(State(app): State<App>) -> Json<CookieStatus> {
     Json(app.cookie.read().await.clone())
 }
-async fn upload_cookies(State(app): State<App>, mut multipart: Multipart) -> Result<Json<Value>> {
-    let field = multipart
-        .next_field()
-        .await
-        .map_err(|_| bad("无法读取 Cookie 文件"))?
-        .ok_or_else(|| bad("请选择 cookies.txt"))?;
-    let bytes = field
-        .bytes()
-        .await
-        .map_err(|_| bad("Cookie 文件不能超过 1 MB"))?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| bad("Cookie 文件必须为 UTF-8 文本"))?;
-    domain::validate_cookies(text)?;
-    // Keep only X cookies; unrelated browser sessions never enter persistent storage.
-    let lines: Vec<_> = text
-        .lines()
-        .filter(|line| {
-            let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
-            matches!(
-                line.split('\t')
-                    .next()
-                    .unwrap_or("")
-                    .trim_start_matches('.'),
-                "x.com" | "twitter.com" | "www.x.com" | "www.twitter.com"
-            )
-        })
-        .collect();
-    let content = format!("# Netscape HTTP Cookie File\n{}\n", lines.join("\n"));
+#[derive(Deserialize)]
+struct CookieInput {
+    cookie: String,
+}
+async fn save_cookies(
+    State(app): State<App>,
+    input: std::result::Result<Json<CookieInput>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let Json(input) = input.map_err(|_| bad("请输入有效的 Cookie 内容"))?;
+    let content = domain::cookies_from_header(&input.cookie)?;
     let _guard = app.config_gate.lock().await;
     private_write(&app.config.join("cookies.txt"), content.as_bytes()).await?;
     let revision = uuid::Uuid::new_v4().to_string();
@@ -322,7 +305,7 @@ async fn delete_cookies(State(app): State<App>) -> Result<Json<Value>> {
 }
 async fn require_cookie(app: &App) -> Result<()> {
     if !app.config.join("cookies.txt").exists() {
-        return Err(bad("请先在设置中导入 X 登录 Cookie"));
+        return Err(bad("请先在设置中填写 X 登录 Cookie"));
     }
     Ok(())
 }
@@ -482,6 +465,7 @@ pub struct Filters {
     pub tag: Option<String>,
     pub search: Option<String>,
     pub status: Option<String>,
+    pub grouped: Option<bool>,
 }
 fn pagination(f: &Filters) -> (i64, i64) {
     let limit = f.limit.unwrap_or(48).clamp(1, 100) as i64;
@@ -554,6 +538,8 @@ struct Tweet {
     archived_at: String,
     media_count: i64,
     ready_count: i64,
+    #[sqlx(skip)]
+    media: Vec<Media>,
 }
 async fn tweets(State(app): State<App>, Query(f): Query<Filters>) -> Result<Json<Value>> {
     let (limit, offset) = pagination(&f);
@@ -571,10 +557,30 @@ async fn tweets(State(app): State<App>, Query(f): Query<Filters>) -> Result<Json
         .push_bind(limit)
         .push(" OFFSET ")
         .push_bind(offset);
-    let items = q
+    let mut items = q
         .build_query_as::<Tweet>()
         .fetch_all(&app.store.pool)
         .await?;
+    if !items.is_empty() {
+        let mut q = QueryBuilder::new(MEDIA_SELECT);
+        q.push(" AND m.tweet_id IN (");
+        let mut ids = q.separated(",");
+        for item in &items {
+            ids.push_bind(&item.id);
+        }
+        q.push(") ORDER BY m.tweet_id,m.ordinal");
+        let media = q
+            .build_query_as::<Media>()
+            .fetch_all(&app.store.pool)
+            .await?;
+        let mut grouped = std::collections::HashMap::<String, Vec<Media>>::new();
+        for item in media {
+            grouped.entry(item.tweet_id.clone()).or_default().push(item);
+        }
+        for item in &mut items {
+            item.media = grouped.remove(&item.id).unwrap_or_default();
+        }
+    }
     Ok(Json(
         json!({"items":items,"total":total,"page":offset/limit+1,"limit":limit}),
     ))
@@ -601,6 +607,7 @@ struct Media {
     has_file: bool,
     has_thumbnail: bool,
 }
+const MEDIA_SELECT: &str = "SELECT m.id,m.tweet_id,m.ordinal,m.kind,m.extension,m.status,m.error,m.size,m.width,m.height,m.duration,m.favorite,t.author,t.text,t.published_at,t.url,(SELECT COALESCE(group_concat(g.name,','),'') FROM media_tags mt JOIN tags g ON mt.tag_id=g.id WHERE mt.media_id=m.id) tags,m.file_path IS NOT NULL has_file,m.thumbnail_path IS NOT NULL has_thumbnail FROM media m JOIN tweets t ON t.id=m.tweet_id WHERE 1=1";
 async fn media(State(app): State<App>, Query(f): Query<Filters>) -> Result<Json<Value>> {
     let (limit, offset) = pagination(&f);
     let mut count = QueryBuilder::new(
@@ -611,9 +618,7 @@ async fn media(State(app): State<App>, Query(f): Query<Filters>) -> Result<Json<
         .build_query_scalar()
         .fetch_one(&app.store.pool)
         .await?;
-    let mut q = QueryBuilder::new(
-        "SELECT m.id,m.tweet_id,m.ordinal,m.kind,m.extension,m.status,m.error,m.size,m.width,m.height,m.duration,m.favorite,t.author,t.text,t.published_at,t.url,(SELECT COALESCE(group_concat(g.name,','),'') FROM media_tags mt JOIN tags g ON mt.tag_id=g.id WHERE mt.media_id=m.id) tags,m.file_path IS NOT NULL has_file,m.thumbnail_path IS NOT NULL has_thumbnail FROM media m JOIN tweets t ON t.id=m.tweet_id WHERE 1=1",
-    );
+    let mut q = QueryBuilder::new(MEDIA_SELECT);
     filters(&mut q, &f, true)?;
     q.push(" ORDER BY t.published_at DESC,m.ordinal LIMIT ")
         .push_bind(limit)
@@ -744,8 +749,90 @@ async fn thumbnail(
     serve_media(app, id, true, request).await
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+struct TaskGroup {
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    task: Task,
+    download_total: i64,
+    download_completed: i64,
+    download_failed: i64,
+    download_cancelled: i64,
+    download_size: i64,
+    download_error: Option<String>,
+    #[serde(skip)]
+    group_status: String,
+    #[serde(skip)]
+    group_progress: i64,
+}
+
+const TASK_GROUPS: &str = "
+WITH latest_downloads AS (
+    SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY parent_id,target ORDER BY created_at DESC,rowid DESC
+    ) AS attempt_order
+    FROM tasks WHERE parent_id IS NOT NULL
+), downloads AS (
+    SELECT parent_id, COUNT(*) AS download_total,
+        SUM(status='succeeded') AS download_completed,
+        SUM(status='failed') AS download_failed,
+        SUM(status='cancelled') AS download_cancelled,
+        SUM(status IN ('queued','running')) AS active,
+        SUM(status='cancelling') AS cancelling,
+        SUM(CASE WHEN status='succeeded' THEN result_size ELSE 0 END) AS download_size,
+        CAST(AVG(progress) AS INTEGER) AS download_progress,
+        MIN(CASE WHEN status!='succeeded' THEN error END) AS download_error
+    FROM latest_downloads WHERE attempt_order=1 GROUP BY parent_id
+), task_groups AS (
+    SELECT t.*,
+        COALESCE(d.download_total,0) AS download_total,
+        COALESCE(d.download_completed,0) AS download_completed,
+        COALESCE(d.download_failed,0) AS download_failed,
+        COALESCE(d.download_cancelled,0) AS download_cancelled,
+        COALESCE(d.download_size,t.result_size) AS download_size,
+        d.download_error,
+        CASE
+            WHEN t.status='cancelling' OR d.cancelling>0 THEN 'cancelling'
+            WHEN t.status IN ('queued','running') THEN t.status
+            WHEN d.active>0 THEN 'running'
+            WHEN t.status='failed' OR d.download_failed>0 THEN 'failed'
+            WHEN t.status='cancelled' OR d.download_cancelled>0 THEN 'cancelled'
+            ELSE t.status
+        END AS group_status,
+        CASE WHEN t.status='succeeded' AND d.download_total>0
+            THEN d.download_progress ELSE t.progress END AS group_progress
+    FROM tasks t LEFT JOIN downloads d ON d.parent_id=t.id
+    WHERE t.parent_id IS NULL
+)
+";
+
 async fn tasks(State(app): State<App>, Query(f): Query<Filters>) -> Result<Json<Value>> {
     let (limit, offset) = pagination(&f);
+    if f.grouped == Some(true) {
+        let total: i64 = sqlx::query_scalar(&format!(
+            "{TASK_GROUPS} SELECT COUNT(*) FROM task_groups WHERE (? IS NULL OR group_status=?)"
+        ))
+        .bind(&f.status)
+        .bind(&f.status)
+        .fetch_one(&app.store.pool)
+        .await?;
+        let mut items: Vec<TaskGroup> = sqlx::query_as(&format!(
+            "{TASK_GROUPS} SELECT * FROM task_groups WHERE (? IS NULL OR group_status=?) ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+        ))
+        .bind(&f.status)
+        .bind(&f.status)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&app.store.pool)
+        .await?;
+        for item in &mut items {
+            item.task.status = item.group_status.clone();
+            item.task.progress = item.group_progress;
+        }
+        return Ok(Json(
+            json!({"items":items,"total":total,"page":offset/limit+1,"limit":limit}),
+        ));
+    }
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE (? IS NULL OR status=?)")
         .bind(&f.status)
         .bind(&f.status)
@@ -762,11 +849,37 @@ async fn retry_task(State(app): State<App>, Path(id): Path<String>) -> Result<Js
         .fetch_optional(&app.store.pool)
         .await?
         .ok_or_else(missing)?;
+    if task.status == "succeeded" {
+        let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let children: Vec<Task> = sqlx::query_as("SELECT d.* FROM tasks d WHERE d.parent_id=? AND d.status IN ('failed','cancelled') AND NOT EXISTS (SELECT 1 FROM tasks newer WHERE newer.parent_id=d.parent_id AND newer.target=d.target AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)))")
+            .bind(&id).fetch_all(&mut *tx).await?;
+        if children.is_empty() {
+            return Err(bad("只有失败或取消的任务可以重试"));
+        }
+        for child in children {
+            let queued = sqlx::query("INSERT INTO tasks(id,kind,target,label,parent_id) SELECT ?,'download',?,?,? WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE kind='download' AND target=? AND status IN ('queued','running','cancelling'))")
+                .bind(uuid::Uuid::new_v4().to_string()).bind(&child.target).bind(&child.label).bind(&id).bind(&child.target)
+                .execute(&mut *tx).await?;
+            if queued.rows_affected() == 0 {
+                return Err(bad("媒体正在下载，请稍后再重试任务"));
+            }
+            sqlx::query(
+                "UPDATE media SET status='pending',error=NULL WHERE id=? AND status='failed'",
+            )
+            .bind(&child.target)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        return Ok(Json(task));
+    }
     if !["failed", "cancelled"].contains(&task.status.as_str()) {
         return Err(bad("只有失败或取消的任务可以重试"));
     }
     let new_task = if task.kind == "download" {
-        app.store.queue_download(&task.target, &task.label).await?
+        app.store
+            .queue_child_download(&task.target, &task.label, task.parent_id.as_deref())
+            .await?
     } else if task.kind == "cookie_check" {
         require_cookie(&app).await?;
         app.store
@@ -785,8 +898,8 @@ async fn retry_task(State(app): State<App>, Path(id): Path<String>) -> Result<Js
 }
 async fn cancel_task(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>> {
     let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query("UPDATE media SET status='failed',error='用户取消了下载，可手动重试' WHERE status!='ready' AND id IN (SELECT target FROM tasks WHERE id=? AND kind='download' AND status='queued')").bind(&id).execute(&mut *tx).await?;
-    let result=sqlx::query("UPDATE tasks SET status=CASE WHEN status='running' THEN 'cancelling' ELSE 'cancelled' END,error='用户取消了任务',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('queued','running')").bind(&id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE media SET status='failed',error='用户取消了下载，可手动重试' WHERE status!='ready' AND id IN (SELECT target FROM tasks WHERE (id=? OR parent_id=?) AND kind='download' AND status='queued')").bind(&id).bind(&id).execute(&mut *tx).await?;
+    let result=sqlx::query("UPDATE tasks SET status=CASE WHEN status='running' THEN 'cancelling' ELSE 'cancelled' END,error='用户取消了任务',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE (id=? OR parent_id=?) AND status IN ('queued','running')").bind(&id).bind(&id).execute(&mut *tx).await?;
     if result.rows_affected() == 0 {
         return Err(bad("任务不存在或已结束"));
     }

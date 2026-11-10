@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate tag and package versions
+        id: version
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version=1'], { encoding: 'utf8' }));
+          const { version } = metadata.packages.find(pkg => pkg.name === 'x-archive');
+          const web = JSON.parse(readFileSync('frontend/package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('frontend/package-lock.json', 'utf8'));
+          assert.equal(process.env.GITHUB_REF_TYPE, 'tag', 'Select a version tag to release');
+          assert.equal(process.env.GITHUB_REF_NAME, `v${version}`, 'Tag must match Cargo.toml');
+          assert.equal(web.version, version);
+          assert.equal(lock.version, version);
+          assert.equal(lock.packages[''].version, version);
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nprerelease=${version.includes('-')}\n`);
+          NODE
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-frontend
+          path: frontend/dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  verify:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+
+  binaries:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-frontend
+          path: frontend/dist
+      - name: Install and configure musl
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo 'CC_x86_64_unknown_linux_musl=musl-gcc' >> "$GITHUB_ENV"
+          echo 'CC_aarch64_unknown_linux_musl=musl-gcc' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+      - name: Link the Windows C runtime statically
+        if: runner.os == 'Windows'
+        run: echo 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
+      - run: cargo build --locked --release --target "$TARGET"
+      - name: Verify the release binary outside the source tree
+        run: |
+          binary="target/$TARGET/release/x-archive"
+          if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
+          node scripts/smoke-binary.mjs "$binary" "$VERSION"
+      - name: Package binary and deployment documentation
+        run: |
+          package="x-archive-v$VERSION-$TARGET"
+          mkdir -p "target/release-packages/$package/examples" target/release-assets
+          binary="x-archive"
+          if [[ "$TARGET" == *windows* ]]; then binary="$binary.exe"; fi
+          cp "target/$TARGET/release/$binary" "target/release-packages/$package/"
+          cp README.md CHANGELOG.md LICENSE requirements-tools.txt .env.example compose.yaml compose.build.yaml "target/release-packages/$package/"
+          cp examples/compose.bind.yaml "target/release-packages/$package/examples/"
+          cp -R docs "target/release-packages/$package/"
+          cd target/release-packages
+          if [[ "$TARGET" == *windows* ]]; then
+            7z a -tzip "../release-assets/$package.zip" "$package"
+          else
+            chmod +x "$package/$binary"
+            tar -czf "../release-assets/$package.tar.gz" "$package"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image.yml
+
+  publish:
+    needs: [prepare, verify, binaries, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: target/release-assets
+      - name: Generate checksums
+        working-directory: target/release-assets
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS
+      - name: Publish complete release
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "X Archive $TAG" --notes-file CHANGELOG.md
+          fi
+          gh release upload "$TAG" target/release-assets/* --clobber
+          gh release edit "$TAG" --draft=false --prerelease="$PRERELEASE"

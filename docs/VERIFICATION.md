@@ -1,13 +1,14 @@
-# V1 验证记录
+# 1.1.0 验证记录
 
-验证日期：2026-11-11。本记录区分真实 X 会话、离线工具契约测试和容器运行验证。离线契约不会作为真实 X 获取成功的证据。
+验证日期：2026-11-10（UTC）。本记录只列本次实际执行的结果；GitHub Actions 配置、离线测试和真实 X 会话验证分别记录。
 
 ## 平台
 
-- 开发主机：macOS / Apple Silicon ARM64。
-- 本地服务：Rust/Axum，SQLite，内嵌前端；gallery-dl 1.32.19，yt-dlp 2025.10.14，FFmpeg/FFprobe 9.0.2。
-- 容器环境：Colima / Docker Engine，Linux ARM64 原生运行，Linux AMD64 通过 QEMU 模拟运行。
-- 容器内 gallery-dl 1.32.19、yt-dlp 2025.10.14、FFmpeg/FFprobe 5.1.9（Debian 12 软件包）。
+- 本次环境：Linux x86-64，Rust 1.99.1、Node.js 22.23.4、Python 3.13.5、FFmpeg / FFprobe 7.1.5。
+- CI 配置使用 Node.js 24；本次本地构建使用上述已安装版本。
+- 发布目标：`x86_64-unknown-linux-musl`，musl-tools 1.2.5。
+- 静态配置检查：actionlint 1.7.12、Docker Compose 5.7.0 独立二进制。
+- 当前环境没有 Docker CLI / 守护进程，未在本次执行容器构建和运行验证。
 - 浏览器：Playwright Chromium，1440×1000 桌面及 iPhone 13（390×844）移动视口；移动测试为 Chromium 模拟，不是 iOS Safari 实机。
 
 ## 待验证的真实 X 项目
@@ -24,41 +25,31 @@
 
 | 检查 | 实际结果 |
 | --- | --- |
-| 前端 TypeScript 与 Vite 生产构建 | 通过；主 JS 包约 748 KB，存在超过 500 KB 的非阻断构建提醒 |
+| 前端 TypeScript 与 Vite 生产构建 | 通过；主 JS 包约 756 KB，存在超过 500 KB 的非阻断构建提醒 |
 | `cargo fmt --all --check` | 通过 |
 | `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
-| `cargo test --locked --tests` | 20 项通过：API 8、领域逻辑 4、提取契约 3、持久化/并发 5 |
-| `cargo build --locked --release` | macOS ARM64 发布构建通过 |
-| 桌面 Chromium 1440×1000 | 两项浏览器测试通过，覆盖全部页面和完整归档流程 |
-| 移动 Chromium 390×844 | 两项浏览器测试通过，无页面横向溢出或脚本错误 |
-| AMD64 / ARM64 镜像构建 | 两个平台均成功构建为同一个 OCI 镜像索引 |
-| Linux ARM64 容器 | 原生运行通过：初始化、内嵌前端、鉴权、权限和重启持久化 |
-| Linux AMD64 容器 | QEMU 模拟运行通过相同检查；未在 AMD64 实机运行 |
-| Compose / Bake 配置 | Compose 配置校验和双平台 Bake 解析通过 |
-| 本机正式服务 | `http://127.0.0.1:3000` 健康检查、真实工具版本检测、桌面/移动页面检查通过 |
+| `cargo test --locked` | 31 项通过：API 10、领域逻辑 6、下载路径 1、提取契约 3、持久化/并发 5、任务分组 6 |
+| `cargo build --locked --release --target x86_64-unknown-linux-musl` | 通过，`file` 确认为 stripped static-pie ELF |
+| `scripts/smoke-binary.mjs` | 正式 musl 二进制在独立临时目录中通过启动、版本、内嵌前端资源、鉴权与 SQLite 初始化检查 |
+| 桌面 Chromium 1440×1000 | 5 项通过 |
+| 移动 Chromium 390×844 | 5 项通过 |
+| GitHub Actions 配置 | 三份工作流通过 actionlint 静态检查，尚未在 GitHub 执行 |
+| Compose 配置 | 默认镜像、源码构建覆盖、绑定目录示例均通过 `config`；覆盖结果确认为本地镜像、正确构建上下文和持久卷 |
+| 其他二进制平台与双架构镜像 | 已配置工作流，尚未在相应 runner 上执行，不记为通过 |
 
-浏览器流程使用真实 Rust API、SQLite、队列、图片处理、FFmpeg 和 HTTP 媒体响应；仅 X 端提取与媒体下载工具由离线契约替代。测试实际生成 PNG 与 H.264 MP4，断言图片加载、视频宽度及播放时间推进。覆盖 Cookie 上传、首次用户同步、重复同步/重复推文去重、媒体下载、PhotoSwipe 打开关闭、视频/GIF 播放、标签收藏、完整快照差异及部分快照禁止比较。
+浏览器流程使用真实 Rust API、SQLite、队列、图片处理、FFmpeg 和 HTTP 媒体响应；仅 X 端提取与媒体下载工具由离线契约替代。测试实际生成 PNG 与 H.264 MP4，断言图片加载、视频宽度及播放时间推进。覆盖 Cookie 分别输入、校验、更新、清空与删除，首次用户同步、重复同步/导入去重、推文媒体预览、详情切换、PhotoSwipe、视频/GIF 播放、标签收藏、完整快照差异及部分快照禁止比较。任务页另覆盖批次汇总、大小单位、历史结果显示和移动布局。
 
-后端测试另覆盖 Cookie 非 JSON/空输出、成功退出但带认证错误、失败退出但错误仅在 JSON 中、访问限制、错误脱敏、HTTP Range、访问密码/来源校验、目录越界与符号链接保护、并发入队/下载、取消锁、取消排队下载后重试、文件数据库重开及任务状态恢复。测试 Cookie 和错误标记均为无效离线数据。
+后端测试另覆盖工具认证错误与输出脱敏、HTTP Range、访问密码/来源校验、目录越界与符号链接保护、用户名存储目录、并发入队/下载、取消锁、重试与重启恢复，以及历史任务迁移、父子任务关联、聚合分页和取消/重试。测试 Cookie 和错误标记均为无效离线数据。
 
-截图中媒体库和关系页面来自离线集成测试，设置页面来自本机正式服务：
-
-- [桌面媒体库](screenshots/desktop-media.png)
-- [移动媒体库](screenshots/mobile-media.png)
-- [桌面部分快照](screenshots/desktop-relationships.png)
-- [移动部分快照](screenshots/mobile-relationships.png)
-- [本机正式服务桌面设置页](screenshots/live-desktop-settings.png)
-- [本机正式服务移动设置页](screenshots/live-mobile-settings.png)
+浏览器截图与失败追踪输出到 `frontend/test-results`，不纳入 Git。README 中的媒体库截图为离线测试数据，不能作为真实账号抓取证明。
 
 ## 部署状态与限制
 
-最终镜像已加载为 `x-archive:v1`，OCI 文件位于本机 `.local/x-archive-v1.oci.tar`（构建产物不纳入 Git）。镜像索引摘要为 `sha256:f8c80b60488c355dcf04d07317a059fa0669a1c05f198b8e59b660d0e14b07ca`。
+远程仓库为 `https://github.com/chenbin3625/x-archive.git`。本次环境 `gh auth status` 显示未登录，Git 也无可用 HTTPS 凭据，因此未推送、未修改仓库可见性、未在线运行 Actions，未发布 GitHub Release 或 GHCR 镜像。
 
-执行 `node scripts/verify-container.mjs x-archive:v1`，在两个平台分别创建独立临时卷：检查空库自动迁移、前端静态资源、未登录拒绝访问、UID 10001 应用进程、Cookie/设置 `0600` 权限；写入测试媒体与设置后重启，确认用户、媒体、配置和 Cookie 保留，媒体 SHA-256 一致，旧 Web 登录会话失效，日志不包含离线 Cookie 或访问密码。测试容器和卷已清理。
-
-本机正式服务使用 `target/release/x-archive` 和实际安装的下载工具，数据位于仓库 `data/`、配置位于 `config/`，仅监听回环地址。正式服务没有预置演示数据或测试 Cookie，下一步可在设置页导入用户自己的 Cookie。测试服务已经停止。
-
-- 本目录最初为空，本次交付包含完整应用源码、迁移、Compose、多架构 Docker 配置及 CI/GHCR 工作流。
-- 未配置 GitHub 远程仓库，因此未实际运行 GitHub Actions 或发布 GHCR 镜像；交付的是可执行工作流和本地镜像。
+- `release.yml` 配置 Linux x86-64 / ARM64、macOS Intel / Apple Silicon、Windows x86-64 的生产构建与二进制冒烟检查，并在 CI 和镜像成功后公开 Release。
+- `image.yml` 配置 AMD64 / ARM64 原生容器验证，通过后发布多架构镜像；PR 不推送，主分支使用 `edge`，稳定版使用 `latest`。
+- GitHub 登录后需核对远程版本和分支，再执行公开仓库、推送版本及线上验收；GHCR 包的公开可见性需要单独确认。
+- 只有 Linux x86-64 musl 二进制在本次完成了本地发布构建与运行验证，其他平台不能以配置存在代替实际执行结果。
 - 关系完整性采用前后用户 ID、计数和抓取成员数量的一致性判断。上游没有严格的分页完成凭证，真实平台计数延迟等边界仍需账号验收。
 - 下载进度为处理阶段；目录变更不自动迁移旧媒体，异常残留文件不自动回收。详细行为见 README。

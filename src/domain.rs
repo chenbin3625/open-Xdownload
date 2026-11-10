@@ -75,10 +75,66 @@ pub fn tweet_id(input: &str) -> Result<String> {
     Ok(id.to_string())
 }
 
+pub fn cookies_from_header(input: &str) -> Result<String> {
+    ensure!(input.len() <= 1024 * 1024, "Cookie 内容不能超过 1 MB");
+    ensure!(
+        input.bytes().all(|c| c.is_ascii() && !c.is_ascii_control()),
+        "Cookie 内容包含无效字符"
+    );
+    let input = input.trim();
+    let input = if input
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cookie:"))
+    {
+        input[7..].trim()
+    } else {
+        input
+    };
+    ensure!(!input.is_empty(), "请输入 X 登录 Cookie");
+    let mut auth = None;
+    let mut csrf = None;
+    for pair in input.trim_end_matches(';').split(';') {
+        let (name, value) = pair.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("Cookie 格式不正确，请输入 name=value; name=value 格式")
+        })?;
+        let name = name.trim();
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(value);
+        ensure!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&c))
+                && value.bytes().all(
+                    |c| matches!(c, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e)
+                ),
+            "Cookie 格式不正确，请输入 name=value; name=value 格式"
+        );
+        let slot = match name {
+            "auth_token" => &mut auth,
+            "ct0" => &mut csrf,
+            _ => continue,
+        };
+        ensure!(slot.is_none(), "auth_token 和 ct0 不能重复填写");
+        ensure!(!value.is_empty(), "auth_token 和 ct0 不能为空");
+        *slot = Some(value);
+    }
+    let (Some(auth), Some(csrf)) = (auth, csrf) else {
+        bail!("Cookie 必须包含 auth_token 和 ct0")
+    };
+    // Tool sessions require Netscape format; only the X authentication pair is retained.
+    Ok(format!(
+        "# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tTRUE\t0\tauth_token\t{auth}\n.x.com\tTRUE\t/\tTRUE\t0\tct0\t{csrf}\n"
+    ))
+}
+
 pub fn validate_cookies(input: &str) -> Result<()> {
     ensure!(
         input.len() <= 1024 * 1024 && !input.contains('\0'),
-        "Cookie 文件无效或超过 1 MB"
+        "Cookie 内容无效或超过 1 MB"
     );
     let mut auth = false;
     let mut csrf = false;
@@ -92,7 +148,7 @@ pub fn validate_cookies(input: &str) -> Result<()> {
             line
         };
         let fields: Vec<_> = line.split('\t').collect();
-        ensure!(fields.len() == 7, "请上传 Netscape 格式 cookies.txt");
+        ensure!(fields.len() == 7, "Cookie 存储格式不正确");
         ensure!(
             matches!(fields[1], "TRUE" | "FALSE")
                 && matches!(fields[3], "TRUE" | "FALSE")
@@ -115,7 +171,7 @@ pub fn validate_cookies(input: &str) -> Result<()> {
     }
     ensure!(
         auth && csrf,
-        "未找到未过期的 X auth_token 和 ct0，请重新导出登录 Cookie"
+        "未找到未过期的 X auth_token 和 ct0，请更新登录 Cookie"
     );
     Ok(())
 }

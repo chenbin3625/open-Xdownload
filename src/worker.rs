@@ -71,10 +71,7 @@ pub async fn schedule(app: &App) -> Result<()> {
 async fn dispatch(app: &App) -> Result<()> {
     let settings = app.settings.read().await.clone();
     if settings.auto_download && app.config.join("cookies.txt").exists() {
-        let missing:Vec<String> = sqlx::query_scalar("SELECT id FROM media m WHERE status='pending' AND NOT EXISTS (SELECT 1 FROM tasks WHERE kind='download' AND target=m.id) LIMIT 50").fetch_all(&app.store.pool).await?;
-        for id in missing {
-            app.store.enqueue("download", &id, "自动下载媒体").await?;
-        }
+        app.store.queue_automatic_downloads().await?;
     }
     let running:Vec<(String,i64)> = sqlx::query_as("SELECT CASE WHEN kind='download' THEN 'download' ELSE 'extract' END,COUNT(*) FROM tasks WHERE status IN ('running','cancelling') GROUP BY 1").fetch_all(&app.store.pool).await?;
     let mut downloads = running
@@ -133,7 +130,7 @@ pub async fn execute(app: &App, task: &Task) -> Result<()> {
     };
     match result {
         Ok(result) => {
-            sqlx::query("UPDATE tasks SET status='succeeded',progress=100,result=?,error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='running'")
+            sqlx::query("UPDATE tasks SET status='succeeded',progress=100,result=?,result_size=CASE WHEN kind='download' THEN COALESCE((SELECT size FROM media WHERE id=tasks.target),0) ELSE result_size END,error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='running'")
                 .bind(result).bind(&task.id).execute(&app.store.pool).await?;
         }
         Err(error) => {
@@ -205,7 +202,11 @@ async fn archive_tweet(app: &App, task: &Task) -> Result<String> {
     .await?;
     let tweets = tools::parse_tweets(&output.stdout)?;
     progress(app, task, 80).await?;
-    let inserted = app.store.ingest(&tweets).await?;
+    let auto_download = app.settings.read().await.auto_download;
+    let inserted = app
+        .store
+        .ingest_for_task(&tweets, auto_download.then_some(task.id.as_str()))
+        .await?;
     if let Some(reason) = output.failure() {
         bail!(
             "已保存 {} 条可读取的推文，抓取未完整结束：{reason}",
@@ -272,7 +273,11 @@ async fn sync(app: &App, task: &Task) -> Result<String> {
         .into_iter()
         .filter(|t| t.author.eq_ignore_ascii_case(&username))
         .collect();
-    let inserted = app.store.ingest(&own).await?;
+    let auto_download = app.settings.read().await.auto_download;
+    let inserted = app
+        .store
+        .ingest_for_task(&own, auto_download.then_some(task.id.as_str()))
+        .await?;
     if let Some(reason) = output.failure() {
         bail!(
             "已保存 {} 条可读取的推文，抓取未完整结束：{reason}",
@@ -458,6 +463,7 @@ async fn download(app: &App, task: &Task) -> Result<String> {
     if status == "ready" {
         return Ok("媒体已下载，跳过重复任务".into());
     }
+    let author = domain::username(&author)?;
     tools::media_url(&url)?;
     let free = fs2::available_space(&app.data).unwrap_or(0);
     ensure!(
@@ -568,7 +574,7 @@ async fn download(app: &App, task: &Task) -> Result<String> {
     let final_relative = format!("{target_dir}/{author}/{tweet_id}_{ordinal}.{ext}");
     let final_path = safe_path(&app.data, &final_relative).await?;
     fs::create_dir_all(final_path.parent().unwrap()).await?;
-    let thumbnail_relative = format!("thumbnails/{}.jpg", task.target);
+    let thumbnail_relative = format!("thumbnails/{author}/{}.jpg", task.target);
     let thumbnail = safe_path(&app.data, &thumbnail_relative).await?;
     fs::create_dir_all(thumbnail.parent().unwrap()).await?;
     let thumb_temp = staging.join("thumbnail.jpg");
@@ -681,5 +687,5 @@ async fn download(app: &App, task: &Task) -> Result<String> {
     sqlx::query("UPDATE media SET status='ready',error=NULL,file_path=?,thumbnail_path=?,extension=?,size=?,width=?,height=?,duration=? WHERE id=?")
         .bind(final_relative).bind(thumbnail_relative).bind(ext).bind(size).bind(width).bind(height).bind(duration).bind(&task.target).execute(&app.store.pool).await?;
     let _ = fs::remove_dir_all(staging).await;
-    Ok(format!("已下载并生成预览，{} 字节", size))
+    Ok("已下载并生成预览".into())
 }
