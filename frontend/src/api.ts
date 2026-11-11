@@ -23,6 +23,17 @@ export interface Storage {
   free_bytes: number;
   total_bytes: number;
 }
+export interface StoragePathPreview {
+  path: string | null;
+  error: string | null;
+  root_ignored: boolean;
+}
+export interface StoragePreview {
+  data_directory: string;
+  image: StoragePathPreview;
+  video: StoragePathPreview;
+  thumbnail: StoragePathPreview;
+}
 export interface User {
   id: string;
   username: string;

@@ -145,17 +145,20 @@ Cookie 格式通过校验不等于登录会话有效。过期时重新复制、�
 
 ```text
 data/
-  archive.sqlite          推文、媒体索引、任务、快照、收藏与标签
   images/<username>/      默认图片与原生 GIF（根目录和模板可配置）
   videos/<username>/      默认视频与 MP4 GIF（根目录和模板可配置）
   thumbnails/<username>/  默认缩略图与视频封面（根目录和模板可配置）
 config/
+  archive.sqlite          推文、媒体索引、任务、快照、收藏与标签
+  .instance.lock          实例锁
   settings.json           Web 设置
   cookies.txt             私有 X 会话
   cookie-pool.json        私有备用会话及任务类型配置
 ```
 
-Compose 示例中对应 `/app/data`、`/app/config`，实际位置由启动参数及卷挂载决定。图片、视频和缩略图分别有根目录与路径模板：根目录相对数据目录解析，也可填写绝对路径或 `{data}/...`；模板支持 `{data}`、`{kind}`、`{author}`、`{tweet_id}`、`{ordinal}`、`{extension}`、`{media_id}` 占位符，模板为绝对路径或包含 `{data}` 时忽略根目录。默认模板为 `{author}/{tweet_id}_{ordinal}.{extension}`（缩略图为 `{author}/{media_id}.{extension}`），按小写用户名分目录。修改根目录或模板只影响后续下载，不迁移旧文件，旧媒体仍按数据库记录的原路径读取。每个数据目录只能运行一个实例。备份时先停止服务，再备份完整数据目录、配置目录以及自定义的媒体根目录。
+Compose 示例中对应 `/app/data`、`/app/config`，实际位置由启动参数及卷挂载决定。图片、视频和缩略图分别有根目录与路径模板：根目录相对数据目录解析，也可填写绝对路径或 `{data}/...`；模板支持 `{data}`、`{kind}`、`{author}`、`{tweet_id}`、`{ordinal}`、`{extension}`、`{media_id}` 占位符，模板为绝对路径或包含 `{data}` 时忽略根目录。默认模板为 `{author}/{tweet_id}_{ordinal}.{extension}`（缩略图为 `{author}/{media_id}.{extension}`），按小写用户名分目录。修改根目录或模板只影响后续下载，不迁移旧文件，旧媒体仍按数据库记录的原路径读取。每个配置目录只能运行一个实例，不同实例应使用独立的媒体目录。备份时先停止服务，再备份完整数据目录、配置目录以及自定义的媒体根目录。
+
+从旧版本升级时，先停止旧实例并备份两个目录。启动时若仅数据目录中存在 `archive.sqlite`，会自动将数据库（包含 WAL 中已提交的数据）迁移到配置目录，成功后清理旧数据库及其 WAL/SHM 文件，媒体文件及记录路径保持原样；配置目录需有足够空间保存数据库副本。若两个目录均有数据库，服务会停止并提示人工确认，避免覆盖已有数据。迁移后不要直接使用旧版本启动。
 
 启动参数 `--bind`、`--password`、`--data-dir`、`--config-dir` 分别设置监听地址、访问密码、数据目录和配置目录，优先于对应环境变量。Compose 使用这些参数；二进制部署也可使用以下环境变量：
 
@@ -163,8 +166,8 @@ Compose 示例中对应 `/app/data`、`/app/config`，实际位置由启动参�
 | --- | --- | --- |
 | `X_ARCHIVE_BIND` | `127.0.0.1:3000` | 监听地址；镜像默认启动命令使用 `--bind 0.0.0.0:3000` |
 | `X_ARCHIVE_PASSWORD` | 无 | Web 访问密码；对外监听时必填 |
-| `X_ARCHIVE_DATA` | `data` | 数据目录；相对路径基于工作目录，镜像工作目录为 `/app` |
-| `X_ARCHIVE_CONFIG` | `config` | 配置目录；相对路径基于工作目录，镜像工作目录为 `/app` |
+| `X_ARCHIVE_DATA` | `data` | 媒体目录；相对路径基于工作目录，镜像工作目录为 `/app` |
+| `X_ARCHIVE_CONFIG` | `config` | 配置与数据库目录；相对路径基于工作目录，镜像工作目录为 `/app` |
 | `GALLERY_DL_BIN` | `gallery-dl` | gallery-dl 可执行文件路径 |
 | `YT_DLP_BIN` | `yt-dlp` | yt-dlp 可执行文件路径 |
 | `RUST_LOG` | `x_archive=info,tower_http=warn` | 日志级别 |

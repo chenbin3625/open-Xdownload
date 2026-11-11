@@ -96,6 +96,95 @@ async fn settings_persist_and_invalid_paths_are_rejected() {
 }
 
 #[tokio::test]
+async fn storage_previews_resolve_paths_validate_each_kind_and_do_not_write() {
+    let (_dir, app, router) = app(None).await;
+    let before = tokio::fs::read(app.config.join("settings.json"))
+        .await
+        .unwrap();
+    let (status, preview) = call(
+        &router,
+        "POST",
+        "/api/settings/storage-preview",
+        json!({
+            "image_path": "preview-only",
+            "video_path": "{data}/clips",
+            "thumbnail_path": "/mnt/covers",
+            "thumbnail_path_template": "{kind}/{author}/{media_id}.{extension}",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["data_directory"], json!(app.data));
+    assert_eq!(
+        preview["image"]["path"],
+        json!(app.data.join("preview-only/alice/1234567890_1.jpg"))
+    );
+    assert_eq!(
+        preview["video"]["path"],
+        json!(app.data.join("clips/alice/1234567890_1.mp4"))
+    );
+    assert_eq!(
+        preview["thumbnail"]["path"],
+        "/mnt/covers/image/alice/00000000-0000-0000-0000-000000000000.jpg"
+    );
+    assert!(!app.data.join("preview-only").exists());
+    assert!(!app.data.join("clips").exists());
+    assert_eq!(
+        tokio::fs::read(app.config.join("settings.json"))
+            .await
+            .unwrap(),
+        before
+    );
+    assert_eq!(app.settings.read().await.image_path, "images");
+
+    let (_, preview) = call(
+        &router,
+        "POST",
+        "/api/settings/storage-preview",
+        json!({
+            "image_path": "../escape",
+            "video_path_template": "{data}/movies/{media_id}.{extension}",
+            "thumbnail_path_template": "{author}/{tweet_id}.{extension}",
+        }),
+    )
+    .await;
+    assert!(
+        preview["image"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("不能包含")
+    );
+    assert!(preview["image"]["path"].is_null());
+    assert_eq!(preview["video"]["root_ignored"], true);
+    assert_eq!(
+        preview["video"]["path"],
+        json!(
+            app.data
+                .join("movies/00000000-0000-0000-0000-000000000000.mp4")
+        )
+    );
+    assert!(
+        preview["thumbnail"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("media_id")
+    );
+
+    let (_dir, _app, protected) = self::app(Some("test-password".into())).await;
+    assert_eq!(
+        call(
+            &protected,
+            "POST",
+            "/api/settings/storage-preview",
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn authentication_and_request_origin_protect_all_private_routes() {
     let (_dir, _app, router) = app(Some("a-test-password-123".into())).await;
     assert_eq!(

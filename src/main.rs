@@ -32,14 +32,15 @@ async fn main() -> Result<()> {
         bind.ip().is_loopback() || password.is_some(),
         "对外监听需要通过 --password 或 X_ARCHIVE_PASSWORD 设置访问密码"
     );
-    let app = App::new(args.data_dir, args.config_dir, password).await?;
     // One process owns the persistent queue and its recovery operation.
+    x_archive::config::private_dir(&args.config_dir).await?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(app.data.join(".instance.lock"))?;
+        .open(args.config_dir.join(".instance.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock)?;
+    let app = App::new(args.data_dir, args.config_dir, password).await?;
     let sessions = app.config.join(".sessions");
     if let Ok(meta) = tokio::fs::symlink_metadata(&sessions).await {
         ensure!(

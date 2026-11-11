@@ -58,7 +58,8 @@ gallery-dl 没有提供严格的分页完成凭证，完整状态采用前后计
 Compose 默认使用 `archive-data` 和 `archive-config` 命名卷，示例分别挂载到 `/app/data` 和 `/app/config`。目录可通过 `command` 中的 `--data-dir`、`--config-dir` 配置，修改时需同步调整卷挂载的容器路径：
 
 ```text
-<数据目录>/archive.sqlite          SQLite 数据及任务、快照、收藏、标签
+<配置目录>/archive.sqlite          SQLite 数据及任务、快照、收藏、标签
+<配置目录>/.instance.lock          实例锁
 <图片根目录>/<模板>                默认 <数据目录>/images/<username>/<推文 ID>_<序号>.<扩展名>
 <视频根目录>/<模板>                默认 <数据目录>/videos/<username>/<推文 ID>_<序号>.<扩展名>
 <缩略图根目录>/<模板>              默认 <数据目录>/thumbnails/<username>/<媒体 ID>.<扩展名>
@@ -67,6 +68,8 @@ Compose 默认使用 `archive-data` 和 `archive-config` 命名卷，示例分�
 <配置目录>/cookies.txt             私有会话文件
 <配置目录>/.sessions/              临时私有会话副本
 ```
+
+旧版本的数据库在数据目录中。升级前停止旧实例并备份数据与配置目录；新版本首次启动会将旧数据库连同 WAL 中已提交的数据复制到配置目录，成功后删除旧数据库及其 WAL/SHM 文件，不改变媒体路径。配置目录应有足够空间保存完整数据库副本。若两个目录均存在 `archive.sqlite`，启动会报错，请备份并确认要保留的数据库后移除另一份，再启动服务；迁移完成后不要直接回退到旧版本。
 
 图片、视频和缩略图分别配置根目录与路径模板。根目录相对数据目录解析，也可填写绝对路径或使用 `{data}` 前缀（例如 `{data}/media/images`），从而保存到数据目录之外。模板支持以下占位符：
 

@@ -150,6 +150,7 @@ pub fn router(app: App) -> Router {
         .route("/api/session", get(session).post(login).delete(logout))
         .route("/api/dashboard", get(dashboard))
         .route("/api/settings", get(settings).put(save_settings))
+        .route("/api/settings/storage-preview", post(storage_preview))
         .route(
             "/api/cookies",
             get(cookies).post(save_cookies).delete(delete_cookies),
@@ -247,7 +248,7 @@ pub async fn storage(app: &App) -> Value {
         .fetch_one(&app.store.pool)
         .await
         .unwrap_or(0);
-    json!({"media_bytes":used,"database_bytes":tokio::fs::metadata(app.data.join("archive.sqlite")).await.map(|m|m.len()).unwrap_or(0),"free_bytes":fs2::available_space(&app.data).unwrap_or(0),"total_bytes":fs2::total_space(&app.data).unwrap_or(0)})
+    json!({"media_bytes":used,"database_bytes":tokio::fs::metadata(app.config.join("archive.sqlite")).await.map(|m|m.len()).unwrap_or(0),"free_bytes":fs2::available_space(&app.data).unwrap_or(0),"total_bytes":fs2::total_space(&app.data).unwrap_or(0)})
 }
 async fn dashboard(State(app): State<App>) -> Result<Json<Value>> {
     let row = sqlx::query(&format!("{TASK_GROUPS} SELECT (SELECT COUNT(*) FROM users) users,(SELECT COUNT(*) FROM tweets) tweets,(SELECT COUNT(*) FROM media WHERE status='ready') media,(SELECT COUNT(*) FROM task_groups WHERE group_status IN ('queued','running','cancelling')) active_tasks,(SELECT COUNT(*) FROM task_groups WHERE group_status='failed') failed_tasks")).fetch_one(&app.store.pool).await?;
@@ -301,6 +302,30 @@ async fn save_settings(
     .await?;
     *app.settings.write().await = value.clone();
     Ok(Json(value.redacted()))
+}
+async fn storage_preview(State(app): State<App>, Json(value): Json<Settings>) -> Json<Value> {
+    let mut previews = serde_json::Map::new();
+    previews.insert("data_directory".into(), json!(app.data));
+    for (kind, root, template) in [
+        ("image", &value.image_path, &value.image_path_template),
+        ("video", &value.video_path, &value.video_path_template),
+        (
+            "thumbnail",
+            &value.thumbnail_path,
+            &value.thumbnail_path_template,
+        ),
+    ] {
+        let preview = match config::preview_media_path(&app.data, root, template, kind) {
+            Ok(path) => json!({
+                "path": path,
+                "error": null,
+                "root_ignored": std::path::Path::new(template).is_absolute() || template.starts_with("{data}"),
+            }),
+            Err(error) => json!({"path": null, "error": error.to_string(), "root_ignored": false}),
+        };
+        previews.insert(kind.into(), preview);
+    }
+    Json(Value::Object(previews))
 }
 async fn cookies(State(app): State<App>) -> Json<CookieStatus> {
     Json(app.cookie.read().await.clone())

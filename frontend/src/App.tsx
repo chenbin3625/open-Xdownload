@@ -55,6 +55,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Settings as SettingsIcon,
   SlidersHorizontal,
@@ -76,6 +77,8 @@ import type {
   Page,
   Settings,
   SettingsResponse,
+  StoragePathPreview,
+  StoragePreview,
   Snapshot,
   Task,
   TaskGroup,
@@ -2845,6 +2848,105 @@ function CookiePoolSettings() {
     </section>
   );
 }
+const storageKinds = [
+  {
+    kind: "image", label: "图片", root: "image_path",
+    template: "image_path_template", defaultRoot: "images", icon: Image,
+  },
+  {
+    kind: "video", label: "视频", root: "video_path",
+    template: "video_path_template", defaultRoot: "videos", icon: Video,
+  },
+  {
+    kind: "thumbnail", label: "缩略图与视频封面", root: "thumbnail_path",
+    template: "thumbnail_path_template", defaultRoot: "thumbnails", icon: FolderOpen,
+  },
+] as const;
+
+function StoragePathEditor({
+  kind, label, icon: Icon, root, template, preview, pending, onRootChange, onTemplateChange,
+}: {
+  kind: string;
+  label: string;
+  icon: typeof Image;
+  root: string;
+  template: string;
+  preview?: StoragePathPreview;
+  pending: boolean;
+  onRootChange: (value: string) => void;
+  onTemplateChange: (value: string) => void;
+}) {
+  const [custom, setCustom] = useState(false);
+  const filename = kind === "thumbnail" ? "{media_id}.{extension}" : "{tweet_id}_{ordinal}.{extension}";
+  const layouts = [
+    { value: `{author}/${filename}`, label: "按作者分文件夹（默认）" },
+    { value: `{author}/{tweet_id}/${filename}`, label: "按作者、推文分文件夹" },
+    { value: filename, label: "全部放在同一文件夹" },
+  ];
+  const isCustom = custom || !layouts.some((layout) => layout.value === template);
+  return (
+    <div className="storage-path-editor" role="group" aria-label={`${label}存储路径`}>
+      <h3><Icon size={16} />{label}</h3>
+      <div className="storage-path-fields">
+        <div>
+          <label htmlFor={`${kind}-root`}>{label}根目录</label>
+          <Input
+            id={`${kind}-root`}
+            value={root}
+            placeholder={kind === "image" ? "images" : kind === "video" ? "videos" : "thumbnails"}
+            onChange={onRootChange}
+            spellCheck={false}
+            showClear
+          />
+        </div>
+        <div>
+          <label id={`${kind}-layout-label`}>目录结构</label>
+          <Select
+            aria-labelledby={`${kind}-layout-label`}
+            value={isCustom ? "custom" : template}
+            optionList={[...layouts, { value: "custom", label: "自定义路径模板" }]}
+            onChange={(value) => {
+              setCustom(value === "custom");
+              if (value !== "custom") onTemplateChange(String(value));
+            }}
+          />
+        </div>
+      </div>
+      {isCustom && (
+        <div className="storage-custom-template">
+          <label htmlFor={`${kind}-template`}>{label}路径模板</label>
+          <Input
+            id={`${kind}-template`}
+            value={template}
+            onChange={onTemplateChange}
+            spellCheck={false}
+          />
+          <div className="storage-template-tokens">
+            {[
+              ["author", "作者用户名"], ["tweet_id", "推文 ID"], ["ordinal", "媒体序号"],
+              ["extension", "扩展名"], ["media_id", "媒体 ID"], ["kind", "媒体类型"], ["data", "数据目录"],
+            ].map(([token, name]) => (
+              <Tooltip key={token} content={name}>
+                <code tabIndex={0}>{`{${token}}`}</code>
+              </Tooltip>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="storage-path-preview" aria-live="polite" aria-busy={pending}>
+        {pending ? <span className="muted">正在计算保存位置…</span> : preview?.error ? (
+          <span className="error-text" role="alert"><CircleAlert size={14} />{preview.error}</span>
+        ) : preview?.path ? (
+          <><span>保存示例</span><code>{preview.path}</code></>
+        ) : null}
+      </div>
+      {!pending && preview?.root_ignored && (
+        <p className="storage-path-warning">当前模板指定了完整路径，根目录不会参与路径计算。</p>
+      )}
+    </div>
+  );
+}
+
 function SettingsPage() {
   const client = useQueryClient();
   const q = useApi<SettingsResponse>("/settings", 15000);
@@ -2852,6 +2954,29 @@ function SettingsPage() {
   const [ct0, setCt0] = useState("");
   const [draft, setDraft] = useState<Settings | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [storageResetVersion, setStorageResetVersion] = useState(0);
+  const storagePaths = draft && Object.fromEntries(
+    storageKinds.flatMap(({ root, template }) => [
+      [root, draft[root]], [template, draft[template]],
+    ]),
+  );
+  const storageKey = JSON.stringify(storagePaths);
+  const [previewKey, setPreviewKey] = useState(storageKey);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setPreviewKey(storageKey), 250);
+    return () => window.clearTimeout(timer);
+  }, [storageKey]);
+  const storagePreview = useQuery<StoragePreview>({
+    queryKey: ["storage-preview", previewKey],
+    queryFn: () => send<StoragePreview>("/settings/storage-preview", JSON.parse(previewKey)),
+    enabled: previewKey !== "null",
+    retry: false,
+    staleTime: Infinity,
+  });
+  const previewPending = previewKey !== storageKey || storagePreview.isPending;
+  const storageInvalid = !storagePreview.data || storageKinds.some(
+    ({ kind }) => storagePreview.data?.[kind].error,
+  );
   const editRevision = useRef(0);
   const save = useAction(async () => {
     const revision = editRevision.current;
@@ -2893,7 +3018,7 @@ function SettingsPage() {
           theme="solid"
           icon={<Check size={16} />}
           loading={save.isPending}
-          disabled={!dirty}
+          disabled={!dirty || previewPending || storageInvalid || storagePreview.isError}
           onClick={() => save.mutate()}
         >
           保存更改
@@ -3122,70 +3247,49 @@ function SettingsPage() {
         <div className="settings-section-title">
           <FolderOpen size={18} />
           <h2>存储</h2>
+          <Button
+            className="storage-reset"
+            icon={<RotateCcw size={14} />}
+            onClick={() => {
+              storageKinds.forEach(({ root, template, defaultRoot, kind }) => {
+                change(root, defaultRoot);
+                change(template, kind === "thumbnail" ? "{author}/{media_id}.{extension}" : "{author}/{tweet_id}_{ordinal}.{extension}");
+              });
+              setStorageResetVersion((value) => value + 1);
+            }}
+          >恢复默认路径</Button>
         </div>
-        <SettingRow label="图片根目录">
-          <div className="path-input">
-            <Input
-              aria-label="图片根目录"
-              placeholder="images"
-              value={draft.image_path}
-              onChange={(v) => change("image_path", v)}
+        <div className="storage-location">
+          <span>服务器数据目录</span>
+          <code>{storagePreview.data?.data_directory || "正在读取…"}</code>
+          <p>相对目录保存在此位置下，也可填写绝对路径（如 /mnt/archive/images）。Docker 部署请填写容器内路径，并挂载对应目录。</p>
+        </div>
+        {storageKinds.map(({ kind, label, root, template, icon }) => (
+          <StoragePathEditor
+            key={`${kind}-${storageResetVersion}`}
+            kind={kind}
+            label={label}
+            icon={icon}
+            root={draft[root]}
+            template={draft[template]}
+            preview={storagePreview.data?.[kind]}
+            pending={previewPending}
+            onRootChange={(value) => change(root, value)}
+            onTemplateChange={(value) => change(template, value)}
+          />
+        ))}
+        {storagePreview.isError && (
+          <div className="storage-preview-error" role="alert">
+            <span className="error-text">路径预览失败：{storagePreview.error.message}</span>
+            <IconButton
+              label="重新预览存储路径"
+              icon={<RefreshCw size={15} />}
+              disabled={storagePreview.isFetching}
+              onClick={() => void storagePreview.refetch()}
             />
           </div>
-        </SettingRow>
-        <SettingRow label="图片路径模板">
-          <div className="path-input">
-            <Input
-              aria-label="图片路径模板"
-              value={draft.image_path_template}
-              onChange={(v) => change("image_path_template", v)}
-            />
-          </div>
-        </SettingRow>
-        <SettingRow label="视频根目录">
-          <div className="path-input">
-            <Input
-              aria-label="视频根目录"
-              placeholder="videos"
-              value={draft.video_path}
-              onChange={(v) => change("video_path", v)}
-            />
-          </div>
-        </SettingRow>
-        <SettingRow label="视频路径模板">
-          <div className="path-input">
-            <Input
-              aria-label="视频路径模板"
-              value={draft.video_path_template}
-              onChange={(v) => change("video_path_template", v)}
-            />
-          </div>
-        </SettingRow>
-        <SettingRow label="缩略图根目录">
-          <div className="path-input">
-            <Input
-              aria-label="缩略图根目录"
-              placeholder="thumbnails"
-              value={draft.thumbnail_path}
-              onChange={(v) => change("thumbnail_path", v)}
-            />
-          </div>
-        </SettingRow>
-        <SettingRow label="缩略图路径模板">
-          <div className="path-input">
-            <Input
-              aria-label="缩略图路径模板"
-              value={draft.thumbnail_path_template}
-              onChange={(v) => change("thumbnail_path_template", v)}
-            />
-          </div>
-        </SettingRow>
-        <p className="settings-hint">
-          根目录相对于数据目录，也可填写绝对路径或 {"{data}"} 前缀。路径模板支持{" "}
-          {"{data}"}、{"{kind}"}、{"{author}"}、{"{tweet_id}"}、{"{ordinal}"}、
-          {"{extension}"}、{"{media_id}"}；模板为绝对路径或包含 {"{data}"}{" "}
-          时忽略根目录。修改仅影响后续下载。
-        </p>
+        )}
+        <p className="settings-hint">修改仅影响后续下载，已下载文件保留原位置，不会自动迁移。保存时会创建根目录；预览不检查磁盘权限。</p>
         <div className="storage-settings">
           <div>
             <span>归档媒体</span>

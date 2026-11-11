@@ -279,6 +279,25 @@ pub fn media_path(
     })
 }
 
+pub fn preview_media_path(data: &Path, root: &str, template: &str, kind: &str) -> Result<PathBuf> {
+    validate_root(root, "保存目录")?;
+    validate_template(template, "文件模板", kind == "thumbnail")?;
+    media_path(
+        data,
+        root,
+        template,
+        &MediaTokens {
+            data,
+            kind: if kind == "thumbnail" { "image" } else { kind },
+            author: "alice",
+            tweet_id: "1234567890",
+            ordinal: 1,
+            extension: if kind == "video" { "mp4" } else { "jpg" },
+            media_id: "00000000-0000-0000-0000-000000000000",
+        },
+    )
+}
+
 /// Store paths inside the data directory as relative paths for portability, but
 /// keep paths configured outside the data directory absolute.
 pub fn stored_path(data: &Path, path: &Path) -> String {
