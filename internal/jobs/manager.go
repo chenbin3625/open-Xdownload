@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -295,10 +296,14 @@ func (m *Manager) runOnce(ctx context.Context) {
 	if cfg.AutoRetryFailed && m.shouldCheckAutomaticRetry() {
 		// Reserve 复用同一条自动重试任务行（终态行重置为 pending），避免每批重试都
 		// 新建 jobs 行导致任务中心/dashboard 被历史行刷屏。
-		if job, err := m.store.ReserveAutomaticRetryJob(ctx); err != nil {
-			log.Printf("schedule failed retry: %v", err)
-		} else if job != nil {
-			m.publishJob(ctx, "job.created", *job)
+		if due, err := m.store.ListFailedTweetsForRetry(ctx, 1, false); err != nil {
+			log.Printf("check failed retries: %v", err)
+		} else if len(due) > 0 {
+			if job, err := m.store.ReserveAutomaticRetryJob(ctx); err != nil {
+				log.Printf("schedule failed retry: %v", err)
+			} else if job != nil {
+				m.publishJob(ctx, "job.created", *job)
+			}
 		}
 	}
 	available := m.availableSlots(cfg.MaxConcurrency)
@@ -862,18 +867,24 @@ func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, jo
 	result, err := target.SaveMedia(ctx, m.downloader, mediaURL, dir, filenameHint, options)
 	if err != nil {
 		if isPermanentlyUnavailableMediaError(err) {
-			// unavailable_media 以 media_url 为键、对全部推文生效且没有到期时间：一旦
-			// 误判（签名 URL 瞬时 404/403 被归类为永久）该媒体将永久不再下载。当前只在
-			// 明确 404/410/DMCA 时写入；"N 天后重试一次"需要 storage 侧增加列/清理策略。
-			if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
-				MediaURL: mediaURL,
-				TweetID:  tweetID,
-				Error:    err.Error(),
-			}); markErr != nil {
-				return mediaDownloadResult{}, fmt.Errorf("记录永久不可用媒体失败: %v: %w", markErr, err)
+			// 需要两次独立观察才标记为永久不可用：CDN 瞬时 404 不应让媒体半年不重试。
+			// 判断依据：failed_media 表中是否已有该 URL 的记录（首次下载失败时会写入）。
+			// 首次 → 只走正常失败流程（写 failed_media）；
+			// 二次 → 确认为永久不可用，写入 unavailable_media 黑名单并跳过。
+			previouslyFailed, _ := m.store.HasFailedMediaForURL(saveCtx, mediaURL)
+			if previouslyFailed {
+				// 二次确认 → 标记永久不可用。
+				if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
+					MediaURL: mediaURL,
+					TweetID:  tweetID,
+					Error:    err.Error(),
+				}); markErr != nil {
+					return mediaDownloadResult{}, fmt.Errorf("记录永久不可用媒体失败: %v: %w", markErr, err)
+				}
+				_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
+				return mediaDownloadResult{skipped: true, unavailable: true}, nil
 			}
-			_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
-			return mediaDownloadResult{skipped: true, unavailable: true}, nil
+			// 首次观察：走正常失败流程，不标记 unavailable_media。
 		}
 		return mediaDownloadResult{}, err
 	}
@@ -1447,6 +1458,10 @@ func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Con
 				if isCancellation(ctx, err) || errors.As(err, &databaseError) {
 					return stats, err
 				}
+				// 磁盘/文件系统致命错误：继续下载只会持续失败并刷满失败记录。
+				if isDiskFatalError(err) {
+					return stats, fmt.Errorf("磁盘写入失败，中止归档: %w", err)
+				}
 				stats.Failed++
 				if _, recordErr := m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()}); recordErr != nil {
 					return stats, recordErr
@@ -1687,18 +1702,42 @@ func isPermanentlyUnavailableMediaError(err error) bool {
 	return statusErr.StatusCode == http.StatusForbidden && strings.Contains(strings.ToLower(statusErr.Payload), "dmca")
 }
 
+// isDiskFatalError 报告 err 是否为磁盘/文件系统致命错误（空间不足/权限/只读），
+// 继续下载只会持续失败。这类错误不写失败队列、不重试，直接中止整个归档任务。
+func isDiskFatalError(err error) bool {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+		return true
+	}
+	// os.ErrPermission 也覆盖跨平台的权限错误。
+	return errors.Is(err, os.ErrPermission)
+}
+
 func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, user xclient.User) (storage.UserEntity, string, error) {
 	target, err := filestore.New(cfg)
 	if err != nil {
 		return storage.UserEntity{}, "", err
 	}
 	parent := target.Join(target.Root(), "users")
-	name := safeName(user.Title())
+	name := userDirectoryName(user)
 	existing, err := m.store.LocateUserEntity(ctx, user.ID, parent)
 	if err != nil {
 		return storage.UserEntity{}, "", err
 	}
+	shared, err := m.store.UserEntityDirectoryShared(ctx, user.ID, parent, name)
+	if err != nil {
+		return storage.UserEntity{}, "", err
+	}
+	if shared {
+		return storage.UserEntity{}, "", fmt.Errorf("归档目录 %s 已属于其他账号，需先分离已有文件", target.Join(parent, name))
+	}
 	if existing != nil && existing.Name != "" && existing.Name != name {
+		shared, err := m.store.UserEntityDirectoryShared(ctx, user.ID, existing.ParentDir, existing.Name)
+		if err != nil {
+			return storage.UserEntity{}, "", err
+		}
+		if shared {
+			return storage.UserEntity{}, "", fmt.Errorf("归档目录 %s 被多个账号共用，需先分离已有文件", target.Join(existing.ParentDir, existing.Name))
+		}
 		if name, err = m.renameEntityDir(ctx, target, existing.ParentDir, existing.Name, name); err != nil {
 			return storage.UserEntity{}, "", err
 		}
@@ -1802,7 +1841,7 @@ func (m *Manager) ensureListEntity(ctx context.Context, cfg config.AppConfig, gr
 }
 
 func (m *Manager) ensureUserLink(ctx context.Context, cfg config.AppConfig, listEntity storage.ListEntity, user xclient.User, targetDir string) error {
-	name := safeName(user.Title())
+	name := filepath.Base(filepath.Clean(targetDir))
 	if _, err := m.store.EnsureUserLink(ctx, user.ID, listEntity.ID, name); err != nil {
 		return err
 	}
@@ -1850,14 +1889,29 @@ func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, er
 }
 
 func (m *Manager) save(ctx context.Context, job storage.Job) {
-	updated, err := m.store.UpdateJobAndGet(ctx, job)
-	if err != nil {
-		log.Printf("save job %d: %v", job.ID, err)
+	terminal := storage.IsTerminalJobStatus(job.Status)
+	// 终态写入必须落库：一旦失败，该任务会永久卡在中间状态（重启才能恢复）。
+	// 短退避重试最多 3 次；非终态写入仍只尝试一次（下次进度更新会自然重试）。
+	maxAttempts := 1
+	if terminal {
+		maxAttempts = 3
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+		updated, err := m.store.UpdateJobAndGet(ctx, job)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if updated != nil {
+			m.publishJob(ctx, "job.updated", *updated)
+		}
 		return
 	}
-	if updated != nil {
-		m.publishJob(ctx, "job.updated", *updated)
-	}
+	log.Printf("save job %d (terminal=%v, attempts=%d): %v", job.ID, terminal, maxAttempts, lastErr)
 }
 
 func (m *Manager) cancel(ctx context.Context, job storage.Job) {
@@ -2153,6 +2207,27 @@ func archiveIssueSummary(issues []string) string {
 }
 
 var unsupportedPathChars = regexp.MustCompile(`[/\\:*?"<>\|]`)
+
+func userDirectoryName(user xclient.User) string {
+	name := safeName(user.Title())
+	if user.Name == "" || user.ScreenName == "" {
+		return name
+	}
+	suffix := "(" + safeName(user.ScreenName) + ")"
+	if strings.HasSuffix(name, suffix) {
+		return name
+	}
+	// 截断显示名时保留账号后缀，防止长显示名相同的账号共用目录或列表链接。
+	const maxBytes = 180
+	var prefix strings.Builder
+	for _, ch := range name {
+		if prefix.Len()+utf8.RuneLen(ch)+len(suffix) > maxBytes {
+			break
+		}
+		prefix.WriteRune(ch)
+	}
+	return sanitizePathSegment(strings.TrimSpace(prefix.String()) + suffix)
+}
 
 func safeName(name string) string {
 	name = strings.TrimSpace(name)

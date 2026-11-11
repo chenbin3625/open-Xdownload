@@ -101,7 +101,18 @@ func (s localStore) Rename(_ context.Context, oldPath string, newPath string) er
 	switch {
 	case err == nil:
 		if os.SameFile(oldInfo, targetInfo) {
-			// 已是同一文件/目录：幂等处理，视为成功。
+			// 同一 inode：大小写敏感文件系统上不会走到这里，大小写不敏感系统上
+			// oldPath 和 newPath 指向同一 inode 但目录项大小写可能不同。
+			// 如果路径 Clean 后相同则真正幂等；否则是大小写 only rename，
+			// 需要调 os.Rename 让文件系统更新目录项。
+			if filepath.Clean(oldPath) == filepath.Clean(newPath) {
+				return nil
+			}
+			// 大小写 only rename：POSIX 和 Windows 都支持，直接调用。
+			if err := os.Rename(oldPath, newPath); err != nil {
+				return fmt.Errorf("rename %s -> %s: %w", oldPath, newPath, err)
+			}
+			syncDir(filepath.Dir(newPath))
 			return nil
 		}
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: fmt.Errorf("%w: %w", ErrTargetExists, fs.ErrExist)}
@@ -115,6 +126,9 @@ func (s localStore) Rename(_ context.Context, oldPath string, newPath string) er
 	if info, statErr := os.Stat(parent); statErr != nil || !info.IsDir() {
 		return fmt.Errorf("rename %s -> %s: 目标父目录不可用: %v", oldPath, newPath, statErr)
 	}
+	// shortcut: os.Rename 在 POSIX 上会替换已存在目标，存在 TOCTOU 窗口。
+	// 完全避免需要 renameat2(RENAME_NOREPLACE)，当前项目为单实例部署，
+	// 只有手工/外部进程在窗口内建目录才能触发。后续可升级为 renameat2。
 	if err := os.Rename(oldPath, newPath); err != nil {
 		if os.IsNotExist(err) {
 			// 源在 Lstat 之后被并发删除：归入"源缺失"语义，jobs 可继续 DB 重写。

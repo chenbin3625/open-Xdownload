@@ -390,6 +390,10 @@ func isCompressionSidecar(name string) bool {
 	return strings.HasSuffix(lower, ".gz") || strings.HasSuffix(lower, ".br")
 }
 
+// maxStaticAssetBytes 是单个静态资源解压后的上限。超过此值的 sidecar 按损坏处理，
+// 防止极小压缩包解压打爆内存（外部 --web-dir 场景）。正常 SPA 产物远小于此值。
+const maxStaticAssetBytes = 32 << 20 // 32 MiB
+
 func readOptional(fsys http.FileSystem, name string) []byte {
 	file, err := fsys.Open(name)
 	if err != nil {
@@ -400,8 +404,11 @@ func readOptional(fsys http.FileSystem, name string) []byte {
 	if err != nil || stat.IsDir() {
 		return nil
 	}
-	data, err := io.ReadAll(file)
-	if err != nil || len(data) == 0 {
+	if stat.Size() > maxStaticAssetBytes {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxStaticAssetBytes+1))
+	if err != nil || len(data) == 0 || int64(len(data)) > maxStaticAssetBytes {
 		return nil
 	}
 	return data
@@ -439,14 +446,14 @@ func decompressBytes(data []byte, encoding string) []byte {
 			return nil
 		}
 		defer reader.Close()
-		decoded, err := io.ReadAll(reader)
-		if err != nil {
+		decoded, err := io.ReadAll(io.LimitReader(reader, maxStaticAssetBytes+1))
+		if err != nil || int64(len(decoded)) > maxStaticAssetBytes {
 			return nil
 		}
 		return decoded
 	case httpx.EncodingBrotli:
-		decoded, err := io.ReadAll(brotli.NewReader(bytes.NewReader(data)))
-		if err != nil {
+		decoded, err := io.ReadAll(io.LimitReader(brotli.NewReader(bytes.NewReader(data)), maxStaticAssetBytes+1))
+		if err != nil || int64(len(decoded)) > maxStaticAssetBytes {
 			return nil
 		}
 		return decoded

@@ -541,17 +541,20 @@ func TestDownloadMediaCachesPermanentlyUnavailableMedia(t *testing.T) {
 	useTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root}
 
-	first, err := manager.downloadMedia(ctx, ctx, job, cfg, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
-	if err != nil {
-		t.Fatalf("first download: %v", err)
-	}
-	if !first.skipped || !first.unavailable {
-		t.Fatalf("first result = %+v, want skipped permanently unavailable", first)
+	// 首次观察：DMCA 403 返回错误（调用方会写 failed_media），不写 unavailable_media。
+	first, firstErr := manager.downloadMedia(ctx, ctx, job, cfg, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
+	if firstErr == nil {
+		t.Fatalf("first download should return error for first observation, got result %+v", first)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("HTTP requests after first download = %d, want 1", requests.Load())
 	}
+	// 模拟调用方写 failed_media（archiveTweetsWithSeen 会做这一步）。
+	if _, err := store.CreateFailedMedia(ctx, storage.FailedMedia{JobID: job.ID, MediaURL: server.URL + "/media.mp4", Error: firstErr.Error()}); err != nil {
+		t.Fatalf("create failed media: %v", err)
+	}
 
+	// 二次确认：同一 URL 再次 DMCA，failed_media 已有记录 → 写入 unavailable_media 并跳过。
 	second, err := manager.downloadMedia(ctx, ctx, job, cfg, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
 	if err != nil {
 		t.Fatalf("second download: %v", err)
@@ -559,16 +562,28 @@ func TestDownloadMediaCachesPermanentlyUnavailableMedia(t *testing.T) {
 	if !second.skipped || !second.unavailable {
 		t.Fatalf("second result = %+v, want cached permanently unavailable", second)
 	}
-	if requests.Load() != 1 {
-		t.Fatalf("HTTP requests after cached download = %d, want 1", requests.Load())
+	if requests.Load() != 2 {
+		t.Fatalf("HTTP requests after second download = %d, want 2", requests.Load())
+	}
+
+	// 三次调用应从 unavailable_media 缓存跳过（不再发 HTTP 请求）。
+	third, err := manager.downloadMedia(ctx, ctx, job, cfg, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
+	if err != nil {
+		t.Fatalf("third download: %v", err)
+	}
+	if !third.skipped || !third.unavailable {
+		t.Fatalf("third result = %+v, want cached permanently unavailable", third)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("HTTP requests after cached download = %d, want 2 (no new request)", requests.Load())
 	}
 
 	failed, err := store.ListFailedMediaForJobs(ctx, []int64{job.ID})
 	if err != nil {
 		t.Fatalf("list failed media: %v", err)
 	}
-	if len(failed) != 1 || !strings.Contains(failed[0].Error, "Dmcaed") {
-		t.Fatalf("failed media = %#v, want one DMCA record", failed)
+	if len(failed) < 1 || !strings.Contains(failed[0].Error, "Dmcaed") {
+		t.Fatalf("failed media = %#v, want at least one DMCA record", failed)
 	}
 }
 

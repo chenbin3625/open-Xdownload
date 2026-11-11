@@ -491,7 +491,7 @@ export const deleteFailedTweet = (id: number) =>
 export const clearFailedTweets = () =>
   api<{ ok: boolean }>("/api/failed-tweets", { method: "DELETE" });
 
-export const updateConfig = (config: AppConfig) =>
+export const updateConfig = (config: Partial<AppConfig>) =>
   api<AppConfig>("/api/config", {
     method: "PUT",
     body: JSON.stringify(config),

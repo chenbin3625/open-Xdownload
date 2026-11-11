@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"html"
 	"io"
 	"math"
 	"net/http"
@@ -160,6 +161,8 @@ func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, 
 	if text == "" {
 		text = legacy.Get("full_text").String()
 	}
+	// X 返回的推文文本包含 HTML 实体（&amp; &lt; &#39; 等），存储和文件命名前需解码。
+	text = html.UnescapeString(text)
 	return TweetData{
 		ID:        id,
 		URL:       canonicalTweetURL(author.ScreenName, id),
@@ -322,7 +325,7 @@ func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID str
 	return TweetData{
 		ID:        id,
 		URL:       canonicalTweetURL(author.ScreenName, id),
-		Text:      result.Get("text").String(),
+		Text:      html.UnescapeString(result.Get("text").String()),
 		CreatedAt: createdAt,
 		Author:    author,
 		Media:     parseSyndicationMedia(result, options),

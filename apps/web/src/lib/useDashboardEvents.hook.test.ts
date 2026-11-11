@@ -85,6 +85,26 @@ describe("useDashboardEvents reconnect", () => {
     expect(invalidatedRoots(queryClient)).toEqual([]);
   });
 
+  it("refreshes events missed while the subscription was disabled", () => {
+    const queryClient = seededClient();
+    const onRefresh = vi.fn();
+    const { rerender } = renderHook(
+      ({ enabled }) => useDashboardEvents(queryClient, onRefresh, enabled),
+      { initialProps: { enabled: true } },
+    );
+    const first = latestSource();
+    act(() => first.open());
+
+    rerender({ enabled: false });
+    expect(first.readyState).toBe(FakeEventSource.CLOSED);
+    expect(invalidatedRoots(queryClient)).toEqual([]);
+
+    rerender({ enabled: true });
+    act(() => latestSource().open());
+
+    expect(invalidatedRoots(queryClient)).toEqual([...roots]);
+  });
+
   it("refetches workbench, schedule and failed-tweet queries after reconnecting", () => {
     const queryClient = seededClient();
     const { result } = renderHook(() => useDashboardEvents(queryClient, vi.fn()));

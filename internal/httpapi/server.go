@@ -35,10 +35,23 @@ type Server struct {
 	eventBus    *jobs.EventBus
 	authMu      sync.RWMutex
 	authChanged chan struct{}
+	// loginLimiter 全局登录限速：滑动窗口内最多 maxLoginAttempts 次尝试。
+	loginMu       sync.Mutex
+	loginAttempts []time.Time
+	// bcryptSem 限制并发 bcrypt 操作，避免 CPU DoS。
+	bcryptSem chan struct{}
 }
 
+const maxLoginAttempts = 10              // 窗口内最大尝试次数
+const loginRateWindow = 5 * time.Minute  // 滑动窗口时长
+const maxConcurrentBcrypt = 2            // 并发 bcrypt 上限
+
 func NewServer(store *storage.Store, parserService *parser.Service, manager *jobs.Manager, eventBus *jobs.EventBus) *Server {
-	return &Server{store: store, parser: parserService, manager: manager, eventBus: eventBus, authChanged: make(chan struct{})}
+	return &Server{
+		store: store, parser: parserService, manager: manager, eventBus: eventBus,
+		authChanged: make(chan struct{}),
+		bcryptSem:   make(chan struct{}, maxConcurrentBcrypt),
+	}
 }
 
 func (s *Server) publish(event jobs.Event) {
@@ -319,7 +332,10 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if r.ContentLength != 0 {
+	// 有 body 时用提交的配置做探测；无 body 时用已存配置。
+	// ContentLength == -1 表示 chunked（也可能有 body），改用 Content-Type 判断。
+	hasBody := r.ContentLength > 0 || (r.ContentLength < 0 && r.Header.Get("Content-Type") != "")
+	if hasBody {
 		var submitted config.AppConfig
 		if err := decodeJSON(w, r, &submitted); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -1136,6 +1152,9 @@ func fetchRemotePoster(ctx context.Context, client *http.Client, limiter countin
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError {
+			return &posterStatusError{status: http.StatusBadGateway, message: "视频预览图回源暂时失败"}
+		}
 		return &posterStatusError{status: http.StatusNotFound, message: "视频预览图不可用"}
 	}
 	// 上游 Content-Type 的大小写与参数都不可信（曾有 CDN 返回 "IMAGE/JPEG"）：
@@ -1515,7 +1534,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	if err != nil || media != "application/json" {
 		return storage.ErrValidation("Content-Type 必须是 application/json")
 	}
-	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(target); err != nil {
 		// 解码错误原文包含 Go 类型/结构体字段名（如
 		// "json: cannot unmarshal string into Go struct field
 		// archiveScheduleRequest.intervalMinutes of type int"），既是内部实现
@@ -1526,6 +1546,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 			return storage.ErrValidation("请求体不能为空")
 		}
 		return storage.ErrValidation("请求格式无效")
+	}
+	// 拒绝尾随 JSON（如 `{"a":1}{"b":2}`）：只接受单个顶层值。
+	if dec.More() {
+		return storage.ErrValidation("请求体包含多余数据")
 	}
 	return nil
 }
@@ -1670,8 +1694,10 @@ func localDirectoryAllowedRoots(cfg config.AppConfig) []string {
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		// 家目录作为"浏览根"始终允许（目录选择器默认就停在家目录）；它不会被当作
-		// 下载/媒体沙箱根使用。
-		add(home)
+		// 下载/媒体沙箱根使用。但 HOME=/ 时不加入，否则全文件系统都可浏览。
+		if !isFilesystemRoot(filepath.Clean(home)) {
+			add(home)
+		}
 	}
 	// 下载目录只有在能当沙箱用时才是允许根：env 把下载目录设成 `/` 时若也加进
 	// 允许根，目录选择器就能浏览/创建任意路径，配置校验也会被"自证合法"绕过。

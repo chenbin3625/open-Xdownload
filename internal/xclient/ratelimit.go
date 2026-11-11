@@ -63,6 +63,10 @@ func (rl *rateLimiter) before(ctx context.Context, path string) error {
 			rl.mu.Unlock()
 			return nil
 		}
+		if yieldsOnRateLimit(ctx) {
+			rl.mu.Unlock()
+			return errRateLimitBusyWait
+		}
 		wait := time.Until(state.reset.Add(5 * time.Second))
 		rl.mu.Unlock()
 		if wait <= 0 {

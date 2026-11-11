@@ -246,6 +246,71 @@ func TestListLibraryDownloadsPageEmpty(t *testing.T) {
 	}
 }
 
+func TestLibraryReservedUserNamesRemainSelectable(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, JobKindUser, "all", "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, screen := range []string{"all", "unknown"} {
+		if _, err := store.UpsertUser(ctx, User{ID: screen, ScreenName: screen}); err != nil {
+			t.Fatal(err)
+		}
+		entity, err := store.EnsureUserEntity(ctx, screen, filepath.Join(root, "users"), screen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(entity.ParentDir, entity.Name, "record.jpg")
+		writeLibraryTestFile(t, file, "record")
+		if _, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: screen, MediaURL: "https://pbs.twimg.com/media/" + screen + ".jpg", FilePath: file}); err != nil {
+			t.Fatal(err)
+		}
+		writeLibraryTestFile(t, filepath.Join(entity.ParentDir, entity.Name, "orphan.jpg"), "orphan")
+	}
+	unknownPath := filepath.Join(root, "unattributed.jpg")
+	writeLibraryTestFile(t, unknownPath, "unknown")
+	page, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := map[string]bool{}
+	for _, option := range page.Users {
+		options[option.Value] = true
+	}
+	for _, value := range []string{"@all", "@unknown", "unknown"} {
+		if !options[value] {
+			t.Errorf("missing user option %q: %+v", value, page.Users)
+		}
+	}
+	for _, screen := range []string{"all", "unknown"} {
+		filtered, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{Filter: LibraryFilter{User: "@" + screen}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filtered.Pagination.Total != 2 || len(filtered.Items) != 2 {
+			t.Fatalf("@%s filter = %+v, want record and orphan", screen, filtered)
+		}
+		for _, item := range filtered.Items {
+			if item.UserScreenName != screen {
+				t.Errorf("@%s filter included user %q", screen, item.UserScreenName)
+			}
+		}
+	}
+	unknown, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{Filter: LibraryFilter{User: "unknown"}})
+	if err != nil || len(unknown.Items) != 1 || unknown.Items[0].FilePath != unknownPath {
+		t.Fatalf("unattributed filter = %+v, %v", unknown.Items, err)
+	}
+}
+
 // TestListLibraryDownloadsPageDerivesPreviewURL 分页结果对缺失 preview_url 的视频记录
 // 回退推导（与非分页接口一致）。
 func TestListLibraryDownloadsPageDerivesPreviewURL(t *testing.T) {

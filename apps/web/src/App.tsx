@@ -109,10 +109,10 @@ function Workbench() {
     refetchInterval: (query) => {
       // 用全局 meta 统计判断是否有活跃任务，避免新建任务尚未被轮询拉到时漏掉刷新。
       const metaData = queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot);
-      if (metaData) return metaData.stats.active > 0 ? 5_000 : false;
+      if (metaData) return metaData.stats.active > 0 ? 5_000 : 30_000;
       // meta 从未成功过（首屏 meta 挂了）：退回"本页是否有活跃任务"，避免列表彻底不轮询。
       const page = query.state.data as JobsPage | undefined;
-      return page?.items.some((job) => jobStatusBucket(job.status) === "active") ? 5_000 : false;
+      return page?.items.some((job) => jobStatusBucket(job.status) === "active") ? 5_000 : 30_000;
     },
   });
 

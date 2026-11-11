@@ -244,7 +244,7 @@ export function ConfigForm({
             variant="primary"
             icon={<Save className="size-4" />}
             loading={mutation.isPending}
-            onClick={() => mutation.mutate(draft)}
+            onClick={() => mutation.mutate(configDiff(normalizeConfig(config), draft))}
           >
             {t("保存配置")}</Button>
         </div>
@@ -315,4 +315,18 @@ export function cookieCheckKey(config: AppConfig) {
     config.additionalCookies ?? "",
     config.proxyUrl ?? "",
   ]);
+}
+
+/** 只返回 draft 相对于 base 有变化的字段（PATCH 语义），避免多标签页并发保存时
+ *  后提交者把前提交者改的字段覆盖回旧值。 */
+function configDiff(base: AppConfig, draft: AppConfig): Partial<AppConfig> {
+  const diff: Record<string, unknown> = {};
+  for (const key of Object.keys(draft) as (keyof AppConfig)[]) {
+    if (JSON.stringify(draft[key]) !== JSON.stringify(base[key])) {
+      diff[key] = draft[key];
+    }
+  }
+  // 后端要求至少有一个字段，空 diff 说明无变化，仍发全量避免 400。
+  if (Object.keys(diff).length === 0) return draft;
+  return diff as Partial<AppConfig>;
 }

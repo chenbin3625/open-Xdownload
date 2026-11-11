@@ -4,6 +4,7 @@ import "./lib/i18n";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { ApiError } from "./lib/api";
 import { TooltipProvider } from "./components/ui/Overlay";
 import { Toaster } from "./components/ui/Toast";
 import { hydrateAppQueries, takeAppBootstrap } from "./lib/bootstrap";
@@ -14,7 +15,14 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 15_000,
       refetchOnWindowFocus: false,
-      retry: 1,
+      // 超时（AbortError）和 401 不重试：前者重试只会再等一个完整超时窗口，
+      // 后者已触发 session invalidation，重试不会改变结果。
+      retry: (failureCount, error) => {
+        if (failureCount >= 1) return false;
+        if (error instanceof DOMException && error.name === "AbortError") return false;
+        if (error instanceof ApiError && error.status === 401) return false;
+        return true;
+      },
     },
   },
 });

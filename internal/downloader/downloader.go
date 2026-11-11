@@ -194,6 +194,19 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		_ = os.Remove(tempPath)
 		return Result{}, closeErr
 	}
+	// 拒绝 0 字节媒体：200 + Content-Length:0 或空 body 会产生空文件，之后被永久
+	// 当成"完整下载"跳过（size 0 == CL 0），永远无法自愈。
+	if bytes == 0 {
+		_ = os.Remove(tempPath)
+		return Result{}, fmt.Errorf("下载得到 0 字节媒体: %s", rawURL)
+	}
+	// 大小上限：单个媒体超过 4 GiB 几乎不可能是正常推文内容（即使是 4K 长视频也在
+	// 1–2 GiB 内），更可能是 CDN 错误返回了无穷流。
+	const maxMediaBytes = 4 << 30 // 4 GiB
+	if bytes > maxMediaBytes {
+		_ = os.Remove(tempPath)
+		return Result{}, fmt.Errorf("媒体文件过大 (%d bytes > %d): %s", bytes, maxMediaBytes, rawURL)
+	}
 	contentHash := hex.EncodeToString(hasher.Sum(nil))
 	result, skipped, err := publishTempFile(tempPath, basePath, bytes, response.ContentLength, maxFilenameLength, replaceExisting)
 	if err != nil {
@@ -727,9 +740,8 @@ func sanitizeFilename(name string) string {
 
 	// Detect Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
 	// If the base name (without extension) matches, prefix with underscore.
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	if isWindowsReservedName(base) || isWindowsReservedName(name) {
+	base, _, _ := strings.Cut(name, ".")
+	if isWindowsReservedName(base) {
 		name = "_" + name
 	}
 

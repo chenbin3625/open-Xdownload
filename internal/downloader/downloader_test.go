@@ -861,6 +861,8 @@ func TestSanitizeFilenameHandlesControlAndWindowsNames(t *testing.T) {
 		"lpt9.txt":        "_lpt9.txt",
 		"CONIN$":          "_CONIN$",
 		"conout$.jpg":     "_conout$.jpg",
+		"CON.notes.jpg":   "_CON.notes.jpg",
+		"aux.archive.mp4": "_aux.archive.mp4",
 		"a\x00b\x01c\x7f": "abc",
 		"line\nbreak":     "linebreak",
 		"trailing...  ":   "trailing",

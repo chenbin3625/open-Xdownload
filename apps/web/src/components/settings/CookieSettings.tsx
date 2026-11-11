@@ -384,10 +384,12 @@ export function BackupCookieInputs({
         return row;
       }
       if (isRedactedBackupCookieRow(row) && nextValue !== redactedCookieValue) {
+        // 编辑掩码行的一个字段时，保留另一个字段的掩码值：服务端按行 id 还原
+        // ******** 对应的真实凭据，空串会被当成"主动清空"而把库里的值抹掉。
         return {
           id: row.id,
-          authToken: field === "authToken" ? nextValue : "",
-          csrfToken: field === "csrfToken" ? nextValue : "",
+          authToken: field === "authToken" ? nextValue : redactedCookieValue,
+          csrfToken: field === "csrfToken" ? nextValue : redactedCookieValue,
         };
       }
       return { ...row, [field]: nextValue };

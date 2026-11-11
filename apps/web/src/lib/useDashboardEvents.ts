@@ -270,6 +270,8 @@ export function applyDashboardEvent(
   queryClient: QueryClient,
   event: DashboardEvent,
 ): ApplyDashboardEventResult {
+  // 防御非字符串 type（服务端格式异常时可能出现数字等）。
+  if (typeof event.type !== "string") return "refresh-workbench";
   const applyEventMeta = () => {
     if (isDashboardMeta(event.meta)) {
       applyDashboardMeta(queryClient, event.meta);
@@ -337,6 +339,7 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
     if (!enabled) {
       setSseConnected(true);
       retryDelayRef.current = sseRetryBaseDelay;
+      reconnectPendingRef.current = true;
       return;
     }
     const events = new EventSource("/api/events");

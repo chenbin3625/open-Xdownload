@@ -237,7 +237,7 @@ export function PaginatedList<TItem>({
           )}
         >
           {pagination.items.map((item, index) => (
-            <div key={index} className="p-3 transition-colors hover:bg-surface-hover">
+            <div key={`${pagination.page}-${index}`} className="p-3 transition-colors hover:bg-surface-hover">
               {renderItem(item)}
             </div>
           ))}

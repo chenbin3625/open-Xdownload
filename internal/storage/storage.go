@@ -1063,6 +1063,9 @@ func (s *Store) guardStoredDownloadDir(cfg config.AppConfig) config.AppConfig {
 	fallback := s.fallbackDownloadDir
 	if strings.TrimSpace(fallback) == "" || validateTrustedDownloadRoot(fallback) != nil {
 		s.warnUnsafeDownloadDir(cfg.DownloadDir, rootErr)
+		// 兜底目录本身也不可信：返回空值而非被拒绝的原路径，避免 WalkDir 扫描整个
+		// 文件系统。所有 library walker 和下载路径构造都已跳过空 DownloadDir。
+		cfg.DownloadDir = ""
 		return cfg
 	}
 	s.warnUnsafeDownloadDir(cfg.DownloadDir, rootErr)
@@ -1839,7 +1842,9 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	now := time.Now().UTC()
 	// 媒体身份键：同一媒体内容的稳定键，供跨推文/跨目录复用查找（见 FindDownloadsByMediaKey）。
 	record.MediaKey = downloader.MediaIdentity(record.MediaURL)
-	if strings.TrimSpace(record.TweetID) != "" {
+	// 统一 trim，避免空白 tweet_id 绕过唯一索引导致重复行。
+	record.TweetID = strings.TrimSpace(record.TweetID)
+	if record.TweetID != "" {
 		err := s.db.GetContext(ctx, &record, `
 	INSERT INTO downloads (job_id, tweet_id, media_url, media_key, content_hash, preview_url, file_path, bytes, created_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2515,6 +2520,14 @@ VALUES (?, ?, ?, ?)`, failed.JobID, failed.MediaURL, failed.Error, now)
 	return failed, nil
 }
 
+// HasFailedMediaForURL 报告 failed_media 表中是否已有该 media_url 的记录。
+// 用于 unavailable_media 的两次确认逻辑：只有之前已经观察到过失败才标记为永久不可用。
+func (s *Store) HasFailedMediaForURL(ctx context.Context, mediaURL string) (bool, error) {
+	var exists bool
+	err := s.db.GetContext(ctx, &exists, `SELECT EXISTS(SELECT 1 FROM failed_media WHERE media_url = ?)`, mediaURL)
+	return exists, err
+}
+
 func (s *Store) ListFailedMedia(ctx context.Context, limit int) ([]FailedMedia, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
@@ -2606,6 +2619,18 @@ func (s *Store) LocateUserEntity(ctx context.Context, userID string, parentDir s
 		return nil, err
 	}
 	return &entity, nil
+}
+
+func (s *Store) UserEntityDirectoryShared(ctx context.Context, userID, parentDir, name string) (bool, error) {
+	parentDir, err := normalizeParentDir(parentDir)
+	if err != nil {
+		return false, err
+	}
+	var shared bool
+	err = s.db.GetContext(ctx, &shared, `SELECT EXISTS (
+		SELECT 1 FROM user_entities WHERE parent_dir = ? AND name = ? COLLATE NOCASE AND user_id <> ?
+	)`, parentDir, name, userID)
+	return shared, err
 }
 
 // LocateUserEntities loads all existing entities for one archive root in a

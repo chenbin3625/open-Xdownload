@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -150,6 +151,9 @@ func validatePassword(password string) error {
 }
 
 func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.checkLoginRate(w) {
+		return
+	}
 	if account, err := s.store.GetAccount(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -180,7 +184,9 @@ func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errors.New("账号已创建，请登录"))
 		return
 	}
+	s.bcryptSem <- struct{}{}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	<-s.bcryptSem
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -194,6 +200,9 @@ func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.checkLoginRate(w) {
+		return
+	}
 	var req struct{ Username, Password string }
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -204,7 +213,17 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if account == nil || strings.TrimSpace(req.Username) != account.Username || bcrypt.CompareHashAndPassword(account.PasswordHash, []byte(req.Password)) != nil {
+	// 用户名不匹配时仍跑一次 bcrypt，防止时序枚举。
+	s.bcryptSem <- struct{}{}
+	if account == nil || strings.TrimSpace(req.Username) != account.Username {
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(req.Password))
+		<-s.bcryptSem
+		writeError(w, http.StatusUnauthorized, errors.New("用户名或密码错误"))
+		return
+	}
+	err = bcrypt.CompareHashAndPassword(account.PasswordHash, []byte(req.Password))
+	<-s.bcryptSem
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, errors.New("用户名或密码错误"))
 		return
 	}
@@ -228,11 +247,16 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := r.Context().Value(authContextKey{}).(authenticatedSession)
-	if bcrypt.CompareHashAndPassword(session.account.PasswordHash, []byte(req.CurrentPassword)) != nil {
+	s.bcryptSem <- struct{}{}
+	err := bcrypt.CompareHashAndPassword(session.account.PasswordHash, []byte(req.CurrentPassword))
+	<-s.bcryptSem
+	if err != nil {
 		writeError(w, http.StatusBadRequest, storage.ErrValidation("当前密码错误"))
 		return
 	}
+	s.bcryptSem <- struct{}{}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	<-s.bcryptSem
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -250,4 +274,30 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	setSessionCookie(w, r, "")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// dummyBcryptHash 用于用户名不匹配时跑一次假 hash，防止时序差异泄漏"用户名是否存在"。
+var dummyBcryptHash, _ = bcrypt.GenerateFromPassword([]byte("dummy-timing-defense"), bcrypt.DefaultCost)
+
+// checkLoginRate 全局登录限速（滑动窗口）。返回 false 表示已限流并已写响应。
+func (s *Server) checkLoginRate(w http.ResponseWriter) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-loginRateWindow)
+	// 滑动窗口：丢弃过期记录。
+	valid := 0
+	for _, t := range s.loginAttempts {
+		if t.After(cutoff) {
+			s.loginAttempts[valid] = t
+			valid++
+		}
+	}
+	s.loginAttempts = s.loginAttempts[:valid]
+	if len(s.loginAttempts) >= maxLoginAttempts {
+		writeError(w, http.StatusTooManyRequests, errors.New("登录尝试过于频繁，请稍后再试"))
+		return false
+	}
+	s.loginAttempts = append(s.loginAttempts, now)
+	return true
 }

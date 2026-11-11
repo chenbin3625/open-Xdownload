@@ -251,7 +251,7 @@ func buildLibraryQuery(filter LibraryFilter, snap *librarySnapshot) libraryQuery
 			// "不在任意实体目录下"，因此这里的用户条件留到 Go 侧逐条判定。
 			result.userUnknown = true
 		} else {
-			prefixes := snap.prefixesForUser(filter.User)
+			prefixes := snap.prefixesForUser(strings.TrimPrefix(filter.User, "@"))
 			if len(prefixes) == 0 {
 				return libraryQuery{noMatch: true}
 			}
@@ -459,7 +459,7 @@ func filterLibraryOrphans(orphans []DownloadRecord, filter LibraryFilter) []Down
 		if filter.User == libraryUserUnknown && item.UserScreenName != "" {
 			continue
 		}
-		if filter.User != libraryKindAll && filter.User != libraryUserUnknown && item.UserScreenName != filter.User {
+		if filter.User != libraryKindAll && filter.User != libraryUserUnknown && item.UserScreenName != strings.TrimPrefix(filter.User, "@") {
 			continue
 		}
 		if !libraryKindMatches(item.FilePath, filter.Kind) {
@@ -599,14 +599,18 @@ ORDER BY ue.id`); err != nil {
 		if screen == "" {
 			return
 		}
-		if _, exists := userByScreen[screen]; exists {
+		value := screen
+		if value == libraryKindAll || value == libraryUserUnknown {
+			value = "@" + value
+		}
+		if _, exists := userByScreen[value]; exists {
 			return
 		}
 		label := name
 		if label == "" {
 			label = screen
 		}
-		userByScreen[screen] = LibraryUserOption{Value: screen, Label: label + " (@" + screen + ")"}
+		userByScreen[value] = LibraryUserOption{Value: value, Label: label + " (@" + screen + ")"}
 	}
 	for _, entity := range entities {
 		prefix := libraryEntityPrefix{

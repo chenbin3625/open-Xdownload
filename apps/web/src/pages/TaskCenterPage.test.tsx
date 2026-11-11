@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -181,6 +181,7 @@ describe("TaskCenterPage 移动端", () => {
 describe("TaskCenterPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.retryJob).mockReset();
   });
 
   it("在表格的执行进度列中展示错误信息并高亮异常状态", () => {
@@ -233,6 +234,75 @@ describe("TaskCenterPage", () => {
     expect(screen.getByText("任务未生成已下载文件记录")).not.toBeNull();
     // 应当展示重试按钮
     expect(screen.getByRole("button", { name: "重试此任务" })).not.toBeNull();
+  });
+
+  it.each([true, false])("prevents repeated detail retries on desktop=%s", async (desktop) => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: desktop,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    const user = userEvent.setup();
+    vi.mocked(api.getJobFiles).mockResolvedValue({ downloads: [], failed: [] });
+    let finishRetry!: (job: Job) => void;
+    vi.mocked(api.retryJob).mockImplementation(() => new Promise<Job>((resolve) => { finishRetry = resolve; }));
+    renderWithClient(
+      <TaskCenterPage
+        jobs={[mockJobs[1]]}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 1, totalPages: 1 }}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "展开详情" }));
+    const button = screen.getByRole("button", { name: "重试此任务" }) as HTMLButtonElement;
+    await user.click(button);
+    await waitFor(() => expect(button.disabled).toBe(true));
+    await user.click(button);
+    expect(api.retryJob).toHaveBeenCalledTimes(1);
+    await act(async () => finishRetry({ ...mockJobs[1], id: 99, status: "pending" }));
+    await waitFor(() => expect(button.disabled).toBe(false));
+  });
+
+  it.each([true, false])("keeps other retry controls disabled while a request is pending on desktop=%s", async (desktop) => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: desktop,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    const user = userEvent.setup();
+    vi.mocked(api.getJobFiles).mockResolvedValue({ downloads: [], failed: [] });
+    let finishRetry!: (job: Job) => void;
+    vi.mocked(api.retryJob).mockImplementation(() => new Promise<Job>((resolve) => { finishRetry = resolve; }));
+    renderWithClient(
+      <TaskCenterPage
+        jobs={mockJobs.slice(1)}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 2, totalPages: 1 }}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+    const expand = screen.getAllByRole("button", { name: "展开详情" });
+    await user.click(expand[0]);
+    await user.click(expand[1]);
+    const details = screen.getAllByRole("button", { name: "重试此任务" }) as HTMLButtonElement[];
+    const actions = screen.getAllByRole("button", { name: /^重试$/ }) as HTMLButtonElement[];
+    await user.click(details[0]);
+    await waitFor(() => {
+      expect(details.every((button) => button.disabled)).toBe(true);
+      expect(actions.every((button) => button.disabled)).toBe(true);
+    });
+    await user.click(actions[1]);
+    await user.click(details[1]);
+    expect(api.retryJob).toHaveBeenCalledTimes(1);
+    await act(async () => finishRetry({ ...mockJobs[1], id: 99, status: "pending" }));
+    await waitFor(() => expect(details.every((button) => !button.disabled)).toBe(true));
   });
 
   it("展开成功任务时，列表形式展示已下载文件及其大小和完整路径", async () => {

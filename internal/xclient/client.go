@@ -507,14 +507,16 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	if readErr != nil {
 		return "", readErr
 	}
-	if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
-		// HTTP 200 的挑战页既不能证明 Cookie 失效，也不能从 HTML 里猜账号。
-		err := fmt.Errorf("%w: /home 返回挑战页", ErrWAFChallenge)
-		c.recordError(err)
-		return "", err
-	}
 	matches := screenNamePattern.FindSubmatch(payload)
 	if len(matches) < 2 {
+		if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
+			if c.limiter != nil {
+				c.limiter.markRateLimitedFor(homeCheckPath, wafBackoffDuration)
+			}
+			err := fmt.Errorf("%w: /home 返回挑战页", ErrWAFChallenge)
+			c.recordError(err)
+			return "", err
+		}
 		// HTTP 200 却识别不到账号，多是首页改版或返回了挑战页，不能证明 Cookie 失效：
 		// 只记录错误供诊断，不禁用。
 		err := errors.New("无法从 X 首页识别登录账号")
@@ -797,6 +799,13 @@ func getUserTimelineWithStats(ctx context.Context, requester timelineRequester, 
 		seenCursor[next] = struct{}{}
 		cursor = next
 	}
+	// 安全检查：timeline 返回了推文条目但全部被解析失败跳过。这通常意味着 X 改了
+	// 推文结构或 legacy 字段缺失，而非"该用户没有媒体推文"。若当成正常空结果返回，
+	// 上层会推进增量游标，导致这些推文的媒体被永久跳过。
+	if len(tweets) == 0 && stats.SkippedTweets > 0 && len(seenTweetIDs) == stats.SkippedTweets {
+		return nil, stats, fmt.Errorf("时间线返回了 %d 条推文但全部解析失败（user=%s，跳过的推文: %s）",
+			stats.SkippedTweets, user.ID, strings.Join(stats.SkippedTweetIDs, ", "))
+	}
 	return tweets, stats, nil
 }
 
@@ -941,11 +950,21 @@ func (c *Client) GetFollowing(ctx context.Context, user User) ([]User, error) {
 }
 
 // GetFollowing 与 GetListMembers 相同：一次 select + 同一个客户端拉完所有分页，
-// 保证受保护账号的"关注列表"始终以同一账号视角读取。
+// 保证受保护账号的"关注列表"始终以同一账号视角读取。受保护用户的关注列表只有
+// 关注者（即 Primary）能看到，与 userMediaNeedsPrimaryClient 的逻辑一致。
 func (p *Pool) GetFollowing(ctx context.Context, user User) ([]User, error) {
-	client, err := p.Select(ctx, followingPath)
-	if err != nil {
-		return nil, err
+	var client *Client
+	var err error
+	if user.Protected {
+		client = p.Primary()
+		if client == nil {
+			return nil, errors.New("没有可用 X 客户端")
+		}
+	} else {
+		client, err = p.Select(ctx, followingPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return getFollowing(ctx, client, user)
 }
@@ -1048,9 +1067,12 @@ func (p *Pool) FollowUser(ctx context.Context, user User) error {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		if !errors.Is(err, ErrClientDisabled) && !isYieldableError(err) {
-			return err
+		// 凭证失效/账号锁定/限流/WAF 都交给下一个 client 重试；只有非此类的确定性
+		// 业务错误（如用户不存在/参数错误）才直接返回，换 Cookie 也不会改变结果。
+		if errors.Is(err, ErrClientDisabled) || isYieldableError(err) || isPermanentClientError(err) {
+			continue
 		}
+		return err
 	}
 	if lastErr != nil {
 		return lastErr
@@ -1505,7 +1527,7 @@ func (c *Client) status(index int, primary bool) ClientStatus {
 func isPermanentClientError(err error) bool {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.Code == apiErrAccountLocked
+		return isFatalAPIErrorCode(apiErr.Code) && apiErr.Code != apiErrRateLimit
 	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
@@ -1538,8 +1560,14 @@ func isTransientError(err error) bool {
 	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
-		return httpErr.StatusCode >= 500
+		if httpErr.StatusCode >= 500 {
+			return true
+		}
+		// 408 Request Timeout / 425 Too Early 可重试；其余 4xx（400/404/405/409/422 等）
+		// 是确定性客户端错误，重试结果不变，白消耗配额和退避时间。
+		return httpErr.StatusCode == http.StatusRequestTimeout || httpErr.StatusCode == 425
 	}
+	// 非 HTTP/非 API 错误（DNS、连接重置等网络错误）按瞬时处理。
 	return err != nil && !isPermanentClientError(err)
 }
 
@@ -1592,8 +1620,14 @@ func timelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 		}
 		return nil, "", fmt.Errorf("无法解析 timeline instructions（%s）", instructionsPath)
 	}
+	// instructions 必须是数组；X 若改成对象/null/字符串，.Array() 为空但 .Exists() 为真，
+	// 旧实现会把这当成"空时间线"静默成功——改为报错。
+	if !instructions.IsArray() {
+		return nil, "", fmt.Errorf("timeline instructions 不是数组（%s, type=%s）", instructionsPath, instructions.Type.String())
+	}
 	entries := gjson.Result{}
-	moduleItems := gjson.Result{}
+	// 累积所有 TimelineAddToModule 的条目，而不是只保留最后一个。
+	allModuleItems := []gjson.Result{}
 	recognized := false
 	for _, instruction := range instructions.Array() {
 		switch instruction.Get("type").String() {
@@ -1602,7 +1636,28 @@ func timelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 			entries = instruction.Get("entries")
 		case "TimelineAddToModule":
 			recognized = true
-			moduleItems = instruction.Get("moduleItems")
+			for _, item := range instruction.Get("moduleItems").Array() {
+				allModuleItems = append(allModuleItems, item)
+			}
+		case "TimelinePinEntry":
+			recognized = true
+			// 置顶推文以单条 entry 形式出现（非数组），追加到 entries 逻辑外单独处理。
+			if entry := instruction.Get("entry"); entry.Exists() {
+				content := entry.Get("content")
+				if itemContent := content.Get("itemContent"); itemContent.Exists() {
+					// 直接放入下方的 items（不通过 entries 数组，避免干扰 cursor 提取）。
+					allModuleItems = append(allModuleItems, gjson.Parse(`{"item":{"itemContent":`+itemContent.Raw+`}}`))
+				}
+			}
+		case "TimelineReplaceEntry":
+			recognized = true
+			// 替换条目同样可能携带媒体，按与 AddEntries 相同的方式提取。
+			if entry := instruction.Get("entry"); entry.Exists() {
+				content := entry.Get("content")
+				if itemContent := content.Get("itemContent"); itemContent.Exists() {
+					allModuleItems = append(allModuleItems, gjson.Parse(`{"item":{"itemContent":`+itemContent.Raw+`}}`))
+				}
+			}
 		}
 	}
 	// instructions 非空但没有任何已知类型：说明 X 改了 timeline 结构。此时若仍返回空结果，
@@ -1632,11 +1687,9 @@ func timelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 			}
 		}
 	}
-	if moduleItems.IsArray() {
-		for _, item := range moduleItems.Array() {
-			if itemContent := item.Get("item.itemContent"); itemContent.Exists() {
-				items = append(items, itemContent)
-			}
+	for _, item := range allModuleItems {
+		if itemContent := item.Get("item.itemContent"); itemContent.Exists() {
+			items = append(items, itemContent)
 		}
 	}
 	return items, bottomCursor(entries), nil

@@ -238,6 +238,7 @@ export function TaskCenterPage({
           variant="default"
           size="sm"
           loading={retry.isPending && retry.variables === record.id}
+          disabled={retry.isPending}
           onClick={() => retry.mutate(record.id)}
         >
           {t("重试")}</Button>
@@ -318,13 +319,13 @@ export function TaskCenterPage({
     <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <span className="text-xs text-fg-muted">
         {hasActiveFilter
-          ? t("本页匹配 {{value0}} 条（筛选仅作用于当前第 {{value1}} 页）", { value0: filteredJobs.length, value1: pagination.page })
+          ? t("本页匹配 {{value0}} 条（筛选仅作用于当前页，共 {{value1}} 个任务）", { value0: filteredJobs.length, value1: pagination.total })
           : t("共 {{value0}} 个下载任务", { value0: pagination.total })}
       </span>
       <Pagination
-        page={hasActiveFilter ? 1 : pagination.page}
+        page={pagination.page}
         pageSize={pagination.pageSize}
-        total={hasActiveFilter ? filteredJobs.length : pagination.total}
+        total={pagination.total}
         onPageChange={onPageChange}
         onPageSizeChange={onPageSizeChange}
       />
@@ -522,6 +523,7 @@ export function TaskCenterPage({
                     job={job}
                     actions={renderJobActions(job)}
                     onRetry={() => retry.mutate(job.id)}
+                    retryingJobId={retry.isPending ? retry.variables : undefined}
                   />
                 ))}
               </ul>
@@ -541,6 +543,7 @@ export function TaskCenterPage({
               <ExpandedJobDetails
                 job={record}
                 onRetry={() => retry.mutate(record.id)}
+                retryingJobId={retry.isPending ? retry.variables : undefined}
               />
             )}
             footer={paginationFooter}
@@ -577,7 +580,17 @@ function JobProgress({ job }: { job: Job }) {
   );
 }
 
-function MobileJobCard({ job, actions, onRetry }: { job: Job; actions: React.ReactNode; onRetry: () => void }) {
+function MobileJobCard({
+  job,
+  actions,
+  onRetry,
+  retryingJobId,
+}: {
+  job: Job;
+  actions: React.ReactNode;
+  onRetry: () => void;
+  retryingJobId?: number;
+}) {
   useTranslation();
   const [expanded, setExpanded] = useState(false);
   const panelId = React.useId();
@@ -615,7 +628,7 @@ function MobileJobCard({ job, actions, onRetry }: { job: Job; actions: React.Rea
       </div>
       {expanded && (
         <div id={panelId} className="border-t border-line">
-          <ExpandedJobDetails job={job} onRetry={onRetry} />
+          <ExpandedJobDetails job={job} onRetry={onRetry} retryingJobId={retryingJobId} />
         </div>
       )}
     </li>
@@ -778,9 +791,11 @@ function JobErrorAlert({ job }: { job: Job }) {
 function ExpandedJobDetails({
   job,
   onRetry,
+  retryingJobId,
 }: {
   job: Job;
   onRetry: () => void;
+  retryingJobId?: number;
 }) {
   useTranslation();
   const filesQuery = useQuery({
@@ -963,6 +978,8 @@ function ExpandedJobDetails({
             size="sm"
             icon={<RotateCcw className="size-3.5" />}
             onClick={onRetry}
+            loading={retryingJobId === job.id}
+            disabled={retryingJobId !== undefined}
           >
             {t("重试此任务")}</Button>
         )}

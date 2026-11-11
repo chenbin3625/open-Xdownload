@@ -79,7 +79,8 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Inp
         className={cn(bareInput, className)}
         onKeyDown={(event) => {
           onKeyDown?.(event);
-          if (event.key === "Enter") onPressEnter?.(event);
+          // IME 组合输入中的回车不触发提交（中文/日文输入法用回车确认候选词）。
+          if (event.key === "Enter" && !event.nativeEvent.isComposing) onPressEnter?.(event);
         }}
         {...rest}
       />

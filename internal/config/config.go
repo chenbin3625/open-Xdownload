@@ -289,7 +289,8 @@ func (cfg AppConfig) Redacted() AppConfig {
 }
 
 func defaultDownloadDir() string {
-	if value := os.Getenv("OPEN_XDOWNLOAD_DOWNLOAD_DIR"); value != "" {
+	// 使用 envValue（trim 空白）而非 os.Getenv：纯空白环境变量不应被当成有效路径。
+	if value := envValue(EnvDownloadDir); value != "" {
 		return value
 	}
 	cwd, err := os.Getwd()
@@ -603,7 +604,28 @@ func SameURLAuthority(a, b string) bool {
 	}
 	return au.Scheme != "" &&
 		strings.EqualFold(au.Scheme, bu.Scheme) &&
-		strings.EqualFold(au.Host, bu.Host)
+		strings.EqualFold(normalizeHost(au), normalizeHost(bu))
+}
+
+// normalizeHost 规范化 URL 的 Host：去掉与 scheme 对应的默认端口，
+// 使 "http://proxy:80" 和 "http://proxy" 被视为同一 authority。
+func normalizeHost(u *url.URL) string {
+	host := u.Host
+	port := u.Port()
+	if port == "" {
+		return host
+	}
+	switch {
+	case strings.EqualFold(u.Scheme, "http") && port == "80":
+		return u.Hostname()
+	case strings.EqualFold(u.Scheme, "https") && port == "443":
+		return u.Hostname()
+	case strings.EqualFold(u.Scheme, "socks5") && port == "1080":
+		return u.Hostname()
+	case strings.EqualFold(u.Scheme, "socks5h") && port == "1080":
+		return u.Hostname()
+	}
+	return host
 }
 
 // RestoreURLUserinfo reverses redactURLUserinfo when a redacted config is
