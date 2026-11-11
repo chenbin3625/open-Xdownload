@@ -11,7 +11,7 @@
 - **用户归档**：添加用户名或主页链接，保存可访问的本人推文与回复；支持定时增量同步、立即同步、暂停和去重。
 - **单条导入**：粘贴 X / Twitter 推文链接，保存正文和媒体；纯文字推文同样入库。
 - **本地媒体库**：原图缩放、视频和 GIF 播放，按用户、日期、类型、收藏和标签筛选，随时返回原推文。
-- **分类存储**：原始媒体、缩略图和视频封面按作者用户名分目录，图片与视频根目录可在设置中调整。
+- **分类存储**：原始媒体、缩略图和视频封面的根目录与路径模板均可配置，支持按作者用户名、媒体类型等自由组织，也可保存到数据目录之外的绝对路径。
 - **关注关系**：手动或定时保存 Following / Followers 快照，浏览历史，比较完整快照的新增和取消关系。
 - **任务管理**：按导入或用户同步汇总媒体下载数量、大小与失败原因，支持取消、重试、下载并发和重启后继续处理。
 - **批量与成员归档**：每次最多提交 200 个目标，自动去重；支持用户、推文链接、X List ID / 链接，以及某用户关注的所有人（Following）。列表和关注归档会展开成员，再创建用户同步任务。
@@ -34,9 +34,9 @@ cd x-archive
 curl -fsSLO https://raw.githubusercontent.com/chenbin3625/x-archive/main/compose.yaml
 ```
 
-编辑 `compose.yaml`，将 `command` 中 `--password` 后的空字符串改为自己的访问密码，至少 12 位。镜像、端口、密码和目录均直接在此文件中配置，无需 `.env`。
+编辑 `compose.yaml`，将 `command` 中 `--password` 后的空字符串改为自己的访问密码。镜像、端口、密码和目录均直接在此文件中配置，无需 `.env`。
 
-主分支 Compose 默认使用 `edge` 镜像，包含新增的启动参数。当前稳定版 `1.2.0` / `latest` 使用旧的环境变量配置方式，不能直接套用此配置。密码中包含 `$` 时，在 Compose 文件中写为 `$$`。然后启动：
+主分支 Compose 默认使用 `edge` 镜像。稳定版 `1.3.0` / `latest` 同样使用启动参数配置，可直接使用此文件；更早的 `1.2.0` 使用旧的环境变量配置方式，不能直接套用此配置。密码中包含 `$` 时，在 Compose 文件中写为 `$$`。然后启动：
 
 ```sh
 docker compose pull
@@ -50,13 +50,13 @@ docker compose logs -f x-archive
 
 存储目录不要求使用 `/data`。示例使用容器内的 `/app/data` 和 `/app/config`，可同时修改 `--data-dir`、`--config-dir` 及 `volumes` 中对应的容器路径；绑定目录示例中冒号左侧的 `./data`、`./config` 也可改为自己的宿主机目录。
 
-镜像标签：`latest` 为最近稳定版，`1.2.0` 为指定版本，`1.2` / `1` 跟随对应版本系列，`edge` 跟随 `main`。主分支配置使用：
+镜像标签：`latest` 为最近稳定版，`1.3.0` 为指定版本，`1.3` / `1` 跟随对应版本系列，`edge` 跟随 `main`。主分支配置使用：
 
 ```yaml
 image: chenbin3625/x-archive:edge
 ```
 
-固定版本时应使用与该版本兼容的部署配置。`1.2.0` 镜像通过 `X_ARCHIVE_PASSWORD`、`X_ARCHIVE_DATA` 和 `X_ARCHIVE_CONFIG` 等环境变量配置，默认持久化路径为 `/data`、`/config`；主分支改用启动参数和 `/app/data`、`/app/config`。已有命名卷可保持卷名，仅调整容器挂载路径；绑定目录部署应保留原宿主机目录。
+固定版本时应使用与该版本兼容的部署配置。`1.3.0` 及主分支镜像使用启动参数和 `/app/data`、`/app/config`；`1.2.0` 镜像通过 `X_ARCHIVE_PASSWORD`、`X_ARCHIVE_DATA` 和 `X_ARCHIVE_CONFIG` 等环境变量配置，默认持久化路径为 `/data`、`/config`。已有命名卷可保持卷名，仅调整容器挂载路径；绑定目录部署应保留原宿主机目录。
 
 更新时，先备份数据和配置；若固定版本，先修改镜像标签及对应配置，再运行：
 
@@ -113,9 +113,9 @@ $env:PATH = "$PWD\.tools\Scripts;$env:PATH"
 .\x-archive.exe
 ```
 
-两种方式默认均在 <http://127.0.0.1:3000> 提供服务，数据和配置保存在当前工作目录的 `data/`、`config/`。直接启动二进制**不会自动读取 `.env`**，可通过 shell、服务管理器及系统配置传入环境变量。主分支构建还支持以下启动参数，已发布的 `1.2.0` 二进制仍使用环境变量。长期运行示例见 [运维文档](docs/OPERATIONS.md#长期运行二进制)。
+两种方式默认均在 <http://127.0.0.1:3000> 提供服务，数据和配置保存在当前工作目录的 `data/`、`config/`。直接启动二进制**不会自动读取 `.env`**，可通过 shell、服务管理器及系统配置传入环境变量。当前发布版及主分支构建还支持以下启动参数，更早的 `1.2.0` 二进制仍使用环境变量。长期运行示例见 [运维文档](docs/OPERATIONS.md#长期运行二进制)。
 
-主分支二进制的远程部署示例：
+当前二进制的远程部署示例：
 
 ```sh
 ./x-archive --bind 0.0.0.0:3000 --password 'replace-with-your-own-password' --data-dir ./data --config-dir ./config
@@ -146,23 +146,23 @@ Cookie 格式通过校验不等于登录会话有效。过期时重新复制、�
 ```text
 data/
   archive.sqlite          推文、媒体索引、任务、快照、收藏与标签
-  images/<username>/      图片与原生 GIF
-  videos/<username>/      视频与 MP4 GIF
-  thumbnails/<username>/  缩略图与视频封面
+  images/<username>/      默认图片与原生 GIF（根目录和模板可配置）
+  videos/<username>/      默认视频与 MP4 GIF（根目录和模板可配置）
+  thumbnails/<username>/  默认缩略图与视频封面（根目录和模板可配置）
 config/
   settings.json           Web 设置
   cookies.txt             私有 X 会话
   cookie-pool.json        私有备用会话及任务类型配置
 ```
 
-Compose 示例中对应 `/app/data`、`/app/config`，实际位置由启动参数及卷挂载决定。新下载文件按小写用户名分类；修改保存目录只影响后续下载，不迁移旧文件。每个数据目录只能运行一个实例。备份时先停止服务，再备份完整数据目录和配置目录。
+Compose 示例中对应 `/app/data`、`/app/config`，实际位置由启动参数及卷挂载决定。图片、视频和缩略图分别有根目录与路径模板：根目录相对数据目录解析，也可填写绝对路径或 `{data}/...`；模板支持 `{data}`、`{kind}`、`{author}`、`{tweet_id}`、`{ordinal}`、`{extension}`、`{media_id}` 占位符，模板为绝对路径或包含 `{data}` 时忽略根目录。默认模板为 `{author}/{tweet_id}_{ordinal}.{extension}`（缩略图为 `{author}/{media_id}.{extension}`），按小写用户名分目录。修改根目录或模板只影响后续下载，不迁移旧文件，旧媒体仍按数据库记录的原路径读取。每个数据目录只能运行一个实例。备份时先停止服务，再备份完整数据目录、配置目录以及自定义的媒体根目录。
 
 启动参数 `--bind`、`--password`、`--data-dir`、`--config-dir` 分别设置监听地址、访问密码、数据目录和配置目录，优先于对应环境变量。Compose 使用这些参数；二进制部署也可使用以下环境变量：
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `X_ARCHIVE_BIND` | `127.0.0.1:3000` | 监听地址；镜像默认启动命令使用 `--bind 0.0.0.0:3000` |
-| `X_ARCHIVE_PASSWORD` | 无 | Web 访问密码；对外监听时必填且至少 12 位 |
+| `X_ARCHIVE_PASSWORD` | 无 | Web 访问密码；对外监听时必填 |
 | `X_ARCHIVE_DATA` | `data` | 数据目录；相对路径基于工作目录，镜像工作目录为 `/app` |
 | `X_ARCHIVE_CONFIG` | `config` | 配置目录；相对路径基于工作目录，镜像工作目录为 `/app` |
 | `GALLERY_DL_BIN` | `gallery-dl` | gallery-dl 可执行文件路径 |

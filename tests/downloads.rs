@@ -62,14 +62,48 @@ async fn downloads_separate_users_with_default_and_custom_media_roots() {
         .unwrap();
     assert!(status.success(), "fixture video generation failed");
 
+    let external_images = directory
+        .path()
+        .join("external/images")
+        .to_string_lossy()
+        .into_owned();
+    let external_videos = directory
+        .path()
+        .join("external/videos")
+        .to_string_lossy()
+        .into_owned();
     for (round, image_root, video_root) in [
-        (0, "images", "videos"),
-        (1, "photos/originals", "clips/originals"),
+        (0, "images".to_string(), "videos".to_string()),
+        (
+            1,
+            "photos/originals".to_string(),
+            "clips/originals".to_string(),
+        ),
+        (
+            2,
+            "templated/images".to_string(),
+            "templated/videos".to_string(),
+        ),
+        (3, external_images, external_videos),
     ] {
-        if round == 1 {
+        if round > 0 {
             let mut settings = app.settings.write().await;
-            settings.image_path = image_root.into();
-            settings.video_path = video_root.into();
+            settings.image_path = image_root.clone();
+            settings.video_path = video_root.clone();
+            if round == 2 {
+                settings.thumbnail_path = "templated/thumbnails".into();
+                settings.image_path_template =
+                    "{kind}/{author}/{tweet_id}_{ordinal}.{extension}".into();
+                settings.video_path_template =
+                    "{kind}/{author}/{tweet_id}_{ordinal}.{extension}".into();
+                settings.thumbnail_path_template = "{kind}/{author}/{media_id}.{extension}".into();
+            } else if round == 3 {
+                let defaults = x_archive::config::Settings::default();
+                settings.thumbnail_path = defaults.thumbnail_path;
+                settings.image_path_template = defaults.image_path_template;
+                settings.video_path_template = defaults.video_path_template;
+                settings.thumbnail_path_template = defaults.thumbnail_path_template;
+            }
             settings.validate().unwrap();
         }
         for (index, author) in ["Archive_One", "archive_two"].into_iter().enumerate() {
@@ -135,14 +169,23 @@ async fn downloads_separate_users_with_default_and_custom_media_roots() {
                 .fetch_one(&app.store.pool)
                 .await
                 .unwrap();
-                let (media_root, extension) = if ordinal == 1 {
-                    (image_root, "png")
+                let (media_root, extension, kind) = if ordinal == 1 {
+                    (image_root.as_str(), "png", "image")
+                } else if ordinal == 2 {
+                    (video_root.as_str(), "mp4", "video")
                 } else {
-                    (video_root, "mp4")
+                    (video_root.as_str(), "mp4", "gif")
                 };
-                let expected_file =
-                    format!("{media_root}/{username}/{tweet_id}_{ordinal}.{extension}");
-                let expected_thumbnail = format!("thumbnails/{username}/{id}.jpg");
+                let expected_file = if round == 2 {
+                    format!("{media_root}/{kind}/{username}/{tweet_id}_{ordinal}.{extension}")
+                } else {
+                    format!("{media_root}/{username}/{tweet_id}_{ordinal}.{extension}")
+                };
+                let expected_thumbnail = if round == 2 {
+                    format!("templated/thumbnails/{kind}/{username}/{id}.jpg")
+                } else {
+                    format!("thumbnails/{username}/{id}.jpg")
+                };
                 assert_eq!(row.get::<String, _>("status"), "ready");
                 assert_eq!(row.get::<String, _>("file_path"), expected_file);
                 assert_eq!(row.get::<String, _>("thumbnail_path"), expected_thumbnail);
@@ -181,7 +224,7 @@ async fn downloads_separate_users_with_default_and_custom_media_roots() {
         .fetch_one(&app.store.pool)
         .await
         .unwrap();
-    assert_eq!(ready, 12);
+    assert_eq!(ready, 24);
 }
 
 #[tokio::test]

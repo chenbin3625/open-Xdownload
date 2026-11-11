@@ -8,6 +8,10 @@ export interface Settings {
   download_concurrency: number;
   image_path: string;
   video_path: string;
+  thumbnail_path: string;
+  image_path_template: string;
+  video_path_template: string;
+  thumbnail_path_template: string;
   auto_download: boolean;
   relationship_sync_enabled: boolean;
   relationship_interval_minutes: number;

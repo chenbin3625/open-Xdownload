@@ -163,7 +163,7 @@ test("tweet schedules can run and be edited after targets are normalized", async
 
 test("settings retain edits made while a previous save is pending", async ({ page, request }) => {
   await page.goto("/settings");
-  const imagePath = page.getByLabel("图片保存路径", { exact: true });
+  const imagePath = page.getByLabel("图片根目录", { exact: true });
   await expect(imagePath).toBeVisible();
   let releaseResponse!: () => void;
   let notifySent!: () => void;

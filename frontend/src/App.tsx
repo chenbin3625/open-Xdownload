@@ -3123,28 +3123,69 @@ function SettingsPage() {
           <FolderOpen size={18} />
           <h2>存储</h2>
         </div>
-        <SettingRow label="图片保存路径">
+        <SettingRow label="图片根目录">
           <div className="path-input">
-            <span>数据目录 /</span>
             <Input
-              aria-label="图片保存路径"
+              aria-label="图片根目录"
+              placeholder="images"
               value={draft.image_path}
               onChange={(v) => change("image_path", v)}
             />
-            <span>/ 用户名 /</span>
           </div>
         </SettingRow>
-        <SettingRow label="视频保存路径">
+        <SettingRow label="图片路径模板">
           <div className="path-input">
-            <span>数据目录 /</span>
             <Input
-              aria-label="视频保存路径"
+              aria-label="图片路径模板"
+              value={draft.image_path_template}
+              onChange={(v) => change("image_path_template", v)}
+            />
+          </div>
+        </SettingRow>
+        <SettingRow label="视频根目录">
+          <div className="path-input">
+            <Input
+              aria-label="视频根目录"
+              placeholder="videos"
               value={draft.video_path}
               onChange={(v) => change("video_path", v)}
             />
-            <span>/ 用户名 /</span>
           </div>
         </SettingRow>
+        <SettingRow label="视频路径模板">
+          <div className="path-input">
+            <Input
+              aria-label="视频路径模板"
+              value={draft.video_path_template}
+              onChange={(v) => change("video_path_template", v)}
+            />
+          </div>
+        </SettingRow>
+        <SettingRow label="缩略图根目录">
+          <div className="path-input">
+            <Input
+              aria-label="缩略图根目录"
+              placeholder="thumbnails"
+              value={draft.thumbnail_path}
+              onChange={(v) => change("thumbnail_path", v)}
+            />
+          </div>
+        </SettingRow>
+        <SettingRow label="缩略图路径模板">
+          <div className="path-input">
+            <Input
+              aria-label="缩略图路径模板"
+              value={draft.thumbnail_path_template}
+              onChange={(v) => change("thumbnail_path_template", v)}
+            />
+          </div>
+        </SettingRow>
+        <p className="settings-hint">
+          根目录相对于数据目录，也可填写绝对路径或 {"{data}"} 前缀。路径模板支持{" "}
+          {"{data}"}、{"{kind}"}、{"{author}"}、{"{tweet_id}"}、{"{ordinal}"}、
+          {"{extension}"}、{"{media_id}"}；模板为绝对路径或包含 {"{data}"}{" "}
+          时忽略根目录。修改仅影响后续下载。
+        </p>
         <div className="storage-settings">
           <div>
             <span>归档媒体</span>
