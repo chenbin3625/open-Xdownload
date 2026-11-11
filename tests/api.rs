@@ -53,6 +53,7 @@ async fn settings_persist_and_invalid_paths_are_rejected() {
     let mut settings = data["settings"].clone();
     settings["download_concurrency"] = json!(2);
     settings["image_path"] = json!("photos/originals");
+    settings["image_path_template"] = json!("{kind}/{author}/{tweet_id}_{ordinal}.{extension}");
     assert_eq!(
         call(&router, "PUT", "/api/settings", settings.clone())
             .await
@@ -62,11 +63,23 @@ async fn settings_persist_and_invalid_paths_are_rejected() {
     let reopened = App::new(app.data.clone(), app.config.clone(), None)
         .await
         .unwrap();
+    let saved = reopened.settings.read().await;
+    assert_eq!(saved.image_path, "photos/originals");
     assert_eq!(
-        reopened.settings.read().await.image_path,
-        "photos/originals"
+        saved.image_path_template,
+        "{kind}/{author}/{tweet_id}_{ordinal}.{extension}"
     );
+    assert_eq!(saved.thumbnail_path, "thumbnails");
+    drop(saved);
     settings["image_path"] = json!("../config");
+    assert_eq!(
+        call(&router, "PUT", "/api/settings", settings.clone())
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    settings["image_path"] = json!("images");
+    settings["image_path_template"] = json!("{author}/{unknown}.{extension}");
     assert_eq!(
         call(&router, "PUT", "/api/settings", settings).await.0,
         StatusCode::BAD_REQUEST

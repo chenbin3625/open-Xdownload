@@ -25,7 +25,7 @@ cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked --release
-node scripts/smoke-binary.mjs target/release/x-archive 1.2.0
+node scripts/smoke-binary.mjs target/release/x-archive 1.3.0
 cd frontend
 npx playwright install --with-deps chromium
 npm run test:e2e
@@ -70,20 +70,20 @@ docker buildx bake -f docker-bake.hcl --set x-archive.output=type=oci,dest=x-arc
 
 下载包包含二进制、README、更新记录、MIT License、固定版本工具依赖、Compose 示例和运维文档。Linux 使用 musl 静态构建，Windows 静态链接 C 运行库；SQLite 已内置，不依赖外部 SQLite 或 OpenSSL。媒体下载仍依赖外部工具。
 
-Docker Hub 镜像为 `chenbin3625/x-archive`。镜像 `edge` 随主分支更新；稳定版标签发布 `1.2.0`、`1.2`、`1` 和 `latest`。预发布标签不会更新 `latest`。Release 会先创建草稿，上传全部压缩包及 `SHA256SUMS` 后公开；失败可在同一标签重跑，不需移动标签。
+Docker Hub 镜像为 `chenbin3625/x-archive`。镜像 `edge` 随主分支更新；稳定版标签发布 `1.3.0`、`1.3`、`1` 和 `latest`。预发布标签不会更新 `latest`。Release 会先创建草稿，上传全部压缩包及 `SHA256SUMS` 后公开；失败可在同一标签重跑，不需移动标签。
 
-手动发布已有源码标签时，在 `image.yml` 的 `source_ref` 输入中指定标签，例如 `v1.2.0`。工作流按指定源码构建、验证并生成对应版本标签，不会移动 Git 标签。
+手动发布已有源码标签时，在 `image.yml` 的 `source_ref` 输入中指定标签，例如 `v1.3.0`。工作流按指定源码构建、验证并生成对应版本标签，不会移动 Git 标签。
 
 ## 发布新版本
 
 1. 同步 `Cargo.toml`、`Cargo.lock`、`frontend/package.json`、`frontend/package-lock.json` 中的版本，并更新 `CHANGELOG.md`。界面版本从前端包版本读取。
-2. 运行自动化检查并提交。标签必须与 Cargo 版本完全一致，例如 `v1.2.0`。
+2. 运行自动化检查并提交。标签必须与 Cargo 版本完全一致，例如 `v1.3.0`。
 3. 推送分支和标签：
 
 ```sh
 git push origin main
-git tag -a v1.2.0 -m "X Archive v1.2.0"
-git push origin v1.2.0
+git tag -a v1.3.0 -m "X Archive v1.3.0"
+git push origin v1.3.0
 ```
 
 GitHub Release 使用仓库自带的 `GITHUB_TOKEN`，仅发布 job 需要 `contents: write`。Docker Hub 登录使用仓库 Actions Secrets `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，账号需有 `chenbin3625/x-archive` 的推送权限；发布流程通过 `secrets: inherit` 传给镜像工作流。PR 构建只有读取权限且不登录、不推送镜像。仓库需允许 GitHub Actions 运行，Docker Hub 仓库需设置为公开以允许匿名拉取。

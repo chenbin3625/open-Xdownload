@@ -29,8 +29,8 @@ async fn main() -> Result<()> {
     let bind = args.bind;
     let password = args.password.filter(|p| !p.is_empty());
     ensure!(
-        bind.ip().is_loopback() || password.as_ref().is_some_and(|p| p.len() >= 12),
-        "对外监听需要通过 --password 或 X_ARCHIVE_PASSWORD 设置至少 12 位的访问密码"
+        bind.ip().is_loopback() || password.is_some(),
+        "对外监听需要通过 --password 或 X_ARCHIVE_PASSWORD 设置访问密码"
     );
     let app = App::new(args.data_dir, args.config_dir, password).await?;
     // One process owns the persistent queue and its recovery operation.

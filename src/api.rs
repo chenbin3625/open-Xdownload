@@ -1,7 +1,7 @@
 use crate::{
     app::{App, CookieStatus},
     automation::{self, ArchiveTarget, Schedule},
-    config::{Settings, private_write, safe_path},
+    config::{self, Settings, private_write, stored_path_from_record},
     domain, sessions,
     store::Task,
     tools,
@@ -285,11 +285,14 @@ async fn save_settings(
         value.proxy_url = proxy.to_string();
     }
     value.validate()?;
-    for dir in [&value.image_path, &value.video_path] {
-        let path = safe_path(&app.data, dir).await?;
-        tokio::fs::create_dir_all(path)
+    for (root, label) in [
+        (&value.image_path, "图片根目录"),
+        (&value.video_path, "视频根目录"),
+        (&value.thumbnail_path, "缩略图根目录"),
+    ] {
+        tokio::fs::create_dir_all(config::resolve_root(&app.data, root))
             .await
-            .map_err(anyhow::Error::from)?;
+            .map_err(|error| anyhow::anyhow!("无法创建{label}：{error}"))?;
     }
     private_write(
         &app.config.join("settings.json"),
@@ -966,7 +969,7 @@ async fn serve_media(
             .fetch_optional(&app.store.pool)
             .await?;
     let path = path.flatten().ok_or_else(missing)?;
-    let path = safe_path(&app.data, &path).await?;
+    let path = stored_path_from_record(&app.data, &path).await?;
     Ok(ServeFile::new(path)
         .oneshot(request)
         .await

@@ -1,8 +1,17 @@
 use crate::app::App;
-use crate::{app::CookieStatus, config::safe_path, domain, store::Task, tools};
+use crate::{
+    app::CookieStatus,
+    config::{self, MediaTokens, safe_path},
+    domain,
+    store::Task,
+    tools,
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::fs;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
@@ -563,12 +572,19 @@ async fn download_media(app: &App, task: &Task, staging: &Path) -> Result<String
     }
     let author = domain::username(&author)?;
     tools::media_url(&url)?;
-    let free = fs2::available_space(&app.data).unwrap_or(0);
+    let is_image = kind == "image" || extension == "gif";
+    let settings = app.settings.read().await.clone();
+    let target_root = if is_image {
+        &settings.image_path
+    } else {
+        &settings.video_path
+    };
+    let free = available_space(&config::resolve_root(&app.data, target_root));
     ensure!(
         free > 128 * 1024 * 1024,
-        "数据目录可用空间不足 128 MB，请清理磁盘后重试"
+        "保存目录可用空间不足 128 MB，请清理磁盘后重试"
     );
-    let proxy = app.settings.read().await.proxy_url.clone();
+    let proxy = settings.proxy_url.clone();
     let client = if proxy.is_empty() {
         app.client.clone()
     } else {
@@ -595,7 +611,6 @@ async fn download_media(app: &App, task: &Task, staging: &Path) -> Result<String
         fs::remove_dir_all(staging).await?;
     }
     fs::create_dir_all(staging).await?;
-    let is_image = kind == "image" || extension == "gif";
     let cookie = tools::session_cookie_for(app, Some(&task.id)).await?;
     let output = if is_image {
         let mut args = tools::gallery_args(&cookie.0);
@@ -658,11 +673,10 @@ async fn download_media(app: &App, task: &Task, staging: &Path) -> Result<String
     }
     let source = source.context("下载工具没有生成媒体文件，请检查工具版本后重试")?;
     ensure!(fs::metadata(&source).await?.len() > 0, "下载文件为空");
-    let settings = app.settings.read().await.clone();
-    let target_dir = if is_image {
-        &settings.image_path
+    let (root, template) = if is_image {
+        (&settings.image_path, &settings.image_path_template)
     } else {
-        &settings.video_path
+        (&settings.video_path, &settings.video_path_template)
     };
     let ext = if is_image {
         source
@@ -677,12 +691,46 @@ async fn download_media(app: &App, task: &Task, staging: &Path) -> Result<String
         ["jpg", "jpeg", "png", "webp", "gif", "mp4"].contains(&ext.as_str()),
         "下载后的媒体格式暂不支持"
     );
-    let final_relative = format!("{target_dir}/{author}/{tweet_id}_{ordinal}.{ext}");
-    let final_path = safe_path(&app.data, &final_relative).await?;
-    fs::create_dir_all(final_path.parent().unwrap()).await?;
-    let thumbnail_relative = format!("thumbnails/{author}/{}.jpg", task.target);
-    let thumbnail = safe_path(&app.data, &thumbnail_relative).await?;
-    fs::create_dir_all(thumbnail.parent().unwrap()).await?;
+    let final_path = checked_output_path(
+        app,
+        config::media_path(
+            &app.data,
+            root,
+            template,
+            &MediaTokens {
+                data: &app.data,
+                kind: &kind,
+                author: &author,
+                tweet_id: &tweet_id,
+                ordinal,
+                extension: &ext,
+                media_id: &task.target,
+            },
+        )?,
+    )
+    .await?;
+    fs::create_dir_all(final_path.parent().context("保存路径无效")?).await?;
+    let thumbnail = checked_output_path(
+        app,
+        config::media_path(
+            &app.data,
+            &settings.thumbnail_path,
+            &settings.thumbnail_path_template,
+            &MediaTokens {
+                data: &app.data,
+                kind: &kind,
+                author: &author,
+                tweet_id: &tweet_id,
+                ordinal,
+                extension: "jpg",
+                media_id: &task.target,
+            },
+        )?,
+    )
+    .await?;
+    fs::create_dir_all(thumbnail.parent().context("缩略图路径无效")?).await?;
+    let stored_file = config::stored_path(&app.data, &final_path);
+    let stored_thumbnail = config::stored_path(&app.data, &thumbnail);
     let thumb_temp = staging.join("thumbnail.jpg");
     let (width, height, duration, processed) = if is_image {
         let source_copy = source.clone();
@@ -787,12 +835,45 @@ async fn download_media(app: &App, task: &Task, staging: &Path) -> Result<String
     };
     progress(app, task, 95).await?;
     let size = fs::metadata(&processed).await?.len() as i64;
-    // Same-filesystem renames leave no partially written public media files.
-    fs::rename(processed, &final_path).await?;
-    fs::rename(thumb_temp, thumbnail).await?;
+    // Rename is atomic on one filesystem; copy when a custom media root lives
+    // on another device.
+    move_file(&processed, &final_path).await?;
+    move_file(&thumb_temp, &thumbnail).await?;
     sqlx::query("UPDATE media SET status='ready',error=NULL,file_path=?,thumbnail_path=?,extension=?,size=?,width=?,height=?,duration=? WHERE id=?")
-        .bind(final_relative).bind(thumbnail_relative).bind(ext).bind(size).bind(width).bind(height).bind(duration).bind(&task.target).execute(&app.store.pool).await?;
+        .bind(&stored_file).bind(&stored_thumbnail).bind(ext).bind(size).bind(width).bind(height).bind(duration).bind(&task.target).execute(&app.store.pool).await?;
     Ok("已下载并生成预览".into())
+}
+
+/// Keep the original symlink and traversal checks for paths under the data
+/// directory. Paths configured outside it are trusted as explicit storage roots.
+async fn checked_output_path(app: &App, path: PathBuf) -> Result<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(&app.data) {
+        let relative = relative.to_str().context("保存路径包含非 UTF-8 字符")?;
+        return safe_path(&app.data, relative).await;
+    }
+    Ok(path)
+}
+
+fn available_space(path: &Path) -> u64 {
+    let mut current = path;
+    loop {
+        if let Ok(space) = fs2::available_space(current) {
+            return space;
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => return 0,
+        }
+    }
+}
+
+async fn move_file(source: &Path, target: &Path) -> Result<()> {
+    if fs::rename(source, target).await.is_ok() {
+        return Ok(());
+    }
+    fs::copy(source, target).await?;
+    fs::remove_file(source).await?;
+    Ok(())
 }
 
 #[cfg(test)]

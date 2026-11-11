@@ -1,6 +1,32 @@
 # 验证记录
 
-## 1.2.0 - 2026-11-11
+## 1.3.0 - 2026-11-11
+
+本地环境：Linux x86-64、Rust 1.99.1、Node.js 22.23.4，已安装 Python、FFmpeg / FFprobe 和 musl 工具链。GitHub Actions 使用 Node.js 24。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `npm --prefix frontend ci && npm --prefix frontend run build` | 通过；主 JS 包约 782 KB，有超过 500 KB 的非阻断提醒 |
+| `cargo fmt --all --check` | 通过 |
+| `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
+| `cargo test --locked` | 50 项通过，无失败 |
+| `cargo build --locked --release --target x86_64-unknown-linux-musl` | 通过；`file` 确认为 stripped static-pie ELF |
+| `scripts/smoke-binary.mjs`，版本参数 `1.3.0`（glibc 与 musl 构建） | 均通过；独立临时目录中的启动参数覆盖、自定义目录、版本、内嵌前端、鉴权、SQLite 初始化与中断下载暂存目录清理 |
+| `npm --prefix frontend run test:e2e` | 33 项通过，1 项按配置跳过，无失败 |
+
+新增后端覆盖图片、视频、缩略图根目录与路径模板校验，旧设置文件的默认值补全，`{data}` 前缀与数据目录外的绝对根目录，模板占位符展开，以及默认和自定义模板下的实际下载布局与数据库路径记录。设置保存、下载和媒体读取测试同时验证了相对路径与外部绝对路径的兼容性。
+
+浏览器使用桌面 Chromium 与 iPhone 13 移动视口，更新了存储设置标签与模板相关断言，覆盖归档、计划、Cookie 池、代理设置、失败队列、设置保存期间编辑、快照分页重置、导航、媒体筛选、长错误显示和响应式布局。移动测试是 Chromium 模拟，不是 iOS Safari 实机。
+
+本次没有使用有效个人 X Cookie。X 端提取与下载由离线工具契约替代，不能据此认定真实平台抓取、分页、权限或长期限流验证通过。媒体检查使用真实 Rust API、SQLite、图片处理、FFmpeg 和测试 PNG / H.264 文件。
+
+本地没有 Docker CLI / 守护进程，未在本次执行容器构建和运行验证。跨文件系统复制路径由代码审查覆盖，测试中的自定义根目录仍位于同一文件系统，未在独立挂载点实测。其他平台二进制与双架构容器由 `v1.3.0` 标签的发布流程构建、运行验证并打包，最终状态见 [Release 工作流](https://github.com/chenbin3625/x-archive/actions/workflows/release.yml) 与 [发布页](https://github.com/chenbin3625/x-archive/releases/tag/v1.3.0)。工作流配置存在不等于执行通过。
+
+升级前应停止服务并备份完整数据、配置以及自定义的媒体根目录。旧版设置文件会自动补全新增的缩略图根目录与路径模板；默认值保持原有目录布局，无需迁移旧媒体。
+
+---
+
+## 1.2.0 历史验证记录
 
 本地环境：Linux x86-64、Rust 1.99.1、Node.js 22.23.4，已安装 Python、FFmpeg / FFprobe 和 musl 工具链。GitHub Actions 使用 Node.js 24。
 

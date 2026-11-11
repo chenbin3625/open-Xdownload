@@ -9,7 +9,7 @@ services:
       - --bind
       - 0.0.0.0:3000
       - --password
-      - "" # 填写自己的访问密码，至少 12 位。
+      - "" # 填写自己的访问密码。
       - --data-dir
       - /app/data
       - --config-dir

@@ -1778,6 +1778,13 @@ td:first-child {
   flex: 1;
   min-width: 0;
 }
+.settings-hint {
+  max-width: 750px;
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
 .storage-settings {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
