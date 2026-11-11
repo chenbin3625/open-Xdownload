@@ -1,0 +1,6 @@
+services:
+  x-archive:
+    image: x-archive:local
+    pull_policy: build
+    build:
+      context: .

@@ -1,60 +1,48 @@
 # syntax=docker/dockerfile:1.7
-
-FROM --platform=$BUILDPLATFORM node:22-alpine AS web
-WORKDIR /src/apps/web
-COPY apps/web/package*.json ./
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS web
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
 RUN npm ci
-COPY apps/web ./
+COPY frontend/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS build
+FROM --platform=$BUILDPLATFORM rust:1-slim-bookworm AS backend
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu libc6-dev-arm64-cross libc6-dev-amd64-cross \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN apk add --no-cache ca-certificates
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-COPY --from=web /src/apps/web/dist ./apps/web/dist
-RUN sh scripts/sync-webui.sh
-ARG VERSION=dev
-ARG COMMIT=unknown
-ARG DATE=unknown
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
-  -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
-  -o /out/open-xdownload ./cmd/server
+COPY Cargo.toml Cargo.lock ./
+COPY migrations ./migrations
+COPY src ./src
+COPY --from=web /src/frontend/dist ./frontend/dist
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    case "$TARGETARCH" in arm64) target=aarch64-unknown-linux-gnu ;; amd64) target=x86_64-unknown-linux-gnu ;; *) exit 1 ;; esac \
+    && rustup target add "$target" \
+    && cargo build --locked --release --target "$target" \
+    && install -Dm755 "target/$target/release/x-archive" /out/x-archive
 
-FROM alpine:3.22
-RUN apk add --no-cache ca-certificates su-exec tzdata \
-  && mkdir -p /data /downloads
+FROM debian:bookworm-slim AS runtime
+ARG GALLERY_DL_VERSION=1.32.19
+ARG YT_DLP_VERSION=2025.10.14
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates python3 python3-venv ffmpeg tini gosu \
+    && python3 -m venv /opt/download-tools \
+    && /opt/download-tools/bin/pip install --no-cache-dir "gallery-dl==$GALLERY_DL_VERSION" "yt-dlp==$YT_DLP_VERSION" \
+    && groupadd --gid 10001 archive && useradd --uid 10001 --gid archive --no-create-home --home-dir /config archive \
+    && mkdir /data /config && chown archive:archive /data /config && chmod 700 /data /config \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/opt/download-tools/bin:$PATH" X_ARCHIVE_DATA=/data X_ARCHIVE_CONFIG=/config X_ARCHIVE_BIND=0.0.0.0:3000
+COPY --from=backend /out/x-archive /usr/local/bin/x-archive
+COPY --chmod=755 scripts/entrypoint.sh /usr/local/bin/x-archive-entrypoint
 WORKDIR /app
-COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY --from=build /out/open-xdownload /usr/local/bin/open-xdownload
-ENV OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787 \
-  OPEN_XDOWNLOAD_DATA_DIR=/data \
-  OPEN_XDOWNLOAD_DOWNLOAD_DIR=/downloads \
-  PUID=1000 \
-  PGID=1000
-# 容器内需监听 0.0.0.0 才能被端口映射访问；
-# 如只在本机使用，请用 `docker run -p 127.0.0.1:8787:8787` 限制仅本机可达，
-# 暴露到网络前请完成单用户账号创建，远程访问使用 HTTPS。
-#
-# 关于 root：镜像故意不写 USER。entrypoint 需要 root 才能把挂载卷 chown 给 PUID/PGID
-# （NFS/只读卷 chown 失败会告警但不退出），随后用 su-exec 降权执行本程序——即
-# 实际服务进程始终以 PUID:PGID 运行，不是 root。若宿主已用 `--user` 指定非 root，
-# entrypoint 会跳过 chown 直接 exec。
-EXPOSE 8787
-
-STOPSIGNAL SIGTERM
-
-# 探针请求 /api/health（不依赖前端产物是否就绪），端口取自运行时 OPEN_XDOWNLOAD_ADDR，
-# 因此用户覆盖端口后依然有效；TLS 模式先试 http 再试 https（busybox 的 TLS 不校验证书，
-# 自签证书可直接探测）。start-period 放宽到 20s，给首次迁移留时间。
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD sh -c 'port="${OPEN_XDOWNLOAD_ADDR##*:}"; port="${port:-8787}"; \
-    wget -q -O /dev/null "http://127.0.0.1:${port}/api/health" \
-    || wget -q -O /dev/null "https://127.0.0.1:${port}/api/health" \
-    || exit 1'
-
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["open-xdownload"]
+VOLUME ["/data", "/config"]
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health', timeout=3)"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/x-archive-entrypoint"]
+CMD ["x-archive"]

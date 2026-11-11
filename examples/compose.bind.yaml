@@ -1,0 +1,18 @@
+# Run in a dedicated deployment directory with a configured .env file.
+# Existing data/config contents must be writable by UID/GID 10001.
+services:
+  x-archive:
+    image: "${X_ARCHIVE_IMAGE:-ghcr.io/chenbin3625/x-archive:latest}"
+    restart: unless-stopped
+    ports:
+      - "${X_ARCHIVE_HOST:-127.0.0.1}:${X_ARCHIVE_PORT:-3000}:3000"
+    environment:
+      X_ARCHIVE_PASSWORD: "${X_ARCHIVE_PASSWORD:?Set a password of at least 12 characters in .env}"
+      TZ: Asia/Shanghai
+      RUST_LOG: x_archive=info,tower_http=warn
+    volumes:
+      - ./data:/data
+      - ./config:/config
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
