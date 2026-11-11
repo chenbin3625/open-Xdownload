@@ -279,4 +279,41 @@ async fn migration_retains_old_downloads_in_an_explicit_history_batch() {
             .await
             .unwrap();
     assert_eq!(label, "历史自动下载");
+    sqlx::raw_sql(include_str!("../migrations/0003_automation.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let migrated: (String, i64) =
+        sqlx::query_as("SELECT parent_id,result_size FROM tasks WHERE id='old'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(migrated, row);
+    sqlx::query("INSERT INTO users(id,username,last_sync) VALUES('legacy-user','legacy_user','2026-11-10T12:00:00Z')")
+        .execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0004_sync_and_cookie_revisions.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let cursor: Option<String> =
+        sqlx::query_scalar("SELECT sync_cursor FROM users WHERE id='legacy-user'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(cursor.is_none());
+    let revision: Option<String> =
+        sqlx::query_scalar("SELECT cookie_revision FROM tasks WHERE id='old'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(revision.is_none());
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -42,6 +42,10 @@ async fn main() -> Result<()> {
         );
         tokio::fs::remove_dir_all(sessions).await?;
     }
+    let staging = x_archive::config::safe_path(&app.data, ".staging").await?;
+    if staging.exists() {
+        tokio::fs::remove_dir_all(staging).await?;
+    }
     app.store.recover().await?;
     let scheduler = worker::start(app.clone()).await?;
     let listener = tokio::net::TcpListener::bind(bind).await?;

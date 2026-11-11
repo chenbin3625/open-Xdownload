@@ -35,10 +35,12 @@ test("all pages load from the real API without overflow or script errors", async
   for (const [path, title] of [
     ["/", "归档概览"],
     ["/users", "用户归档"],
+    ["/archives", "归档任务"],
     ["/relationships", "关注关系"],
     ["/tweets", "推文归档"],
     ["/media", "媒体库"],
     ["/tasks", "下载任务"],
+    ["/schedules", "归档任务"],
     ["/settings", "设置"],
   ]) {
     await page.goto(path);

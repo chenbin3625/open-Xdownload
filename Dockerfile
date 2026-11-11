@@ -33,7 +33,7 @@ ARG YT_DLP_VERSION=2025.10.14
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates python3 python3-venv ffmpeg tini gosu \
     && python3 -m venv /opt/download-tools \
-    && /opt/download-tools/bin/pip install --no-cache-dir "gallery-dl==$GALLERY_DL_VERSION" "yt-dlp==$YT_DLP_VERSION" \
+    && /opt/download-tools/bin/pip install --no-cache-dir "gallery-dl==$GALLERY_DL_VERSION" "yt-dlp==$YT_DLP_VERSION" "PySocks==1.7.1" \
     && groupadd --gid 10001 archive && useradd --uid 10001 --gid archive --no-create-home --home-dir /config archive \
     && mkdir /data /config && chown archive:archive /data /config && chmod 700 /data /config \
     && rm -rf /var/lib/apt/lists/*

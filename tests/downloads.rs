@@ -183,3 +183,104 @@ async fn downloads_separate_users_with_default_and_custom_media_roots() {
         .unwrap();
     assert_eq!(ready, 12);
 }
+
+#[tokio::test]
+async fn failed_and_cancelled_downloads_remove_partial_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        directory.path().join("data"),
+        directory.path().join("config"),
+        None,
+    )
+    .await
+    .unwrap();
+    app.gallery_dl = format!("{}/tests/fixtures/gallery.py", env!("CARGO_MANIFEST_DIR"));
+    app.client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(20))
+        .build()
+        .unwrap();
+    private_write(&app.config.join("cookies.txt"), b"OFFLINE_FIXTURE_COOKIE")
+        .await
+        .unwrap();
+    for (index, mode) in ["fail", "invalid-image", "cancel"].into_iter().enumerate() {
+        app.store
+            .ingest(&[ExtractedTweet {
+                id: index.to_string(),
+                author: "archive_test".into(),
+                author_name: "Archive Test".into(),
+                text: "cleanup fixture".into(),
+                published_at: "2026-11-10T12:00:00Z".into(),
+                media: vec![ExtractedMedia {
+                    ordinal: 1,
+                    kind: "image".into(),
+                    extension: "png".into(),
+                    url: "https://pbs.twimg.com/media/fixture.png".into(),
+                }],
+            }])
+            .await
+            .unwrap();
+        let media: String = sqlx::query_scalar("SELECT id FROM media WHERE tweet_id=?")
+            .bind(index.to_string())
+            .fetch_one(&app.store.pool)
+            .await
+            .unwrap();
+        let task = app
+            .store
+            .queue_download(&media, "cleanup fixture")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET max_attempts=1 WHERE id=?")
+            .bind(&task.id)
+            .execute(&app.store.pool)
+            .await
+            .unwrap();
+        assert!(app.store.claim(&task.id).await.unwrap());
+        let task = sqlx::query_as("SELECT * FROM tasks WHERE id=?")
+            .bind(&task.id)
+            .fetch_one(&app.store.pool)
+            .await
+            .unwrap();
+        tokio::fs::write(app.config.join("download-mode"), mode)
+            .await
+            .unwrap();
+        let worker_app = app.clone();
+        let execution = tokio::spawn(async move { worker::execute(&worker_app, &task).await });
+        if mode == "cancel" {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !app.config.join("download-started").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            sqlx::query("UPDATE tasks SET status='cancelling' WHERE kind='download' AND target=? AND status='running'")
+                .bind(&media).execute(&app.store.pool).await.unwrap();
+        }
+        execution.await.unwrap().unwrap();
+        let (id, status): (String, String) =
+            sqlx::query_as("SELECT id,status FROM tasks WHERE kind='download' AND target=?")
+                .bind(&media)
+                .fetch_one(&app.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status,
+            if mode == "cancel" {
+                "cancelled"
+            } else {
+                "failed"
+            }
+        );
+        assert!(
+            !app.data.join(".staging").join(&id).exists(),
+            "{mode} left staging files"
+        );
+        let retry = app
+            .store
+            .queue_download(&media, "manual retry")
+            .await
+            .unwrap();
+        assert_ne!(retry.id, id);
+        assert!(!app.data.join(".staging").join(id).exists());
+    }
+}

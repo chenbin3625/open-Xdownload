@@ -1,7 +1,9 @@
 pub mod api;
 pub mod app;
+pub mod automation;
 pub mod config;
 pub mod domain;
+pub mod sessions;
 pub mod store;
 pub mod tools;
 pub mod worker;

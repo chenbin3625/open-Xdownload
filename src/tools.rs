@@ -19,10 +19,11 @@ impl Drop for CookieLease {
     }
 }
 pub async fn session_cookie(app: &App) -> Result<CookieLease> {
+    session_cookie_for(app, None).await
+}
+pub async fn session_cookie_for(app: &App, task: Option<&str>) -> Result<CookieLease> {
     let _guard = app.config_gate.lock().await;
-    let bytes = tokio::fs::read(app.config.join("cookies.txt"))
-        .await
-        .context("尚未设置 Cookie，请先在设置中填写自己的 X 登录 Cookie")?;
+    let bytes = crate::sessions::content(app, task).await?;
     let directory = app.config.join(".sessions");
     private_dir(&directory).await?;
     let path = directory.join(format!("{}.txt", uuid::Uuid::new_v4()));
@@ -73,7 +74,23 @@ pub async fn run(
     args: &[String],
     timeout: Duration,
 ) -> Result<ToolOutput> {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    if binary == app.gallery_dl || binary == app.yt_dlp {
+        let proxy = app.settings.read().await.proxy_url.clone();
+        if !proxy.is_empty() {
+            command.args(["--proxy", &proxy]);
+            command
+                .env("HTTP_PROXY", &proxy)
+                .env("HTTPS_PROXY", &proxy)
+                .env("ALL_PROXY", &proxy)
+                .env("http_proxy", &proxy)
+                .env("https_proxy", &proxy)
+                .env("all_proxy", &proxy)
+                .env("NO_PROXY", "")
+                .env("no_proxy", "");
+        }
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -148,7 +165,7 @@ pub fn gallery_args(cookie: &std::path::Path) -> Vec<String> {
         "-o",
         "extractor.twitter.quoted=false",
         "-o",
-        "extractor.twitter.rate-limit=abort",
+        "extractor.twitter.ratelimit=abort",
         "-o",
         "extractor.twitter.cookies-update=false",
     ]
@@ -164,11 +181,7 @@ pub async fn extract(
     since: Option<&str>,
     limit: bool,
 ) -> Result<ToolOutput> {
-    ensure!(
-        app.config.join("cookies.txt").exists(),
-        "尚未设置 Cookie，请先在设置中填写自己的 X 登录 Cookie"
-    );
-    let cookie = session_cookie(app).await?;
+    let cookie = session_cookie_for(app, Some(task)).await?;
     let mut args = gallery_args(&cookie.0);
     args.push("--dump-json".into());
     if let Some(date) = since {

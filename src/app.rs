@@ -35,6 +35,7 @@ pub struct App {
     pub settings: Arc<RwLock<Settings>>,
     pub cookie: Arc<RwLock<CookieStatus>>,
     pub config_gate: Arc<Mutex<()>>,
+    pub rotation: Arc<Mutex<crate::sessions::Rotation>>,
     pub client: reqwest::Client,
     pub password: Option<String>,
     pub session_token: String,
@@ -81,6 +82,7 @@ impl App {
             settings: Arc::new(RwLock::new(settings)),
             cookie: Arc::new(RwLock::new(cookie)),
             config_gate: Arc::new(Mutex::new(())),
+            rotation: Arc::new(Mutex::new(crate::sessions::Rotation::default())),
             client,
             password,
             session_token: format!(

@@ -75,6 +75,29 @@ pub fn tweet_id(input: &str) -> Result<String> {
     Ok(id.to_string())
 }
 
+pub fn list_id(input: &str) -> Result<String> {
+    let value = if input.contains("://") {
+        let url = x_url(input)?;
+        let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+        ensure!(
+            parts.len() == 3 && parts[..2] == ["i", "lists"],
+            "请输入 X 列表链接"
+        );
+        parts[2].to_string()
+    } else {
+        input.trim().to_string()
+    };
+    ensure!(
+        !value.is_empty() && value.len() <= 20 && value.bytes().all(|c| c.is_ascii_digit()),
+        "列表 ID 无效"
+    );
+    let id = value
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("列表 ID 无效"))?;
+    ensure!(id > 0, "列表 ID 无效");
+    Ok(id.to_string())
+}
+
 pub fn cookies_from_header(input: &str) -> Result<String> {
     ensure!(input.len() <= 1024 * 1024, "Cookie 内容不能超过 1 MB");
     ensure!(

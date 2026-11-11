@@ -29,6 +29,7 @@ pub struct Task {
     pub updated_at: String,
     pub parent_id: Option<String>,
     pub result_size: i64,
+    pub cookie_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

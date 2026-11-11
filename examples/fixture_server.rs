@@ -82,6 +82,12 @@ async fn phase(State(app): State<App>, Json(value): Json<Value>) -> Json<Value> 
     Json(json!({"ok":true}))
 }
 async fn reset(State(app): State<App>) -> Json<Value> {
+    sqlx::query("DELETE FROM schedules")
+        .execute(&app.store.pool)
+        .await
+        .unwrap();
+    let _ = tokio::fs::remove_file(app.config.join("cookie-pool.json")).await;
+    *app.rotation.lock().await = Default::default();
     sqlx::query("DELETE FROM tasks")
         .execute(&app.store.pool)
         .await

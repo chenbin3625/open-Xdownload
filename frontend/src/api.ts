@@ -11,6 +11,7 @@ export interface Settings {
   auto_download: boolean;
   relationship_sync_enabled: boolean;
   relationship_interval_minutes: number;
+  proxy_url: string;
 }
 export interface Storage {
   media_bytes: number;
@@ -79,6 +80,44 @@ export interface Task {
   available_at: string;
   parent_id: string | null;
   result_size: number;
+  cookie_id: string | null;
+}
+export type ArchiveKind = "user" | "tweet" | "list" | "following";
+export interface ArchiveTarget {
+  kind: ArchiveKind;
+  target: string;
+}
+export interface Schedule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  interval_minutes: number;
+  items: ArchiveTarget[];
+  last_run_at: string | null;
+  next_run_at: string;
+  last_task_ids: string[];
+}
+export interface PoolCookie {
+  id: string;
+  name: string;
+  enabled: boolean;
+  kinds: string[];
+  cooldown_until: string | null;
+  error: string | null;
+}
+export interface FailedTweet {
+  id: string;
+  task_id: string;
+  kind: string;
+  target: string;
+  tweet_id: string;
+  label: string;
+  error: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  available_at: string;
+  updated_at: string;
 }
 export interface TaskGroup extends Task {
   download_total: number;
@@ -163,7 +202,10 @@ export function params(
 export function bytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return "0 KB";
   const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.max(1, Math.min(Math.floor(Math.log(value) / Math.log(1024)), 4));
+  const i = Math.max(
+    1,
+    Math.min(Math.floor(Math.log(value) / Math.log(1024)), 4),
+  );
   return `${Number((value / 1024 ** i).toFixed(i > 1 ? 1 : 2))} ${units[i]}`;
 }
 export function date(value: string | null, short = false) {

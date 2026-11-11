@@ -2,7 +2,7 @@ use crate::app::App;
 use crate::{app::CookieStatus, config::safe_path, domain, store::Task, tools};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use tokio::fs;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
@@ -32,8 +32,15 @@ pub async fn start(app: App) -> Result<JobScheduler> {
 }
 
 pub async fn schedule(app: &App) -> Result<()> {
-    if !app.config.join("cookies.txt").exists() {
+    if !crate::sessions::available(app).await {
         return Ok(());
+    }
+    let due: Vec<String> = sqlx::query_scalar("SELECT id FROM schedules WHERE enabled=1 AND next_run_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+        .fetch_all(&app.store.pool).await?;
+    for id in due {
+        if let Err(error) = crate::automation::run_schedule(&app.store, &id, true).await {
+            tracing::error!(schedule=%id, %error, "scheduled archive failed");
+        }
     }
     let settings = app.settings.read().await.clone();
     let users: Vec<(String,String)> = sqlx::query_as("SELECT id,username FROM users u WHERE enabled=1 AND (julianday('now')-julianday(COALESCE((SELECT MAX(created_at) FROM tasks WHERE kind='sync' AND target=u.id),u.last_sync,u.created_at)))*1440>=COALESCE(u.sync_interval,?)")
@@ -70,44 +77,41 @@ pub async fn schedule(app: &App) -> Result<()> {
 
 async fn dispatch(app: &App) -> Result<()> {
     let settings = app.settings.read().await.clone();
-    if settings.auto_download && app.config.join("cookies.txt").exists() {
+    if settings.auto_download && crate::sessions::available(app).await {
         app.store.queue_automatic_downloads().await?;
     }
     let running:Vec<(String,i64)> = sqlx::query_as("SELECT CASE WHEN kind='download' THEN 'download' ELSE 'extract' END,COUNT(*) FROM tasks WHERE status IN ('running','cancelling') GROUP BY 1").fetch_all(&app.store.pool).await?;
-    let mut downloads = running
+    let downloads = running
         .iter()
         .find(|r| r.0 == "download")
         .map(|r| r.1)
         .unwrap_or(0);
-    let mut extracts = running
+    let extracts = running
         .iter()
         .find(|r| r.0 == "extract")
         .map(|r| r.1)
         .unwrap_or(0);
-    let queued:Vec<Task> = sqlx::query_as("SELECT * FROM tasks WHERE status='queued' AND available_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now') ORDER BY created_at LIMIT 64").fetch_all(&app.store.pool).await?;
-    for mut task in queued {
-        if task.kind == "download" {
-            if downloads >= i64::from(settings.download_concurrency) {
+    for (download, capacity) in [
+        (true, i64::from(settings.download_concurrency) - downloads),
+        (false, 1 - extracts),
+    ] {
+        if capacity <= 0 {
+            continue;
+        }
+        let queued: Vec<Task> = sqlx::query_as("SELECT * FROM tasks WHERE status='queued' AND (kind='download')=? AND available_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now') ORDER BY created_at,rowid LIMIT ?")
+            .bind(download).bind(capacity).fetch_all(&app.store.pool).await?;
+        for mut task in queued {
+            if !app.store.claim(&task.id).await? {
                 continue;
             }
-        } else if extracts >= 1 {
-            continue;
+            task.attempts += 1;
+            let app = app.clone();
+            tokio::spawn(async move {
+                if let Err(error) = execute(&app, &task).await {
+                    tracing::error!(task=%task.id,%error,"task status update failed");
+                }
+            });
         }
-        if !app.store.claim(&task.id).await? {
-            continue;
-        }
-        if task.kind == "download" {
-            downloads += 1;
-        } else {
-            extracts += 1;
-        }
-        task.attempts += 1;
-        let app = app.clone();
-        tokio::spawn(async move {
-            if let Err(error) = execute(&app, &task).await {
-                tracing::error!(task=%task.id,%error,"task status update failed");
-            }
-        });
     }
     Ok(())
 }
@@ -120,23 +124,44 @@ async fn progress(app: &App, task: &Task, percent: i64) -> Result<()> {
 
 pub async fn execute(app: &App, task: &Task) -> Result<()> {
     let session_revision = app.cookie.read().await.revision.clone();
-    let result = match task.kind.as_str() {
-        "tweet" => archive_tweet(app, task).await,
-        "sync" => sync(app, task).await,
-        "download" => download(app, task).await,
-        "relationships" => relationships(app, task).await,
-        "cookie_check" => cookie_check(app, task).await,
-        _ => Err(anyhow::anyhow!("未知任务类型")),
+    let result = match crate::sessions::assign(app, task).await {
+        Err(error) => Err(error),
+        Ok(()) => match task.kind.as_str() {
+            "tweet" => archive_tweet(app, task).await,
+            "sync" => sync(app, task).await,
+            "download" => download(app, task).await,
+            "relationships" => relationships(app, task).await,
+            "cookie_check" => cookie_check(app, task).await,
+            "list" | "following" => archive_members(app, task).await,
+            _ => Err(anyhow::anyhow!("未知任务类型")),
+        },
     };
     match result {
         Ok(result) => {
-            sqlx::query("UPDATE tasks SET status='succeeded',progress=100,result=?,result_size=CASE WHEN kind='download' THEN COALESCE((SELECT size FROM media WHERE id=tasks.target),0) ELSE result_size END,error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='running'")
-                .bind(result).bind(&task.id).execute(&app.store.pool).await?;
+            let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let updated = sqlx::query("UPDATE tasks SET status='succeeded',progress=100,result=?,result_size=CASE WHEN kind='download' THEN COALESCE((SELECT size FROM media WHERE id=tasks.target),0) ELSE result_size END,error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='running'")
+                .bind(result).bind(&task.id).execute(&mut *tx).await?;
+            if updated.rows_affected() == 1 {
+                sqlx::query("DELETE FROM failed_tweets WHERE kind=? AND target=?")
+                    .bind(&task.kind)
+                    .bind(&task.target)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
         }
         Err(error) => {
             // Every tool error has already been converted to a safe, user-facing reason.
             let reason = error.to_string();
-            if reason.contains("Cookie 无效") {
+            let waiting_pool = reason.starts_with("Cookie 池");
+            let credential_issue =
+                !waiting_pool && (reason.contains("Cookie 无效") || reason.contains("频率"));
+            let primary = if credential_issue {
+                crate::sessions::cool_down(app, task, &reason, Some(&session_revision)).await?
+            } else {
+                false
+            };
+            if reason.contains("Cookie 无效") && primary {
                 app.set_cookie_status(CookieStatus {
                     status: "invalid".into(),
                     reason: reason.clone(),
@@ -147,47 +172,109 @@ pub async fn execute(app: &App, task: &Task) -> Result<()> {
             }
             let auth_error =
                 reason.contains("Cookie") || reason.contains("无权") || reason.contains("不可访问");
+            let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
             let cancelled: bool = sqlx::query_scalar(
                 "SELECT status IN ('cancelled','cancelling') FROM tasks WHERE id=?",
             )
             .bind(&task.id)
-            .fetch_one(&app.store.pool)
+            .fetch_one(&mut *tx)
             .await?;
             let retry = !cancelled
-                && !auth_error
+                && (waiting_pool
+                    || !auth_error
+                    || (credential_issue && !crate::sessions::load(app).await?.is_empty()))
                 && task.kind != "cookie_check"
-                && task.attempts < task.max_attempts;
-            let delay = if reason.contains("频率") {
-                900
+                && (waiting_pool || task.attempts < task.max_attempts);
+            let delay = if waiting_pool {
+                30
             } else {
-                30_i64 * task.attempts.max(1)
+                retry_delay(task.attempts, reason.contains("频率"))
             };
             let available = (chrono::Utc::now() + chrono::Duration::seconds(delay))
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("UPDATE tasks SET status=?,error=?,available_at=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='running'")
-                .bind(if retry {"queued"} else {"failed"}).bind(&reason).bind(available).bind(&task.id).execute(&mut *tx).await?;
+            let updated = sqlx::query("UPDATE tasks SET status=?,error=?,available_at=?,attempts=MAX(attempts-?,0),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='running'")
+                .bind(if retry {"queued"} else {"failed"}).bind(&reason).bind(available).bind(i64::from(waiting_pool)).bind(&task.id).execute(&mut *tx).await?;
             if task.kind == "download" {
                 sqlx::query(
                     "UPDATE media SET status='failed',error=? WHERE id=? AND status!='ready'",
                 )
-                .bind(&reason)
+                .bind(if cancelled {
+                    "用户取消了下载，可手动重试"
+                } else {
+                    &reason
+                })
                 .bind(&task.target)
                 .execute(&mut *tx)
                 .await?;
             }
-            if task.kind == "sync" {
+            if updated.rows_affected() == 1 && task.kind == "sync" {
                 sqlx::query("UPDATE users SET last_error=? WHERE id=?")
                     .bind(&reason)
                     .bind(&task.target)
                     .execute(&mut *tx)
                     .await?;
             }
+            if updated.rows_affected() == 1
+                && !cancelled
+                && ["tweet", "download"].contains(&task.kind.as_str())
+            {
+                sqlx::query("INSERT INTO failed_tweets(id,task_id,kind,target,tweet_id,error) SELECT ?,?,?,?,CASE WHEN ?='tweet' THEN ? ELSE (SELECT tweet_id FROM media WHERE id=?) END,? WHERE ?='tweet' OR EXISTS(SELECT 1 FROM media WHERE id=?) ON CONFLICT(kind,target) DO UPDATE SET task_id=excluded.task_id,error=excluded.error,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+                    .bind(uuid::Uuid::new_v4().to_string()).bind(&task.id).bind(&task.kind).bind(&task.target)
+                    .bind(&task.kind).bind(&task.target).bind(&task.target).bind(&reason).bind(&task.kind).bind(&task.target).execute(&mut *tx).await?;
+            }
             tx.commit().await?;
         }
     }
     sqlx::query("UPDATE tasks SET status='cancelled',error='任务已取消',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='cancelling'").bind(&task.id).execute(&app.store.pool).await?;
     Ok(())
+}
+
+pub fn retry_delay(attempt: i64, limited: bool) -> i64 {
+    let base = if limited { 900 } else { 30 };
+    (base * 2_i64.pow(attempt.saturating_sub(1).clamp(0, 7) as u32)).min(3600)
+}
+
+async fn archive_members(app: &App, task: &Task) -> Result<String> {
+    progress(app, task, 5).await?;
+    let url = if task.kind == "list" {
+        format!(
+            "https://x.com/i/lists/{}/members",
+            domain::list_id(&task.target)?
+        )
+    } else {
+        format!(
+            "https://x.com/{}/following",
+            domain::username(&task.target)?
+        )
+    };
+    let output = tools::extract(app, &task.id, &url, None, false).await?;
+    let members = tools::relationship_members(&output.stdout)?;
+    let mut count = 0;
+    for chunk in members.chunks(200) {
+        progress(app, task, 20 + (count * 65 / members.len().max(1)) as i64).await?;
+        let items: Vec<_> = chunk
+            .iter()
+            .map(|(_, name, _)| crate::automation::ArchiveTarget {
+                kind: "user".into(),
+                target: name.clone(),
+            })
+            .collect();
+        let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let running: bool = sqlx::query_scalar("SELECT status='running' FROM tasks WHERE id=?")
+            .bind(&task.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(running, "任务已取消");
+        crate::automation::queue_targets(&mut tx, &items).await?;
+        tx.commit().await?;
+        count += chunk.len();
+    }
+    if let Some(reason) = output.failure() {
+        bail!("已为 {count} 名成员创建归档任务，成员抓取未完整结束：{reason}");
+    }
+    Ok(format!(
+        "已读取 {count} 名成员并加入用户归档队列，媒体将按下载设置保存"
+    ))
 }
 
 async fn archive_tweet(app: &App, task: &Task) -> Result<String> {
@@ -224,12 +311,13 @@ async fn archive_tweet(app: &App, task: &Task) -> Result<String> {
 }
 
 async fn sync(app: &App, task: &Task) -> Result<String> {
-    let username: Option<String> =
-        sqlx::query_scalar("SELECT username FROM users WHERE id=? AND enabled=1")
+    let user: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT username,sync_cursor FROM users WHERE id=? AND enabled=1")
             .bind(&task.target)
             .fetch_optional(&app.store.pool)
             .await?;
-    let username = username.context("用户不存在或已暂停")?;
+    let (username, cursor) = user.context("用户不存在或已暂停")?;
+    let started_at = chrono::Utc::now().to_rfc3339();
     progress(app, task, 5).await?;
     let info = tools::extract(
         app,
@@ -248,13 +336,9 @@ async fn sync(app: &App, task: &Task) -> Result<String> {
         .bind(&task.target)
         .execute(&app.store.pool)
         .await?;
-    let newest: Option<String> =
-        sqlx::query_scalar("SELECT MAX(published_at) FROM tweets WHERE user_id=?")
-            .bind(&task.target)
-            .fetch_one(&app.store.pool)
-            .await?;
-    // A two-day overlap catches pinned posts, pagination changes, and delayed media.
-    let since = newest
+    // Only a completed timeline pass may advance the cursor; imports and partial
+    // results do not establish historical coverage.
+    let since = cursor
         .as_deref()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|d| (d - chrono::Duration::days(2)).to_rfc3339());
@@ -284,7 +368,8 @@ async fn sync(app: &App, task: &Task) -> Result<String> {
             own.len()
         );
     }
-    sqlx::query("UPDATE users SET last_sync=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_error=NULL WHERE id=?").bind(&task.target).execute(&app.store.pool).await?;
+    sqlx::query("UPDATE users SET last_sync=strftime('%Y-%m-%dT%H:%M:%fZ','now'),sync_cursor=?,last_error=NULL WHERE id=? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND status='running')")
+        .bind(started_at).bind(&task.target).bind(&task.id).execute(&app.store.pool).await?;
     Ok(format!(
         "读取 {} 条当前会话可访问的推文，新增 {inserted} 条，重复内容已跳过",
         own.len()
@@ -366,19 +451,21 @@ async fn relationships(app: &App, task: &Task) -> Result<String> {
         .await?;
         let members = tools::relationship_members(&output.stdout)?;
         let error = output.failure().map(str::to_string);
-        let after = tools::extract(
-            app,
-            &task.id,
-            &format!("https://x.com/{username}/info"),
-            None,
-            false,
-        )
-        .await;
-        let after_profile = after
-            .as_ref()
+        let after_profile = if error.is_none() {
+            tools::extract(
+                app,
+                &task.id,
+                &format!("https://x.com/{username}/info"),
+                None,
+                false,
+            )
+            .await
             .ok()
             .filter(|o| o.failure().is_none())
-            .and_then(|o| tools::profile(&o.stdout).ok());
+            .and_then(|o| tools::profile(&o.stdout).ok())
+        } else {
+            None
+        };
         let after_count = after_profile.as_ref().and_then(|p| p[field].as_u64());
         let identity_matches = after_profile
             .as_ref()
@@ -457,6 +544,17 @@ async fn relationships(app: &App, task: &Task) -> Result<String> {
 }
 
 async fn download(app: &App, task: &Task) -> Result<String> {
+    let staging = safe_path(&app.data, &format!(".staging/{}", task.id)).await?;
+    let result = download_media(app, task, &staging).await;
+    if let Err(error) = fs::remove_dir_all(&staging).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(task=%task.id, %error, "download staging cleanup failed");
+    }
+    result
+}
+
+async fn download_media(app: &App, task: &Task, staging: &Path) -> Result<String> {
     let row:Option<(String,String,String,String,String,i64,String)>=sqlx::query_as("SELECT m.kind,m.remote_url,m.extension,m.tweet_id,t.author,m.ordinal,m.status FROM media m JOIN tweets t ON t.id=m.tweet_id WHERE m.id=?").bind(&task.target).fetch_optional(&app.store.pool).await?;
     let (kind, url, extension, tweet_id, author, ordinal, status) =
         row.context("媒体记录不存在")?;
@@ -470,7 +568,17 @@ async fn download(app: &App, task: &Task) -> Result<String> {
         free > 128 * 1024 * 1024,
         "数据目录可用空间不足 128 MB，请清理磁盘后重试"
     );
-    if let Ok(response) = app.client.head(&url).send().await
+    let proxy = app.settings.read().await.proxy_url.clone();
+    let client = if proxy.is_empty() {
+        app.client.clone()
+    } else {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .proxy(reqwest::Proxy::all(&proxy).map_err(|_| anyhow::anyhow!("代理地址无效"))?)
+            .build()?
+    };
+    if let Ok(response) = client.head(&url).send().await
         && let Some(size) = response.content_length()
     {
         ensure!(
@@ -483,14 +591,12 @@ async fn download(app: &App, task: &Task) -> Result<String> {
         .bind(&task.target)
         .execute(&app.store.pool)
         .await?;
-    let relative = format!(".staging/{}", task.id);
-    let staging = safe_path(&app.data, &relative).await?;
     if staging.exists() {
-        fs::remove_dir_all(&staging).await?;
+        fs::remove_dir_all(staging).await?;
     }
-    fs::create_dir_all(&staging).await?;
+    fs::create_dir_all(staging).await?;
     let is_image = kind == "image" || extension == "gif";
-    let cookie = tools::session_cookie(app).await?;
+    let cookie = tools::session_cookie_for(app, Some(&task.id)).await?;
     let output = if is_image {
         let mut args = tools::gallery_args(&cookie.0);
         args.extend([
@@ -537,7 +643,7 @@ async fn download(app: &App, task: &Task) -> Result<String> {
     };
     tools::ensure_success(&output)?;
     progress(app, task, 70).await?;
-    let mut entries = fs::read_dir(&staging).await?;
+    let mut entries = fs::read_dir(staging).await?;
     let mut source = None;
     while let Some(entry) = entries.next_entry().await? {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -686,6 +792,64 @@ async fn download(app: &App, task: &Task) -> Result<String> {
     fs::rename(thumb_temp, thumbnail).await?;
     sqlx::query("UPDATE media SET status='ready',error=NULL,file_path=?,thumbnail_path=?,extension=?,size=?,width=?,height=?,duration=? WHERE id=?")
         .bind(final_relative).bind(thumbnail_relative).bind(ext).bind(size).bind(width).bind(height).bind(duration).bind(&task.target).execute(&app.store.pool).await?;
-    let _ = fs::remove_dir_all(staging).await;
     Ok("已下载并生成预览".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_fills_both_task_classes_beyond_the_old_prefetch_window() {
+        for (first, last) in [("sync", "download"), ("download", "sync")] {
+            let directory = tempfile::tempdir().unwrap();
+            let app = App::new(
+                directory.path().join("data"),
+                directory.path().join("config"),
+                None,
+            )
+            .await
+            .unwrap();
+            app.settings.write().await.auto_download = false;
+            for index in 0..70 {
+                app.store
+                    .enqueue(first, &index.to_string(), "older tasks")
+                    .await
+                    .unwrap();
+            }
+            let target = app
+                .store
+                .enqueue(last, "last", "other task class")
+                .await
+                .unwrap();
+            dispatch(&app).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let error: Option<String> =
+                        sqlx::query_scalar("SELECT error FROM tasks WHERE id=?")
+                            .bind(&target.id)
+                            .fetch_one(&app.store.pool)
+                            .await
+                            .unwrap();
+                    let running: i64 =
+                        sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status='running'")
+                            .fetch_one(&app.store.pool)
+                            .await
+                            .unwrap();
+                    if error.is_some() && running == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let dispatched: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE error IS NOT NULL")
+                    .fetch_one(&app.store.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(dispatched, if first == "download" { 4 } else { 2 });
+        }
+    }
 }

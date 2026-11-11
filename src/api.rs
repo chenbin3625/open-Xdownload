@@ -1,7 +1,8 @@
 use crate::{
     app::{App, CookieStatus},
+    automation::{self, ArchiveTarget, Schedule},
     config::{Settings, private_write, safe_path},
-    domain,
+    domain, sessions,
     store::Task,
     tools,
 };
@@ -154,6 +155,26 @@ pub fn router(app: App) -> Router {
             get(cookies).post(save_cookies).delete(delete_cookies),
         )
         .route("/api/cookies/check", post(check_cookies))
+        .route("/api/cookie-pool", get(cookie_pool).post(add_pool_cookie))
+        .route(
+            "/api/cookie-pool/{id}",
+            axum::routing::put(update_pool_cookie).delete(delete_pool_cookie),
+        )
+        .route("/api/archives/batch", post(batch_archive))
+        .route("/api/schedules", get(list_schedules).post(create_schedule))
+        .route(
+            "/api/schedules/{id}",
+            axum::routing::put(edit_schedule)
+                .patch(toggle_schedule)
+                .delete(delete_schedule),
+        )
+        .route("/api/schedules/{id}/run", post(run_schedule))
+        .route("/api/failed-tweets", get(failed_tweets))
+        .route("/api/failed-tweets/{id}/retry", post(retry_failed_tweet))
+        .route(
+            "/api/failed-tweets/{id}",
+            axum::routing::delete(dismiss_failed_tweet),
+        )
         .route("/api/users", get(users).post(add_user))
         .route(
             "/api/users/{id}",
@@ -236,15 +257,34 @@ async fn dashboard(State(app): State<App>) -> Result<Json<Value>> {
 }
 async fn settings(State(app): State<App>) -> Json<Value> {
     Json(
-        json!({"settings":app.settings.read().await.clone(),"cookie":app.cookie.read().await.clone(),"tools":tools::versions(&app).await,"storage":storage(&app).await}),
+        json!({"settings":app.settings.read().await.redacted(),"cookie":app.cookie.read().await.clone(),"tools":tools::versions(&app).await,"storage":storage(&app).await}),
     )
 }
 async fn save_settings(
     State(app): State<App>,
-    Json(value): Json<Settings>,
+    Json(mut value): Json<Settings>,
 ) -> Result<Json<Settings>> {
-    value.validate()?;
     let _guard = app.config_gate.lock().await;
+    if let Ok(mut proxy) = url::Url::parse(&value.proxy_url)
+        && proxy.username() == "********"
+    {
+        let stored = app.settings.read().await.proxy_url.clone();
+        let old = url::Url::parse(&stored).map_err(|_| bad("请重新填写代理认证信息"))?;
+        if proxy.scheme() != old.scheme()
+            || proxy.host_str() != old.host_str()
+            || proxy.port_or_known_default() != old.port_or_known_default()
+        {
+            return Err(bad("代理地址已变化，请重新填写代理认证信息"));
+        }
+        proxy
+            .set_username(old.username())
+            .map_err(|_| bad("代理地址无效"))?;
+        proxy
+            .set_password(old.password())
+            .map_err(|_| bad("代理地址无效"))?;
+        value.proxy_url = proxy.to_string();
+    }
+    value.validate()?;
     for dir in [&value.image_path, &value.video_path] {
         let path = safe_path(&app.data, dir).await?;
         tokio::fs::create_dir_all(path)
@@ -257,7 +297,7 @@ async fn save_settings(
     )
     .await?;
     *app.settings.write().await = value.clone();
-    Ok(Json(value))
+    Ok(Json(value.redacted()))
 }
 async fn cookies(State(app): State<App>) -> Json<CookieStatus> {
     Json(app.cookie.read().await.clone())
@@ -281,6 +321,7 @@ async fn save_cookies(
         checked_at: None,
         revision: revision.clone(),
     };
+    app.rotation.lock().await.cooldowns.remove("primary");
     let task = app
         .store
         .enqueue("cookie_check", &revision, "检测 Cookie")
@@ -297,6 +338,10 @@ async fn delete_cookies(State(app): State<App>) -> Result<Json<Value>> {
             .map_err(anyhow::Error::from)?;
     }
     *app.cookie.write().await = CookieStatus::default();
+    app.rotation.lock().await.cooldowns.remove("primary");
+    if sessions::available(&app).await {
+        return Ok(Json(json!({"ok":true})));
+    }
     let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE media SET status='failed',error='Cookie 已删除，下载已取消' WHERE status!='ready' AND id IN (SELECT target FROM tasks WHERE kind='download' AND status='queued')").execute(&mut *tx).await?;
     sqlx::query("UPDATE tasks SET status=CASE WHEN status='running' THEN 'cancelling' ELSE 'cancelled' END,error='Cookie 已删除',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status IN ('queued','running')").execute(&mut *tx).await?;
@@ -304,13 +349,15 @@ async fn delete_cookies(State(app): State<App>) -> Result<Json<Value>> {
     Ok(Json(json!({"ok":true})))
 }
 async fn require_cookie(app: &App) -> Result<()> {
-    if !app.config.join("cookies.txt").exists() {
+    if !sessions::available(app).await {
         return Err(bad("请先在设置中填写 X 登录 Cookie"));
     }
     Ok(())
 }
 async fn check_cookies(State(app): State<App>) -> Result<Json<Task>> {
-    require_cookie(&app).await?;
+    if !app.config.join("cookies.txt").exists() {
+        return Err(bad("请先设置主 Cookie"));
+    }
     Ok(Json(
         app.store
             .enqueue(
@@ -320,6 +367,198 @@ async fn check_cookies(State(app): State<App>) -> Result<Json<Task>> {
             )
             .await?,
     ))
+}
+
+async fn cookie_pool(State(app): State<App>) -> Result<Json<Value>> {
+    Ok(Json(sessions::list(&app).await?))
+}
+async fn add_pool_cookie(
+    State(app): State<App>,
+    Json(input): Json<sessions::CookieInput>,
+) -> Result<Json<Value>> {
+    Ok(Json(
+        json!({"id": sessions::save(&app, None, input).await?}),
+    ))
+}
+async fn update_pool_cookie(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<sessions::CookieInput>,
+) -> Result<Json<Value>> {
+    Ok(Json(
+        json!({"id": sessions::save(&app, Some(&id), input).await?}),
+    ))
+}
+async fn delete_pool_cookie(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>> {
+    sessions::delete(&app, &id).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchInput {
+    items: Vec<ArchiveTarget>,
+}
+async fn batch_archive(
+    State(app): State<App>,
+    Json(input): Json<BatchInput>,
+) -> Result<Json<Value>> {
+    require_cookie(&app).await?;
+    let tasks = automation::enqueue(&app.store, &input.items).await?;
+    Ok(Json(
+        json!({"tasks":tasks,"count":tasks.len(),"duplicates":input.items.len()-tasks.len()}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleInput {
+    name: String,
+    enabled: bool,
+    interval_minutes: i64,
+    items: Vec<ArchiveTarget>,
+}
+impl ScheduleInput {
+    fn validate(&self) -> Result<Vec<ArchiveTarget>> {
+        if self.name.trim().is_empty() || self.name.len() > 100 {
+            return Err(bad("计划名称应为 1 至 100 个字符"));
+        }
+        if !(5..=43200).contains(&self.interval_minutes) {
+            return Err(bad("计划间隔应在 5 至 43200 分钟之间"));
+        }
+        Ok(automation::normalize(&self.items)?)
+    }
+}
+async fn list_schedules(State(app): State<App>) -> Result<Json<Value>> {
+    let rows: Vec<Schedule> =
+        sqlx::query_as("SELECT * FROM schedules ORDER BY created_at DESC,id DESC")
+            .fetch_all(&app.store.pool)
+            .await?;
+    Ok(Json(Value::Array(
+        rows.iter()
+            .map(Schedule::value)
+            .collect::<anyhow::Result<_>>()?,
+    )))
+}
+async fn create_schedule(
+    State(app): State<App>,
+    Json(input): Json<ScheduleInput>,
+) -> Result<Json<Value>> {
+    let items = input.validate()?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let next = (chrono::Utc::now() + chrono::Duration::minutes(input.interval_minutes))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("INSERT INTO schedules(id,name,enabled,interval_minutes,items_json,next_run_at) VALUES(?,?,?,?,?,?)")
+        .bind(&id).bind(input.name.trim()).bind(input.enabled).bind(input.interval_minutes)
+        .bind(serde_json::to_string(&items).map_err(anyhow::Error::from)?).bind(next).execute(&app.store.pool).await?;
+    Ok(Json(json!({"id":id})))
+}
+async fn edit_schedule(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<ScheduleInput>,
+) -> Result<Json<Value>> {
+    let items = input.validate()?;
+    let result = sqlx::query("UPDATE schedules SET name=?,enabled=?,interval_minutes=?,items_json=?,next_run_at=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?")
+        .bind(input.name.trim()).bind(input.enabled).bind(input.interval_minutes)
+        .bind(serde_json::to_string(&items).map_err(anyhow::Error::from)?)
+        .bind((chrono::Utc::now() + chrono::Duration::minutes(input.interval_minutes)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .bind(id).execute(&app.store.pool).await?;
+    if result.rows_affected() == 0 {
+        return Err(missing());
+    }
+    Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleToggle {
+    enabled: bool,
+}
+async fn toggle_schedule(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<ScheduleToggle>,
+) -> Result<Json<Value>> {
+    let result = sqlx::query("UPDATE schedules SET enabled=?,next_run_at=CASE WHEN ?=1 THEN strftime('%Y-%m-%dT%H:%M:%fZ','now','+'||interval_minutes||' minutes') ELSE next_run_at END,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?")
+        .bind(input.enabled).bind(input.enabled).bind(id).execute(&app.store.pool).await?;
+    if result.rows_affected() == 0 {
+        return Err(missing());
+    }
+    Ok(Json(json!({"ok":true})))
+}
+async fn delete_schedule(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>> {
+    let result = sqlx::query("DELETE FROM schedules WHERE id=?")
+        .bind(id)
+        .execute(&app.store.pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(missing());
+    }
+    Ok(Json(json!({"ok":true})))
+}
+async fn run_schedule(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>> {
+    require_cookie(&app).await?;
+    let tasks = automation::run_schedule(&app.store, &id, false).await?;
+    Ok(Json(json!({"tasks":tasks})))
+}
+
+async fn failed_tweets(State(app): State<App>, Query(f): Query<Filters>) -> Result<Json<Value>> {
+    let (limit, offset) = pagination(&f);
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM failed_tweets")
+        .fetch_one(&app.store.pool)
+        .await?;
+    let rows = sqlx::query("SELECT f.*,t.label,t.status,t.attempts,t.max_attempts,t.available_at,t.cookie_id FROM failed_tweets f JOIN tasks t ON t.id=f.task_id ORDER BY f.updated_at DESC,f.id LIMIT ? OFFSET ?")
+        .bind(limit).bind(offset).fetch_all(&app.store.pool).await?;
+    let items: Vec<_> = rows.iter().map(|r| json!({
+        "id":r.get::<String,_>("id"),"task_id":r.get::<String,_>("task_id"),"kind":r.get::<String,_>("kind"),
+        "target":r.get::<String,_>("target"),"tweet_id":r.get::<String,_>("tweet_id"),"label":r.get::<String,_>("label"),
+        "error":r.get::<String,_>("error"),"status":r.get::<String,_>("status"),"attempts":r.get::<i64,_>("attempts"),
+        "max_attempts":r.get::<i64,_>("max_attempts"),"available_at":r.get::<String,_>("available_at"),
+        "updated_at":r.get::<String,_>("updated_at")
+    })).collect();
+    Ok(Json(
+        json!({"items":items,"total":total,"page":offset/limit+1,"limit":limit}),
+    ))
+}
+async fn retry_failed_tweet(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>> {
+    require_cookie(&app).await?;
+    let mut tx = app.store.pool.begin_with("BEGIN IMMEDIATE").await?;
+    let task: Task = sqlx::query_as(
+        "SELECT t.* FROM tasks t JOIN failed_tweets f ON f.task_id=t.id WHERE f.id=?",
+    )
+    .bind(&id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(missing)?;
+    if !["queued", "failed", "cancelled"].contains(&task.status.as_str()) {
+        return Err(bad("任务正在运行或已完成"));
+    }
+    let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE kind=? AND target=? AND id!=? AND status IN ('queued','running','cancelling'))")
+        .bind(&task.kind).bind(&task.target).bind(&task.id).fetch_one(&mut *tx).await?;
+    if active {
+        return Err(bad("此目标已有任务正在执行"));
+    }
+    sqlx::query("UPDATE tasks SET status='queued',attempts=0,progress=0,error=NULL,available_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?")
+        .bind(&task.id).execute(&mut *tx).await?;
+    if task.kind == "download" {
+        sqlx::query("UPDATE media SET status='pending',error=NULL WHERE id=? AND status!='ready'")
+            .bind(&task.target)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(Json(json!({"task_id":task.id})))
+}
+async fn dismiss_failed_tweet(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    let result = sqlx::query("DELETE FROM failed_tweets WHERE id=? AND task_id IN (SELECT id FROM tasks WHERE status IN ('failed','cancelled','succeeded'))")
+        .bind(id).execute(&app.store.pool).await?;
+    if result.rows_affected() == 0 {
+        return Err(bad("记录不存在或仍在重试中"));
+    }
+    Ok(Json(json!({"ok":true})))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -894,6 +1133,8 @@ async fn retry_task(State(app): State<App>, Path(id): Path<String>) -> Result<Js
             .enqueue(&task.kind, &task.target, &task.label)
             .await?
     };
+    sqlx::query("UPDATE failed_tweets SET task_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE kind=? AND target=?")
+        .bind(&new_task.id).bind(&new_task.kind).bind(&new_task.target).execute(&app.store.pool).await?;
     Ok(Json(new_task))
 }
 async fn cancel_task(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>> {

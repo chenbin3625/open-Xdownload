@@ -13,6 +13,7 @@ pub struct Settings {
     pub auto_download: bool,
     pub relationship_sync_enabled: bool,
     pub relationship_interval_minutes: u32,
+    pub proxy_url: String,
 }
 
 impl Default for Settings {
@@ -25,12 +26,37 @@ impl Default for Settings {
             auto_download: true,
             relationship_sync_enabled: false,
             relationship_interval_minutes: 1440,
+            proxy_url: String::new(),
         }
     }
 }
 
 impl Settings {
+    pub fn redacted(&self) -> Self {
+        let mut value = self.clone();
+        if let Ok(mut proxy) = url::Url::parse(&value.proxy_url)
+            && (!proxy.username().is_empty() || proxy.password().is_some())
+        {
+            let _ = proxy.set_username("********");
+            let _ = proxy.set_password(None);
+            value.proxy_url = proxy.to_string();
+        }
+        value
+    }
     pub fn validate(&self) -> Result<()> {
+        if !self.proxy_url.is_empty() {
+            let proxy =
+                url::Url::parse(&self.proxy_url).map_err(|_| anyhow::anyhow!("代理地址无效"))?;
+            ensure!(
+                self.proxy_url.len() <= 2048
+                    && matches!(proxy.scheme(), "http" | "https" | "socks5" | "socks5h")
+                    && proxy.host_str().is_some()
+                    && proxy.query().is_none()
+                    && proxy.fragment().is_none()
+                    && matches!(proxy.path(), "" | "/"),
+                "代理地址应为 HTTP、HTTPS 或 SOCKS5 地址"
+            );
+        }
         ensure!(
             (5..=43200).contains(&self.sync_interval_minutes),
             "同步间隔应在 5 至 43200 分钟之间"

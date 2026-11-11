@@ -1,4 +1,32 @@
-# 1.1.0 验证记录
+# 验证记录
+
+## 1.2.0 - 2026-11-11
+
+本地环境：Linux x86-64、Rust 1.99.1、Node.js 22.23.4，已安装 Python、FFmpeg / FFprobe 和 musl 工具链。GitHub Actions 使用 Node.js 24。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `npm --prefix frontend run build` | 通过；主 JS 包约 781 KB，有超过 500 KB 的非阻断提醒 |
+| `cargo fmt --all --check` | 通过 |
+| `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
+| `cargo test --locked` | 45 项通过，无失败 |
+| `cargo build --locked --release --target x86_64-unknown-linux-musl` | 通过；`file` 确认为 stripped static-pie ELF |
+| `scripts/smoke-binary.mjs`，版本参数 `1.2.0` | 通过；独立临时目录中的启动、版本、内嵌前端、鉴权、SQLite 初始化与中断下载暂存目录清理 |
+| `npm --prefix frontend run test:e2e` | 33 项通过，1 项按配置跳过，无失败 |
+
+新增后端覆盖批量目标、List / Following 成员展开、计划任务管理与到期认领、混合目标持久化、失效计划隔离、Cookie 轮换与冷却、凭据更新隔离、代理校验与脱敏、失败队列退避与恢复，以及单条导入和部分失败不推进独立同步游标。
+
+浏览器使用桌面 Chromium 与 iPhone 13 移动视口，覆盖归档、计划、Cookie 池、代理设置、失败队列、设置保存期间编辑、快照分页重置、导航、媒体筛选、长错误显示和响应式布局。跨尺寸测试在桌面项目中单独覆盖平板与窄屏，因此移动项目跳过该重复测试。移动测试是 Chromium 模拟，不是 iOS Safari 实机。
+
+本次没有使用有效个人 X Cookie。X 端提取与下载由离线工具契约替代，不能据此认定真实平台抓取、分页、权限或长期限流验证通过。媒体检查使用真实 Rust API、SQLite、图片处理、FFmpeg 和测试 PNG / H.264 文件。
+
+本地没有 Docker CLI / 守护进程。其他平台二进制与双架构容器由 `v1.2.0` 标签的发布流程构建、运行验证并打包，最终状态见 [Release 工作流](https://github.com/chenbin3625/x-archive/actions/workflows/release.yml) 与 [发布页](https://github.com/chenbin3625/x-archive/releases/tag/v1.2.0)。工作流配置存在不等于执行通过。
+
+升级前应停止服务并备份完整数据与配置。新增迁移包含自动化表、独立同步游标和任务凭据版本；旧用户需重新完成一次历史读取才能推进游标，已归档内容去重。
+
+---
+
+## 1.1.0 历史验证记录
 
 验证日期：2026-11-10（UTC）。本记录只列本次实际执行的结果；GitHub Actions 配置、离线测试和真实 X 会话验证分别记录。
 

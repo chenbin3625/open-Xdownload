@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   Link,
+  Navigate,
   NavLink,
   Route,
   Routes,
+  useLocation,
   useNavigate,
   useParams,
   useSearchParams,
@@ -19,6 +21,7 @@ import {
   Pagination,
   Progress,
   Select,
+  SideSheet,
   Spin,
   Switch,
   Tag,
@@ -34,6 +37,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  CalendarClock,
   Clock3,
   Download,
   ExternalLink,
@@ -46,13 +50,17 @@ import {
   LockKeyhole,
   LogOut,
   Maximize2,
+  Menu,
   Play,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
   Settings as SettingsIcon,
+  SlidersHorizontal,
   Tags,
   Trash2,
+  UserCheck,
   Users,
   Video,
   X,
@@ -73,6 +81,11 @@ import type {
   TaskGroup,
   Tweet,
   User,
+  ArchiveKind,
+  ArchiveTarget,
+  Schedule,
+  PoolCookie,
+  FailedTweet,
 } from "./api";
 import { useUI } from "./store";
 
@@ -101,9 +114,11 @@ function Status({ value }: { value: string }) {
     ? "green"
     : ["invalid", "failed"].includes(value)
       ? "red"
-      : ["partial", "limited", "unknown"].includes(value)
-        ? "orange"
-        : "grey";
+      : ["running", "downloading"].includes(value)
+        ? "blue"
+        : ["partial", "limited", "unknown"].includes(value)
+          ? "orange"
+          : "grey";
   return (
     <Tag color={color} size="small" shape="square">
       {statusNames[value] || value}
@@ -129,6 +144,7 @@ function IconButton({
         aria-label={label}
         className={active ? "active-icon" : ""}
         icon={icon}
+        type="tertiary"
         theme="borderless"
         size="small"
         disabled={disabled}
@@ -313,6 +329,8 @@ export default function App() {
 }
 
 function Shell({ canLogout }: { canLogout: boolean }) {
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const location = useLocation();
   const cookie = useApi<CookieStatus>("/cookies", 15000);
   const dashboard = useApi<Dashboard>("/dashboard", 5000);
   const setImportOpen = useUI((s) => s.setImportOpen);
@@ -321,31 +339,51 @@ function Shell({ canLogout }: { canLogout: boolean }) {
     "已退出",
   );
   const navigation = [
-    ["/", "首页", LayoutDashboard],
-    ["/users", "用户归档", Users],
-    ["/relationships", "关注关系", Users],
-    ["/tweets", "推文归档", Archive],
-    ["/media", "媒体库", Image],
-    ["/tasks", "下载任务", Download],
-    ["/settings", "设置", SettingsIcon],
+    {
+      label: "概览",
+      items: [["/", "首页", LayoutDashboard]],
+    },
+    {
+      label: "数据",
+      items: [
+        ["/users", "用户归档", Users],
+        ["/tweets", "推文", Archive],
+        ["/media", "媒体库", Image],
+        ["/relationships", "关注关系", UserCheck],
+      ],
+    },
+    {
+      label: "任务",
+      items: [
+        ["/archives", "归档任务", ListFilter],
+        ["/tasks", "下载任务", Download],
+      ],
+    },
+    {
+      label: "系统",
+      items: [["/settings", "设置", SettingsIcon]],
+    },
   ] as const;
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <Link className="brand" to="/">
-          <span className="brand-symbol">
-            X<span />
-          </span>
-          <span>
-            X Archive<small>个人归档空间</small>
-          </span>
-        </Link>
-        <nav aria-label="主导航">
-          {navigation.map(([path, label, Icon]) => (
+  useEffect(() => setNavigationOpen(false), [location.pathname]);
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 640px)");
+    const closeOnDesktop = () => {
+      if (!mobile.matches) setNavigationOpen(false);
+    };
+    mobile.addEventListener("change", closeOnDesktop);
+    return () => mobile.removeEventListener("change", closeOnDesktop);
+  }, []);
+  const navigationLinks = (
+    <nav aria-label="主导航">
+      {navigation.map((group) => (
+        <div className="nav-group" key={group.label}>
+          <span className="nav-group-label">{group.label}</span>
+          {group.items.map(([path, label, Icon]) => (
             <NavLink
               key={path}
               to={path}
               end={path === "/"}
+              onClick={() => setNavigationOpen(false)}
               className={({ isActive }) =>
                 isActive ? "nav-link selected" : "nav-link"
               }
@@ -357,7 +395,22 @@ function Shell({ canLogout }: { canLogout: boolean }) {
               )}
             </NavLink>
           ))}
-        </nav>
+        </div>
+      ))}
+    </nav>
+  );
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <Link className="brand" to="/">
+          <span className="brand-symbol">
+            X<span />
+          </span>
+          <span>
+            X Archive<small>个人归档空间</small>
+          </span>
+        </Link>
+        {navigationLinks}
         <div className="sidebar-bottom">
           <span className="connection-dot" />
           本地归档<span>V{version}</span>
@@ -365,6 +418,16 @@ function Shell({ canLogout }: { canLogout: boolean }) {
       </aside>
       <div className="workspace">
         <header className="topbar">
+          <div className="mobile-brand">
+            <Button
+              aria-label="打开导航"
+              aria-expanded={navigationOpen}
+              icon={<Menu size={20} />}
+              theme="borderless"
+              onClick={() => setNavigationOpen(true)}
+            />
+            <Link to="/">X Archive</Link>
+          </div>
           <span className="workspace-name">
             <FolderOpen size={16} /> 我的归档
           </span>
@@ -383,7 +446,7 @@ function Shell({ canLogout }: { canLogout: boolean }) {
               />
             )}
             <Button
-              theme="solid"
+              theme="light"
               icon={<Plus size={16} />}
               onClick={() => setImportOpen(true)}
             >
@@ -396,6 +459,8 @@ function Shell({ canLogout }: { canLogout: boolean }) {
             <Route path="/" element={<Home />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/users/:id" element={<UserDetail />} />
+            <Route path="/archives" element={<ArchivePage />} />
+            <Route path="/schedules" element={<Navigate to="/archives" replace />} />
             <Route path="/relationships" element={<RelationshipsPage />} />
             <Route path="/tweets" element={<TweetsPage />} />
             <Route path="/media" element={<MediaPage />} />
@@ -417,6 +482,17 @@ function Shell({ canLogout }: { canLogout: boolean }) {
           <span>你的内容，本地留存</span>
         </footer>
       </div>
+      <SideSheet
+        title="X Archive"
+        className="navigation-drawer"
+        placement="left"
+        width={280}
+        visible={navigationOpen}
+        closeOnEsc
+        onCancel={() => setNavigationOpen(false)}
+      >
+        {navigationLinks}
+      </SideSheet>
       <ImportModal />
     </div>
   );
@@ -512,7 +588,7 @@ function Home() {
           );
         })}
       </div>
-      <section className="section">
+      <section className="section recent-media-section">
         <div className="section-heading">
           <h2>最近归档</h2>
           <Link to="/media">
@@ -522,7 +598,7 @@ function Home() {
         {!media.data ? (
           <Loading query={media} />
         ) : media.data.items.length ? (
-          <MediaGrid items={media.data.items.slice(0, 8)} />
+          <MediaGrid items={media.data.items.slice(0, 4)} />
         ) : (
           <Empty
             icon={<Image size={36} />}
@@ -950,12 +1026,24 @@ function TweetsPage() {
         <Empty
           title="没有匹配的归档推文"
           action={
-            <Button
-              icon={<Plus size={16} />}
-              onClick={() => setImportOpen(true)}
-            >
-              导入推文
-            </Button>
+            sp.get("search") || sp.get("user") ? (
+              <Button
+                icon={<X size={16} />}
+                onClick={() => {
+                  setSearch("");
+                  setSp({});
+                }}
+              >
+                清除筛选
+              </Button>
+            ) : (
+              <Button
+                icon={<Plus size={16} />}
+                onClick={() => setImportOpen(true)}
+              >
+                导入推文
+              </Button>
+            )
           }
         />
       ) : (
@@ -1034,6 +1122,8 @@ function MediaPage({
   embedded?: boolean;
   userId?: string;
 }) {
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
   const [sp, setSp] = useSearchParams();
   const users = useApi<User[]>("/users");
   const tags = useApi<string[]>("/tags");
@@ -1041,6 +1131,9 @@ function MediaPage({
   const compact = useUI((s) => s.compact);
   const setCompact = useUI((s) => s.setCompact);
   const page = Number(sp.get("page") || 1);
+  const filterCount = ["user", "tag", "from", "to"].filter(
+    (key) => sp.has(key) && !(key === "user" && userId),
+  ).length;
   const q = useApi<Page<Media>>(
     `/media?${params({ page, limit: 48, user: userId || sp.get("user") || undefined, tweet: sp.get("tweet") || undefined, kind: kind || undefined, from: sp.get("from") || undefined, to: sp.get("to") || undefined, favorite: sp.get("favorite") || undefined, tag: sp.get("tag") || undefined })}`,
     5000,
@@ -1076,52 +1169,69 @@ function MediaPage({
             <button
               key={label}
               className={kind === value ? "chosen" : ""}
+              aria-pressed={kind === value}
               onClick={() => filter("kind", value)}
             >
               {label}
             </button>
           ))}
         </div>
-        {!userId && (
+        <Button
+          className="mobile-filter-toggle"
+          aria-label="媒体筛选"
+          aria-expanded={filtersOpen}
+          aria-controls={filtersId}
+          icon={<SlidersHorizontal size={16} />}
+          theme={filterCount ? "light" : "borderless"}
+          onClick={() => setFiltersOpen((open) => !open)}
+        >
+          筛选{filterCount > 0 ? ` (${filterCount})` : ""}
+        </Button>
+        <div
+          id={filtersId}
+          className={`media-filters${filtersOpen ? " is-open" : ""}`}
+        >
+          {!userId && (
+            <Select
+              aria-label="媒体用户"
+              value={sp.get("user") || ""}
+              optionList={[
+                { value: "", label: "全部用户" },
+                ...(users.data || []).map((u) => ({
+                  value: u.id,
+                  label: `@${u.username}`,
+                })),
+              ]}
+              onChange={(v) => filter("user", String(v))}
+              style={{ width: 160 }}
+            />
+          )}
           <Select
-            aria-label="媒体用户"
-            value={sp.get("user") || ""}
+            aria-label="标签筛选"
+            value={sp.get("tag") || ""}
             optionList={[
-              { value: "", label: "全部用户" },
-              ...(users.data || []).map((u) => ({
-                value: u.id,
-                label: `@${u.username}`,
-              })),
+              { value: "", label: "全部标签" },
+              ...(tags.data || []).map((t) => ({ value: t, label: t })),
             ]}
-            onChange={(v) => filter("user", String(v))}
-            style={{ width: 160 }}
+            onChange={(v) => filter("tag", String(v))}
+            style={{ width: 140 }}
           />
-        )}
-        <Select
-          aria-label="标签筛选"
-          value={sp.get("tag") || ""}
-          optionList={[
-            { value: "", label: "全部标签" },
-            ...(tags.data || []).map((t) => ({ value: t, label: t })),
-          ]}
-          onChange={(v) => filter("tag", String(v))}
-          style={{ width: 140 }}
-        />
-        <label className="date-filter">
-          <input
-            aria-label="开始日期"
-            type="date"
-            value={sp.get("from") || ""}
-            onChange={(e) => filter("from", e.target.value)}
-          />
-          <span>至</span>
-          <input
-            aria-label="结束日期"
-            type="date"
-            value={sp.get("to") || ""}
-            onChange={(e) => filter("to", e.target.value)}
-          />
-        </label>
+          <label className="date-filter">
+            <input
+              aria-label="开始日期"
+              type="date"
+              value={sp.get("from") || ""}
+              onChange={(e) => filter("from", e.target.value)}
+            />
+            <span>至</span>
+            <input
+              aria-label="结束日期"
+              type="date"
+              value={sp.get("to") || ""}
+              onChange={(e) => filter("to", e.target.value)}
+            />
+          </label>
+        </div>
         <Tooltip content="仅看收藏">
           <Button
             aria-label="仅看收藏"
@@ -1149,7 +1259,15 @@ function MediaPage({
       {!q.data ? (
         <Loading query={q} />
       ) : !q.data.items.length ? (
-        <Empty icon={<Image size={36} />} title="没有匹配的媒体" />
+        <Empty
+          icon={<Image size={36} />}
+          title="没有匹配的媒体"
+          action={sp.size > 0 ? (
+            <Button icon={<X size={16} />} onClick={() => setSp({})}>
+              清除筛选
+            </Button>
+          ) : undefined}
+        />
       ) : (
         <MediaGrid items={q.data.items} compact={compact} />
       )}
@@ -1612,7 +1730,460 @@ function MediaMetadata({ item: m }: { item: Media }) {
   );
 }
 
+const archiveKinds = [
+  { value: "auto", label: "混合目标" },
+  { value: "user", label: "用户归档" },
+  { value: "tweet", label: "推文链接" },
+  { value: "list", label: "列表归档" },
+  { value: "following", label: "关注者归档 · Following" },
+];
+const kindNames: Record<string, string> = {
+  user: "用户",
+  tweet: "推文",
+  list: "列表",
+  following: "关注者",
+  sync: "用户同步",
+  download: "媒体下载",
+  relationships: "关系快照",
+};
+function archiveItems(text: string, kind: string): ArchiveTarget[] {
+  return text
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((target) => {
+      const explicit =
+        kind === "auto" && target.match(/^(user|tweet|list|following)\s+(.+)$/);
+      const inferred = /\/status\//.test(target)
+        ? "tweet"
+        : /\/i\/lists\//.test(target) || /^\d+$/.test(target)
+          ? "list"
+          : "user";
+      return {
+        kind: (explicit
+          ? explicit[1]
+          : kind === "auto"
+            ? inferred
+            : kind) as ArchiveKind,
+        target: explicit ? explicit[2] : target,
+      };
+    });
+}
+function TargetEditor({
+  text,
+  kind,
+  onText,
+  onKind,
+  idPrefix = "archive",
+}: {
+  text: string;
+  kind: string;
+  onText: (value: string) => void;
+  onKind: (value: string) => void;
+  idPrefix?: string;
+}) {
+  const count = archiveItems(text, kind).length;
+  return (
+    <div className="archive-editor">
+      <label className="field-label" id={`${idPrefix}-kind-label`}>归档类型</label>
+      <Select
+        aria-labelledby={`${idPrefix}-kind-label`}
+        value={kind}
+        optionList={archiveKinds}
+        onSelect={(v) => onKind(String(v))}
+        onChange={(v) => onKind(String(v))}
+        style={{ width: "100%" }}
+      />
+      <label className="field-label" htmlFor={`${idPrefix}-targets`}>
+        归档目标 · 每行一个
+      </label>
+      <textarea
+        id={`${idPrefix}-targets`}
+        className="targets-input"
+        value={text}
+        onChange={(e) => onText(e.target.value)}
+        rows={9}
+        placeholder={
+          kind === "list"
+            ? "1234567890\nhttps://x.com/i/lists/..."
+            : kind === "following"
+              ? "@username\nhttps://x.com/username"
+              : kind === "tweet"
+                ? "https://x.com/username/status/..."
+                : "@username\nhttps://x.com/username/status/...\nhttps://x.com/i/lists/..."
+        }
+      />
+      <div className={count > 200 ? "error-text" : "muted"}>
+        {count} / 200 个目标
+      </div>
+    </div>
+  );
+}
+function ArchivePage() {
+  const [targetText, setTargetText] = useState("");
+  const [targetKind, setTargetKind] = useState("user");
+  const [result, setResult] = useState<{
+    count: number;
+    duplicates: number;
+  } | null>(null);
+  const cookie = useApi<CookieStatus>("/cookies");
+  const targets = archiveItems(targetText, targetKind);
+  const submit = useAction(async (targets: ArchiveTarget[]) => {
+    const result = await send<{ count: number; duplicates: number }>(
+      "/archives/batch",
+      { items: targets },
+    );
+    setResult(result);
+    setTargetText("");
+  }, "归档任务已加入队列");
+
+  const q = useApi<Schedule[]>("/schedules", 10000);
+  const [editing, setEditing] = useState<Schedule | "new" | null>(null);
+  const [name, setName] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [interval, setInterval] = useState(60);
+  const [kind, setKind] = useState("user");
+  const [text, setText] = useState("");
+  const items = archiveItems(text, kind);
+  const save = useAction(
+    () =>
+      send(
+        editing === "new"
+          ? "/schedules"
+          : `/schedules/${(editing as Schedule).id}`,
+        { name, enabled, interval_minutes: interval, items },
+        editing === "new" ? "POST" : "PUT",
+      ),
+    "计划已保存",
+  );
+  const toggle = useAction((s: Schedule) =>
+    send(`/schedules/${s.id}`, { enabled: !s.enabled }, "PATCH"),
+  );
+  const run = useAction(
+    (id: string) => send(`/schedules/${id}/run`),
+    "计划任务已排队",
+  );
+  const remove = useAction(
+    (id: string) => send(`/schedules/${id}`, undefined, "DELETE"),
+    "计划已删除",
+  );
+  function open(schedule: Schedule | "new") {
+    setEditing(schedule);
+    save.reset();
+    if (schedule === "new") {
+      setName("");
+      setEnabled(true);
+      setInterval(60);
+      setKind(targetKind);
+      setText(targetText);
+    } else {
+      setName(schedule.name);
+      setEnabled(schedule.enabled);
+      setInterval(schedule.interval_minutes);
+      const same =
+        schedule.items.length > 0 &&
+        schedule.items.every((i) => i.kind === schedule.items[0].kind);
+      setKind(same ? schedule.items[0].kind : "auto");
+      setText(
+        schedule.items
+          .map((i) => (same ? i.target : `${i.kind} ${i.target}`))
+          .join("\n"),
+      );
+    }
+  }
+  return (
+    <>
+      <PageTitle title="归档任务">
+        <Link to="/tasks">
+          <Button icon={<Download size={16} />}>查看任务</Button>
+        </Link>
+      </PageTitle>
+      <CookieNotice cookie={cookie.data} />
+      <section className="archive-form-section" aria-labelledby="quick-archive-title">
+        <h2 id="quick-archive-title">快速归档</h2>
+        <TargetEditor
+          text={targetText}
+          kind={targetKind}
+          onText={setTargetText}
+          onKind={setTargetKind}
+        />
+        {submit.error && <p className="error-text">{submit.error.message}</p>}
+        <div className="archive-actions">
+          <Button
+            theme="solid"
+            icon={<Archive size={16} />}
+            disabled={!targets.length || targets.length > 200 || editing !== null}
+            loading={submit.isPending}
+            onClick={() => submit.mutate(targets)}
+          >
+            立即归档
+          </Button>
+          <Button
+            icon={<CalendarClock size={16} />}
+            disabled={!targets.length || targets.length > 200 || submit.isPending}
+            onClick={() => open("new")}
+          >
+            保存为计划
+          </Button>
+        </div>
+        {result && (
+          <Banner
+            type="success"
+            description={`已加入 ${result.count} 个任务，跳过 ${result.duplicates} 个重复目标`}
+          />
+        )}
+      </section>
+      <section className="archive-schedules-section" aria-labelledby="schedules-title">
+        <div className="section-heading">
+          <h2 id="schedules-title">计划任务{q.data ? ` (${q.data.length})` : ""}</h2>
+          <Button
+            icon={<Plus size={16} />}
+            disabled={submit.isPending}
+            onClick={() => open("new")}
+          >
+            新建计划
+          </Button>
+        </div>
+        {!q.data ? (
+          <Loading query={q} />
+        ) : !q.data.length ? (
+          <Empty icon={<CalendarClock size={34} />} title="暂无计划任务" />
+        ) : (
+          <div className="table-wrap">
+            <table className="automation-table" aria-label="计划任务">
+              <thead>
+                <tr>
+                  <th>计划</th>
+                  <th>间隔 / 目标</th>
+                  <th>运行时间</th>
+                  <th>启用</th>
+                  <th className="right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {q.data.map((s) => (
+                  <tr key={s.id}>
+                    <td>
+                      <strong>{s.name}</strong>
+                      <small>
+                        {[...new Set(s.items.map((i) => kindNames[i.kind]))].join(
+                          "、",
+                        )}
+                      </small>
+                    </td>
+                    <td>
+                      每 {s.interval_minutes} 分钟
+                      <small>{s.items.length} 个目标</small>
+                    </td>
+                    <td>
+                      <small>
+                        上次：{s.last_run_at ? date(s.last_run_at) : "尚未运行"}
+                      </small>
+                      <small>
+                        下次：{s.enabled ? date(s.next_run_at) : "已禁用"}
+                      </small>
+                    </td>
+                    <td>
+                      <Switch
+                        aria-label={`启用 ${s.name}`}
+                        checked={s.enabled}
+                        disabled={toggle.isPending}
+                        onChange={() => toggle.mutate(s)}
+                      />
+                    </td>
+                    <td className="right">
+                      <div className="row-controls">
+                        <IconButton
+                          label={`立即运行 ${s.name}`}
+                          icon={<Play size={16} />}
+                          disabled={run.isPending}
+                          onClick={() => run.mutate(s.id)}
+                        />
+                        <IconButton
+                          label={`编辑 ${s.name}`}
+                          icon={<Pencil size={16} />}
+                          onClick={() => open(s)}
+                        />
+                        <IconButton
+                          label={`删除 ${s.name}`}
+                          icon={<Trash2 size={16} />}
+                          onClick={() =>
+                            Modal.confirm({
+                              title: `删除计划“${s.name}”？`,
+                              okText: "删除",
+                              okButtonProps: { "aria-label": "删除" },
+                              cancelText: "取消",
+                              onOk: () => remove.mutateAsync(s.id),
+                            })
+                          }
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+      <Modal
+        title={editing === "new" ? "新建计划" : "编辑计划"}
+        className="automation-modal"
+        visible={editing !== null}
+        width={600}
+        okText="保存计划"
+        cancelText="取消"
+        cancelButtonProps={{ "aria-label": "取消" }}
+        confirmLoading={save.isPending}
+        okButtonProps={{
+          "aria-label": "保存计划",
+          disabled:
+            !name.trim() ||
+            items.length < 1 || items.length > 200 ||
+            !Number.isInteger(interval) || interval < 5 || interval > 43200,
+        }}
+        onCancel={() => setEditing(null)}
+        onOk={() =>
+          void save
+            .mutateAsync()
+            .then(() => setEditing(null))
+            .catch(() => {})
+        }
+      >
+        <div className="automation-form">
+          <label className="field-label" htmlFor="schedule-name">
+            计划名称
+          </label>
+          <Input
+            id="schedule-name"
+            value={name}
+            onChange={setName}
+            maxLength={100}
+          />
+          <SettingRow label="运行间隔">
+            <InputNumber
+              aria-label="计划运行间隔"
+              value={interval}
+              min={5}
+              max={43200}
+              suffix="分钟"
+              onChange={(v) => setInterval(Number(v))}
+            />
+          </SettingRow>
+          <SettingRow label="启用计划">
+            <Switch
+              aria-label="启用计划"
+              checked={enabled}
+              onChange={setEnabled}
+            />
+          </SettingRow>
+          <TargetEditor
+            idPrefix="schedule"
+            text={text}
+            kind={kind}
+            onText={setText}
+            onKind={setKind}
+          />
+          {save.error && <p className="error-text">{save.error.message}</p>}
+        </div>
+      </Modal>
+    </>
+  );
+}
+function FailureDrawer({
+  visible,
+  onClose,
+}: {
+  visible: boolean;
+  onClose: () => void;
+}) {
+  const [page, setPage] = useState(1);
+  const q = useApi<Page<FailedTweet>>(
+    visible ? `/failed-tweets?page=${page}&limit=20` : null,
+    3000,
+  );
+  const retry = useAction(
+    (id: string) => send(`/failed-tweets/${id}/retry`),
+    "失败项已重新排队",
+  );
+  const dismiss = useAction(
+    (id: string) => send(`/failed-tweets/${id}`, undefined, "DELETE"),
+    "已移出失败队列",
+  );
+  useEffect(() => {
+    if (q.data && page > 1 && !q.data.items.length) setPage(page - 1);
+  }, [q.data, page]);
+  return (
+    <SideSheet
+      title={`失败推文队列${q.data ? ` · ${q.data.total}` : ""}`}
+      visible={visible}
+      onCancel={onClose}
+      width="min(680px, 100vw)"
+      keepDOM={false}
+    >
+      {!q.data ? (
+        <Loading query={q} />
+      ) : !q.data.items.length ? (
+        <Empty icon={<Check size={32} />} title="暂无失败推文" />
+      ) : (
+        <>
+          <div className="failure-list">
+            {q.data.items.map((t) => (
+              <article key={t.id} className="failure-row">
+                <div className="failure-heading">
+                  <strong>{t.label}</strong>
+                  <Status value={t.status} />
+                </div>
+                <a
+                  href={`https://x.com/i/web/status/${t.tweet_id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t.tweet_id} <ExternalLink size={12} />
+                </a>
+                <p className="error-text">{t.error}</p>
+                <div className="muted">
+                  {kindNames[t.kind]} · 尝试 {t.attempts} / {t.max_attempts}
+                </div>
+                <div className="failure-footer">
+                  <small>
+                    {t.status === "queued"
+                      ? `下次重试：${date(t.available_at)}`
+                      : `更新：${date(t.updated_at)}`}
+                  </small>
+                  <div className="row-controls">
+                    <IconButton
+                      label="立即重试失败项"
+                      icon={<RefreshCw size={16} />}
+                      disabled={
+                        retry.isPending ||
+                        !["queued", "failed", "cancelled"].includes(t.status)
+                      }
+                      onClick={() => retry.mutate(t.id)}
+                    />
+                    <IconButton
+                      label="移出失败队列"
+                      icon={<Trash2 size={16} />}
+                      disabled={
+                        dismiss.isPending ||
+                        !["failed", "cancelled", "succeeded"].includes(t.status)
+                      }
+                      onClick={() => dismiss.mutate(t.id)}
+                    />
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+          <Pager {...q.data} onChange={setPage} />
+        </>
+      )}
+    </SideSheet>
+  );
+}
 function TasksPage() {
+  const [failuresOpen, setFailuresOpen] = useState(false);
+  const failures = useApi<Page<FailedTweet>>("/failed-tweets?limit=1", 5000);
   const [sp, setSp] = useSearchParams();
   const status = sp.get("status") || "";
   const page = Number(sp.get("page") || 1);
@@ -1631,6 +2202,12 @@ function TasksPage() {
   return (
     <>
       <PageTitle title="下载任务" count={q.data?.total}>
+        <Button
+          icon={<CircleAlert size={16} />}
+          onClick={() => setFailuresOpen(true)}
+        >
+          失败队列{failures.data?.total ? ` (${failures.data.total})` : ""}
+        </Button>
         <IconButton
           label="刷新任务"
           icon={<RefreshCw size={17} />}
@@ -1684,15 +2261,22 @@ function TasksPage() {
                     <strong>{t.label}</strong>
                     <div className="task-facts">
                       <span>
-                        {({
-                          tweet: "推文归档",
-                          sync: "用户同步",
-                          relationships: "关系快照",
-                          cookie_check: "会话检测",
-                          download: t.download_total > 0 ? "媒体下载" : "手动下载",
-                        } as Record<string, string>)[t.kind] || t.kind}
+                        {(
+                          {
+                            tweet: "推文归档",
+                            sync: "用户同步",
+                            list: "列表归档",
+                            following: "关注者归档",
+                            relationships: "关系快照",
+                            cookie_check: "会话检测",
+                            download:
+                              t.download_total > 0 ? "媒体下载" : "手动下载",
+                          } as Record<string, string>
+                        )[t.kind] || t.kind}
                       </span>
-                      <span>尝试 {t.attempts} / {t.max_attempts}</span>
+                      <span>
+                        尝试 {t.attempts} / {t.max_attempts}
+                      </span>
                     </div>
                   </td>
                   <td className="task-status-cell">
@@ -1707,7 +2291,9 @@ function TasksPage() {
                   <td className="task-download-cell">
                     {t.download_total > 0 ? (
                       <>
-                        <span>{t.download_completed} / {t.download_total} 完成</span>
+                        <span>
+                          {t.download_completed} / {t.download_total} 完成
+                        </span>
                         <small>{bytes(t.download_size)}</small>
                       </>
                     ) : t.kind === "download" && t.result_size > 0 ? (
@@ -1718,24 +2304,44 @@ function TasksPage() {
                   </td>
                   <td className="task-result-cell">
                     {(t.error || t.download_error) && (
-                      <p className={t.status === "cancelled" ? "muted" : "task-error"}>
-                        {t.error || t.download_error}
+                      <div
+                        className={
+                          t.status === "cancelled" ? "muted" : "task-error"
+                        }
+                      >
+                        {(t.error || t.download_error || "").length > 100 ? (
+                          <details className="task-error-details">
+                            <summary>
+                              <span>{(t.error || t.download_error || "").slice(0, 80)}...</span>
+                              <ChevronRight size={14} />
+                            </summary>
+                            <p>{t.error || t.download_error}</p>
+                          </details>
+                        ) : (
+                          <p>{t.error || t.download_error}</p>
+                        )}
                         {t.status === "queued" && (
                           <span> · 下次尝试 {date(t.available_at, true)}</span>
                         )}
-                      </p>
+                      </div>
                     )}
                     {(t.download_failed > 0 || t.download_cancelled > 0) && (
                       <p className="task-error">
                         {[
-                          t.download_failed > 0 && `${t.download_failed} 个下载失败`,
-                          t.download_cancelled > 0 && `${t.download_cancelled} 个已取消`,
-                        ].filter(Boolean).join("，")}
+                          t.download_failed > 0 &&
+                            `${t.download_failed} 个下载失败`,
+                          t.download_cancelled > 0 &&
+                            `${t.download_cancelled} 个已取消`,
+                        ]
+                          .filter(Boolean)
+                          .join("，")}
                       </p>
                     )}
                     {t.result && (
                       <p className="task-result">
-                        {t.result.replace(/(\d+)\s*字节/g, (_, size: string) => bytes(Number(size)))}
+                        {t.result.replace(/(\d+)\s*字节/g, (_, size: string) =>
+                          bytes(Number(size)),
+                        )}
                       </p>
                     )}
                     {!t.result && !t.error && !t.download_error && (
@@ -1743,7 +2349,9 @@ function TasksPage() {
                     )}
                   </td>
                   <td className="task-time-cell">
-                    <time dateTime={t.created_at}>{date(t.created_at, true)}</time>
+                    <time dateTime={t.created_at}>
+                      {date(t.created_at, true)}
+                    </time>
                   </td>
                   <td className="task-controls">
                     {["failed", "cancelled"].includes(t.status) && (
@@ -1777,6 +2385,10 @@ function TasksPage() {
           }
         />
       )}
+      <FailureDrawer
+        visible={failuresOpen}
+        onClose={() => setFailuresOpen(false)}
+      />
     </>
   );
 }
@@ -1800,7 +2412,7 @@ function RelationshipsPage() {
   const [base, setBase] = useState("");
   const [compare, setCompare] = useState(false);
   const diff = useApi<{ added: Member[]; removed: Member[] }>(
-    compare && selected && base
+    compare && selected?.status === "complete" && base
       ? `/snapshots/${selected.id}/diff?base=${base}`
       : null,
   );
@@ -1810,10 +2422,12 @@ function RelationshipsPage() {
   );
   useEffect(() => {
     setSelected("");
+  }, [user, direction]);
+  useEffect(() => {
     setBase("");
     setCompare(false);
     setMemberPage(1);
-  }, [user, direction]);
+  }, [user, direction, selected?.id]);
   if (!users.data) return <Loading query={users} />;
   return (
     <>
@@ -1875,7 +2489,7 @@ function RelationshipsPage() {
               action={
                 <Button
                   icon={<Plus size={16} />}
-                  disabled={!users.data.find(u => u.id === user)?.enabled}
+                  disabled={!users.data.find((u) => u.id === user)?.enabled}
                   onClick={() => capture.mutate()}
                   loading={capture.isPending}
                 >
@@ -2032,13 +2646,221 @@ function MemberList({ members, title }: { members: Member[]; title?: string }) {
   );
 }
 
+function CookiePoolSettings() {
+  const q = useApi<PoolCookie[]>("/cookie-pool", 10000);
+  const [editing, setEditing] = useState<PoolCookie | "new" | null>(null);
+  const [name, setName] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [kinds, setKinds] = useState<string[]>([]);
+  const [auth, setAuth] = useState("");
+  const [csrf, setCsrf] = useState("");
+  const allKinds = [
+    "sync",
+    "tweet",
+    "list",
+    "following",
+    "relationships",
+    "download",
+  ];
+  const save = useAction(
+    () =>
+      send(
+        editing === "new"
+          ? "/cookie-pool"
+          : `/cookie-pool/${(editing as PoolCookie).id}`,
+        {
+          name,
+          enabled,
+          kinds,
+          cookie:
+            auth || csrf ? `auth_token=${auth.trim()}; ct0=${csrf.trim()}` : "",
+        },
+        editing === "new" ? "POST" : "PUT",
+      ),
+    "备用 Cookie 已保存",
+  );
+  const toggle = useAction((c: PoolCookie) =>
+    send(
+      `/cookie-pool/${c.id}`,
+      { name: c.name, enabled: !c.enabled, kinds: c.kinds },
+      "PUT",
+    ),
+  );
+  const remove = useAction(
+    (id: string) => send(`/cookie-pool/${id}`, undefined, "DELETE"),
+    "备用 Cookie 已删除",
+  );
+  function open(entry: PoolCookie | "new") {
+    setEditing(entry);
+    save.reset();
+    setAuth("");
+    setCsrf("");
+    setName(entry === "new" ? "" : entry.name);
+    setEnabled(entry === "new" ? true : entry.enabled);
+    setKinds(entry === "new" ? allKinds : entry.kinds);
+  }
+  return (
+    <section className="settings-section">
+      <div className="settings-section-title">
+        <LockKeyhole size={18} />
+        <h2>Cookie 池</h2>
+        <Button icon={<Plus size={15} />} onClick={() => open("new")}>
+          添加备用 Cookie
+        </Button>
+      </div>
+      {!q.data ? (
+        <Loading query={q} />
+      ) : !q.data.length ? (
+        <p className="muted">暂无备用 Cookie</p>
+      ) : (
+        <div className="pool-list">
+          {q.data.map((c) => (
+            <div className="pool-row" key={c.id}>
+              <div>
+                <strong>{c.name}</strong>
+                <small>{c.kinds.map((k) => kindNames[k]).join("、")}</small>
+                {c.cooldown_until && (
+                  <p className="error-text">
+                    {c.error}
+                    <small>冷却至 {date(c.cooldown_until)}</small>
+                  </p>
+                )}
+              </div>
+              <div className="row-controls">
+                <Switch
+                  aria-label={`启用 Cookie ${c.name}`}
+                  checked={c.enabled}
+                  disabled={toggle.isPending}
+                  onChange={() => toggle.mutate(c)}
+                />
+                <IconButton
+                  label={`编辑 Cookie ${c.name}`}
+                  icon={<Pencil size={15} />}
+                  onClick={() => open(c)}
+                />
+                <IconButton
+                  label={`删除 Cookie ${c.name}`}
+                  icon={<Trash2 size={15} />}
+                  onClick={() =>
+                    Modal.confirm({
+                      title: `删除备用 Cookie“${c.name}”？`,
+                      okText: "删除",
+                      okButtonProps: { "aria-label": "删除" },
+                      cancelText: "取消",
+                      onOk: () => remove.mutateAsync(c.id),
+                    })
+                  }
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <Modal
+        title={editing === "new" ? "添加备用 Cookie" : "编辑备用 Cookie"}
+        className="automation-modal"
+        visible={editing !== null}
+        width={540}
+        okText="保存 Cookie"
+        cancelText="取消"
+        confirmLoading={save.isPending}
+        okButtonProps={{
+          "aria-label": "保存 Cookie",
+          disabled:
+            !name.trim() ||
+            !kinds.length ||
+            (editing === "new" && (!auth.trim() || !csrf.trim())) ||
+            !!auth.trim() !== !!csrf.trim(),
+        }}
+        onCancel={() => {
+          setEditing(null);
+          setAuth("");
+          setCsrf("");
+        }}
+        onOk={() =>
+          void save
+            .mutateAsync()
+            .then(() => {
+              setEditing(null);
+              setAuth("");
+              setCsrf("");
+            })
+            .catch(() => {})
+        }
+      >
+        <div className="automation-form">
+          <label className="field-label" htmlFor="pool-name">
+            名称
+          </label>
+          <Input
+            id="pool-name"
+            value={name}
+            onChange={setName}
+            maxLength={100}
+          />
+          <label className="field-label" id="pool-kinds-label">任务类型</label>
+          <Select
+            aria-labelledby="pool-kinds-label"
+            multiple
+            value={kinds}
+            style={{ width: "100%" }}
+            optionList={allKinds.map((k) => ({
+              value: k,
+              label: kindNames[k],
+            }))}
+            onChange={(v) => setKinds(v as string[])}
+          />
+          <label className="field-label" htmlFor="pool-auth">
+            auth_token
+          </label>
+          <Input
+            id="pool-auth"
+            mode="password"
+            value={auth}
+            onChange={setAuth}
+            autoComplete="off"
+            placeholder={editing === "new" ? "auth_token" : "保留已保存的值"}
+          />
+          <label className="field-label" htmlFor="pool-csrf">
+            ct0
+          </label>
+          <Input
+            id="pool-csrf"
+            mode="password"
+            value={csrf}
+            onChange={setCsrf}
+            autoComplete="off"
+            placeholder={editing === "new" ? "ct0" : "保留已保存的值"}
+          />
+          <SettingRow label="启用 Cookie">
+            <Switch
+              aria-label="启用备用 Cookie"
+              checked={enabled}
+              onChange={setEnabled}
+            />
+          </SettingRow>
+          {save.error && <p className="error-text">{save.error.message}</p>}
+        </div>
+      </Modal>
+    </section>
+  );
+}
 function SettingsPage() {
+  const client = useQueryClient();
   const q = useApi<SettingsResponse>("/settings", 15000);
   const [authToken, setAuthToken] = useState("");
   const [ct0, setCt0] = useState("");
   const [draft, setDraft] = useState<Settings | null>(null);
   const [dirty, setDirty] = useState(false);
-  const save = useAction(() => send("/settings", draft, "PUT"), "设置已保存");
+  const editRevision = useRef(0);
+  const save = useAction(async () => {
+    const revision = editRevision.current;
+    const saved = await send<Settings>("/settings", draft, "PUT");
+    client.setQueryData<SettingsResponse>(["/settings"], (data) =>
+      data && { ...data, settings: saved },
+    );
+    if (editRevision.current === revision) setDirty(false);
+  }, "设置已保存");
   const saveCookie = useAction(
     () =>
       send("/cookies", {
@@ -2060,6 +2882,7 @@ function SettingsPage() {
   if (!q.data || !draft) return <Loading query={q} />;
   const data = q.data;
   function change<K extends keyof Settings>(key: K, value: Settings[K]) {
+    editRevision.current += 1;
     setDraft((d) => d && { ...d, [key]: value });
     setDirty(true);
   }
@@ -2071,12 +2894,7 @@ function SettingsPage() {
           icon={<Check size={16} />}
           loading={save.isPending}
           disabled={!dirty}
-          onClick={() => {
-            void save
-              .mutateAsync()
-              .then(() => setDirty(false))
-              .catch(() => {});
-          }}
+          onClick={() => save.mutate()}
         >
           保存更改
         </Button>
@@ -2228,6 +3046,24 @@ function SettingsPage() {
             </p>
           </details>
         </div>
+      </section>
+      <CookiePoolSettings />
+      <section className="settings-section">
+        <div className="settings-section-title">
+          <ExternalLink size={18} />
+          <h2>全局代理</h2>
+        </div>
+        <SettingRow label="代理地址">
+          <Input
+            aria-label="全局代理地址"
+            className="proxy-input"
+            mode="password"
+            autoComplete="off"
+            value={draft.proxy_url}
+            placeholder="http://127.0.0.1:7890 或 socks5h://..."
+            onChange={(v) => change("proxy_url", v)}
+          />
+        </SettingRow>
       </section>
       <section className="settings-section">
         <div className="settings-section-title">

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -11,6 +11,9 @@ assert.ok(process.argv[2] && process.argv[3], 'Usage: node scripts/smoke-binary.
 const binary = resolve(process.argv[2]);
 const version = process.argv[3];
 const work = await mkdtemp(join(tmpdir(), 'x-archive-release-'));
+const staging = join(work, 'data', '.staging');
+await mkdir(join(staging, 'orphan'), { recursive: true });
+await writeFile(join(staging, 'orphan', 'asset.part'), 'interrupted download');
 const socket = createServer();
 await new Promise((resolve, reject) => {
   socket.once('error', reject);
@@ -84,7 +87,8 @@ try {
   assert.equal(dashboard.status, 200);
   await access(join(work, 'data', 'archive.sqlite'));
   await access(join(work, 'config', 'settings.json'));
-  console.log(`Release ${version}: startup, embedded frontend, authentication and SQLite passed`);
+  await assert.rejects(access(staging), { code: 'ENOENT' });
+  console.log(`Release ${version}: startup, embedded frontend, authentication, SQLite and staging recovery passed`);
 } catch (error) {
   console.error(log.replaceAll(password, '[redacted]'));
   throw error;
