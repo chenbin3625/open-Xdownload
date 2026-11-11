@@ -145,8 +145,8 @@ jobs:
     needs: verify
     permissions:
       contents: read
-      packages: write
     uses: ./.github/workflows/image.yml
+    secrets: inherit
 
   publish:
     needs: [prepare, verify, binaries, image]
