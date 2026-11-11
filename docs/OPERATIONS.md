@@ -11,7 +11,7 @@
 3. 检测任务使用需要登录的书签读取验证会话。界面区分未设置、待检测、有效、已失效和访问受限；保存通过格式校验不等于已经验证登录有效。
 4. 会话失效时重新复制并更新，再检测、重试失败任务。删除 Cookie 会取消未结束任务，已归档数据保留。
 
-服务将填写的 Cookie 转换为下载工具需要的 Netscape 格式，内部保存为 `/config/cookies.txt`。Linux/macOS 和容器中的配置目录权限为 `0700`，Cookie 和设置文件为 `0600`；Windows 使用所在目录继承的 ACL，应限制该目录的访问权限。每次工具执行使用 `/config/.sessions` 中的私有 Cookie 副本，避免工具修改已保存的会话；结束后删除，异常关机残留在下一次启动时清理。Cookie 内容不进入接口响应、数据库、日志或镜像构建上下文。不要将 `cookies.txt` 提交到 Git。
+服务将填写的 Cookie 转换为下载工具需要的 Netscape 格式，内部保存为配置目录下的 `cookies.txt`。Linux/macOS 和容器中的配置目录权限为 `0700`，Cookie 和设置文件为 `0600`；Windows 使用所在目录继承的 ACL，应限制该目录的访问权限。每次工具执行使用配置目录下 `.sessions` 中的私有 Cookie 副本，避免工具修改已保存的会话；结束后删除，异常关机残留在下一次启动时清理。Cookie 内容不进入接口响应、数据库、日志或镜像构建上下文。不要将 `cookies.txt` 提交到 Git。
 
 应用使用 gallery-dl 和 yt-dlp 的现有提取能力，不使用 X 付费 API，也不提供越权抓取、解除访问限制或绕过限流的功能。
 
@@ -55,22 +55,22 @@ gallery-dl 没有提供严格的分页完成凭证，完整状态采用前后计
 
 ## 持久化和存储设置
 
-Compose 默认使用 `archive-data` 和 `archive-config` 命名卷：
+Compose 默认使用 `archive-data` 和 `archive-config` 命名卷，示例分别挂载到 `/app/data` 和 `/app/config`。目录可通过 `command` 中的 `--data-dir`、`--config-dir` 配置，修改时需同步调整卷挂载的容器路径：
 
 ```text
-/data/archive.sqlite          SQLite 数据及任务、快照、收藏、标签
-/data/images/<username>/      默认图片和原生 GIF，按用户名分目录
-/data/videos/<username>/      默认视频及 MP4 GIF，按用户名分目录
-/data/thumbnails/<username>/  预览图及视频封面，按用户名分目录
-/data/.staging/               未完成下载
-/config/settings.json         Web 设置
-/config/cookies.txt           私有会话文件
-/config/.sessions/            临时私有会话副本
+<数据目录>/archive.sqlite          SQLite 数据及任务、快照、收藏、标签
+<数据目录>/images/<username>/      默认图片和原生 GIF，按用户名分目录
+<数据目录>/videos/<username>/      默认视频及 MP4 GIF，按用户名分目录
+<数据目录>/thumbnails/<username>/  预览图及视频封面，按用户名分目录
+<数据目录>/.staging/               未完成下载
+<配置目录>/settings.json           Web 设置
+<配置目录>/cookies.txt             私有会话文件
+<配置目录>/.sessions/              临时私有会话副本
 ```
 
-所有新下载的媒体和预览图均按推文作者的用户名分目录，用户名统一为小写；原文件名为 `<推文 ID>_<媒体序号>.<扩展名>`。例如，`alice` 和 `bob` 的图片分别保存在 `/data/images/alice/`、`/data/images/bob/`，视频分别保存在 `/data/videos/alice/`、`/data/videos/bob/`。单条推文导入与用户同步使用相同规则。
+所有新下载的媒体和预览图均按推文作者的用户名分目录，用户名统一为小写；原文件名为 `<推文 ID>_<媒体序号>.<扩展名>`。例如，`alice` 和 `bob` 的图片分别保存在数据目录下的 `images/alice/`、`images/bob/`，视频分别保存在 `videos/alice/`、`videos/bob/`。单条推文导入与用户同步使用相同规则。
 
-Web 保存路径为 `/data` 内的图片或视频根目录，其下自动创建用户名子目录。例如图片路径设为 `photos/originals` 时，实际保存到 `/data/photos/originals/<username>/`。不接受 `..`、绝对路径或符号链接跳转。修改目录只影响后续下载，不自动迁移旧文件；旧媒体及预览图仍按数据库记录的原路径读取。重新下载后旧目录文件、异常中断后的临时/未引用文件可能残留，当前版本不含垃圾回收。
+Web 保存路径为数据目录内的图片或视频根目录，其下自动创建用户名子目录。例如图片路径设为 `photos/originals` 时，实际保存到 `<数据目录>/photos/originals/<username>/`。不接受 `..`、绝对路径或符号链接跳转。修改目录只影响后续下载，不自动迁移旧文件；旧媒体及预览图仍按数据库记录的原路径读取。重新下载后旧目录文件、异常中断后的临时/未引用文件可能残留，当前版本不含垃圾回收。
 
 “归档媒体”显示数据库记录的媒体文件字节数，不包括缩略图、暂存文件或遗留文件；磁盘总量/可用量为数据目录所在文件系统的实际数值。可用空间不足 128 MB 时暂停新的媒体下载。
 
@@ -89,7 +89,7 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --no-build
 
 ## 远程访问
 
-Compose 默认只发布到 `127.0.0.1:3000`。可通过 HTTPS 反向代理访问，保留原始 `Host`，让浏览器的 Origin 与 Host 一致。例如 Caddy：
+Compose 默认发布到 `0.0.0.0:3000`，可用服务器 IP 访问。使用同机 HTTPS 反向代理时，将 `ports` 改为 `127.0.0.1:3000:3000`，保留原始 `Host`，让浏览器的 Origin 与 Host 一致。例如 Caddy：
 
 ```caddyfile
 archive.example.com {
@@ -97,7 +97,7 @@ archive.example.com {
 }
 ```
 
-反向代理和应用在同一台主机时保留默认端口映射即可；代理运行在容器中时应通过同一 Docker 网络连接 `x-archive:3000`。访问密码通过环境变量传入，不写入 SQLite。Web 登录会话在应用重启后失效，X Cookie 和归档仍保留。
+代理运行在容器中时应通过同一 Docker 网络连接 `x-archive:3000`。Compose 的访问密码直接填写在 `command` 的 `--password` 参数中，不写入 SQLite。Web 登录会话在应用重启后失效，X Cookie 和归档仍保留。
 
 也可以通过 SSH 隧道访问远程服务器的回环端口：
 
@@ -138,7 +138,7 @@ WantedBy=multi-user.target
 
 升级前停止服务，备份整个数据目录和配置目录，包括 SQLite、媒体、设置与 Cookie。不要只备份仍在运行的 `archive.sqlite`：SQLite 使用 WAL，还可能有尚未合并的数据。Compose 命名卷的实际名称带项目名前缀，可用 `docker volume ls` 查询。
 
-使用镜像部署时运行 `docker compose pull` 和 `docker compose up -d`；若 `.env` 固定了镜像版本，先修改 `X_ARCHIVE_IMAGE`。二进制部署先停止旧进程，再替换可执行文件。迁移在启动时自动执行；降级前应恢复与旧版本对应的备份。`docker compose down` 保留数据卷，`docker compose down -v` 会删除数据卷。
+使用镜像部署时运行 `docker compose pull` 和 `docker compose up -d`；若固定了镜像版本，先修改 `compose.yaml` 的 `image`。二进制部署先停止旧进程，再替换可执行文件。迁移在启动时自动执行；降级前应恢复与旧版本对应的备份。`docker compose down` 保留数据卷，`docker compose down -v` 会删除数据卷。
 
 ## 常见问题
 

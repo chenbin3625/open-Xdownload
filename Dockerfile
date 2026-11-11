@@ -34,15 +34,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates python3 python3-venv ffmpeg tini gosu \
     && python3 -m venv /opt/download-tools \
     && /opt/download-tools/bin/pip install --no-cache-dir "gallery-dl==$GALLERY_DL_VERSION" "yt-dlp==$YT_DLP_VERSION" "PySocks==1.7.1" \
-    && groupadd --gid 10001 archive && useradd --uid 10001 --gid archive --no-create-home --home-dir /config archive \
-    && mkdir /data /config && chown archive:archive /data /config && chmod 700 /data /config \
+    && groupadd --gid 10001 archive && useradd --uid 10001 --gid archive --no-create-home --home-dir /app/config archive \
+    && mkdir -p /app/data /app/config && chown archive:archive /app/data /app/config && chmod 700 /app/data /app/config \
     && rm -rf /var/lib/apt/lists/*
-ENV PATH="/opt/download-tools/bin:$PATH" X_ARCHIVE_DATA=/data X_ARCHIVE_CONFIG=/config X_ARCHIVE_BIND=0.0.0.0:3000
+ENV PATH="/opt/download-tools/bin:$PATH"
 COPY --from=backend /out/x-archive /usr/local/bin/x-archive
 COPY --chmod=755 scripts/entrypoint.sh /usr/local/bin/x-archive-entrypoint
 WORKDIR /app
-VOLUME ["/data", "/config"]
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health', timeout=3)"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/x-archive-entrypoint"]
-CMD ["x-archive"]
+CMD ["x-archive", "--bind", "0.0.0.0:3000"]

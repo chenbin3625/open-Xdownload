@@ -31,7 +31,7 @@ for (const [index, architecture] of architectures.entries()) {
   }
   try {
     volumes.forEach(volume => docker(['volume', 'create', volume]));
-    docker(['run', '-d', '--platform', `linux/${architecture}`, '--name', name, '-p', `127.0.0.1:${port}:3000`, '-e', `X_ARCHIVE_PASSWORD=${password}`, '-e', 'GALLERY_DL_BIN=/bin/false', '-v', `${volumes[0]}:/data`, '-v', `${volumes[1]}:/config`, image]);
+    docker(['run', '-d', '--platform', `linux/${architecture}`, '--name', name, '-p', `127.0.0.1:${port}:3000`, '-e', 'GALLERY_DL_BIN=/bin/false', '-v', `${volumes[0]}:/archive/media`, '-v', `${volumes[1]}:/archive/settings`, image, 'x-archive', '--bind', '0.0.0.0:3000', '--password', password, '--data-dir', '/archive/media', '--config-dir=/archive/settings']);
     await healthy();
     const html = await (await fetch(base)).text();
     assert.match(html, /<div id="root">/);
@@ -47,15 +47,15 @@ for (const [index, architecture] of architectures.entries()) {
     assert.equal(savedCookie.includes('OFFLINE_FIXTURE'), false);
     assert.equal(savedCookie.includes('OFFLINE_CSRF'), false);
     const seed = `import sqlite3,pathlib,base64,os,json
-p=pathlib.Path('/data/persisted-images');p.mkdir(exist_ok=True)
+p=pathlib.Path('/archive/media/persisted-images');p.mkdir(exist_ok=True)
 p.joinpath('probe.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII='))
-c=sqlite3.connect('/data/archive.sqlite')
+c=sqlite3.connect('/archive/media/archive.sqlite')
 c.execute("INSERT INTO users(id,username) VALUES('persist-user','persist_user')")
 c.execute("INSERT INTO tweets(id,user_id,author,published_at,url) VALUES('123','persist-user','persist_user','2026-11-10T00:00:00Z','https://x.com/persist_user/status/123')")
 c.execute("INSERT INTO media(id,tweet_id,ordinal,kind,extension,remote_url,status,file_path,size) VALUES('persist-media','123',1,'image','png','https://pbs.twimg.com/media/fixture.png','ready','persisted-images/probe.png',68)")
 c.commit()
-assert os.stat('/config/cookies.txt').st_mode & 0o777 == 0o600
-assert os.stat('/config/settings.json').st_mode & 0o777 == 0o600
+assert os.stat('/archive/settings/cookies.txt').st_mode & 0o777 == 0o600
+assert os.stat('/archive/settings/settings.json').st_mode & 0o777 == 0o600
 uids=[]
 for proc in pathlib.Path('/proc').glob('[0-9]*'):
  try:

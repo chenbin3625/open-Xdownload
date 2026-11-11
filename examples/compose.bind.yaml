@@ -1,18 +1,24 @@
-# Run in a dedicated deployment directory with a configured .env file.
+# Set the password below before starting in a dedicated deployment directory.
 # Existing data/config contents must be writable by UID/GID 10001.
 services:
   x-archive:
-    image: "${X_ARCHIVE_IMAGE:-ghcr.io/chenbin3625/x-archive:latest}"
+    image: chenbin3625/x-archive:edge
     restart: unless-stopped
     ports:
-      - "${X_ARCHIVE_HOST:-127.0.0.1}:${X_ARCHIVE_PORT:-3000}:3000"
-    environment:
-      X_ARCHIVE_PASSWORD: "${X_ARCHIVE_PASSWORD:?Set a password of at least 12 characters in .env}"
-      TZ: Asia/Shanghai
-      RUST_LOG: x_archive=info,tower_http=warn
+      - "0.0.0.0:3000:3000"
+    command:
+      - x-archive
+      - --bind
+      - 0.0.0.0:3000
+      - --password
+      - "" # Set your own password of at least 12 characters.
+      - --data-dir
+      - /app/data
+      - --config-dir
+      - /app/config
     volumes:
-      - ./data:/data
-      - ./config:/config
+      - ./data:/app/data
+      - ./config:/app/config
     stop_grace_period: 30s
     security_opt:
       - no-new-privileges:true

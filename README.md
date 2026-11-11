@@ -4,7 +4,7 @@
 
 本项目由 open-Xdownload 演进而来，当前主分支为 Rust 版本 X Archive。原 Go 版本及归档时的本地修改保留在 [`archive/open-Xdownload`](https://github.com/chenbin3625/x-archive/tree/archive/open-Xdownload) 分支，两个项目的提交历史和原有版本标签均保留。
 
-[下载二进制](https://github.com/chenbin3625/x-archive/releases) · [Docker 镜像](https://github.com/chenbin3625/x-archive/pkgs/container/x-archive) · [更新记录](CHANGELOG.md) · [MIT License](LICENSE)
+[下载二进制](https://github.com/chenbin3625/x-archive/releases) · [Docker Hub 镜像](https://hub.docker.com/r/chenbin3625/x-archive) · [更新记录](CHANGELOG.md) · [MIT License](LICENSE)
 
 ## 功能
 
@@ -26,16 +26,17 @@
 
 ## Docker Compose 部署
 
-推荐使用 Docker Engine 和 Compose，支持 `linux/amd64`、`linux/arm64`。无需安装 Rust、Node.js、Python 或 FFmpeg。
+推荐使用 Docker Engine 和 Compose，镜像为 `chenbin3625/x-archive`，支持 `linux/amd64`、`linux/arm64`。无需安装 Rust、Node.js、Python 或 FFmpeg。
 
 ```sh
 mkdir x-archive
 cd x-archive
 curl -fsSLO https://raw.githubusercontent.com/chenbin3625/x-archive/main/compose.yaml
-curl -fsSL https://raw.githubusercontent.com/chenbin3625/x-archive/main/.env.example -o .env
 ```
 
-编辑 `.env`，将 `X_ARCHIVE_PASSWORD` 改为自己的访问密码，至少 12 位。然后启动：
+编辑 `compose.yaml`，将 `command` 中 `--password` 后的空字符串改为自己的访问密码，至少 12 位。镜像、端口、密码和目录均直接在此文件中配置，无需 `.env`。
+
+主分支 Compose 默认使用 `edge` 镜像，包含新增的启动参数。当前稳定版 `1.2.0` / `latest` 使用旧的环境变量配置方式，不能直接套用此配置。密码中包含 `$` 时，在 Compose 文件中写为 `$$`。然后启动：
 
 ```sh
 docker compose pull
@@ -43,17 +44,21 @@ docker compose up -d
 docker compose logs -f x-archive
 ```
 
-打开 <http://127.0.0.1:3000>，使用访问密码登录。默认只发布到本机回环地址，远程访问可配置 [HTTPS 反向代理或 SSH 隧道](docs/OPERATIONS.md#远程访问)。
+打开 `http://服务器IP:3000`，使用访问密码登录。默认发布到 `0.0.0.0:3000`，远程访问建议配置 [HTTPS 反向代理或 SSH 隧道](docs/OPERATIONS.md#远程访问)。
 
 默认 [compose.yaml](compose.yaml) 使用两个命名卷保存数据和配置。需要直接挂载宿主机目录时，参考 [绑定目录示例](examples/compose.bind.yaml)；已有目录和内容需允许 UID/GID `10001` 读写。
 
-镜像标签：`latest` 为最近稳定版，`1.2.0` 为指定版本，`1.2` / `1` 跟随对应版本系列，`edge` 跟随 `main`。可在 `.env` 中固定版本：
+存储目录不要求使用 `/data`。示例使用容器内的 `/app/data` 和 `/app/config`，可同时修改 `--data-dir`、`--config-dir` 及 `volumes` 中对应的容器路径；绑定目录示例中冒号左侧的 `./data`、`./config` 也可改为自己的宿主机目录。
 
-```dotenv
-X_ARCHIVE_IMAGE=ghcr.io/chenbin3625/x-archive:1.2.0
+镜像标签：`latest` 为最近稳定版，`1.2.0` 为指定版本，`1.2` / `1` 跟随对应版本系列，`edge` 跟随 `main`。主分支配置使用：
+
+```yaml
+image: chenbin3625/x-archive:edge
 ```
 
-更新时，先备份数据和配置；若固定版本，先修改镜像标签，再运行：
+固定版本时应使用与该版本兼容的部署配置。`1.2.0` 镜像通过 `X_ARCHIVE_PASSWORD`、`X_ARCHIVE_DATA` 和 `X_ARCHIVE_CONFIG` 等环境变量配置，默认持久化路径为 `/data`、`/config`；主分支改用启动参数和 `/app/data`、`/app/config`。已有命名卷可保持卷名，仅调整容器挂载路径；绑定目录部署应保留原宿主机目录。
+
+更新时，先备份数据和配置；若固定版本，先修改镜像标签及对应配置，再运行：
 
 ```sh
 docker compose pull
@@ -64,7 +69,7 @@ docker compose up -d
 
 ### 从源码构建镜像
 
-在仓库根目录配置 `.env` 后运行：
+在仓库根目录填写 `compose.yaml` 中的访问密码后运行：
 
 ```sh
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
@@ -108,7 +113,13 @@ $env:PATH = "$PWD\.tools\Scripts;$env:PATH"
 .\x-archive.exe
 ```
 
-两种方式默认均在 <http://127.0.0.1:3000> 提供服务，数据和配置保存在当前工作目录的 `data/`、`config/`。直接启动二进制**不会自动读取 `.env`**，需通过 shell、服务管理器或系统配置传入环境变量。长期运行示例见 [运维文档](docs/OPERATIONS.md#长期运行二进制)。
+两种方式默认均在 <http://127.0.0.1:3000> 提供服务，数据和配置保存在当前工作目录的 `data/`、`config/`。直接启动二进制**不会自动读取 `.env`**，可通过 shell、服务管理器及系统配置传入环境变量。主分支构建还支持以下启动参数，已发布的 `1.2.0` 二进制仍使用环境变量。长期运行示例见 [运维文档](docs/OPERATIONS.md#长期运行二进制)。
+
+主分支二进制的远程部署示例：
+
+```sh
+./x-archive --bind 0.0.0.0:3000 --password 'replace-with-your-own-password' --data-dir ./data --config-dir ./config
+```
 
 ## 首次使用
 
@@ -144,19 +155,21 @@ config/
   cookie-pool.json        私有备用会话及任务类型配置
 ```
 
-Docker 中对应 `/data`、`/config`。新下载文件按小写用户名分类；修改保存目录只影响后续下载，不迁移旧文件。每个数据目录只能运行一个实例。备份时先停止服务，再备份完整数据目录和配置目录。
+Compose 示例中对应 `/app/data`、`/app/config`，实际位置由启动参数及卷挂载决定。新下载文件按小写用户名分类；修改保存目录只影响后续下载，不迁移旧文件。每个数据目录只能运行一个实例。备份时先停止服务，再备份完整数据目录和配置目录。
+
+启动参数 `--bind`、`--password`、`--data-dir`、`--config-dir` 分别设置监听地址、访问密码、数据目录和配置目录，优先于对应环境变量。Compose 使用这些参数；二进制部署也可使用以下环境变量：
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `X_ARCHIVE_BIND` | `127.0.0.1:3000` | 监听地址，镜像内为 `0.0.0.0:3000` |
+| `X_ARCHIVE_BIND` | `127.0.0.1:3000` | 监听地址；镜像默认启动命令使用 `--bind 0.0.0.0:3000` |
 | `X_ARCHIVE_PASSWORD` | 无 | Web 访问密码；对外监听时必填且至少 12 位 |
-| `X_ARCHIVE_DATA` | `data` | 数据目录，镜像内为 `/data` |
-| `X_ARCHIVE_CONFIG` | `config` | 配置目录，镜像内为 `/config` |
+| `X_ARCHIVE_DATA` | `data` | 数据目录；相对路径基于工作目录，镜像工作目录为 `/app` |
+| `X_ARCHIVE_CONFIG` | `config` | 配置目录；相对路径基于工作目录，镜像工作目录为 `/app` |
 | `GALLERY_DL_BIN` | `gallery-dl` | gallery-dl 可执行文件路径 |
 | `YT_DLP_BIN` | `yt-dlp` | yt-dlp 可执行文件路径 |
 | `RUST_LOG` | `x_archive=info,tower_http=warn` | 日志级别 |
 
-Compose 另支持在 `.env` 中配置 `X_ARCHIVE_IMAGE`、`X_ARCHIVE_HOST` 和 `X_ARCHIVE_PORT`，默认地址和端口为 `127.0.0.1:3000`。
+Compose 的镜像和发布地址直接修改 `image`、`ports`；仅供本机反向代理使用时，可将 `ports` 改为 `127.0.0.1:3000:3000`。
 
 ## 常见问题
 

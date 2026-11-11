@@ -23,14 +23,19 @@ const port = socket.address().port;
 await new Promise(resolve => socket.close(resolve));
 const base = `http://127.0.0.1:${port}`;
 const password = randomBytes(24).toString('hex');
-const child = spawn(binary, [], {
+const child = spawn(binary, [
+  '--bind', `127.0.0.1:${port}`,
+  '--password', password,
+  '--data-dir', join(work, 'data'),
+  `--config-dir=${join(work, 'config')}`,
+], {
   cwd: work,
   env: {
     ...process.env,
-    X_ARCHIVE_BIND: `127.0.0.1:${port}`,
-    X_ARCHIVE_DATA: join(work, 'data'),
-    X_ARCHIVE_CONFIG: join(work, 'config'),
-    X_ARCHIVE_PASSWORD: password,
+    X_ARCHIVE_BIND: 'invalid-env-bind',
+    X_ARCHIVE_DATA: join(work, 'unused-data'),
+    X_ARCHIVE_CONFIG: join(work, 'unused-config'),
+    X_ARCHIVE_PASSWORD: 'unused-env-password',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -87,8 +92,10 @@ try {
   assert.equal(dashboard.status, 200);
   await access(join(work, 'data', 'archive.sqlite'));
   await access(join(work, 'config', 'settings.json'));
+  await assert.rejects(access(join(work, 'unused-data')), { code: 'ENOENT' });
+  await assert.rejects(access(join(work, 'unused-config')), { code: 'ENOENT' });
   await assert.rejects(access(staging), { code: 'ENOENT' });
-  console.log(`Release ${version}: startup, embedded frontend, authentication, SQLite and staging recovery passed`);
+  console.log(`Release ${version}: CLI overrides, custom directories, startup, embedded frontend, authentication, SQLite and staging recovery passed`);
 } catch (error) {
   console.error(log.replaceAll(password, '[redacted]'));
   throw error;
