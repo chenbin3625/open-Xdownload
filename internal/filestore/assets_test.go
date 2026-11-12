@@ -46,11 +46,40 @@ func TestAssetLongLiteralKeepsExtension(t *testing.T) {
 
 func TestAssetSeparateFolderByKind(t *testing.T) {
 	on := true
-	rule := config.AssetRule{DirectoryTemplate: "{username}", FilenameTemplate: "{media_id}.{ext}", SeparateFolder: &on}
-	for _, kind := range config.AssetKinds {
-		key, err := TemplatePath(rule, kind, parser.TweetData{Author: parser.Author{ScreenName: "author"}}, parser.Media{ID: "media"}, 0, "jpg")
-		if err != nil || key != "author/"+string(kind)+"/media.jpg" {
-			t.Fatalf("kind %s: %q, %v", kind, key, err)
+	for _, directory := range []string{"{username}", "{kind}/{username}"} {
+		for _, prefix := range []string{"", "archive"} {
+			rule := config.AssetRule{Prefix: prefix, DirectoryTemplate: directory, FilenameTemplate: "{media_id}.{ext}", SeparateFolder: &on}
+			for _, kind := range config.AssetKinds {
+				key, err := TemplatePath(rule, kind, parser.TweetData{Author: parser.Author{ScreenName: "author"}}, parser.Media{ID: "media"}, 0, "jpg")
+				want := string(kind) + "/author/media.jpg"
+				if prefix != "" {
+					want = prefix + "/" + want
+				}
+				if err != nil || key != want {
+					t.Fatalf("prefix %q, directory %q, kind %s: %q, %v; want %q", prefix, directory, kind, key, err, want)
+				}
+			}
+		}
+	}
+}
+
+func TestDefaultAssetPathsGroupMediaTypesBeforeUsers(t *testing.T) {
+	document := config.DefaultStorage(t.TempDir())
+	for _, username := range []string{"alice", "bob"} {
+		for _, kind := range config.AssetKinds {
+			rule, _, err := document.Rule(kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ext := "jpg"
+			if kind == config.AssetVideo {
+				ext = "mp4"
+			}
+			key, err := TemplatePath(rule, kind, parser.TweetData{ID: "123", Author: parser.Author{ScreenName: username}}, parser.Media{ID: "media"}, 0, ext)
+			want := string(kind) + "/" + username + "/123_media_1." + ext
+			if err != nil || key != want {
+				t.Fatalf("kind %s, user %s: %q, %v; want %q", kind, username, key, err, want)
+			}
 		}
 	}
 }

@@ -2,6 +2,25 @@ package config
 
 import "testing"
 
+func TestDefaultStorageUsesMediaTypeThenUser(t *testing.T) {
+	document := DefaultStorage("/tmp/archive")
+	if !document.Enabled {
+		t.Fatal("default storage policy must be enabled")
+	}
+	if err := document.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range AssetKinds {
+		rule, target, err := document.Rule(kind)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target.Root != "/tmp/archive" || rule.DirectoryTemplate != "{kind}/{username}" {
+			t.Fatalf("kind %s: target = %+v, rule = %+v", kind, target, rule)
+		}
+	}
+}
+
 func TestStorageRuleInheritsEachDefaultField(t *testing.T) {
 	document := DefaultStorage("/tmp/archive")
 	document.Default.Prefix = "default-root"

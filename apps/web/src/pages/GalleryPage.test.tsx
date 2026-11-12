@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -371,6 +371,41 @@ it("loads the selected server page without resetting it to page one", async () =
 function previewedFile() {
   return document.querySelector("[role=dialog] video, [role=dialog] img")?.getAttribute("src");
 }
+
+it("卡片可下载归档原文件，包括视频和未登记文件", async () => {
+  const items = [
+    { ...records[0], assetUrls: { thumbnail: "/thumbnail.webp" } },
+    mediaRecords[0],
+    { ...records[2], id: 0, filePath: "/downloads/未登记.gif", fileUrl: "/api/library/file?path=%2Fdownloads%2F%E6%9C%AA%E7%99%BB%E8%AE%B0.gif" },
+  ];
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(items)));
+  renderGallery();
+
+  const links = await screen.findAllByRole("link", { name: "下载原文件" });
+  expect(links.map(link => link.getAttribute("href"))).toEqual([
+    "/api/library/downloads/1/file",
+    "/api/library/downloads/11/file",
+    items[2].fileUrl,
+  ]);
+  expect(links.map(link => link.getAttribute("download"))).toEqual([
+    "shared.jpg", "clip-a.mp4", "未登记.gif",
+  ]);
+});
+
+it("预览切换图片和视频时同步下载链接与文件名", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse([records[0], mediaRecords[0]])));
+  renderGallery();
+  await userEvent.click(await screen.findByRole("button", { name: "查看图片 shared.jpg" }));
+
+  const dialog = within(screen.getByRole("dialog"));
+  expect(dialog.getByRole("link", { name: "下载原文件" }).getAttribute("href")).toBe("/api/library/downloads/1/file");
+  expect(dialog.getByRole("link", { name: "下载原文件" }).getAttribute("download")).toBe("shared.jpg");
+
+  await userEvent.click(dialog.getByRole("button", { name: "下一个媒体文件" }));
+  expect(previewedFile()).toBe("/api/library/downloads/11/file");
+  expect(dialog.getByRole("link", { name: "下载原文件" }).getAttribute("href")).toBe("/api/library/downloads/11/file");
+  expect(dialog.getByRole("link", { name: "下载原文件" }).getAttribute("download")).toBe("clip-a.mp4");
+});
 
 function pressArrow(target: EventTarget) {
   const event = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true });

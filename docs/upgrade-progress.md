@@ -140,8 +140,8 @@ Evidence logs on the development machine:
   reopening the store and resuming. A crash between failure-log insertion and
   checkpoint persistence can duplicate a failure-log row on replay; the
   processed/failed checkpoint totals remain consistent.
-- Runtime video derivatives require `ffmpeg`. It is installed in this preview
-  environment and was added to the Docker runtime stage. Docker CLI is not
-  available here, so no container image build or container smoke test is claimed.
+- Runtime media derivatives are disabled; the Docker runtime no longer needs
+  an external media converter. Docker CLI is not available here, so no
+  container image build or container smoke test is claimed.
 - The preview account is temporary: username `preview`, password
   `UpgradePreview2026!`.

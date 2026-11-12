@@ -512,8 +512,6 @@ func (m *Manager) process(ctx context.Context, saveCtx context.Context, job stor
 		m.processFollowing(ctx, saveCtx, job)
 	case storage.JobKindFailedRetry:
 		m.processFailedRetry(ctx, saveCtx, job)
-	case storage.JobKindAssetDerivative:
-		m.processAssetDerivative(ctx, saveCtx, job)
 	case storage.JobKindAssetMigration:
 		m.processAssetMigration(ctx, saveCtx, job)
 	default:

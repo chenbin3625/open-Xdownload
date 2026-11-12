@@ -155,10 +155,9 @@ func (s *Server) serveDownloadAsset(w http.ResponseWriter, r *http.Request, id i
 	}
 	kinds := []config.AssetKind{config.AssetImage, config.AssetVideo}
 	if preview {
-		kinds = []config.AssetKind{config.AssetVideoCover, config.AssetThumbnail}
-		if requested := config.AssetKind(r.URL.Query().Get("kind")); requested == config.AssetVideoCover || requested == config.AssetThumbnail {
-			kinds = []config.AssetKind{requested}
-		}
+		// Derived thumbnails are no longer generated. An image can still be
+		// previewed from its original asset; videos use the remote poster fallback.
+		kinds = []config.AssetKind{config.AssetImage}
 	}
 	for _, kind := range kinds {
 		if assetID := assets[kind]; assetID != "" {
@@ -184,8 +183,6 @@ func (s *Server) enrichAssetURLs(r *http.Request, records []storage.DownloadReco
 			// an asset object was removed or its historical target is unavailable.
 			if kind == config.AssetImage || kind == config.AssetVideo {
 				records[i].AssetURLs[kind] = "/api/library/downloads/" + strconv.FormatInt(records[i].ID, 10) + "/file"
-			} else {
-				records[i].AssetURLs[kind] = "/api/library/downloads/" + strconv.FormatInt(records[i].ID, 10) + "/preview?kind=" + string(kind)
 			}
 		}
 		for _, kind := range []config.AssetKind{config.AssetImage, config.AssetVideo} {
@@ -195,36 +192,6 @@ func (s *Server) enrichAssetURLs(r *http.Request, records []storage.DownloadReco
 			}
 		}
 	}
-}
-func (s *Server) listDerivatives(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListMediaAssets(r.Context())
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, 200, map[string]any{"items": items})
-}
-func (s *Server) retryDerivative(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		MediaKey string           `json:"mediaKey"`
-		Kind     config.AssetKind `json:"kind"`
-	}
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-	if req.MediaKey == "" || (req.Kind != config.AssetThumbnail && req.Kind != config.AssetVideoCover) {
-		writeError(w, 400, fmt.Errorf("无效的衍生资源"))
-		return
-	}
-	job, err := s.store.CreateJob(r.Context(), storage.JobKindAssetDerivative, string(req.Kind)+"|"+req.MediaKey, "Regenerate "+string(req.Kind))
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	s.manager.Notify()
-	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "job.created", JobID: job.ID, Payload: job}))
-	writeJSON(w, 201, job)
 }
 
 func (s *Server) migrateStorage(w http.ResponseWriter, r *http.Request) {

@@ -102,7 +102,7 @@ func TestDownloadEndpointsFallBackFromUnavailableAssets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, kind := range []config.AssetKind{config.AssetVideo, config.AssetVideoCover} {
+			for _, kind := range []config.AssetKind{config.AssetVideo} {
 				if err := store.LinkDownloadAsset(ctx, record.ID, kind, asset.ID); err != nil {
 					t.Fatal(err)
 				}
@@ -116,7 +116,7 @@ func TestDownloadEndpointsFallBackFromUnavailableAssets(t *testing.T) {
 			}
 			records := []storage.DownloadRecord{record}
 			NewServer(store, nil, nil, nil).enrichDownloads(newLoopbackRequest(http.MethodGet, "/", nil), records)
-			if records[0].FileURL != fmt.Sprintf("/api/library/downloads/%d/file", record.ID) || records[0].AssetURLs[config.AssetVideoCover] != fmt.Sprintf("/api/library/downloads/%d/preview?kind=video_cover", record.ID) {
+			if records[0].FileURL != fmt.Sprintf("/api/library/downloads/%d/file", record.ID) || records[0].AssetURLs[config.AssetVideo] != fmt.Sprintf("/api/library/downloads/%d/file", record.ID) {
 				t.Fatalf("download URLs bypass fallback: %+v", records[0])
 			}
 		})
@@ -135,7 +135,7 @@ func TestImagePreviewFallsBackToRetainedLegacyOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	asset, err := store.CreateAsset(ctx, storage.Asset{ID: "missing-thumbnail", Kind: config.AssetThumbnail, PolicyVersion: document.Version, TargetID: "local", TargetVersion: document.Targets[0].Version, Key: "missing.jpg", Size: 10, ContentType: "image/jpeg", ContentHash: "missing"})
+	asset, err := store.CreateAsset(ctx, storage.Asset{ID: "missing-image", Kind: config.AssetImage, PolicyVersion: document.Version, TargetID: "local", TargetVersion: document.Targets[0].Version, Key: "missing.jpg", Size: 10, ContentType: "image/jpeg", ContentHash: "missing"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,11 +147,11 @@ func TestImagePreviewFallsBackToRetainedLegacyOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.LinkDownloadAsset(ctx, record.ID, config.AssetThumbnail, asset.ID); err != nil {
+	if err := store.LinkDownloadAsset(ctx, record.ID, config.AssetImage, asset.ID); err != nil {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, newLoopbackRequest(http.MethodGet, fmt.Sprintf("/api/library/downloads/%d/preview?kind=thumbnail", record.ID), nil))
+	handler.ServeHTTP(response, newLoopbackRequest(http.MethodGet, fmt.Sprintf("/api/library/downloads/%d/preview", record.ID), nil))
 	if response.Code != http.StatusOK || response.Body.String() != "retained image" {
 		t.Fatalf("image preview fallback: %d %q", response.Code, response.Body.String())
 	}

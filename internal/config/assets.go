@@ -11,13 +11,17 @@ import (
 type AssetKind string
 
 const (
-	AssetImage      AssetKind = "image"
-	AssetVideo      AssetKind = "video"
+	AssetImage AssetKind = "image"
+	AssetVideo AssetKind = "video"
+	// AssetThumbnail and AssetVideoCover remain readable for old database rows.
+	// New storage policies no longer create or configure derived assets.
 	AssetThumbnail  AssetKind = "thumbnail"
 	AssetVideoCover AssetKind = "video_cover"
 )
 
-var AssetKinds = []AssetKind{AssetImage, AssetVideo, AssetThumbnail, AssetVideoCover}
+var AssetKinds = []AssetKind{AssetImage, AssetVideo}
+
+var legacyAssetKinds = []AssetKind{AssetThumbnail, AssetVideoCover}
 
 type StorageTarget struct {
 	ID           string `json:"id"`
@@ -61,7 +65,7 @@ type StorageDocument struct {
 }
 
 func DefaultStorage(root string) StorageDocument {
-	return StorageDocument{Targets: []StorageTarget{{ID: "local", Name: "Local", Type: "local", Root: root}}, Default: AssetRule{TargetID: "local", DirectoryTemplate: "{username}/{year}/{month}", FilenameTemplate: "{tweet_id}_{media_id}_{index}.{ext}"}, Rules: map[AssetKind]AssetRule{}, Thumbnail: ThumbnailConfig{Width: 640, Height: 640, Format: "jpeg", Quality: 82}}
+	return StorageDocument{Enabled: true, Targets: []StorageTarget{{ID: "local", Name: "Local", Type: "local", Root: root}}, Default: AssetRule{TargetID: "local", DirectoryTemplate: "{kind}/{username}", FilenameTemplate: "{tweet_id}_{media_id}_{index}.{ext}"}, Rules: map[AssetKind]AssetRule{}, Thumbnail: ThumbnailConfig{Width: 640, Height: 640, Format: "jpeg", Quality: 82}}
 }
 
 func (d StorageDocument) Rule(kind AssetKind) (AssetRule, StorageTarget, error) {
@@ -158,7 +162,7 @@ func (d StorageDocument) Validate() error {
 	}
 	for kind := range d.Rules {
 		valid := false
-		for _, k := range AssetKinds {
+		for _, k := range append(AssetKinds, legacyAssetKinds...) {
 			valid = valid || kind == k
 		}
 		if !valid {
@@ -182,12 +186,6 @@ func (d StorageDocument) Validate() error {
 		if strings.ContainsAny(r.Prefix, "{}") {
 			return fmt.Errorf("根前缀不支持模板变量")
 		}
-	}
-	if d.Thumbnail.Width < 16 || d.Thumbnail.Width > 4096 || d.Thumbnail.Height < 16 || d.Thumbnail.Height > 4096 || d.Thumbnail.Quality < 1 || d.Thumbnail.Quality > 100 {
-		return fmt.Errorf("缩略图尺寸或质量超出范围")
-	}
-	if d.Thumbnail.Format != "jpeg" && d.Thumbnail.Format != "png" && d.Thumbnail.Format != "webp" {
-		return fmt.Errorf("不支持的缩略图格式")
 	}
 	return nil
 }

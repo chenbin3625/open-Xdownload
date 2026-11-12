@@ -5,11 +5,11 @@ import { act, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { renderWithProviders, screen } from "../../test/render";
-import { getDerivatives, getStorage, getTweets, saveStorage, type StorageDocument } from "../../lib/archive";
+import { getStorage, getTweets, saveStorage, type StorageDocument } from "../../lib/archive";
 import { api } from "../../lib/api";
 import { StorageManagement } from "./StorageManagement";
 
-vi.mock("../../lib/archive", async original => ({ ...await original<typeof import("../../lib/archive")>(), getStorage: vi.fn(), getDerivatives: vi.fn(), getTweets: vi.fn(), saveStorage: vi.fn() }));
+vi.mock("../../lib/archive", async original => ({ ...await original<typeof import("../../lib/archive")>(), getStorage: vi.fn(), getTweets: vi.fn(), saveStorage: vi.fn() }));
 vi.mock("../../lib/api", async original => ({ ...await original<typeof import("../../lib/api")>(), api: vi.fn() }));
 
 const document: StorageDocument = {
@@ -27,7 +27,6 @@ function renderStorage() {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getStorage).mockResolvedValue(structuredClone(document));
-  vi.mocked(getDerivatives).mockResolvedValue({ items: [] });
   vi.mocked(getTweets).mockResolvedValue({ items: [], pagination: { page: 1, pageSize: 1, total: 0, totalPages: 1 } });
 });
 
@@ -70,7 +69,7 @@ it("uses readable policies without exposing template variables and exposes previ
 it("previews each media type inside its own row with the matching media and extension", async () => {
   vi.mocked(api).mockImplementation(async (_path, options) => ({ location: `/downloads/${JSON.parse(options!.body as string).kind}/example` }) as never);
   const user = userEvent.setup(); renderStorage();
-  for (const [kind, label, extension] of [["image", "图片原文件", "jpg"], ["video", "视频及 GIF 原文件", "mp4"], ["thumbnail", "缩略图", "jpg"], ["video_cover", "视频封面", "jpg"]]) {
+  for (const [kind, label, extension] of [["image", "图片原文件", "jpg"], ["video", "视频及 GIF 原文件", "mp4"]]) {
     const row = await screen.findByRole("group", { name: label });
     await user.click(within(row).getByRole("button", { name: `${label} 预览实际路径` }));
     expect(await within(row).findByText(`/downloads/${kind}/example`)).toBeTruthy();
@@ -151,7 +150,7 @@ it("shows every media rule and historical migration without expanding a section"
   await screen.findByRole("combobox", { name: "分类存储策略" });
   expect(globalThis.document.querySelector("details")).toBeNull();
   expect(screen.getByRole("button", { name: "迁移历史资源" })).toBeTruthy();
-  for (const kind of ["图片原文件", "视频及 GIF 原文件", "缩略图", "视频封面"]) {
+  for (const kind of ["图片原文件", "视频及 GIF 原文件"]) {
     expect(screen.getByRole("combobox", { name: `${kind} 分类存储策略` })).toBeTruthy();
     expect(screen.getByRole("combobox", { name: `${kind} 命名策略` })).toBeTruthy();
   }

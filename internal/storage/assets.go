@@ -224,12 +224,6 @@ func (s *Store) DownloadAssets(ctx context.Context, id int64) (map[config.AssetK
 	}
 	return result, rows.Err()
 }
-func (s *Store) ListMediaAssets(ctx context.Context) ([]MediaAsset, error) {
-	items := []MediaAsset{}
-	err := s.db.SelectContext(ctx, &items, `SELECT * FROM media_assets WHERE kind IN ('thumbnail','video_cover') ORDER BY updated_at DESC LIMIT 200`)
-	return items, err
-}
-
 func (s *Store) RememberMediaContext(ctx context.Context, tweet parser.TweetData) error {
 	data, err := json.Marshal(tweet)
 	if err != nil {
@@ -264,11 +258,6 @@ func (s *Store) AssetContext(ctx context.Context, key string) (parser.TweetData,
 		return tweet, parser.Media{}, 0, fmt.Errorf("媒体上下文序号无效")
 	}
 	return tweet, tweet.Media[index], index, nil
-}
-func (s *Store) LinkMediaDerivative(ctx context.Context, key string, kind config.AssetKind, assetID string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO download_assets(download_id,kind,asset_id) SELECT id,?,? FROM downloads WHERE media_key=?
-ON CONFLICT(download_id,kind) DO UPDATE SET asset_id=excluded.asset_id`, kind, assetID, key)
-	return err
 }
 
 type AssetMigrationProgress struct {

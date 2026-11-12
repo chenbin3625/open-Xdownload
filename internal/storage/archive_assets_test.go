@@ -171,6 +171,30 @@ func TestTweetMediaRetryRecognizesActiveURLAliases(t *testing.T) {
 	}
 }
 
+func TestNewJobFreezesEnabledMediaTypeThenUserStorage(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "assets.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "author", "author")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := store.FreezeJobStorage(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !document.Enabled || document.Version == 0 || document.Default.DirectoryTemplate != "{kind}/{username}" {
+		t.Fatalf("new job did not freeze the default category/user policy: %+v", document)
+	}
+	resumed, err := store.FreezeJobStorage(ctx, job.ID)
+	if err != nil || resumed.Version != document.Version || resumed.Default != document.Default {
+		t.Fatalf("job storage snapshot changed: %+v, %v", resumed, err)
+	}
+}
+
 func TestStorageVersionsSecretsAndInterruptedJobSnapshot(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "assets.db"))
 	if err != nil {

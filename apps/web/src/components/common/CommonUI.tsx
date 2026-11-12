@@ -307,7 +307,6 @@ export function kindLabel(kind: JobKind) {
     list: t("列表"),
     following: t("关注"),
     failed_retry: t("失败重试"),
-    asset_derivative: t("storage.derivativeJob"),
     asset_migration: t("storage.migrationJob"),
   };
   return labels[kind] ?? t("未知类型");

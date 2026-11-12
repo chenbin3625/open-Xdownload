@@ -509,6 +509,19 @@
 .gallery-range-inputs .semi-input-wrapper,
 .gallery-range-inputs .semi-input-number { width: 100%; min-width: 0; }
 .gallery-range-inputs input { min-width: 0; }
+.gallery-preview-frame { height: min(64dvh, 640px); flex: none; }
+.gallery-download {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  color: var(--semi-color-text-0);
+}
+.gallery-download:hover { background: var(--semi-color-fill-0); }
+.gallery-download:focus-visible { outline: 2px solid var(--semi-color-primary); outline-offset: 2px; }
 
 @media (max-width: 767px) {
   .gallery-toolbar { flex-wrap: wrap; overflow-x: visible; }

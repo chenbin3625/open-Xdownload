@@ -9,7 +9,7 @@ import { Alert, Field, Input, ListSkeleton, Modal, Popconfirm, Select, Switch, T
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
 import { FilenameStrategy } from "./FilenameStrategy";
 
-const kinds: AssetKind[] = ["image", "video", "thumbnail", "video_cover"];
+const kinds: AssetKind[] = ["image", "video"];
 
 function directoryOptions() {
   return [
@@ -28,10 +28,10 @@ function StoragePathPreview({ document, kind, tweet: sample }: { document: Stora
   useEffect(() => setLocation(""), [document]);
   const preview = useMutation({ mutationFn: async (submitted: StorageDocument) => {
     const tweet = sample ?? { id: "2120206875581186293", text: t("归档预览"), createdAt: "2026-11-10T12:00:00Z", author: { id: "44196397", name: "Author", screenName: "author" }, media: [] };
-    const video = kind === "video" || kind === "video_cover";
+    const video = kind === "video";
     const index = tweet.media.findIndex(media => video ? media.type !== "photo" : media.type === "photo");
     const media = tweet.media[index] ?? { id: video ? "video-1" : "image-1", type: video ? "video" : "photo" };
-    const extension = kind === "video" ? "mp4" : kind === "thumbnail" && submitted.thumbnail.format !== "jpeg" ? submitted.thumbnail.format : "jpg";
+    const extension = kind === "video" ? "mp4" : "jpg";
     return api<{ location: string }>("/api/storage/preview", { method: "POST", body: JSON.stringify({ document: submitted, kind, tweet, media, index: Math.max(0, index), extension }) });
   }, onSuccess: (value, submitted) => { if (current.current === submitted) setLocation(value.location); }, onError: error => toast.error({ message: error.message }) });
   return <div className="storage-preview-row"><Button type="tertiary" icon={<Eye size={16} />} aria-label={`${t(`storage.kind.${kind}`)} ${t("storage.preview")}`} loading={preview.isPending} disabled={preview.isPending} onClick={() => preview.mutate(document)}>{t("storage.preview")}</Button>{location && <output className="storage-path-preview">{location}</output>}</div>;

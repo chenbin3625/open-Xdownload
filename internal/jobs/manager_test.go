@@ -119,7 +119,7 @@ func TestCancelJobStopsActiveDownload(t *testing.T) {
 	managerCtx, stop := context.WithCancel(context.Background())
 	defer stop()
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	manager.Start(managerCtx)
 	manager.Notify()
 
@@ -204,7 +204,7 @@ func TestShutdownLeavesJobRequeueable(t *testing.T) {
 
 	managerCtx, stop := context.WithCancel(context.Background())
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	manager.Start(managerCtx)
 	manager.Notify()
 
@@ -357,6 +357,7 @@ func TestDownloadMediaSkipsExistingTweetMedia(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 
 	ctx := context.Background()
 	root := t.TempDir()
@@ -422,7 +423,7 @@ func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
 	}
 
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	result, err := manager.downloadMedia(ctx, ctx, job, config.AppConfig{DownloadDir: root}, server.URL+"/media.mp4", "tweet-1", root, "media", false, time.Time{})
 	if err != nil {
 		t.Fatalf("download media: %v", err)
@@ -471,7 +472,7 @@ func TestDownloadMediaSuffixedPathWhenAnotherTweetOwnsFilename(t *testing.T) {
 	}
 
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	firstURL := server.URL + "/one.mp4"
 	secondURL := server.URL + "/two.mp4"
 
@@ -538,7 +539,7 @@ func TestDownloadMediaCachesPermanentlyUnavailableMedia(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root}
 
 	// 首次观察：DMCA 403 返回错误（调用方会写 failed_media），不写 unavailable_media。
@@ -608,7 +609,7 @@ func TestDownloadMediaDoesNotCacheGenericForbidden(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root}
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -1193,6 +1194,25 @@ func TestSyncLinkDoesNotRemoveRealDirectory(t *testing.T) {
 	}
 }
 
+func useLegacyStorage(t *testing.T, store *storage.Store) {
+	t.Helper()
+	document, err := store.GetStorageDocument(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Enabled = false
+	if _, err := store.SaveStorageDocument(context.Background(), document); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// useLegacyTestDownloader 保留旧下载流程测试对直接文件和模拟媒体字节的覆盖。
+func useLegacyTestDownloader(t *testing.T, manager *Manager) {
+	t.Helper()
+	useLegacyStorage(t, manager.store)
+	useTestDownloader(t, manager)
+}
+
 // useTestDownloader 让 downloader 在 jobs 测试里接受 127.0.0.1/localhost（httptest 媒体
 // CDN mock）。生产 downloader 仍然只允许 twimg.com 主机；这里只替换 Manager 持有的实例。
 func useTestDownloader(t *testing.T, manager *Manager) {
@@ -1237,7 +1257,7 @@ func TestDownloadMediaSkipsSameMediaWithSameNameAndSize(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
 	mediaURL := server.URL + "/media.mp4"
 
@@ -1292,6 +1312,7 @@ func TestDownloadMediaFindsLiveCopyBeyondStaleHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	root := t.TempDir()
 	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
@@ -1346,7 +1367,7 @@ func TestDownloadMediaReusesMatchingContentBeyondStaleHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
 	firstURL := server.URL + "/first.mp4"
 	if _, err := manager.downloadMedia(ctx, ctx, job, cfg, firstURL, "original", root, "original", false, time.Time{}); err != nil {
@@ -1415,7 +1436,7 @@ func TestDownloadMediaReusesSameContentFromDifferentURLs(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
 	firstURL := server.URL + "/video-a.mp4"
 	secondURL := server.URL + "/video-b.mp4"
@@ -1485,7 +1506,7 @@ func TestDownloadMediaConcurrentDifferentURLsReuseSameContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
 	results := make([]mediaDownloadResult, archives)
 	errs := make([]error, archives)
@@ -1551,7 +1572,7 @@ func TestDownloadMediaPersistsCompletedDownloadAfterCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	contentKey := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
 	release, err := manager.lockMedia(saveCtx, contentKey)
 	if err != nil {
@@ -1613,7 +1634,7 @@ func TestDownloadMediaSkipsSameMediaAcrossDirectories(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
 	mediaURL := server.URL + "/media.mp4"
 	aliceDir := filepath.Join(root, "users", "Alice(alice)")
@@ -1671,7 +1692,7 @@ func TestDownloadMediaSameMediaDifferentNameSkips(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
 	mediaURL := server.URL + "/media.mp4"
 
@@ -1727,6 +1748,7 @@ func TestDownloadMediaSkipsOtherVariantOfSameVideo(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	root := t.TempDir()
 	job, err := store.CreateJob(ctx, storage.JobKindList, "list-1", "list")
@@ -1866,7 +1888,7 @@ func TestDownloadMediaJobSkipsAlreadyDownloadedURL(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength}
 
 	first, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, "", root, "media", false, time.Time{})
@@ -1918,7 +1940,7 @@ func TestDownloadMediaConcurrentSameTargetDownloadsOnce(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	cfg := config.AppConfig{DownloadDir: root, MaxFilenameLength: config.DefaultMaxFilenameLength, MaxConcurrency: 8}
 	mediaURL := server.URL + "/media.mp4"
 
@@ -2264,7 +2286,7 @@ func TestArchiveTweetsAdvancesCursorWhenFailuresAreQueued(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	user := xclient.User{ID: "u1", Name: "Alice", ScreenName: "alice"}
 	if _, err := store.UpsertUser(ctx, storageUser(user)); err != nil {
 		t.Fatalf("upsert user: %v", err)
@@ -2335,7 +2357,7 @@ func TestArchiveTweetsAdvancesCursorWhenMediaHasNoDownloadURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	entity, dir, err := manager.ensureUserEntity(ctx, cfg, user)
 	if err != nil {
 		t.Fatal(err)
@@ -2656,7 +2678,7 @@ func TestProcessMediaURLJobEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	manager.Start(ctx)
 	defer func() {
 		if !manager.Stop() {
@@ -2704,7 +2726,7 @@ func TestCancelActiveJobDrainsManager(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	manager.Start(ctx)
 	defer cancel()
 	select {
@@ -2747,7 +2769,7 @@ func TestArchiveTweetsAdvancesCursorToSeenIDForSkippedTweets(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	useTestDownloader(t, manager)
+	useLegacyTestDownloader(t, manager)
 	entity, dir, err := manager.ensureUserEntity(ctx, cfg, user)
 	if err != nil {
 		t.Fatal(err)

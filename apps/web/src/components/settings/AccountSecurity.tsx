@@ -1,6 +1,6 @@
 import { t, useTranslation } from "../../lib/i18n";
 import { KeyRound } from "lucide-react";
-import React, { useContext, useState } from "react";
+import React, { useContext, useId, useState } from "react";
 import { changeAccountPassword } from "../../lib/api";
 import { invalidateSession } from "../../lib/session";
 import { AccountContext } from "../auth/AuthGate";
@@ -11,6 +11,7 @@ import { Modal } from "../semi";
 export function AccountSecurity() {
   useTranslation();
   const username = useContext(AccountContext);
+  const formId = useId();
   const [open, setOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -51,8 +52,11 @@ export function AccountSecurity() {
         <p className="min-w-0 break-all text-sm text-fg-muted">{username}</p>
         <Button icon={<KeyRound className="size-4" />} onClick={() => setOpen(true)}>{t("修改密码")}</Button>
       </div>
-      <Modal open={open} onClose={close} title={t("修改密码")} description={t("修改成功后需重新登录。")}>
-        <form onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+      <Modal open={open} onClose={close} title={t("修改密码")} description={t("修改成功后需重新登录。")} footer={<>
+        <Button type="tertiary" onClick={close} disabled={pending}>{t("取消")}</Button>
+        <Button htmlType="submit" form={formId} theme="solid" icon={<KeyRound className="size-4" />} loading={pending} disabled={pending} aria-busy={pending}>{t("修改密码")}</Button>
+      </>}>
+        <form id={formId} onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
           <input type="text" autoComplete="username" value={username} readOnly hidden />
           <Field label={t("当前密码")} className="sm:col-span-2">
             <Input type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} required disabled={pending} />
@@ -64,10 +68,6 @@ export function AccountSecurity() {
             <Input type="password" autoComplete="new-password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)} minLength={8} required disabled={pending} />
           </Field>
           {error && <p role="alert" className="break-words text-sm text-danger-strong sm:col-span-2">{error}</p>}
-          <div className="flex justify-end gap-2 sm:col-span-2">
-            <Button type="tertiary" onClick={close} disabled={pending}>{t("取消")}</Button>
-            <Button htmlType="submit" theme="solid" icon={<KeyRound className="size-4" />} loading={pending} disabled={pending} aria-busy={pending}>{t("修改密码")}</Button>
-          </div>
         </form>
       </Modal>
     </section>

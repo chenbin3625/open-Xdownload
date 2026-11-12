@@ -189,7 +189,7 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 	if err := m.store.SetMediaAsset(saveCtx, storage.MediaAsset{MediaKey: key, Kind: kind, AssetID: original.ID, JobID: job.ID, Status: "ready"}); err != nil {
 		return err
 	}
-	return m.archiveDerivatives(ctx, saveCtx, job, document, original, tweet, media, index, source, dir, key, record.ID, true)
+	return nil
 }
 
 type migrationReader struct {

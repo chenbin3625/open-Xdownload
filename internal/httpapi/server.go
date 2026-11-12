@@ -104,8 +104,6 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/storage/preview", s.previewStoragePath)
 	r.Post("/api/storage/migrate", s.migrateStorage)
 	read("/api/assets/{assetID}", s.serveAsset)
-	read("/api/assets/derivatives/status", s.listDerivatives)
-	r.Post("/api/assets/derivatives/retry", s.retryDerivative)
 	r.Put("/api/config", s.updateConfig)
 	read("/api/local-directories", s.listLocalDirectories)
 	r.Post("/api/local-directories", s.createLocalDirectory)

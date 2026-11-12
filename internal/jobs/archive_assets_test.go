@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -26,7 +25,6 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
-	"github.com/minio/minio-go/v7"
 )
 
 func archiveTestPNG(t *testing.T) []byte {
@@ -66,10 +64,59 @@ func archiveMediaRefreshClient(t *testing.T, store *storage.Store, cfg config.Ap
 	return cfg
 }
 
-func TestArchiveBodySurvivesMediaFailureAndOfflineRetryDeduplicates(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg unavailable")
+func TestDefaultStorageDownloadsImageIntoTypeUserFolders(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(filepath.Join(t.TempDir(), "archive.db"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer store.Close()
+	root := t.TempDir()
+	cfg, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := archiveTestPNG(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+	job, err := store.CreateJob(ctx, storage.JobKindTweetLink, "https://x.com/author/status/123", "photo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaURL := server.URL + "/photo.png"
+	tweet := parser.TweetData{ID: "123", Author: parser.Author{ID: "42", ScreenName: "author"}, Media: []parser.Media{{ID: "photo", Type: parser.MediaPhoto, URL: mediaURL}}}
+	if err := store.ArchiveTweet(ctx, job.ID, tweet, "pending"); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	useTestDownloader(t, manager)
+	if _, err := manager.downloadMedia(ctx, ctx, job, cfg, mediaURL, tweet.ID, "", "photo", true, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetDownloadByTweetMedia(ctx, tweet.ID, mediaURL)
+	if err != nil || record == nil {
+		t.Fatalf("download = %+v, %v", record, err)
+	}
+	links, err := store.DownloadAssets(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, ext := range map[config.AssetKind]string{config.AssetImage: "png"} {
+		asset, err := store.GetAsset(ctx, links[kind])
+		want := string(kind) + "/author/123_photo_1." + ext
+		if err != nil || asset.Key != want {
+			t.Fatalf("kind %s: asset = %+v, %v; want %q", kind, asset, err, want)
+		}
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(want))); err != nil {
+			t.Fatalf("kind %s was not written under the shared root: %v", kind, err)
+		}
+	}
+}
+
+func TestArchiveBodySurvivesMediaFailureAndOfflineRetryDeduplicates(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(filepath.Join(t.TempDir(), "archive.db"))
 	if err != nil {
@@ -345,9 +392,6 @@ func TestMediaOnlyArchiveKeepsMediaStatusAndSupportsRetry(t *testing.T) {
 }
 
 func TestNewPolicyRelocatesExistingMediaAsset(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg unavailable")
-	}
 	ctx := context.Background()
 	store, err := storage.Open(filepath.Join(t.TempDir(), "policy.db"))
 	if err != nil {
@@ -498,7 +542,7 @@ func TestFailedQueueRetryUpdatesArchivedMediaResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			manager := NewManager(store, parser.NewService(), NewEventBus())
-			useTestDownloader(t, manager)
+			useLegacyTestDownloader(t, manager)
 			if err := manager.rememberFailedTweet(ctx, original, entity, tweet, fmt.Errorf("offline")); err != nil {
 				t.Fatal(err)
 			}
@@ -527,10 +571,7 @@ func TestFailedQueueRetryUpdatesArchivedMediaResult(t *testing.T) {
 	}
 }
 
-func TestFourAssetCategoriesAndHistoricalMigrationRecovery(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg unavailable")
-	}
+func TestOriginalAssetCategoriesAndHistoricalMigrationRecovery(t *testing.T) {
 	ctx := context.Background()
 	store, err := storage.Open(filepath.Join(t.TempDir(), "assets.db"))
 	if err != nil {
@@ -550,9 +591,8 @@ func TestFourAssetCategoriesAndHistoricalMigrationRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	videoPath := filepath.Join(legacyRoot, "old.mp4")
-	command := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=green:s=64x48:d=0.4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-threads", "1", videoPath)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("video fixture: %v %s", err, output)
+	if err := os.WriteFile(videoPath, []byte("video fixture"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	photo, err := store.CreateDownload(ctx, storage.DownloadRecord{JobID: oldJob.ID, TweetID: "10", MediaURL: "https://pbs.twimg.com/media/old.png", FilePath: photoPath})
 	if err != nil {
@@ -569,18 +609,6 @@ func TestFourAssetCategoriesAndHistoricalMigrationRecovery(t *testing.T) {
 		target := config.StorageTarget{ID: string(kind), Type: "local", Root: t.TempDir()}
 		if kind == config.AssetVideo {
 			target.Type = "nas"
-		}
-		if kind == config.AssetThumbnail && os.Getenv("OPEN_XDOWNLOAD_TEST_S3_ENDPOINT") != "" {
-			target = config.StorageTarget{ID: string(kind), Type: "s3", Endpoint: os.Getenv("OPEN_XDOWNLOAD_TEST_S3_ENDPOINT"), Region: "us-east-1", Bucket: "archive-integration", AccessKey: os.Getenv("OPEN_XDOWNLOAD_TEST_S3_ACCESS_KEY"), SecretKey: os.Getenv("OPEN_XDOWNLOAD_TEST_S3_SECRET_KEY")}
-			client, err := filestore.S3Client(target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := client.MakeBucket(ctx, target.Bucket, minio.MakeBucketOptions{Region: target.Region}); err != nil {
-				if exists, _ := client.BucketExists(ctx, target.Bucket); !exists {
-					t.Fatal(err)
-				}
-			}
 		}
 		document.Targets = append(document.Targets, target)
 		document.Rules[kind] = config.AssetRule{TargetID: target.ID, Prefix: "root-" + string(kind), DirectoryTemplate: "{year}/{tweet_id}", FilenameTemplate: "{kind}_{media_id}_{index}.{ext}"}
@@ -607,19 +635,6 @@ func TestFourAssetCategoriesAndHistoricalMigrationRecovery(t *testing.T) {
 	videoLinks, err := store.DownloadAssets(ctx, video.ID)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, target, err := document.Rule(config.AssetThumbnail); err == nil && target.Type == "s3" {
-		client, err := filestore.S3Client(target)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, id := range []string{imageLinks[config.AssetThumbnail], videoLinks[config.AssetThumbnail]} {
-			asset, err := store.GetAsset(ctx, id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer client.RemoveObject(ctx, target.Bucket, asset.Key, minio.RemoveObjectOptions{})
-		}
 	}
 	for _, kind := range config.AssetKinds {
 		id := videoLinks[kind]
@@ -649,7 +664,7 @@ func TestFourAssetCategoriesAndHistoricalMigrationRecovery(t *testing.T) {
 	}
 	manager.processAssetMigration(ctx, ctx, job)
 	recovered, err := store.DownloadAssets(ctx, video.ID)
-	if err != nil || recovered[config.AssetVideo] != videoLinks[config.AssetVideo] || recovered[config.AssetVideoCover] != videoLinks[config.AssetVideoCover] {
+	if err != nil || recovered[config.AssetVideo] != videoLinks[config.AssetVideo] {
 		t.Fatal("repeat migration changed completed associations")
 	}
 	if _, err := os.Stat(photoPath); err != nil {
@@ -720,9 +735,6 @@ func TestFourAssetCategoriesAndHistoricalMigrationRecovery(t *testing.T) {
 }
 
 func TestMigrationCheckpointResumesAndReportsMissingSources(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg unavailable")
-	}
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "resume.db")
 	store, err := storage.Open(dbPath)

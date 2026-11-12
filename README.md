@@ -257,18 +257,18 @@ Default local storage layout:
 
 ```text
 downloads/
-  users/
-    username-or-display-name/
-      media files
-  lists/
-    list-name(list-id)/
-      link to the user directory
+  image/
+    username/
+      original images
+  video/
+    username/
+      original videos and GIFs
 ```
 
 Notes:
 
-- User and followed-account archiving save media to `users/username-or-display-name/`.
-- List archiving creates `lists/list-name(list-id)/` containing links to user directories, so the same user's media isn't copied multiple times.
+- Category storage is enabled by default. All media types share one root directory, with media type first and username second.
+- Existing saved storage policies and files retain their locations. Select “By media type / user” in storage settings to change a saved policy; use historical resource migration to organize existing files.
 - Filenames are cleaned of characters the system doesn't support and are limited by the max filename length.
 - Images are downloaded at the largest available size where possible; videos and GIFs pick the highest-bitrate MP4.
 - Video poster URLs are stored with download records; after upgrading, historical Twitter video records are backfilled with usable CDN thumbnails by the media library API.
@@ -334,7 +334,7 @@ open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web
 - 关注归档：输入某个账号，自动获取它关注的账号并归档这些账号发布的媒体。
 - 批量任务：用户、列表、关注目标可以一次输入多行，单次最多创建 200 个任务，并会自动去重。
 - 定时计划：可把用户、列表、关注目标保存为自动归档计划，支持启用、停用、立即运行和删除。
-- 全量归档：每次归档都完整扫描用户媒体时间线；已下载过且文件仍在的媒体自动跳过，历史视频缺失的预览图地址与缩略图会在归档途中自动补齐。
+- 全量归档：每次归档都完整扫描用户媒体时间线；已下载过且文件仍在的媒体自动跳过。
 - 重复下载跳过：转推、引用推文与卡片媒体可能指向同一份媒体内容。视频按 X 的媒体 ID 识别，同一个视频换了文案、被转推或解析到不同清晰度，都算同一份媒体。只要该媒体已经有可用的本地文件，后续命中会直接跳过——不重复下载、不建硬链接、也不复制副本。
 - 增量归档开关（可选）：开启后重复归档使用早停游标从上次成功位置继续，节省 X API 配额；默认关闭，保持全量扫描。
 - 工作台任务列表：任务状态、进度、错误信息和下载记录直接在工作台展示，支持取消任务、重新执行、复制文件路径或失败媒体地址。
@@ -342,7 +342,6 @@ open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器。内置 Web
 - 用户分组筛选：归档媒体展示用户名和昵称，可按用户分组筛选；历史记录会根据归档目录自动识别用户。
 - 轻量媒体预览：图片使用懒加载；视频默认只加载缩略图，点击后在放大预览中使用播放器组件播放，不在卡片中加载视频播放器。
 - 预览快捷切换：打开媒体预览后可使用左右方向键或预览窗口按钮切换文件。
-- 一键补齐视频封面：媒体库支持手动触发批量补齐缺失的视频预览图，运行中实时显示进度，已有封面的记录自动跳过。
 - 部分失败识别：归档任务中有媒体下载失败时会明确标记为“部分失败”，不会与完全成功的任务混在一起。
 - 失败重试：批量归档中可重试的失败推文会进入失败队列，可在独立抽屉中手动重试，也可开启任务结束后的自动重试；重新执行任务会创建新任务并保留原任务记录。
 - Cookie 池：支持主 Cookie 和多组备用 Cookie，用于列表、用户、关注归档以及 API 限流轮换。
@@ -577,21 +576,21 @@ OPEN_XDOWNLOAD_DOWNLOAD_DIR=/path/to/downloads \
 
 ```text
 downloads/
-  users/
-    用户名或昵称/
-      媒体文件
-  lists/
-    列表名(列表ID)/
-      指向用户目录的链接
+  image/
+    用户名/
+      图片原文件
+  video/
+    用户名/
+      视频和 GIF 原文件
 ```
 
 说明：
 
-- 用户归档和关注归档会把媒体保存到 `users/用户名或昵称/`。
-- 列表归档会创建 `lists/列表名(列表ID)/`，其中包含指向用户目录的链接，避免同一用户媒体被复制多份。
+- 默认启用分类存储，所有媒体类型共用一个根目录，先按媒体类型分文件夹，再按用户名分文件夹。
+- 已保存的存储策略和历史文件保留原位置；已有策略可在存储设置中选择“按媒体类型 / 用户”，历史文件可通过“迁移历史资源”整理。
 - 文件名会清理系统不支持的字符，并受“最大文件名长度”限制。
 - 图片会尽量下载大图版本，视频和 GIF 会选择最高码率 MP4。
-- 视频预览图地址会随下载记录保存；升级到新版本后，历史 Twitter 视频记录会在媒体归档库接口中自动补齐可用缩略图。
+- 视频预览图地址会随下载记录保存；没有预览图时媒体库直接使用原文件。
 
 ## 配置项说明
 

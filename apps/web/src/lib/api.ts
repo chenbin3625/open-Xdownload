@@ -17,7 +17,6 @@ export type JobKind =
   | "list"
   | "following"
   | "failed_retry"
-  | "asset_derivative"
   | "asset_migration";
 
 export type ArchiveMode = "tweets" | "media" | "both";

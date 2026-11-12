@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Download,
   ExternalLink,
   Film,
   HardDrive,
@@ -90,7 +91,6 @@ function VideoPoster({
   useTranslation();
   const sources = useMemo(() => {
     const list: { url: string; remote: boolean }[] = [];
-    if (item.assetUrls?.video_cover) list.push({ url: item.assetUrls.video_cover, remote: false });
     if (item.id > 0) {
       list.push({ url: `/api/library/downloads/${item.id}/preview`, remote: false });
     }
@@ -98,7 +98,7 @@ function VideoPoster({
       list.push({ url: item.previewUrl, remote: true });
     }
     return list;
-  }, [item.previewUrl, item.id, item.assetUrls?.video_cover]);
+  }, [item.previewUrl, item.id]);
   const [sourceIndex, setSourceIndex] = useState(0);
 
   return (
@@ -169,7 +169,7 @@ const GalleryCard = React.memo(function GalleryCard({
                 <span className="text-[11px] font-mono">{ext}</span>
               </div>
               <img
-                src={item.assetUrls?.thumbnail ?? previewURL}
+                src={previewURL}
                 alt={fileName}
                 loading="lazy"
                 decoding="async"
@@ -208,6 +208,16 @@ const GalleryCard = React.memo(function GalleryCard({
           {item.tweetId && <a className="text-brand-600" href={`/tweets?id=${item.tweetId}`}>{t("archive.title")}</a>}
           <span className="font-mono tabular-nums text-[10px]">{formatDateTime(item.createdAt)}</span>
           <div className="flex items-center gap-1">
+            <Tooltip title={t("下载原文件")}>
+              <a
+                className="gallery-download"
+                href={previewURL}
+                download={fileName}
+                aria-label={t("下载原文件")}
+              >
+                <Download size={16} />
+              </a>
+            </Tooltip>
             <Tooltip title={t("复制本地路径")}>
               <Button
                 theme="borderless"
@@ -623,7 +633,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
           return (
             <div className="flex flex-col">
-              <div className="relative flex min-h-[35dvh] max-h-[60dvh] items-center justify-center bg-black/95 p-2 overflow-hidden sm:min-h-[50dvh] sm:max-h-[72dvh]">
+              <div className="gallery-preview-frame relative flex items-center justify-center bg-black/95 p-2 overflow-hidden">
                 {isVideo ? (
                   <video
                     key={item.id}
@@ -631,13 +641,13 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                     controls
                     autoPlay
                     playsInline
-                    className="max-h-[56dvh] max-w-full rounded shadow-2xl sm:max-h-[68dvh]"
+                    className="h-full w-full min-h-0 min-w-0 object-contain"
                   />
                 ) : (
                   <img
                     src={previewURL}
                     alt={fileName}
-                    className="max-h-[56dvh] max-w-full object-contain rounded shadow-2xl sm:max-h-[68dvh]"
+                    className="h-full w-full min-h-0 min-w-0 object-contain"
                   />
                 )}
 
@@ -672,18 +682,34 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <Button
-                    type="tertiary"
-                    icon={<Copy className="size-3.5" />}
-                    onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
-                  >
-                    {t("复制本地路径")}</Button>
-                  <Button
-                    type="tertiary"
-                    icon={<ExternalLink className="size-3.5" />}
-                    onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
-                  >
-                    {t("复制直链")}</Button>
+                  <Tooltip title={t("下载原文件")}>
+                    <a
+                      className="gallery-download"
+                      href={previewURL}
+                      download={fileName}
+                      aria-label={t("下载原文件")}
+                    >
+                      <Download size={16} />
+                    </a>
+                  </Tooltip>
+                  <Tooltip title={t("复制本地路径")}>
+                    <Button
+                      theme="borderless"
+                      type="tertiary"
+                      icon={<Copy size={16} />}
+                      aria-label={t("复制本地路径")}
+                      onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
+                    />
+                  </Tooltip>
+                  <Tooltip title={t("复制直链")}>
+                    <Button
+                      theme="borderless"
+                      type="tertiary"
+                      icon={<ExternalLink size={16} />}
+                      aria-label={t("复制直链")}
+                      onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
+                    />
+                  </Tooltip>
                 </div>
               </div>
             </div>

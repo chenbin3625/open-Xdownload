@@ -46,7 +46,7 @@ it("keeps the full body and available relations when media fails, with local pre
   expect(screen.queryByText("正文已归档")).toBeNull();
   expect(screen.queryByRole("button", { name: "#9" })).toBeNull();
   const image = screen.getByRole("img", { name: "alice · 123" });
-  expect(image.getAttribute("src")).toBe("/api/assets/thumbnail");
+  expect(image.getAttribute("src")).toBe("/api/assets/original");
   await user.click(screen.getByRole("button", { name: /查看图片.*alice.*123.*7/ }));
   expect(within(screen.getByRole("dialog")).getByRole("img", { name: "@alice · 123" }).getAttribute("src")).toBe("/api/assets/original");
   fireEvent.keyDown(document, { key: "Escape", keyCode: 27 });
@@ -125,12 +125,12 @@ it("does not label pure-text archives as missing media", async () => {
   expect(screen.queryByRole("button", { name: "重试媒体" })).toBeNull();
 });
 
-it.each(["m4v", "ogv"])("plays archived .%s media as video with its independently stored cover", async extension => {
-  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, downloads: [{ ...tweet.downloads[0], filePath: `asset:video/clip.${extension}`, fileUrl: "/api/assets/video", assetUrls: { video_cover: "/api/assets/cover" } }] }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+it.each(["m4v", "ogv"])("plays archived .%s media as video with a remote poster fallback", async extension => {
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, downloads: [{ ...tweet.downloads[0], filePath: `asset:video/clip.${extension}`, fileUrl: "/api/assets/video", assetUrls: {} }] }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
   const { container } = renderArchive();
   await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });
   const video = container.querySelector("video");
   expect(video?.getAttribute("src")).toBe("/api/assets/video");
-  expect(video?.getAttribute("poster")).toBe("/api/assets/cover");
+  expect(video?.getAttribute("poster")).toBe("/api/library/downloads/7/preview");
   expect(screen.queryByRole("img", { name: "alice · 123" })).toBeNull();
 });

@@ -4,16 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"io"
 	"mime"
-	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -203,66 +198,7 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	if err := m.store.LinkDownloadAsset(saveCtx, record.ID, kind, asset.ID); err != nil {
 		return mediaDownloadResult{}, err
 	}
-	err = m.archiveDerivatives(ctx, saveCtx, job, document, *asset, tweet, media, index, source, tempDir, key, record.ID, false)
-	return mediaDownloadResult{skipped: skipped}, err
-}
-
-func (m *Manager) archiveDerivatives(ctx, saveCtx context.Context, job storage.Job, document config.StorageDocument, original storage.Asset, tweet parser.TweetData, media parser.Media, index int, source, tempDir, key string, downloadID int64, relocate bool) error {
-	derivativeKinds := []config.AssetKind{config.AssetThumbnail}
-	if original.Kind == config.AssetVideo {
-		derivativeKinds = append(derivativeKinds, config.AssetVideoCover)
-	}
-	var failures []error
-	for _, derivativeKind := range derivativeKinds {
-		derivative, err := m.store.GetMediaAsset(saveCtx, key, derivativeKind)
-		if err != nil {
-			return err
-		}
-		if derivative != nil && derivative.PolicyVersion != document.Version {
-			derivative = nil
-		}
-		if derivative != nil {
-			prior, loadErr := m.store.GetStorageVersion(saveCtx, derivative.PolicyVersion)
-			if loadErr != nil {
-				return loadErr
-			}
-			var target config.StorageTarget
-			for _, t := range prior.Targets {
-				if t.ID == derivative.TargetID && t.Version == derivative.TargetVersion {
-					target = t
-					break
-				}
-			}
-			file, _, openErr := filestore.OpenAsset(ctx, target, derivative.Key)
-			if openErr != nil {
-				derivative = nil
-			} else {
-				file.Close()
-			}
-		}
-		if derivative == nil {
-			if source == "" {
-				source, err = m.copyAssetToTemp(ctx, original, tempDir)
-				if err != nil {
-					if saveErr := m.store.SetMediaAsset(saveCtx, storage.MediaAsset{MediaKey: key, Kind: derivativeKind, JobID: job.ID, Status: "failed", Error: err.Error()}); saveErr != nil {
-						return saveErr
-					}
-					failures = append(failures, err)
-					continue
-				}
-			}
-			created, err := m.generateDerivative(ctx, saveCtx, job, document, derivativeKind, tweet, media, index, source, tempDir, key)
-			if err != nil {
-				failures = append(failures, fmt.Errorf("原文件已归档，%s 生成失败: %w", derivativeKind, err))
-				continue
-			}
-			derivative = &created
-		}
-		if err := m.store.LinkDownloadAsset(saveCtx, downloadID, derivativeKind, derivative.ID); err != nil {
-			return err
-		}
-	}
-	return errors.Join(failures...)
+	return mediaDownloadResult{skipped: skipped}, nil
 }
 
 func (m *Manager) copyAssetToTemp(ctx context.Context, asset storage.Asset, dir string) (string, error) {
@@ -296,116 +232,4 @@ func (m *Manager) copyAssetToTemp(ctx context.Context, asset storage.Asset, dir 
 		_ = os.Remove(filename)
 	}
 	return filename, err
-}
-
-func (m *Manager) generateDerivative(ctx, saveCtx context.Context, job storage.Job, document config.StorageDocument, kind config.AssetKind, tweet parser.TweetData, media parser.Media, index int, source, dir, key string) (storage.Asset, error) {
-	format := document.Thumbnail.Format
-	width, height := document.Thumbnail.Width, document.Thumbnail.Height
-	if kind == config.AssetVideoCover {
-		format = "jpeg"
-		width = 1920
-		height = 1920
-	}
-	ext := format
-	if ext == "jpeg" {
-		ext = "jpg"
-	}
-	destination := filepath.Join(dir, string(kind)+"."+ext)
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-threads", "1", "-i", source, "-frames:v", "1", "-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", width, height), "-filter_threads", "1"}
-	if format == "jpeg" {
-		args = append(args, "-q:v", strconv.Itoa(max(2, 31-document.Thumbnail.Quality*29/100)))
-	}
-	if format == "webp" {
-		args = append(args, "-quality", strconv.Itoa(document.Thumbnail.Quality))
-	}
-	args = append(args, destination)
-	command := exec.CommandContext(ctx, "ffmpeg", args...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		err = fmt.Errorf("ffmpeg: %w: %.500s", err, output)
-	}
-	var asset storage.Asset
-	if err == nil {
-		asset, err = m.saveAsset(ctx, saveCtx, document, kind, tweet, media, index, destination)
-	}
-	state := storage.MediaAsset{MediaKey: key, Kind: kind, AssetID: asset.ID, Status: "ready", JobID: job.ID}
-	if err != nil {
-		state.Status = "failed"
-		state.Error = err.Error()
-	}
-	if saveErr := m.store.SetMediaAsset(saveCtx, state); saveErr != nil {
-		return asset, saveErr
-	}
-	return asset, err
-}
-
-func (m *Manager) processAssetDerivative(ctx, saveCtx context.Context, job storage.Job) {
-	parts := strings.SplitN(job.Input, "|", 2)
-	if len(parts) != 2 {
-		m.fail(saveCtx, job, "", fmt.Errorf("无效的衍生任务"))
-		return
-	}
-	kind := config.AssetKind(parts[0])
-	key := parts[1]
-	if kind != config.AssetThumbnail && kind != config.AssetVideoCover {
-		m.fail(saveCtx, job, "", fmt.Errorf("无效的衍生类型"))
-		return
-	}
-	release, err := m.lockMedia(ctx, key)
-	if err != nil {
-		m.fail(saveCtx, job, "", err)
-		return
-	}
-	defer release()
-	asset, err := m.store.GetMediaAsset(saveCtx, key, config.AssetImage)
-	if err == nil && asset == nil {
-		asset, err = m.store.GetMediaAsset(saveCtx, key, config.AssetVideo)
-	}
-	if err != nil || asset == nil {
-		m.fail(saveCtx, job, "", fmt.Errorf("原始资源不可用: %v", err))
-		return
-	}
-	document, err := m.store.FreezeJobStorage(saveCtx, job.ID)
-	if err != nil {
-		m.fail(saveCtx, job, "", err)
-		return
-	}
-	dir, err := os.MkdirTemp("", "open-xdownload-derivative-")
-	if err != nil {
-		m.fail(saveCtx, job, "", err)
-		return
-	}
-	defer os.RemoveAll(dir)
-	source, err := m.copyAssetToTemp(ctx, *asset, dir)
-	if err != nil {
-		m.fail(saveCtx, job, "", err)
-		return
-	}
-	tweet, media, index, err := m.store.AssetContext(saveCtx, key)
-	if err != nil {
-		m.fail(saveCtx, job, "", err)
-		return
-	}
-	created, err := m.generateDerivative(ctx, saveCtx, job, document, kind, tweet, media, index, source, dir, key)
-	if err != nil {
-		m.fail(saveCtx, job, "", err)
-		return
-	}
-	if err := m.store.LinkMediaDerivative(saveCtx, key, kind, created.ID); err != nil {
-		m.fail(saveCtx, job, "", err)
-		return
-	}
-	job.Status = storage.JobCompleted
-	job.Progress = 1
-	job.Error = ""
-	job.Message = "衍生资源已生成"
-	m.save(saveCtx, job)
-}
-
-func mediaIDFromURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "media"
-	}
-	return strings.TrimSuffix(path.Base(u.Path), path.Ext(u.Path))
 }

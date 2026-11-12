@@ -46,13 +46,14 @@ func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.Twe
 		})
 	}
 	parts := []string{}
-	for _, part := range strings.Split(path.Join(rule.Prefix, render(rule.DirectoryTemplate)), "/") {
+	directory := render(rule.DirectoryTemplate)
+	if rule.SeparateFolder != nil && *rule.SeparateFolder && !strings.Contains(rule.DirectoryTemplate, "{kind}") {
+		directory = path.Join(safeAssetSegment(string(kind)), directory)
+	}
+	for _, part := range strings.Split(path.Join(rule.Prefix, directory), "/") {
 		if part != "" && part != "." {
 			parts = append(parts, safeAssetSegment(part))
 		}
-	}
-	if rule.SeparateFolder != nil && *rule.SeparateFolder && !strings.Contains(rule.DirectoryTemplate, "{kind}") {
-		parts = append(parts, safeAssetSegment(string(kind)))
 	}
 	// Budget text after all other fields so IDs and the extension survive truncation.
 	values["text"] = ""

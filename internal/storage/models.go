@@ -22,14 +22,13 @@ const (
 type JobKind string
 
 const (
-	JobKindTweetLink       JobKind = "tweet_link"
-	JobKindMediaURL        JobKind = "media_url"
-	JobKindUser            JobKind = "user"
-	JobKindList            JobKind = "list"
-	JobKindFollowing       JobKind = "following"
-	JobKindFailedRetry     JobKind = "failed_retry"
-	JobKindAssetDerivative JobKind = "asset_derivative"
-	JobKindAssetMigration  JobKind = "asset_migration"
+	JobKindTweetLink      JobKind = "tweet_link"
+	JobKindMediaURL       JobKind = "media_url"
+	JobKindUser           JobKind = "user"
+	JobKindList           JobKind = "list"
+	JobKindFollowing      JobKind = "following"
+	JobKindFailedRetry    JobKind = "failed_retry"
+	JobKindAssetMigration JobKind = "asset_migration"
 )
 
 // JobSource 标记任务的来源，用于排队公平性：手动任务更快响应，后台任务仍通过

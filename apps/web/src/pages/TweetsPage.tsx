@@ -14,7 +14,7 @@ export function TweetsPage() {
   useTranslation(); const client = useQueryClient();
   const [filters, setFilters] = useState(readFilters);
   const [search, setSearch] = useState(filters.get("search") ?? "");
-  const [preview, setPreview] = useState<{ src: string; video: boolean; poster?: string; title: string } | null>(null);
+  const [preview, setPreview] = useState<{ src: string; video: boolean; title: string } | null>(null);
   const debounced = useDebouncedValue(search, 300);
   useEffect(() => { function restore() { const next = readFilters(); setFilters(next); setSearch(next.get("search") ?? ""); } window.addEventListener("popstate", restore); return () => window.removeEventListener("popstate", restore); }, []);
   function change(patch: Record<string, string>, replace = false) {
@@ -29,7 +29,7 @@ export function TweetsPage() {
   const page = tweets.data;
   function openMedia(tweet: ArchivedTweet, record: ArchivedTweet["downloads"][number]) {
     const video = /\.(mp4|webm|mov|m4v|ogv)$/i.test(record.filePath);
-    setPreview({ src: record.fileUrl ?? `/api/library/downloads/${record.id}/file`, video, poster: record.assetUrls?.video_cover, title: `@${tweet.author.screenName} · ${tweet.id}` });
+    setPreview({ src: record.fileUrl ?? `/api/library/downloads/${record.id}/file`, video, title: `@${tweet.author.screenName} · ${tweet.id}` });
   }
   return <div className="workspace-page tweet-archive">
     <div className="page-heading"><h1 className="page-title">{t("archive.title")}</h1><Button type="tertiary" icon={<RefreshCw size={16} />} loading={tweets.isFetching} disabled={tweets.isFetching} aria-busy={tweets.isFetching} onClick={() => void tweets.refetch()}>{t("刷新数据")}</Button></div>
@@ -56,7 +56,7 @@ export function TweetsPage() {
       <p className="tweet-body">{tweet.text}</p>
       <div className="tweet-media">{tweet.downloads.map(record => {
         const video = /\.(mp4|webm|mov|m4v|ogv)$/i.test(record.filePath); const src = record.fileUrl ?? `/api/library/downloads/${record.id}/file`;
-        return <div key={record.id} className="tweet-media-item">{video ? <video aria-label={`${tweet.author.screenName} · ${tweet.id} · ${record.id}`} controls playsInline preload="metadata" src={src} poster={record.assetUrls?.video_cover ?? `/api/library/downloads/${record.id}/preview`} /> : <button aria-label={`${t("archive.openImage")} · @${tweet.author.screenName} · ${tweet.id} · ${record.id}`} onClick={() => openMedia(tweet, record)}><img src={record.assetUrls?.thumbnail ?? src} loading="lazy" alt={`${tweet.author.screenName} · ${tweet.id}`} /></button>}</div>;
+        return <div key={record.id} className="tweet-media-item">{video ? <video aria-label={`${tweet.author.screenName} · ${tweet.id} · ${record.id}`} controls playsInline preload="metadata" src={src} poster={`/api/library/downloads/${record.id}/preview`} /> : <button aria-label={`${t("archive.openImage")} · @${tweet.author.screenName} · ${tweet.id} · ${record.id}`} onClick={() => openMedia(tweet, record)}><img src={src} loading="lazy" alt={`${tweet.author.screenName} · ${tweet.id}`} /></button>}</div>;
       })}</div>
       {tweet.media.length > 0 && tweet.downloads.length === 0 && tweet.mediaStatus !== "not_requested" && <Tag tone="warning">{t("archive.mediaMissing")}</Tag>}
       {tweet.related?.map(related => <blockquote className="tweet-related" key={related.id}><a href={`/tweets?id=${related.id}`}>@{related.author.screenName} · {related.id}</a><p>{related.text}</p></blockquote>)}

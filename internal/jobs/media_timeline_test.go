@@ -82,6 +82,7 @@ func TestMediaTimelineResumesFromSavedPageAfterRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 
 	root := t.TempDir()
@@ -194,6 +195,7 @@ func TestInvalidMediaCursorRestartsFromFirstPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 
 	root := t.TempDir()
@@ -249,6 +251,7 @@ func TestMediaTimelineYieldsAtPageBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	root := t.TempDir()
 	cfg := config.AppConfig{DownloadDir: root, StorageType: config.StorageLocal, AuthToken: "primary", CSRFToken: "csrf"}
