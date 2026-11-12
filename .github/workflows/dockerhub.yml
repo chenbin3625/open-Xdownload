@@ -48,19 +48,21 @@ jobs:
             # Only the CI run caused by the push to main counts; a pull_request run
             # for the same SHA must not be able to unlock a publish.
             runs="$(gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" \
-              --limit 10 --json status,conclusion,event)"
-            runs="$(jq '[.[] | select(.event == "push")]' <<<"$runs")"
+              --limit 10 --json status,conclusion,event,createdAt)"
+            latest="$(jq -c '[.[] | select(.event == "push")] | sort_by(.createdAt) | last // empty' <<<"$runs")"
 
-            if [ "$(jq 'length' <<<"$runs")" -gt 0 ]; then
-              if [ "$(jq '[.[] | select(.status == "completed" and .conclusion != "success")] | length' <<<"$runs")" -gt 0 ]; then
-                echo "::error::CI failed for $SHA, refusing to publish an image."
-                exit 1
-              fi
-              if [ "$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")" -eq 0 ]; then
+            if [ -n "$latest" ]; then
+              status="$(jq -r '.status' <<<"$latest")"
+              conclusion="$(jq -r '.conclusion // empty' <<<"$latest")"
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" != "success" ]; then
+                  echo "::error::Latest CI run failed for $SHA ($conclusion), refusing to publish an image."
+                  exit 1
+                fi
                 echo "CI passed for $SHA."
                 exit 0
               fi
-              echo "CI is still running for $SHA, waiting..."
+              echo "Latest CI run is still running for $SHA, waiting..."
             elif [ "$SECONDS" -ge 300 ]; then
               # ci.yml only runs for pushes to main, so a tag on a commit that never
               # landed on main has no CI run at all. Tags produce versioned release
@@ -107,8 +109,11 @@ jobs:
         run: |
           # github.event.head_commit is absent on tag pushes and workflow_dispatch,
           # which used to leave the image DATE build-arg empty.
-          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${GITHUB_REF_NAME}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
         id: meta
@@ -129,7 +134,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=dockerhub
+          cache-to: type=gha,mode=max,scope=dockerhub
           build-args: |
             VERSION=${{ steps.build-meta.outputs.version }}
-            COMMIT=${{ github.sha }}
+            COMMIT=${{ steps.build-meta.outputs.commit }}
             DATE=${{ steps.build-meta.outputs.date }}

@@ -168,7 +168,20 @@ func RateLimitRetryAt(err error) (time.Time, bool) {
 	if errors.Is(err, ErrAllClientsRateLimited) {
 		return time.Now().Add(time.Minute), true
 	}
+	if isRateLimitError(err) {
+		return time.Now().Add(time.Minute), true
+	}
 	return time.Time{}, false
+}
+
+func (c *Client) rateLimitedError(path string, cause error) error {
+	retryAt := time.Now().Add(time.Minute)
+	if c != nil && c.limiter != nil {
+		if reset, ok := c.limiter.blockedReset(path); ok && reset.After(time.Now()) {
+			retryAt = reset
+		}
+	}
+	return &RateLimitedError{Path: path, RetryAt: retryAt, Cause: cause}
 }
 
 // schedulerYieldKey 标记请求来自调度器：账号池全部限流时立即返回结构化错误，
@@ -609,6 +622,7 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 				c.limiter.markRateLimited(homeCheckPath, response.Header)
 			}
 			httpx.SlowXRequests()
+			err = c.rateLimitedError(homeCheckPath, err)
 		case http.StatusForbidden:
 			if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
 				// 挑战页 ≠ 凭证失效：短退避即可，不能把唯一 Cookie 锁 30 分钟。
@@ -1460,6 +1474,7 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 				c.limiter.markRateLimited(path, response.Header)
 			}
 			httpx.SlowXRequests()
+			return nil, c.rateLimitedError(path, httpErr)
 		case http.StatusForbidden:
 			// 403 需要读 body 区分 WAF/挑战页与真正的鉴权失败：挑战页不能 disable。
 			if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
@@ -1476,9 +1491,12 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 	}
 	if apiErr := apiError(payload); apiErr != nil {
 		var parsed *APIError
-		if errors.As(apiErr, &parsed) && parsed.Code == apiErrRateLimit && c.limiter != nil {
-			c.limiter.markRateLimited(path, response.Header)
+		if errors.As(apiErr, &parsed) && parsed.Code == apiErrRateLimit {
+			if c.limiter != nil {
+				c.limiter.markRateLimited(path, response.Header)
+			}
 			httpx.SlowXRequests()
+			return nil, c.rateLimitedError(path, apiErr)
 		}
 		return nil, apiErr
 	}

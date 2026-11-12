@@ -97,6 +97,54 @@ it("filters a chosen date range using API-compatible calendar dates and clears i
   await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("from")).toBeNull());
 });
 
+it("filters reposts before pagination and restores and clears the filter through the URL", async () => {
+  window.history.replaceState(null, "", "/tweets?page=2");
+  const user = userEvent.setup(); renderArchive();
+  await screen.findByText("Quoted text available offline");
+  await user.click(screen.getByRole("radio", { name: "隐藏转推" }));
+  await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("retweets")).toBe("exclude"));
+  expect(new URLSearchParams(window.location.search).get("page")).toBeNull();
+  await user.click(screen.getByRole("radio", { name: "仅转推" }));
+  await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("retweets")).toBe("only"));
+  act(() => { window.history.replaceState(null, "", "/tweets?retweets=exclude"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await waitFor(() => expect((screen.getByRole("radio", { name: "隐藏转推" }) as HTMLInputElement).checked).toBe(true));
+  await user.click(screen.getByRole("button", { name: "清除筛选" }));
+  await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("retweets")).toBeNull());
+});
+
+it("shows reposted text once while preserving the source and other related tweets", async () => {
+  const original = { ...tweet.related![0], text: "Original reposted text" };
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, text: "RT @bob: Original reposted text", retweetedTweetId: original.id, related: [original, { ...original, id: "121", text: "Additional quoted context" }] }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+  renderArchive();
+  expect(await screen.findByText("Original reposted text")).toBeTruthy();
+  expect(screen.queryByText("RT @bob: Original reposted text")).toBeNull();
+  expect(screen.getByText("Additional quoted context")).toBeTruthy();
+  expect(screen.getByRole("link", { name: /转推来源.*122/ }).getAttribute("href")).toBe("/tweets?id=122");
+  expect(screen.getByText("转推了 @bob")).toBeTruthy();
+});
+
+it("expands clipped text and keeps the chosen layout and page in the URL", async () => {
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(200);
+  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(80);
+  try {
+    window.history.replaceState(null, "", "/tweets?page=2");
+    const user = userEvent.setup(); renderArchive();
+    const expand = (await screen.findAllByRole("button", { name: "展开全文" }))[0];
+    expect((screen.getByRole("radio", { name: "全部推文" }) as HTMLInputElement).checked).toBe(true);
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
+    await user.click(expand);
+    expect(screen.getByRole("button", { name: "收起全文" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText(tweet.text, { collapseWhitespace: false, trim: false }).textContent).toBe(tweet.text);
+    await user.click(screen.getByRole("radio", { name: "舒适" }));
+    expect(new URLSearchParams(window.location.search).get("view")).toBe("comfortable");
+    expect(new URLSearchParams(window.location.search).get("page")).toBe("2");
+    expect((screen.getByRole("radio", { name: "全部推文" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByRole("button", { name: "收起全文" })).toBeNull();
+  } finally {
+    scrollHeight.mockRestore(); clientHeight.mockRestore();
+  }
+});
+
 it.each(["completed", "not_requested"])("does not offer media retry for %s", async mediaStatus => {
   vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, mediaStatus }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
   renderArchive();

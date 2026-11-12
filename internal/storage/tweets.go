@@ -43,7 +43,7 @@ type ArchivedTweet struct {
 }
 
 type TweetFilter struct {
-	Sort                                    string
+	Sort, Retweets                          string
 	Search, Author, From, To, MediaType, ID string
 	JobID                                   int64
 	Page, PageSize                          int
@@ -399,6 +399,12 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	if f.JobID > 0 {
 		where = append(where, `EXISTS(SELECT 1 FROM tweet_jobs tj WHERE tj.tweet_id=t.id AND tj.job_id=?)`)
 		args = append(args, f.JobID)
+	}
+	switch f.Retweets {
+	case "exclude":
+		where = append(where, `NOT EXISTS(SELECT 1 FROM tweet_relations tr WHERE tr.tweet_id=t.id AND tr.relation='retweet')`)
+	case "only":
+		where = append(where, `EXISTS(SELECT 1 FROM tweet_relations tr WHERE tr.tweet_id=t.id AND tr.relation='retweet')`)
 	}
 	clause := strings.Join(where, " AND ")
 	result := TweetPage{Items: []ArchivedTweet{}, Pagination: Pagination{Page: f.Page, PageSize: f.PageSize}}

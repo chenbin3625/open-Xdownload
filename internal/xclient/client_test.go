@@ -877,17 +877,20 @@ func TestGraphQLPathsComeFromQueryIDTableAndVariablesAreJSON(t *testing.T) {
 
 func TestClientRateLimitErrorsAreNotRetried(t *testing.T) {
 	cases := []struct {
-		name    string
-		handler http.HandlerFunc
+		name     string
+		minRetry time.Duration
+		handler  http.HandlerFunc
 	}{
 		{
-			name: "api code 88",
+			name:     "api code 88",
+			minRetry: 50 * time.Second,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(`{"data":{"user":null},"errors":[{"code":88,"message":"Rate limit exceeded"}]}`))
 			},
 		},
 		{
-			name: "http 429",
+			name:     "http 429",
+			minRetry: 25 * time.Second,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Retry-After", "30")
 				w.WriteHeader(http.StatusTooManyRequests)
@@ -913,6 +916,10 @@ func TestClientRateLimitErrorsAreNotRetried(t *testing.T) {
 			}
 			if !isRateLimitError(err) {
 				t.Fatalf("error %v not classified as rate limit", err)
+			}
+			retryAt, ok := RateLimitRetryAt(err)
+			if !ok || time.Until(retryAt) < tc.minRetry {
+				t.Fatalf("retryAt = %s ok=%v, want at least %s", retryAt, ok, tc.minRetry)
 			}
 			if !client.limiter.wouldBlock(userByScreenNamePath) {
 				t.Fatal("rate limit did not block the path for failover")

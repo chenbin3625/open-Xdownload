@@ -96,6 +96,41 @@ func TestPlainAllClientsRateLimitedUsesConservativeCooldown(t *testing.T) {
 	}
 }
 
+func TestAPIRateLimitIsRequeued(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	job, err := store.CreateJob(ctx, storage.JobKindTweetLink, "https://x.com/alice/status/1", "tweet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimPendingJobs(ctx, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %+v %v", claimed, err)
+	}
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	manager.fail(ctx, claimed[0], "", &xclient.APIError{Code: 88, Raw: "rate limit exceeded"})
+
+	updated, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != storage.JobPending {
+		t.Fatalf("status = %s, want pending", updated.Status)
+	}
+	if updated.AvailableAt == nil || time.Until(*updated.AvailableAt) < 30*time.Second {
+		t.Fatalf("availableAt = %v, want conservative cooldown", updated.AvailableAt)
+	}
+	if updated.Error != "" {
+		t.Fatalf("error = %q, want empty (not a failure)", updated.Error)
+	}
+}
+
 // TestRateLimitDeferCapFailsJobWithReason 覆盖 P0：累计推迟超过上限后不再无限
 // 重排，任务明确失败并在 Error 中写明原因。
 func TestRateLimitDeferCapFailsJobWithReason(t *testing.T) {

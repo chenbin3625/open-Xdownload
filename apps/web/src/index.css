@@ -541,7 +541,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 12px;
+  gap: 10px;
 }
 
 .archive-filters .toolbar-field {
@@ -553,9 +553,17 @@
   flex: 1.6 1 220px;
 }
 
-.archive-filters .archive-date { flex: 1.5 1 260px; }
+.archive-filters .archive-date { flex: 1.4 1 220px; }
+.archive-filters .toolbar-field { gap: 4px; }
+.archive-filters .toolbar-field > label { font-size: 12px; line-height: 18px; }
 .archive-date .semi-datepicker { width: 100%; min-width: 0; }
 .archive-date .semi-button { width: 100%; }
+.tweet-archive { gap: 12px; }
+.archive-results-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.archive-result-count { color: var(--semi-color-text-2); font-size: 12px; }
+.archive-layout { margin-left: auto; }
+.archive-layout-option { display: inline-flex; align-items: center; gap: 6px; }
+.archive-active-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .settings-page, .settings-form { gap: 0; }
 .settings-form > .page-heading { margin-bottom: 16px; }
 .settings-form .page-actions { gap: 6px; }
@@ -652,17 +660,40 @@
 .semi-sidesheet-body:has(.app-sidebar) { padding: 0; }
 .semi-description-grid { display: grid; }
 .archive-progress { padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
-.tweet-entry { padding: 16px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.tweet-entry > :empty { display: none; }
-.tweet-body, .tweet-related p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 14px; }
-.tweet-list { max-width: 1000px; }
-.tweet-media { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%,240px),240px)); gap: 8px; }
-.tweet-media:empty { display: none; }
+.tweet-list { min-width: 0; border-top: 1px solid var(--line); }
+.tweet-entry { padding: 16px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tweet-header { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tweet-header .semi-avatar { flex-shrink: 0; width: 28px; height: 28px; line-height: 28px; font-size: 12px; }
+.tweet-identity { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.tweet-identity strong { font-weight: 600; }
+.tweet-author { min-width: 0; max-width: 100%; padding: 0; color: var(--semi-color-text-2); font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.tweet-author:hover { color: var(--semi-color-primary); text-decoration: underline; }
+.tweet-identity time { font-size: 12px; color: var(--semi-color-text-2); white-space: nowrap; }
+.tweet-original { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 4px; color: var(--semi-color-text-2); }
+.tweet-original:hover { color: var(--semi-color-primary); background: var(--semi-color-fill-0); }
+.tweet-author:focus-visible, .tweet-original:focus-visible, .tweet-media button:focus-visible { outline: 2px solid var(--semi-color-primary); outline-offset: 2px; }
+.tweet-content, .tweet-copy, .tweet-text { min-width: 0; }
+.tweet-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.tweet-copy > .tweet-text { width: 100%; }
+.tweet-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 14px; }
+.tweet-body-clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+.tweet-expand.semi-button { height: 24px; padding: 0 4px; margin-top: 2px; font-size: 12px; }
+.tweet-repost { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--semi-color-success); }
+.tweet-relations { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; overflow-wrap: anywhere; }
+.tweet-relations:empty { display: none; }
+.tweet-relations a, .tweet-related > a { color: var(--semi-color-primary); }
+.tweet-retry.semi-button { padding-inline: 0; }
+.tweet-media { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%,240px),240px)); gap: 6px; margin-top: 10px; }
 .tweet-media-item { aspect-ratio: 16 / 10; min-width: 0; border-radius: 6px; overflow: hidden; background: var(--surface-muted); }
-.tweet-media-item button { width: 100%; height: 100%; cursor: zoom-in; }
+.tweet-media-item button { display: block; width: 100%; height: 100%; padding: 0; cursor: zoom-in; }
 .tweet-media img, .tweet-media video { width: 100%; height: 100%; object-fit: contain; }
-.tweet-related { border-left: 3px solid var(--line-strong); padding: 8px 12px; font-size: 12px; background: var(--surface-muted); }
-.tweet-related p { font-size: 13px; margin-top: 4px; }
+.tweet-related { align-self: stretch; min-width: 0; margin: 0; border-left: 2px solid var(--line-strong); padding: 6px 10px; font-size: 12px; background: var(--surface-muted); overflow-wrap: anywhere; }
+.tweet-related .tweet-body { font-size: 13px; margin-top: 4px; }
+.tweet-related .tweet-body-clamped { -webkit-line-clamp: 2; }
+.tweet-archive-compact .tweet-entry { padding-block: 12px; gap: 6px; }
+.tweet-archive-compact .tweet-has-media { display: grid; grid-template-columns: minmax(0, 1fr) 216px; align-items: start; gap: 16px; }
+.tweet-archive-compact .tweet-media { margin-top: 0; grid-template-columns: minmax(0, 1fr); }
+.tweet-archive-compact .tweet-media-multiple { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .storage-default, .storage-policy { padding: 20px 0; border-bottom: 1px solid var(--line); }
 .storage-rule-fields { display: grid; grid-template-columns: 1fr 1fr 1.4fr 1.6fr; gap: 12px; align-items: end; }
 .storage-path-preview { display: block; margin-top: 12px; padding: 10px; background: var(--surface-muted); font: 12px/1.6 var(--font-mono); overflow-wrap: anywhere; }
@@ -679,5 +710,19 @@
   .toolbar-select, .toolbar-user-select { width: 140px; }
   .archive-filters .toolbar-field { flex-basis: calc(50% - 6px); }
   .archive-filters .archive-search { flex-basis: 100%; }
+  .archive-result-count { margin-left: auto; }
+  .archive-layout { margin-left: 0; }
+  .tweet-archive-compact .tweet-has-media { grid-template-columns: minmax(0, 1fr) 168px; gap: 12px; }
+}
+@media (max-width: 640px) {
+  .tweet-archive-compact .tweet-has-media { grid-template-columns: minmax(0,1fr); gap: 8px; }
+  .tweet-archive-compact .tweet-media { width: min(100%, 176px); }
+  .tweet-archive-compact .tweet-media-multiple { width: min(100%, 358px); }
+  .tweet-identity time { flex-basis: 100%; }
+  .archive-layout { margin-left: auto; }
+  .archive-result-count { margin: 0; }
+  .archive-retweets { width: 100%; }
+  .archive-retweets .semi-radioGroup { display: flex; }
+  .archive-retweets .semi-radio { flex: 1; text-align: center; }
 }
 @media (max-width: 640px) { .storage-rule-fields { grid-template-columns: minmax(0,1fr); } .semi-description-grid { grid-template-columns: minmax(0,1fr) !important; } .tweet-media { grid-template-columns: repeat(2,minmax(0,1fr)); max-width: 488px; } .semi-pagination-bar { justify-content: center; overflow: visible; } .semi-pagination-bar .semi-page-switch { display: none; } .semi-pagination-bar .semi-page { max-width: 100%; flex-wrap: wrap; justify-content: center; row-gap: 6px; } .semi-pagination-item, .semi-pagination-prev, .semi-pagination-next { min-width: 32px; } }
