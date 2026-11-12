@@ -95,17 +95,11 @@ test("archive, storage and task workflows use the real backend", async ({ page }
     await video.screenshot({ path: info.outputPath("video-playback.png") });
     await video.evaluate((node: HTMLVideoElement) => node.pause());
   }
-  const taskLink = page.locator(".tweet-entry footer button").filter({ hasText: /^#\d+$/ }).first();
-  await taskLink.click();
-  const drawer = page.getByRole("dialog", { name: /任务详情|Task details/ });
-  await expect(drawer).toBeVisible();
-  await expect.poll(() => drawer.evaluate(node => node.contains(document.activeElement))).toBe(true);
-  for (let n = 0; n < 8; n++) { await page.keyboard.press("Tab"); expect(await drawer.evaluate(node => node.contains(document.activeElement))).toBe(true); }
-  await page.keyboard.press("Shift+Tab"); expect(await drawer.evaluate(node => node.contains(document.activeElement))).toBe(true);
-  await assertWithinViewport(drawer);
-  await page.screenshot({ path: info.outputPath("task-drawer.png"), fullPage: true });
-  await page.keyboard.press("Escape"); await expect(drawer).toHaveCount(0);
-  await expect(taskLink).toBeFocused();
+  await expect(page.locator(".tweet-entry footer")).toHaveCount(0);
+  const sort = page.getByRole("combobox", { name: en ? "Sort order" : "排序顺序", exact: true });
+  await sort.click();
+  await page.getByRole("option", { name: en ? "Oldest first" : "最早发布优先", exact: true }).click();
+  await expect(page).toHaveURL(/sort=asc/);
   await navigate(page, en ? "Media library" : "媒体归档");
   await expect(page.getByRole("main")).toBeVisible(); await assertLayout(page);
   const userFilter = page.getByRole("combobox", { name: en ? "Filter by user..." : "按用户筛选...", exact: true });
@@ -123,40 +117,24 @@ test("archive, storage and task workflows use the real backend", async ({ page }
   await navigate(page, en ? "Schedules" : "归档计划");
   await assertLayout(page);
   await navigate(page, en ? "Settings" : "系统配置");
-  await expect(page.getByRole("heading", { name: en ? "Asset Storage" : "资产分类存储", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: en ? "Storage settings" : "存储设置", exact: true })).toBeVisible();
   await assertLayout(page);
-  const pathPreview = page.getByRole("button", { name: en ? "Preview path Original images" : "预览实际路径 图片原文件", exact: true });
+  const pathPreview = page.getByRole("button", { name: en ? "Original images Preview path" : "图片原文件 预览实际路径", exact: true });
   await pathPreview.scrollIntoViewIfNeeded(); await pathPreview.click();
-  await expect(page.locator(".storage-path-preview").first()).toContainText(/images/);
-  const addTarget = page.getByRole("button", { name: en ? "Add target" : "添加存储目标", exact: true });
-  await addTarget.click();
+  await expect(page.locator(".storage-path-preview").first()).not.toBeEmpty();
+  await expect(page.getByRole("combobox", { name: en ? "Folder organization" : "分类存储策略", exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: en ? "File naming" : "命名策略", exact: true })).toBeVisible();
+  const selectDirectory = page.getByRole("button", { name: en ? "Select directory" : "选择目录", exact: true });
+  await selectDirectory.click();
   const targetModal = page.getByRole("dialog"); await expect(targetModal).toBeVisible();
-  await expect(targetModal.getByRole("textbox", { name: en ? "Target ID" : "目标 ID", exact: true })).toBeVisible();
+  await expect(targetModal.getByRole("textbox", { name: en ? "Download directory" : "下载目录", exact: true })).toBeVisible();
   for (let n = 0; n < 12; n++) { await page.keyboard.press("Tab"); expect(await targetModal.evaluate(node => node.contains(document.activeElement))).toBe(true); }
   await page.keyboard.press("Shift+Tab"); expect(await targetModal.evaluate(node => node.contains(document.activeElement))).toBe(true);
   await assertWithinViewport(targetModal);
   await page.screenshot({ path: info.outputPath("storage-modal.png"), fullPage: true });
+  await targetModal.getByRole("textbox", { name: en ? "Download directory" : "下载目录", exact: true }).focus();
   await page.keyboard.press("Escape"); await expect(targetModal).toHaveCount(0);
-  await expect(addTarget).toBeFocused();
-  if (info.project.name === "desktop-zh") {
-    const storage = page.locator(".semi-settings-section").filter({ has: page.getByRole("heading", { name: "资产分类存储", exact: true }) });
-    const quality = storage.getByRole("spinbutton", { name: "质量", exact: true });
-    const original = await quality.inputValue();
-    const changed = original === "83" ? "82" : "83";
-    try {
-      await quality.fill(changed);
-      const saved = page.waitForResponse(response => response.url().endsWith("/api/storage") && response.request().method() === "PUT");
-      await storage.getByRole("button", { name: "保存配置", exact: true }).click();
-      expect((await saved).ok()).toBe(true);
-      await page.reload();
-      await expect(quality).toHaveValue(changed);
-    } finally {
-      await quality.fill(original);
-      const restored = page.waitForResponse(response => response.url().endsWith("/api/storage") && response.request().method() === "PUT");
-      await storage.getByRole("button", { name: "保存配置", exact: true }).click();
-      expect((await restored).ok()).toBe(true);
-    }
-  }
+  await expect(selectDirectory).toBeFocused();
   await page.screenshot({ path: info.outputPath("settings.png"), fullPage: true });
   await page.locator(".semi-settings-section").last().evaluate(node => node.scrollIntoView({ block: "end" }));
   await assertWithinViewport(page.locator(".semi-settings-section").last().getByRole("button").last());

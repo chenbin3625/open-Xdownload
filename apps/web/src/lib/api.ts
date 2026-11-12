@@ -435,7 +435,7 @@ export const getConfig = (signal?: AbortSignal) => api<AppConfig>("/api/config",
 export const getJobFiles = (id: number, signal?: AbortSignal) =>
   api<JobFiles>(`/api/jobs/${id}/files`, { signal, timeoutMs: LONG_TIMEOUT_MS });
 export const getLibraryDownloadsPage = (
-  options: { page: number; pageSize: number; kind: string; user: string; search: string },
+  options: { page: number; pageSize: number; kind: string; user: string; search: string; sort?: string; from?: string; to?: string; minBytes?: string; maxBytes?: string },
   signal?: AbortSignal,
 ) => {
   const params = new URLSearchParams({
@@ -445,6 +445,9 @@ export const getLibraryDownloadsPage = (
     user: options.user,
     search: options.search,
   });
+  for (const key of ["sort", "from", "to", "minBytes", "maxBytes"] as const) {
+    if (options[key] !== undefined && options[key] !== "") params.set(key, options[key]);
+  }
   return api<LibraryDownloadsPage>(`/api/library/downloads?${params}`, {
     signal,
     timeoutMs: LONG_TIMEOUT_MS,

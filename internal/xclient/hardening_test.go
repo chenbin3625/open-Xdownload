@@ -9,14 +9,15 @@ import (
 	"time"
 )
 
-func TestParseRetryAfterIsClamped(t *testing.T) {
+func TestParseRetryAfterPreservesLongValues(t *testing.T) {
 	cases := []struct {
 		name   string
 		value  string
 		expect time.Duration
 	}{
 		{name: "正常秒数原样返回", value: "30", expect: 30 * time.Second},
-		{name: "超大秒数被夹到上限", value: "86400", expect: maxRetryAfter},
+		{name: "长冷却原样保留", value: "86400", expect: 24 * time.Hour},
+		{name: "超出时长范围不溢出", value: "18446744073709551615", expect: time.Duration(1<<63 - 1)},
 		{name: "负数视为无", value: "-5", expect: 0},
 		{name: "缺失视为无", value: "", expect: 0},
 	}
@@ -33,11 +34,11 @@ func TestParseRetryAfterIsClamped(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfterHTTPDateIsClamped(t *testing.T) {
+func TestParseRetryAfterHTTPDatePreservesLongValues(t *testing.T) {
 	header := http.Header{}
 	header.Set("Retry-After", time.Now().Add(24*time.Hour).UTC().Format(http.TimeFormat))
-	if got := parseRetryAfter(header); got > maxRetryAfter {
-		t.Fatalf("HTTP-date 分支未夹上限: %s > %s", got, maxRetryAfter)
+	if got := parseRetryAfter(header); got < 24*time.Hour-time.Second || got > 24*time.Hour {
+		t.Fatalf("HTTP-date cooldown = %s, want full 24h", got)
 	}
 }
 

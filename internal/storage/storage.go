@@ -90,7 +90,9 @@ const MaxLibraryDownloadsLimit = 100000
 // BEGIN DEFERRED，事务先以读者身份启动，写第一条语句时才尝试升级为写者，而
 // busy_timeout 对锁升级不生效，并发写者会立刻返回 SQLITE_BUSY(5)/SQLITE_BUSY_SNAPSHOT(517)
 // 而不是等待。开头就取写锁后，冲突走 busy_timeout 排队。
-const sqliteOpenOptions = "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
+// _texttotime 让 modernc 把 DATE/DATETIME/TIMESTAMP 文本列交给 time.Time
+// 扫描器解析；否则新版驱动会返回原始字符串，SELECT * 到模型时直接报 Scan 错误。
+const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
 
 // schemaVersion 是当前二进制认识的库结构版本，迁移完成后写入 PRAGMA user_version。
 // 向前迁移是可加、幂等的，但没有版本闸门时，回滚镜像会让旧二进制打开新库并正常启动，
@@ -1573,13 +1575,11 @@ func (s *Store) CreateJob(ctx context.Context, kind JobKind, input string, title
 // CreateJobFromSource 创建任务并显式标记来源。enqueued_at 与 created_at 都取当前时间；
 // 自动重试复用旧行时必须调用 Requeue* 刷新 enqueued_at，而不是依赖 created_at。
 func (s *Store) CreateJobFromSource(ctx context.Context, kind JobKind, input string, title string, source JobSource) (Job, error) {
-	now := time.Now().UTC()
-	job := Job{}
-	err := s.db.GetContext(ctx, &job, `
-INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source)
-VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
-RETURNING *`, kind, JobPending, input, title, "排队中", now, now, now, now.UnixNano(), source.Normalized())
-	return job, err
+	jobs, err := s.createJobs(ctx, []JobDraft{{Kind: kind, Input: input, Title: title, Source: source}}, false)
+	if err != nil {
+		return Job{}, err
+	}
+	return jobs[0], nil
 }
 
 func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
@@ -1758,6 +1758,9 @@ SELECT COUNT(*) FROM jobs WHERE kind = ? AND input = ? AND status IN (`+activeJo
 	if active > 0 {
 		return Job{}, ErrJobRetryBusy
 	}
+	if err := checkJobQueueCapacity(ctx, tx, 1); err != nil {
+		return Job{}, err
+	}
 	now := time.Now().UTC()
 	retried := Job{}
 	if err := tx.GetContext(ctx, &retried, `
@@ -1859,6 +1862,26 @@ func (s *Store) CreateJobs(ctx context.Context, drafts []JobDraft) ([]Job, error
 	return s.createJobs(ctx, drafts, true)
 }
 
+const MaxQueuedJobs = 500
+
+var ErrJobQueueFull = errors.New("任务队列已满")
+
+// 调用方必须持有写事务；冷却和运行中的任务也保留已接纳的队列容量。
+func checkJobQueueCapacity(ctx context.Context, tx *sqlx.Tx, additional int) error {
+	var active int
+	if err := tx.GetContext(ctx, &active, `SELECT COUNT(*) FROM jobs WHERE status IN (`+activeJobStatusesSQL+`)`); err != nil {
+		return err
+	}
+	if additional > MaxQueuedJobs-active {
+		return &UserFacingError{
+			Status:  http.StatusTooManyRequests,
+			Message: fmt.Sprintf("任务队列已满（最多 %d 个未完成任务），请等待任务完成后重试", MaxQueuedJobs),
+			Cause:   ErrJobQueueFull,
+		}
+	}
+	return nil
+}
+
 func (s *Store) createJobs(ctx context.Context, drafts []JobDraft, dedupe bool) ([]Job, error) {
 	if len(drafts) == 0 {
 		return []Job{}, nil
@@ -1918,6 +1941,9 @@ SELECT kind, input FROM jobs WHERE status IN (`+activeJobStatusesSQL+`)`); err !
 			return []Job{}, nil
 		}
 		drafts = filtered
+	}
+	if err := checkJobQueueCapacity(ctx, tx, len(drafts)); err != nil {
+		return nil, err
 	}
 
 	var query strings.Builder
@@ -3287,6 +3313,9 @@ func (s *Store) ReserveAutomaticRetryJob(ctx context.Context) (*Job, error) {
 SELECT * FROM jobs WHERE kind = ? AND input = ? ORDER BY id DESC LIMIT 1`,
 		JobKindFailedRetry, AutomaticFailedRetryInput)
 	if errors.Is(err, sql.ErrNoRows) {
+		if err := checkJobQueueCapacity(ctx, tx, 1); err != nil {
+			return nil, err
+		}
 		inserted := Job{}
 		if err := tx.GetContext(ctx, &inserted, `
 INSERT INTO jobs(kind, status, input, title, progress, message, error, created_at, updated_at, enqueued_at, enqueue_ns, source)
@@ -3305,6 +3334,9 @@ RETURNING *`, JobKindFailedRetry, JobPending, AutomaticFailedRetryInput, now, no
 	if IsActiveJobStatus(current.Status) {
 		// 已有排队/运行中的重试任务：调用方直接返回，不重复入队。
 		return nil, tx.Commit()
+	}
+	if err := checkJobQueueCapacity(ctx, tx, 1); err != nil {
+		return nil, err
 	}
 	reset := Job{}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM job_storage WHERE job_id=?`, current.ID); err != nil {

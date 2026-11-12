@@ -46,6 +46,13 @@ func TestTweetArchiveDedupFiltersAndIndependentResults(t *testing.T) {
 	if err != nil || page.Pagination.Total != 2 {
 		t.Fatalf("date/author filter: %+v %v", page, err)
 	}
+	if page.Items[0].ID != media.ID {
+		t.Fatalf("default timeline must be newest first: %+v", page.Items)
+	}
+	page, err = store.ListTweets(ctx, TweetFilter{Sort: "asc", PageSize: 1})
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != text.ID || page.Pagination.Total != 2 {
+		t.Fatalf("ascending timeline must sort before pagination: %+v %v", page, err)
+	}
 	page, err = store.ListTweets(ctx, TweetFilter{Search: "正文", MediaType: "text"})
 	if err != nil || page.Pagination.Total != 1 || page.Items[0].Text != text.Text {
 		t.Fatalf("text/long body: %+v %v", page, err)

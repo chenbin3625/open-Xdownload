@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net/http"
 	"net/url"
@@ -47,6 +48,8 @@ type Manager struct {
 	userLocks  map[string]*keyLock
 	mediaMu    sync.Mutex
 	mediaLocks map[string]*keyLock
+	metricsMu  sync.Mutex
+	metrics    map[int64]jobMetrics
 	xPoolMu    sync.Mutex
 	xPoolKey   string
 	cachedPool *xclient.Pool
@@ -120,6 +123,7 @@ func NewManager(store *storage.Store, parserService *parser.Service, eventBus *E
 		active:     make(map[int64]context.CancelFunc),
 		userLocks:  make(map[string]*keyLock),
 		mediaLocks: make(map[string]*keyLock),
+		metrics:    make(map[int64]jobMetrics),
 	}
 }
 
@@ -246,6 +250,9 @@ func (m *Manager) CancelJob(ctx context.Context, id int64) (storage.Job, error) 
 		m.pauseAutomaticRetry()
 	}
 	m.publishJob(ctx, "job.updated", job)
+	if isTerminalJobStatus(job.Status) {
+		m.logJobMetrics(job)
+	}
 	return job, nil
 }
 
@@ -1273,6 +1280,49 @@ type archiveStats struct {
 	Issues       []string
 }
 
+// jobMetrics 汇总单个任务从入队到终态的接口/翻页/让出与耗时指标。任务分段或限流
+// 重排后会跨多次执行累计；进程重启时丢弃，终态日志只用于调参，不参与业务判断。
+type jobMetrics struct {
+	APIRequests     int
+	Pages           int
+	RateLimitYields int
+	Segments        int
+	APITime         time.Duration
+	DownloadTime    time.Duration
+}
+
+func (m *Manager) addJobMetrics(jobID int64, delta jobMetrics) {
+	if jobID == 0 {
+		return
+	}
+	m.metricsMu.Lock()
+	current := m.metrics[jobID]
+	current.APIRequests += delta.APIRequests
+	current.Pages += delta.Pages
+	current.RateLimitYields += delta.RateLimitYields
+	current.Segments += delta.Segments
+	current.APITime += delta.APITime
+	current.DownloadTime += delta.DownloadTime
+	m.metrics[jobID] = current
+	m.metricsMu.Unlock()
+}
+
+func (m *Manager) logJobMetrics(job storage.Job) {
+	m.metricsMu.Lock()
+	metrics, ok := m.metrics[job.ID]
+	if ok {
+		delete(m.metrics, job.ID)
+	}
+	m.metricsMu.Unlock()
+	if !ok {
+		return
+	}
+	log.Printf("job %d metrics: kind=%s status=%s api_requests=%d pages=%d rate_limit_yields=%d segments=%d api_time=%s download_time=%s",
+		job.ID, job.Kind, job.Status, metrics.APIRequests, metrics.Pages,
+		metrics.RateLimitYields, metrics.Segments,
+		metrics.APITime.Round(time.Millisecond), metrics.DownloadTime.Round(time.Millisecond))
+}
+
 // skipped 是跳过总数的对外口径（Job.Message 用）。
 func (s archiveStats) skipped() int { return s.SkippedUsers + s.SkippedMedia }
 
@@ -1417,6 +1467,7 @@ func (m *Manager) yieldJob(ctx context.Context, job storage.Job, message string)
 		return
 	}
 	if updated != nil {
+		m.addJobMetrics(job.ID, jobMetrics{Segments: 1})
 		m.publishJob(ctx, "job.updated", *updated)
 	}
 }
@@ -1719,7 +1770,14 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 		return stats, err
 	}
 	if fullScan {
-		if err := m.store.UpdateUserEntityLastFullScan(saveCtx, entity.ID, time.Now().UTC()); err != nil {
+		scannedAt := time.Now().UTC()
+		if !entity.LastFullScanAt.Valid {
+			// 首次全量扫描（升级或新用户）完成后，把基准时间按 user ID 确定性地
+			// 提前 0~6 天。这样下一轮 7 天全量会自然分散到一周内，而不是所有用户
+			// 在同一天集中触发。
+			scannedAt = scannedAt.Add(-mediaFullScanStagger(user.ID))
+		}
+		if err := m.store.UpdateUserEntityLastFullScan(saveCtx, entity.ID, scannedAt); err != nil {
 			return stats, err
 		}
 	}
@@ -1730,11 +1788,22 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 // 完成时间不同，因此全量扫描自然错开，不会每周集中到同一次运行。
 const mediaFullScanInterval = 7 * 24 * time.Hour
 
+// mediaFullScanStaggerWindow 限制首次全量基准最多提前 6 天，给下一轮至少留 1 天，
+// 避免刚扫完立刻又到期。
+const mediaFullScanStaggerWindow = 6 * 24 * time.Hour
+
 func mediaFullScanDue(entity storage.UserEntity, now time.Time) bool {
 	if !entity.LastFullScanAt.Valid {
 		return true
 	}
 	return now.Sub(entity.LastFullScanAt.Time) >= mediaFullScanInterval
+}
+
+// mediaFullScanStagger 用 user ID 做稳定散列，保证同一用户每次重启得到相同偏移。
+func mediaFullScanStagger(userID string) time.Duration {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(userID))
+	return time.Duration(hash.Sum64() % uint64(mediaFullScanStaggerWindow))
 }
 
 // archiveMediaTimeline 按页抓取 UserMedia 时间线：每页媒体处理完（可重试失败已写入
@@ -1762,6 +1831,7 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 
 	for attempt := 0; attempt < 2; attempt++ {
 		runStats := archiveStats{}
+		var attemptDownloads time.Duration
 		pageNewest := ""
 		walkStats, walkErr := pool.WalkUserMedia(ctx, user, xclient.UserMediaTimelineOptions{
 			Cursor: state.Cursor,
@@ -1771,7 +1841,9 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 			if update != nil {
 				update(fmt.Sprintf("媒体归档 @%s：%d", fallbackUserName(user), state.Count+len(page.Tweets)))
 			}
+			downloadStarted := time.Now()
 			delta, err := m.archiveTweetsBatch(ctx, saveCtx, job, cfg, user, entity, dir, page.Tweets, update)
+			attemptDownloads += time.Since(downloadStarted)
 			if err != nil {
 				return err
 			}
@@ -1814,6 +1886,12 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 			runStats.Issues = append(runStats.Issues, fmt.Sprintf("跳过 @%s 的 %d 条无法解析的推文", fallbackUserName(user), walkStats.SkippedTweets))
 		}
 		stats.merge(runStats)
+		m.addJobMetrics(job.ID, jobMetrics{
+			APIRequests:  walkStats.Requests,
+			Pages:        walkStats.Pages,
+			APITime:      walkStats.APITime,
+			DownloadTime: attemptDownloads,
+		})
 		if walkErr == nil {
 			cursor := state.LastSeenTweetID
 			if newerTweetID(walkStats.LastSeenTweetID, cursor) {
@@ -2476,6 +2554,7 @@ func (m *Manager) requeueForRateLimit(ctx context.Context, job storage.Job, retr
 		// 已被取消或进入终态：不要把它改写成 failed。
 		return true
 	}
+	m.addJobMetrics(job.ID, jobMetrics{RateLimitYields: 1})
 	m.publishJob(ctx, "job.updated", *updated)
 	return true
 }
@@ -2500,6 +2579,11 @@ func (m *Manager) save(ctx context.Context, job storage.Job) {
 		}
 		if updated != nil {
 			m.publishJob(ctx, "job.updated", *updated)
+			if terminal {
+				m.logJobMetrics(*updated)
+			}
+		} else if terminal {
+			m.logJobMetrics(job)
 		}
 		return
 	}

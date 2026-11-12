@@ -8,8 +8,6 @@ import { AppSidebar, type AppSidebarProps } from "./AppSidebar";
 const baseProps: AppSidebarProps = {
   activeSection: "tasks",
   onSectionChange: () => {},
-  onOpenFailedDrawer: () => {},
-  failedTweetCount: 0,
 };
 
 describe("AppSidebar", () => {
@@ -57,7 +55,7 @@ describe("AppSidebar", () => {
   });
 
   it("菜单项只展示统一字数的名称，不展示数量徽标", () => {
-    render(<AppSidebar {...baseProps} failedTweetCount={5} />);
+    render(<AppSidebar {...baseProps} />);
 
     for (const label of ["任务中心", "归档计划", "媒体归档", "系统配置"]) {
       expect(label.length).toBe(4);
@@ -75,13 +73,10 @@ describe("AppSidebar", () => {
     expect(screen.queryByRole("button", { name: /新建任务|新建下载/ })).toBeNull();
   });
 
-  it("没有失败推文时不渲染失败队列入口", () => {
-    const { unmount } = render(<AppSidebar {...baseProps} failedTweetCount={0} />);
+  it("侧边菜单不再展示失败队列入口", () => {
+    render(<AppSidebar {...baseProps} />);
     expect(screen.queryByText("失败推文队列")).toBeNull();
-    unmount();
-
-    render(<AppSidebar {...baseProps} failedTweetCount={5} />);
-    expect(screen.getByText("失败队列")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "处理失败" })).not.toBeNull();
+    expect(screen.queryByText("失败队列")).toBeNull();
+    expect(screen.queryByRole("button", { name: "处理失败" })).toBeNull();
   });
 });

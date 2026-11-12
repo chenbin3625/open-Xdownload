@@ -36,10 +36,12 @@ type StorageTarget struct {
 }
 
 type AssetRule struct {
-	TargetID          string `json:"targetId"`
-	Prefix            string `json:"prefix"`
-	DirectoryTemplate string `json:"directoryTemplate"`
-	FilenameTemplate  string `json:"filenameTemplate"`
+	TargetID             string `json:"targetId"`
+	Prefix               string `json:"prefix"`
+	DirectoryTemplate    string `json:"directoryTemplate"`
+	FilenameTemplate     string `json:"filenameTemplate"`
+	DirectoryTemplateSet bool   `json:"directoryTemplateSet,omitempty"`
+	SeparateFolder       *bool  `json:"separateFolder,omitempty"`
 }
 
 type ThumbnailConfig struct {
@@ -73,8 +75,11 @@ func (d StorageDocument) Rule(kind AssetKind) (AssetRule, StorageTarget, error) 
 		if override.Prefix != "" {
 			r.Prefix = override.Prefix
 		}
-		if override.DirectoryTemplate != "" {
+		if override.DirectoryTemplateSet || override.DirectoryTemplate != "" {
 			r.DirectoryTemplate = override.DirectoryTemplate
+		}
+		if override.SeparateFolder != nil {
+			r.SeparateFolder = override.SeparateFolder
 		}
 		if override.FilenameTemplate != "" {
 			r.FilenameTemplate = override.FilenameTemplate

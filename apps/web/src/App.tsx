@@ -193,7 +193,6 @@ function Workbench() {
 
   const sidebarProps = {
     activeSection,
-    failedTweetCount,
     storageType: config.data?.storageType || "local",
     storagePath: config.data?.downloadDir || "/downloads",
   };
@@ -208,7 +207,6 @@ function Workbench() {
         <AppSidebar
           {...sidebarProps}
           onSectionChange={handleSectionChange}
-          onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
         />
       )}
 
@@ -226,10 +224,6 @@ function Workbench() {
               handleSectionChange(section);
               setMobileMenuOpen(false);
             }}
-            onOpenFailedDrawer={() => {
-              setMobileMenuOpen(false);
-              setFailedDrawerOpen(true);
-            }}
           />
         </Drawer>
       )}
@@ -237,6 +231,8 @@ function Workbench() {
       {/* 右侧主视窗内容流 */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <AppHeader
+          failedTweetCount={failedTweetCount}
+          onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
           refreshPending={manualRefreshPending}
           onRefresh={handleManualRefresh}
           onQuickSubmit={(input) => openCreateModal(input)}

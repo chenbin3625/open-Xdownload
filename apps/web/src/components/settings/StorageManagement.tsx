@@ -1,95 +1,108 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@douyinfe/semi-ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, HardDrive, Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
-import { api, type AssetKind } from "../../lib/api";
-import { getDerivatives, getStorage, getTweets, migrateStorage, regenerateDerivative, saveStorage, storageQueryKey, type AssetRule, type StorageDocument, type StorageTarget } from "../../lib/archive";
+import { Eye, FolderOpen, HardDrive, RefreshCw, Save } from "lucide-react";
+import { api, type AssetKind, type TweetData } from "../../lib/api";
+import { getStorage, getTweets, migrateStorage, saveStorage, storageQueryKey, type AssetRule, type StorageDocument } from "../../lib/archive";
 import { t, useTranslation } from "../../lib/i18n";
-import { Alert, Field, Input, ListSkeleton, Modal, NumberInput, PasswordInput, Popconfirm, Select, Switch, Table, Tag, Tooltip, toast } from "../semi";
+import { Alert, Field, Input, ListSkeleton, Modal, Popconfirm, Select, Switch, Tag, Tooltip, toast } from "../semi";
+import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
+import { FilenameStrategy } from "./FilenameStrategy";
 
 const kinds: AssetKind[] = ["image", "video", "thumbnail", "video_cover"];
-const emptyTarget: StorageTarget = { id: "", name: "", type: "local", version: 0, root: "" };
+
+function directoryOptions() {
+  return [
+    { value: "", label: t("全部放在同一目录") },
+    { value: "{username}", label: t("按用户") },
+    { value: "{username}/{year}/{month}", label: t("按用户 / 年 / 月") },
+    { value: "{year}/{month}", label: t("按年 / 月") },
+    { value: "{kind}/{username}", label: t("按媒体类型 / 用户") },
+    { value: "{author_id}/{tweet_id}", label: t("按用户编号 / 推文编号") },
+  ];
+}
+
+function StoragePathPreview({ document, kind, tweet: sample }: { document: StorageDocument; kind: AssetKind; tweet?: TweetData }) {
+  const [location, setLocation] = useState("");
+  const current = useRef(document); current.current = document;
+  useEffect(() => setLocation(""), [document]);
+  const preview = useMutation({ mutationFn: async (submitted: StorageDocument) => {
+    const tweet = sample ?? { id: "2120206875581186293", text: t("归档预览"), createdAt: "2026-11-10T12:00:00Z", author: { id: "44196397", name: "Author", screenName: "author" }, media: [] };
+    const video = kind === "video" || kind === "video_cover";
+    const index = tweet.media.findIndex(media => video ? media.type !== "photo" : media.type === "photo");
+    const media = tweet.media[index] ?? { id: video ? "video-1" : "image-1", type: video ? "video" : "photo" };
+    const extension = kind === "video" ? "mp4" : kind === "thumbnail" && submitted.thumbnail.format !== "jpeg" ? submitted.thumbnail.format : "jpg";
+    return api<{ location: string }>("/api/storage/preview", { method: "POST", body: JSON.stringify({ document: submitted, kind, tweet, media, index: Math.max(0, index), extension }) });
+  }, onSuccess: (value, submitted) => { if (current.current === submitted) setLocation(value.location); }, onError: error => toast.error({ message: error.message }) });
+  return <div className="storage-preview-row"><Button type="tertiary" icon={<Eye size={16} />} aria-label={`${t(`storage.kind.${kind}`)} ${t("storage.preview")}`} loading={preview.isPending} disabled={preview.isPending} onClick={() => preview.mutate(document)}>{t("storage.preview")}</Button>{location && <output className="storage-path-preview">{location}</output>}</div>;
+}
 
 export function StorageManagement() {
-  useTranslation(); const client = useQueryClient();
+  useTranslation();
+  const client = useQueryClient();
   const query = useQuery({ queryKey: storageQueryKey, queryFn: ({ signal }) => getStorage(signal) });
   const [draft, setDraft] = useState<StorageDocument | null>(null);
   const currentDraft = useRef(draft); currentDraft.current = draft;
   const [dirty, setDirty] = useState(false);
-  const [target, setTarget] = useState<StorageTarget | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [locations, setLocations] = useState<Record<string, string>>({});
-  const derivatives = useQuery({ queryKey: ["derivative-status"], queryFn: ({ signal }) => getDerivatives(signal), refetchInterval: 10_000 });
+  const [pickingDirectory, setPickingDirectory] = useState(false);
   const tweets = useQuery({ queryKey: ["storage-preview-tweets"], queryFn: ({ signal }) => getTweets(new URLSearchParams({ pageSize: "1" }), signal) });
   useEffect(() => { if (query.data && !dirty) setDraft(query.data); }, [query.data, dirty]);
-  function update(next: StorageDocument) { setDraft(next); setDirty(true); setLocations({}); }
+  function update(next: StorageDocument) { setDraft({ ...next, enabled: true }); setDirty(true); }
   const save = useMutation({ mutationFn: saveStorage, onSuccess: (document, submitted) => {
     client.setQueryData(storageQueryKey, document);
     const edited = currentDraft.current !== submitted;
     setDraft(current => edited && current ? { ...current, version: document.version, targets: current.targets.map(target => ({ ...target, version: document.targets.find(saved => saved.id === target.id)?.version ?? target.version })) } : document);
     setDirty(edited); toast.success({ message: t("storage.saved") });
   }, onError: error => toast.error({ message: error.message }) });
-  const regenerate = useMutation({ mutationFn: regenerateDerivative, onSuccess: () => toast.success({ message: t("archive.retryQueued") }), onError: error => toast.error({ message: error.message }) });
   const migration = useMutation({ mutationFn: migrateStorage, onSuccess: () => { void client.invalidateQueries({ queryKey: ["jobs"] }); toast.success({ message: t("storage.migrationQueued") }); }, onError: error => toast.error({ message: error.message }) });
-  const preview = useMutation({ mutationFn: async (kind: AssetKind) => {
-    if (!draft) throw new Error(t("暂无数据"));
-    const tweet = tweets.data?.items[0] ?? { id: "2120206875581186293", text: "Archive preview", createdAt: "2026-11-10T12:00:00Z", author: { id: "44196397", name: "Author", screenName: "author" }, media: [] };
-    return { kind, ...await api<{ location: string }>("/api/storage/preview", { method: "POST", body: JSON.stringify({ document: draft, kind, tweet, media: tweet.media[0] ?? { id: "media-1", type: "photo" }, index: 0, extension: kind === "video" ? "mp4" : kind === "thumbnail" ? draft.thumbnail.format === "jpeg" ? "jpg" : draft.thumbnail.format : "jpg" }) }) };
-  }, onSuccess: value => setLocations(current => ({ ...current, [value.kind]: value.location })), onError: error => toast.error({ message: error.message }) });
   if (!draft) return query.isError ? <Alert type="error" message={query.error.message} action={<Button onClick={() => void query.refetch()}>{t("重试")}</Button>} /> : <ListSkeleton rows={3} />;
-  function ruleFields(kind: AssetKind | "default", rule: AssetRule) {
-    const current = draft!;
-    const change = (patch: Partial<AssetRule>) => update(kind === "default" ? { ...current, default: { ...rule, ...patch } } : { ...current, rules: { ...current.rules, [kind]: { ...rule, ...patch } } });
-    return <div className="storage-rule-fields">
-      <Field label={t("storage.target")}><Select value={rule.targetId} onChange={value => change({ targetId: value })} options={current.targets.map(item => ({ value: item.id, label: item.name || item.id }))} /></Field>
-      <Field label={t("storage.prefix")}><Input value={rule.prefix} onChange={e => change({ prefix: e.target.value })} /></Field>
-      <Field label={t("storage.directoryTemplate")}><Input value={rule.directoryTemplate} onChange={e => change({ directoryTemplate: e.target.value })} /></Field>
-      <Field label={t("storage.filenameTemplate")}><Input value={rule.filenameTemplate} onChange={e => change({ filenameTemplate: e.target.value })} /></Field>
-    </div>;
+  const target = draft.targets.find(item => item.id === draft.default.targetId);
+  function changeRoot(root: string) {
+    update({ ...draft!, targets: draft!.targets.map(item => item.id === target?.id ? { ...item, root } : item) });
   }
-  function commitTarget() {
-    if (!target || !draft) return;
-    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(target.id) || (!editingId && draft.targets.some(item => item.id === target.id))) { toast.error({ message: t("storage.invalidId") }); return; }
-    update({ ...draft, targets: editingId ? draft.targets.map(item => item.id === editingId ? target : item) : [...draft.targets, target] }); setTarget(null);
+  function ruleFields(kind: AssetKind | "default", rule: AssetRule, inherited = false) {
+    const change = (patch: Partial<AssetRule>) => update(kind === "default" ? { ...draft!, default: { ...rule, ...patch } } : { ...draft!, rules: { ...draft!.rules, [kind]: { ...rule, ...patch } } });
+    const directories = directoryOptions();
+    if (!directories.some(item => item.value === rule.directoryTemplate)) directories.push({ value: rule.directoryTemplate, label: t("保留现有分类方式") });
+    const ruleTarget = draft!.targets.find(item => item.id === rule.targetId);
+    return <>
+      {kind !== "default" && <Field label={t("storage.target")} className="storage-media-field"><Select disabled={inherited} ariaLabel={`${t(`storage.kind.${kind}`)} ${t("storage.target")}`} value={rule.targetId} options={draft!.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => change({ targetId })} /><span className="storage-target-path">{ruleTarget?.type === "s3" ? `s3://${ruleTarget.bucket ?? ""}` : ruleTarget?.root}</span></Field>}
+      <Field label={t("分类存储策略")} className={kind !== "default" ? "storage-media-field" : undefined}>
+        <Select disabled={inherited} ariaLabel={kind === "default" ? t("分类存储策略") : `${t(`storage.kind.${kind}`)} ${t("分类存储策略")}`} value={rule.directoryTemplate} options={directories} onChange={directoryTemplate => change({ directoryTemplate, directoryTemplateSet: true })} />
+        {rule.prefix && <span className="storage-target-path">{t("storage.prefix")}: {rule.prefix}</span>}
+        <div className="storage-folder-toggle"><Switch disabled={inherited} checked={Boolean(rule.separateFolder || rule.directoryTemplate.includes("{kind}"))} ariaLabel={`${kind === "default" ? "" : `${t(`storage.kind.${kind}`)} `}${t("按媒体类型分文件夹")}`} onChange={separateFolder => change({
+          separateFolder,
+          ...(!separateFolder && rule.directoryTemplate.includes("{kind}") ? { directoryTemplate: rule.directoryTemplate.replaceAll("{kind}", "").split("/").filter(Boolean).join("/"), directoryTemplateSet: true } : {}),
+        })} /><span>{t("按媒体类型分文件夹")}</span></div>
+      </Field>
+      <Field label={t("命名策略")} className={kind !== "default" ? "storage-media-field" : undefined}><FilenameStrategy disabled={inherited} labelPrefix={kind === "default" ? "" : t(`storage.kind.${kind}`)} value={rule.filenameTemplate} onChange={filenameTemplate => change({ filenameTemplate })} /></Field>
+    </>;
   }
-  return <section className="semi-settings-section">
-    <h2 className="settings-section-title"><HardDrive size={16} />{t("storage.title")}</h2>
-    <div className="flex flex-wrap items-center justify-between gap-3 mb-5"><div className="flex flex-wrap items-center gap-3"><Switch checked={draft.enabled} onChange={value => update({ ...draft, enabled: value })} ariaLabel={t("storage.enabled")} /><span className="text-sm">{t("storage.enabled")}</span><Tag>v{draft.version}</Tag>{dirty && <Tag tone="warning">{t("storage.unsaved")}</Tag>}</div><Button theme="solid" icon={<Save size={16} />} disabled={!dirty || save.isPending} loading={save.isPending} aria-busy={save.isPending} onClick={() => save.mutate(draft)}>{t("保存配置")}</Button></div>
-    <div className="flex flex-wrap items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold">{t("storage.targets")}</h4><Button type="tertiary" icon={<Plus size={16} />} onClick={() => { setEditingId(null); setTarget({ ...emptyTarget }); }}>{t("storage.addTarget")}</Button></div>
-    <Table data={draft.targets} rowKey={item => item.id} minWidth={640} columns={[
-      { key: "name", title: t("名称"), render: item => <div><strong className="text-sm">{item.name || item.id}</strong><div className="text-xs text-fg-muted">{item.id}</div></div> },
-      { key: "type", title: t("类型"), width: 90, render: item => <Tag>{item.type.toUpperCase()}</Tag> },
-      { key: "root", title: t("storage.location"), render: item => <span className="break-all text-xs font-mono">{item.type === "s3" ? `${item.endpoint}/${item.bucket}` : item.root}</span> },
-      { key: "actions", title: "", width: 96, render: item => { const inUse = draft.default.targetId === item.id || Object.values(draft.rules).some(rule => rule?.targetId === item.id); return <div className="flex gap-1"><Tooltip title={t("编辑")}><Button theme="borderless" type="tertiary" icon={<Pencil size={16} />} aria-label={t("编辑")} onClick={() => { setEditingId(item.id); setTarget({ ...item }); }} /></Tooltip><Tooltip title={t(inUse ? "storage.targetInUse" : "删除")}><span><Popconfirm title={t("storage.removeTarget")} danger disabled={inUse || draft.targets.length === 1} onConfirm={() => update({ ...draft, targets: draft.targets.filter(t => t.id !== item.id) })}><Button theme="borderless" type="danger" icon={<Trash2 size={16} />} aria-label={t("删除")} disabled={inUse || draft.targets.length === 1} /></Popconfirm></span></Tooltip></div>; } },
-    ]} />
-    <div className="storage-default"><h4 className="text-sm font-semibold mb-3">{t("storage.default")}</h4>{ruleFields("default", draft.default)}</div>
-    <div className="flex flex-wrap items-center justify-between gap-3 py-4"><span className="text-xs text-fg-muted">{t("storage.sourceRetained")}</span><Popconfirm title={t("storage.migrateConfirm")} onConfirm={() => migration.mutate()}><Button disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} aria-busy={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
-    {kinds.map(kind => <section className="storage-policy" key={kind}>
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-3"><h4 className="text-sm font-semibold">{t(`storage.kind.${kind}`)}</h4><div className="flex items-center gap-2 text-xs"><span>{t("storage.inherit")}</span><Switch checked={!draft.rules[kind]} ariaLabel={`${t(`storage.kind.${kind}`)} ${t("storage.inherit")}`} onChange={inherit => { const rules = { ...draft.rules }; if (inherit) delete rules[kind]; else rules[kind] = { ...draft.default }; update({ ...draft, rules }); }} /><Tooltip title={t("storage.preview")}><Button icon={<Eye size={16} />} theme="borderless" type="tertiary" aria-label={`${t("storage.preview")} ${t(`storage.kind.${kind}`)}`} loading={preview.isPending && preview.variables === kind} disabled={preview.isPending && preview.variables === kind} aria-busy={preview.isPending && preview.variables === kind} onClick={() => preview.mutate(kind)} /></Tooltip></div></div>
-      {draft.rules[kind] ? ruleFields(kind, draft.rules[kind]!) : <div className="text-xs text-fg-muted break-all">{draft.targets.find(item => item.id === draft.default.targetId)?.name} / {draft.default.prefix}{draft.default.directoryTemplate} / {draft.default.filenameTemplate}</div>}
-      {locations[kind] && <output className="storage-path-preview">{locations[kind]}</output>}
-    </section>)}
-    <section className="storage-policy"><h4 className="text-sm font-semibold mb-3">{t("storage.thumbnail")}</h4><div className="storage-rule-fields">
-      <Field label={t("storage.width")}><NumberInput min={16} max={4096} value={draft.thumbnail.width} onChange={value => update({ ...draft, thumbnail: { ...draft.thumbnail, width: value ?? 640 } })} /></Field>
-      <Field label={t("storage.height")}><NumberInput min={16} max={4096} value={draft.thumbnail.height} onChange={value => update({ ...draft, thumbnail: { ...draft.thumbnail, height: value ?? 640 } })} /></Field>
-      <Field label={t("storage.format")}><Select value={draft.thumbnail.format} options={[{ value: "jpeg", label: "JPEG" }, { value: "png", label: "PNG" }, { value: "webp", label: "WebP" }]} onChange={value => update({ ...draft, thumbnail: { ...draft.thumbnail, format: value } })} /></Field>
-      <Field label={t("storage.quality")}><NumberInput min={1} max={100} value={draft.thumbnail.quality} onChange={value => update({ ...draft, thumbnail: { ...draft.thumbnail, quality: value ?? 82 } })} /></Field>
-    </div></section>
-    {derivatives.data && derivatives.data.items.length > 0 && <section className="storage-policy"><h4 className="text-sm font-semibold mb-3">{t("storage.derivatives")}</h4><Table data={derivatives.data.items} rowKey={item => `${item.mediaKey}-${item.kind}`} minWidth={520} columns={[
-      { key: "kind", title: t("类型"), render: item => t(`storage.kind.${item.kind}`) },
-      { key: "status", title: t("状态"), render: item => <div><Tag tone={item.status === "failed" ? "danger" : "success"}>{t(`storage.status.${item.status}`, { defaultValue: item.status })}</Tag>{item.error && <p className="text-xs text-danger break-words">{item.error}</p>}</div> },
-      { key: "action", title: "", width: 64, render: item => <Tooltip title={t("storage.regenerate")}><Button type="tertiary" icon={<RefreshCw size={16} />} aria-label={t("storage.regenerate")} loading={regenerate.isPending && regenerate.variables === item} disabled={regenerate.isPending && regenerate.variables === item} aria-busy={regenerate.isPending && regenerate.variables === item} onClick={() => regenerate.mutate(item)} /></Tooltip> },
-    ]} /></section>}
-    <Modal open={target !== null} onClose={() => setTarget(null)} title={t(editingId ? "storage.editTarget" : "storage.addTarget")} footer={<><Button type="tertiary" onClick={() => setTarget(null)}>{t("取消")}</Button><Button theme="solid" onClick={commitTarget}>{t("确定")}</Button></>}>
-      {target && <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label={t("storage.targetId")}><Input value={target.id} disabled={editingId !== null} onChange={e => setTarget({ ...target, id: e.target.value })} /></Field>
-        <Field label={t("名称")}><Input value={target.name} onChange={e => setTarget({ ...target, name: e.target.value })} /></Field>
-        <Field label={t("类型")}><Select value={target.type} onChange={value => setTarget({ ...target, type: value as StorageTarget["type"] })} options={[{ value: "local", label: t("本地存储") }, { value: "nas", label: t("storage.nas") }, { value: "s3", label: "S3" }]} /></Field>
-        {target.type !== "s3" ? <Field label={t("storage.root")}><Input value={target.root ?? ""} onChange={e => setTarget({ ...target, root: e.target.value })} /></Field> : <>
-          {(["endpoint", "bucket", "region", "accessKeyEnv", "secretKeyEnv"] as const).map(key => <Field key={key} label={t(`storage.${key}`)}><Input value={target[key] ?? ""} onChange={e => setTarget({ ...target, [key]: e.target.value })} /></Field>)}
-          {(["accessKey", "secretKey", "sessionToken"] as const).map(key => <Field key={key} label={t(`storage.${key}`)}><div className="flex gap-2"><PasswordInput value={target[key] === "__CLEAR__" ? "" : target[key] ?? ""} onChange={e => setTarget({ ...target, [key]: e.target.value })} /><Tooltip title={t("清除")}><Button icon={<X size={14} />} aria-label={`${t("清除")} ${t(`storage.${key}`)}`} onClick={() => setTarget({ ...target, [key]: "__CLEAR__" })} /></Tooltip></div></Field>)}
-        </>}
-      </div>}
-    </Modal>
+  return <section className="semi-settings-section storage-settings">
+    <div className="settings-section-heading"><h2 className="settings-section-title"><HardDrive size={16} />{t("存储设置")}</h2><div className="flex flex-wrap items-center gap-2">{dirty && <Tag tone="warning">{t("storage.unsaved")}</Tag>}<Button theme="solid" icon={<Save size={16} />} disabled={!dirty || save.isPending} loading={save.isPending} onClick={() => save.mutate(draft)}>{t("保存存储设置")}</Button></div></div>
+    <div className="storage-location">
+      <h3 className="settings-subsection-title">{t("storage.location")}</h3>
+      <div className={`storage-directory-options ${draft.targets.length > 1 ? "storage-has-targets" : ""}`}>
+        {draft.targets.length > 1 && <Field label={t("storage.target")}><Select ariaLabel={t("storage.target")} value={draft.default.targetId} options={draft.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => update({ ...draft, default: { ...draft.default, targetId } })} /></Field>}
+        <Field label={t("保存目录")}><div className="flex min-w-0 gap-2"><Input aria-label={t("保存目录")} value={target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root ?? ""} disabled={target?.type === "s3"} onChange={event => changeRoot(event.target.value)} />{target?.type !== "s3" && <Tooltip content={t("选择目录")}><Button icon={<FolderOpen size={16} />} aria-label={t("选择目录")} onClick={() => setPickingDirectory(true)} /></Tooltip>}</div></Field>
+      </div>
+    </div>
+    <div className="storage-default-rules">
+      <h3 className="settings-subsection-title">{t("storage.default")}</h3>
+      <div className="storage-policy-options">{ruleFields("default", draft.default)}</div>
+      <div className="storage-filename-limit">{t("文件名上限：240 字节（含扩展名）")}</div>
+    </div>
+    <div className="storage-media-rules">
+      <h3 className="settings-subsection-title">{t("按媒体类型单独设置")}</h3>
+      <div className="storage-media-heading" aria-hidden="true"><span>{t("媒体类型")}</span><span>{t("单独设置")}</span><span>{t("storage.target")}</span><span>{t("分类存储策略")}</span><span>{t("命名策略")}</span></div>
+      {kinds.map(kind => <div className="storage-media-row" role="group" aria-label={t(`storage.kind.${kind}`)} key={kind}>
+        <span className="storage-media-name">{t(`storage.kind.${kind}`)}</span>
+        <div className="storage-media-mode"><Switch checked={Boolean(draft.rules[kind])} ariaLabel={`${t(`storage.kind.${kind}`)} ${t("单独设置")}`} onChange={custom => { const rules = { ...draft.rules }; if (custom) rules[kind] = { ...draft.default }; else delete rules[kind]; update({ ...draft, rules }); }} /><span>{t(draft.rules[kind] ? "单独设置" : "使用默认")}</span></div>
+        {ruleFields(kind, { ...(draft.rules[kind] ?? draft.default), separateFolder: draft.rules[kind]?.separateFolder ?? draft.default.separateFolder }, !draft.rules[kind])}
+        <StoragePathPreview document={draft} kind={kind} tweet={tweets.data?.items[0]} />
+      </div>)}
+    </div>
+    <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{t("storage.sourceRetained")}</p></div><Popconfirm title={t("storage.migrateConfirm")} onConfirm={() => migration.mutate()}><Button disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
+    <Modal open={pickingDirectory} onClose={() => setPickingDirectory(false)} title={t("选择目录")} footer={null}><LocalDirectoryPicker path={target?.root ?? ""} onSelect={root => { changeRoot(root); setPickingDirectory(false); }} /></Modal>
   </section>;
 }

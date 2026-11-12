@@ -81,24 +81,24 @@ var (
 	followingPath        = graphQLPath(graphQLQueryIDs.Following, "Following")
 )
 
-const requestMaxAttempts = 5
+const requestMaxAttempts = 3
 
 // requestTotalBudget 是一次“逻辑请求”跨 Cookie 重试的总耗时上限。次数预算见
-// newRequestBudget：默认 requestMaxAttempts，每多一个 Cookie 只额外允许一次
-// 交接尝试，避免瞬时故障下放大到 5 × Cookie 数。
+// newRequestBudget：所有 Cookie 合计最多 requestMaxAttempts 次尝试。
 const requestTotalBudget = 5 * time.Minute
 
 type requestBudget struct {
 	mu        sync.Mutex
 	remaining int
 	deadline  time.Time
+	perClient int
 }
 
 func newRequestBudget(attempts int, timeout time.Duration) *requestBudget {
 	if attempts < 1 {
 		attempts = 1
 	}
-	return &requestBudget{remaining: attempts, deadline: time.Now().Add(timeout)}
+	return &requestBudget{remaining: attempts, deadline: time.Now().Add(timeout), perClient: requestMaxAttempts}
 }
 
 func (b *requestBudget) acquire() bool {
@@ -204,7 +204,7 @@ var clientDisableCooldown = 30 * time.Minute
 // 唯一 Cookie 锁 30 分钟。
 var clientForbiddenDisableCooldown = 5 * time.Minute
 
-// wafBackoffDuration 是 WAF 挑战页命中后的短退避：只阻塞该 path 一段时间，不 disable。
+// wafBackoffDuration 是 WAF 挑战页命中后的账号级短退避，不 disable。
 const wafBackoffDuration = 60 * time.Second
 
 // homeCheckPath 是 /home 登录自检在本地限流器里的 path key。
@@ -236,6 +236,7 @@ type Client struct {
 	authToken    string
 	csrfToken    string
 	limiter      *rateLimiter
+	requests     *accountRequestLimit
 	screen       string
 	mu           sync.Mutex
 	// disabledUntil 非零且晚于当前时间时客户端不可用。禁用带冷却期而不是永久：403 也可能
@@ -411,13 +412,15 @@ func NewClient(cred Credentials, proxyURL string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	requests := requestLimitForAccount(cred.AuthToken)
 	return &Client{
 		http:         newHTTPClient(transport),
 		baseURL:      host,
 		retryBackoff: requestRetryDelay,
 		authToken:    cred.AuthToken,
 		csrfToken:    cred.CSRFToken,
-		limiter:      newRateLimiter(),
+		limiter:      requests.limiter,
+		requests:     requests,
 	}, nil
 }
 
@@ -430,7 +433,7 @@ func (p *Pool) Primary() *Client {
 
 // maxPoolSelectWait 限制 Select 因"所有客户端限流"而阻塞等待的总时长。X GraphQL
 // 常见窗口接近 15 分钟，等待预算必须覆盖这个窗口，否则任务会在复位前批量失败。
-var maxPoolSelectWait = maxRetryAfter + 10*time.Second
+var maxPoolSelectWait = 15*time.Minute + 10*time.Second
 
 // maxPoolSelectWaitStep 单次等待上限：若最早复位时间很远，只等待一个上限时长后重新评估。
 var maxPoolSelectWaitStep = 60 * time.Second
@@ -468,7 +471,7 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 			return nil, errors.New("没有可用 X 客户端")
 		}
 		// 全部候选被限流：等最早复位时刻（有界），避免按固定 3s 空转碰运气。
-		wait := p.earliestBlockedWait()
+		wait := p.earliestBlockedWait(path)
 		if wait <= 0 {
 			wait = 200 * time.Millisecond
 		}
@@ -495,14 +498,14 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 }
 
 // earliestBlockedWait 返回当前所有客户端中最快结束限流的时间距离；无人限流返回 0。
-func (p *Pool) earliestBlockedWait() time.Duration {
+func (p *Pool) earliestBlockedWait(paths ...string) time.Duration {
 	var earliest time.Time
 	found := false
 	for _, client := range p.clients {
 		if client.isDisabled() || client.limiter == nil {
 			continue
 		}
-		if reset, ok := client.limiter.blockedReset(); ok {
+		if reset, ok := client.limiter.blockedReset(paths...); ok {
 			if !found || reset.Before(earliest) {
 				earliest = reset
 				found = true
@@ -577,11 +580,23 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	}
 	c.setCookieHeaders(request)
 	request.Header.Set("User-Agent", userAgent)
-	response, err := c.http.Do(request)
+	release, err := c.beginRequest(ctx, homeCheckPath)
 	if err != nil {
 		return "", err
 	}
+	defer release()
+	c.requestCount.Add(1)
+	response, err := c.http.Do(request)
+	if err != nil {
+		if c.limiter != nil {
+			c.limiter.refund(homeCheckPath)
+		}
+		return "", err
+	}
 	defer response.Body.Close()
+	if c.limiter != nil {
+		c.limiter.after(homeCheckPath, response.Header)
+	}
 	// 先读 body 再判断状态：403 需要按响应内容区分 WAF/挑战页与真正凭证失效。
 	payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if response.StatusCode >= 400 {
@@ -589,12 +604,19 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 		switch response.StatusCode {
 		case http.StatusUnauthorized:
 			c.disable(err)
+		case http.StatusTooManyRequests:
+			if c.limiter != nil {
+				c.limiter.markRateLimited(homeCheckPath, response.Header)
+			}
+			httpx.SlowXRequests()
 		case http.StatusForbidden:
 			if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
 				// 挑战页 ≠ 凭证失效：短退避即可，不能把唯一 Cookie 锁 30 分钟。
 				if c.limiter != nil {
 					c.limiter.markRateLimitedFor(homeCheckPath, wafBackoffDuration)
+					c.limiter.markAccountCooldown(wafBackoffDuration)
 				}
+				httpx.SlowXRequests()
 				err = fmt.Errorf("%w: HTTP 403", ErrWAFChallenge)
 			} else {
 				c.disableFor(err, clientForbiddenDisableCooldown)
@@ -610,7 +632,9 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 		if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
 			if c.limiter != nil {
 				c.limiter.markRateLimitedFor(homeCheckPath, wafBackoffDuration)
+				c.limiter.markAccountCooldown(wafBackoffDuration)
 			}
+			httpx.SlowXRequests()
 			err := fmt.Errorf("%w: /home 返回挑战页", ErrWAFChallenge)
 			c.recordError(err)
 			return "", err
@@ -626,6 +650,9 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	c.screen = screenName
 	c.mu.Unlock()
 	c.enable()
+	if c.limiter != nil {
+		c.limiter.succeeded(homeCheckPath)
+	}
 	return screenName, nil
 }
 
@@ -721,6 +748,12 @@ func getListByID(ctx context.Context, requester timelineRequester, id string) (L
 // （GetUserMedia/GetUserMediaWithOptions）保持原签名、不暴露统计；需要"越过毒丸"
 // 推进增量游标的调用方使用 GetUserMediaWithOptionsStats。
 type MediaFetchStats struct {
+	// Requests 是本轮实际发起的 GraphQL 请求数（含失败/限流请求）。
+	Requests int
+	// Pages 是成功解析并交给回调的页数。
+	Pages int
+	// APITime 是 GraphQL 请求往返耗时总和，不含本地媒体下载与页间节流。
+	APITime time.Duration
 	// LastSeenTweetID 是本轮 timeline 中见到的所有条目（含被跳过/置顶/早停边界）里
 	// 数值最大的推文 ID。空串表示本轮没有见到任何带 ID 的推文条目。
 	LastSeenTweetID string
@@ -827,7 +860,10 @@ func walkUserMediaPages(ctx context.Context, requester timelineRequester, user U
 		}))
 		values.Set("features", timelineFeatures)
 		values.Set("fieldToggles", `{"withArticlePlainText":false}`)
+		requestStarted := time.Now()
 		payload, err := requester.graphQL(ctx, userMediaPath, values)
+		stats.Requests++
+		stats.APITime += time.Since(requestStarted)
 		if err != nil {
 			// 恢复用的游标可能已过期（用户删推/服务端分页令牌轮换）。显式分类后由上层
 			// 清空游标、退回第 0 页重翻；已下载媒体会被去重跳过。
@@ -840,6 +876,7 @@ func walkUserMediaPages(ctx context.Context, requester timelineRequester, user U
 		if err != nil {
 			return stats, err
 		}
+		stats.Pages++
 		if len(items) == 0 {
 			if next == "" {
 				// 没有更多条目：本页即结束。
@@ -1252,10 +1289,11 @@ func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]b
 func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Values) ([]byte, *Client, error) {
 	var lastErr error
 	failures, handoffs := 0, 0
-	// 同一逻辑请求跨 Cookie 共享重试预算：首个 Cookie 仍有 requestMaxAttempts 次，
-	// 每个额外 Cookie 只允许一次交接尝试（而不是各自 5 次），并受总耗时约束。
+	// 为备用账号保留尝试机会，同时限制所有 Cookie 的总请求次数。
 	if requestBudgetFrom(ctx) == nil {
-		ctx = withRequestBudget(ctx, newRequestBudget(requestMaxAttempts+max(0, len(p.clients)-1), requestTotalBudget))
+		budget := newRequestBudget(requestMaxAttempts, requestTotalBudget)
+		budget.perClient = max(1, requestMaxAttempts-len(p.clients)+1)
+		ctx = withRequestBudget(ctx, budget)
 	}
 	// 限流交还不计入失败次数，但总数有界：限流复位后若仍反复 429，最终按失败处理。
 	maxHandoffs := max(1, len(p.clients)) * requestMaxAttempts
@@ -1302,7 +1340,11 @@ func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Va
 
 func (c *Client) do(ctx context.Context, method string, path string, query url.Values, form url.Values) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt < requestMaxAttempts; attempt++ {
+	attempts := requestMaxAttempts
+	if budget := requestBudgetFrom(ctx); budget != nil {
+		attempts = min(attempts, budget.perClient)
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		// 跨 Cookie 共享的重试预算：耗尽后不再发起请求，把最后一次错误上抛。
 		if budget := requestBudgetFrom(ctx); budget != nil && !budget.acquire() {
 			if lastErr == nil {
@@ -1334,7 +1376,7 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 		if isYieldableError(err) {
 			return nil, err
 		}
-		if !isTransientError(err) || ctx.Err() != nil || attempt == requestMaxAttempts-1 {
+		if !isTransientError(err) || ctx.Err() != nil || attempt == attempts-1 {
 			return nil, err
 		}
 		timer := time.NewTimer(c.requestRetryDelay(attempt))
@@ -1382,11 +1424,11 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 	if form != nil {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	if c.limiter != nil {
-		if err := c.limiter.before(ctx, path); err != nil {
-			return nil, err
-		}
+	release, err := c.beginRequest(ctx, path)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 	c.requestCount.Add(1)
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -1417,13 +1459,16 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 			if c.limiter != nil {
 				c.limiter.markRateLimited(path, response.Header)
 			}
+			httpx.SlowXRequests()
 		case http.StatusForbidden:
 			// 403 需要读 body 区分 WAF/挑战页与真正的鉴权失败：挑战页不能 disable。
 			if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
 				httpErr.WAFChallenge = true
 				if c.limiter != nil {
 					c.limiter.markRateLimitedFor(path, wafBackoffDuration)
+					c.limiter.markAccountCooldown(wafBackoffDuration)
 				}
+				httpx.SlowXRequests()
 				return nil, fmt.Errorf("%w: %w", ErrWAFChallenge, httpErr)
 			}
 		}
@@ -1433,8 +1478,12 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 		var parsed *APIError
 		if errors.As(apiErr, &parsed) && parsed.Code == apiErrRateLimit && c.limiter != nil {
 			c.limiter.markRateLimited(path, response.Header)
+			httpx.SlowXRequests()
 		}
 		return nil, apiErr
+	}
+	if c.limiter != nil {
+		c.limiter.succeeded(path)
 	}
 	return payload, nil
 }

@@ -37,9 +37,11 @@ const (
 // LibraryFilter 是媒体库分页的服务端过滤条件。Kind/User/Search 为空或 "all" 表示不过滤；
 // User 的 "unknown" 表示没有归属用户（不在任何 user_entities 目录下）的文件。
 type LibraryFilter struct {
-	Kind   string
-	User   string
-	Search string
+	Kind               string
+	User               string
+	Search             string
+	From, To           time.Time // UTC; To is exclusive.
+	MinBytes, MaxBytes *int64
 }
 
 // LibraryPageOptions 是分页请求参数。
@@ -47,6 +49,7 @@ type LibraryPageOptions struct {
 	Page     int
 	PageSize int
 	Filter   LibraryFilter
+	Sort     string
 }
 
 // LibraryUserOption 是媒体库用户筛选下拉项，与前端 {value,label} 契约一致。
@@ -99,7 +102,7 @@ type librarySnapshot struct {
 }
 
 // ListLibraryDownloadsPage 返回媒体库按 page/pageSize 分页、并已按 Kind/User/Search 过滤的
-// 结果。排序为 created_at DESC, id DESC；同一 file_path 的多条下载记录只保留最新一条
+// 结果。支持时间、体积排序；同一 file_path 的多条下载记录只保留最新一条
 // （与旧 HTTP 层实现的分组语义一致）；磁盘上无记录的文件（孤儿）并入同一排序与分页。
 //
 // Counts/Users 是不受过滤条件影响的全局 facet（与旧响应语义一致）。
@@ -121,7 +124,9 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 		return LibraryPage{}, err
 	}
 	query := buildLibraryQuery(filter, snap)
+	query.sort = opts.Sort
 	orphans := filterLibraryOrphans(snap.orphans, filter)
+	sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], opts.Sort) })
 
 	var dbTotal int
 	var dbItems []DownloadRecord
@@ -164,7 +169,7 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	}
 	offset := (page - 1) * pageSize
 
-	merged := mergeLibraryEntries(dbItems, orphans, offset+pageSize)
+	merged := mergeLibraryEntries(dbItems, orphans, offset+pageSize, opts.Sort)
 	if offset < len(merged) {
 		merged = merged[offset:]
 	} else {
@@ -226,6 +231,8 @@ func normalizeLibraryFilter(filter LibraryFilter) LibraryFilter {
 // libraryQuery 是记录过滤条件在 SQL 侧的表示。
 type libraryQuery struct {
 	where       string // "" 或 "WHERE ..."
+	entryWhere  string // Applied after deduplication so older records cannot reappear.
+	sort        string
 	args        []any
 	userUnknown bool // User=="unknown"：归属判定必须在 Go 侧做，SQL 不含用户条件
 	noMatch     bool // 条件不可能匹配任何记录
@@ -267,6 +274,26 @@ func buildLibraryQuery(filter LibraryFilter, snap *librarySnapshot) libraryQuery
 		result.where = "WHERE " + strings.Join(conds, " AND ")
 	}
 	result.args = args
+	var entryConds []string
+	if !filter.From.IsZero() {
+		entryConds = append(entryConds, "julianday(created_at) >= julianday(?)")
+		result.args = append(result.args, filter.From.UTC().Format(time.RFC3339Nano))
+	}
+	if !filter.To.IsZero() {
+		entryConds = append(entryConds, "julianday(created_at) < julianday(?)")
+		result.args = append(result.args, filter.To.UTC().Format(time.RFC3339Nano))
+	}
+	if filter.MinBytes != nil {
+		entryConds = append(entryConds, "bytes >= ?")
+		result.args = append(result.args, *filter.MinBytes)
+	}
+	if filter.MaxBytes != nil {
+		entryConds = append(entryConds, "bytes <= ?")
+		result.args = append(result.args, *filter.MaxBytes)
+	}
+	if len(entryConds) > 0 {
+		result.entryWhere = " AND " + strings.Join(entryConds, " AND ")
+	}
 	return result
 }
 
@@ -345,22 +372,21 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
-func libraryEntriesSQL(where string) string {
+func libraryEntriesSQL(query libraryQuery) string {
 	return `
 WITH filtered AS (
 	SELECT d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes,
 		d.created_at, d.media_key, d.content_hash,
 		CASE WHEN d.file_path = '' THEN 'record:' || d.id ELSE d.file_path END AS entry_key
 	FROM downloads d
-	` + where + `
+	` + query.where + `
 ), ranked AS (
 	SELECT filtered.*, ROW_NUMBER() OVER (PARTITION BY entry_key ORDER BY created_at DESC, id DESC) AS rn
 	FROM filtered
 )
 SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash
 FROM ranked
-WHERE rn = 1
-ORDER BY created_at DESC, id DESC`
+WHERE rn = 1` + query.entryWhere
 }
 
 func (s *Store) queryLibraryEntries(ctx context.Context, query libraryQuery, limit, offset int) ([]DownloadRecord, error) {
@@ -369,7 +395,16 @@ func (s *Store) queryLibraryEntries(ctx context.Context, query libraryQuery, lim
 	}
 	items := []DownloadRecord{}
 	args := append(append([]any{}, query.args...), limit, offset)
-	err := s.db.SelectContext(ctx, &items, libraryEntriesSQL(query.where)+" LIMIT ? OFFSET ?", args...)
+	order := "created_at DESC, id DESC"
+	switch query.sort {
+	case "date_asc":
+		order = "created_at ASC, id DESC"
+	case "size_desc":
+		order = "bytes DESC, created_at DESC, id DESC"
+	case "size_asc":
+		order = "bytes ASC, created_at DESC, id DESC"
+	}
+	err := s.db.SelectContext(ctx, &items, libraryEntriesSQL(query)+" ORDER BY "+order+" LIMIT ? OFFSET ?", args...)
 	return items, err
 }
 
@@ -381,6 +416,9 @@ func (s *Store) countLibraryEntries(ctx context.Context, query libraryQuery) (in
 	sqlText := `SELECT COUNT(*) FROM (
 	SELECT 1 FROM downloads d ` + query.where + `
 	GROUP BY CASE WHEN d.file_path = '' THEN 'record:' || d.id ELSE d.file_path END)`
+	if query.entryWhere != "" {
+		sqlText = "SELECT COUNT(*) FROM (" + libraryEntriesSQL(query) + ")"
+	}
 	err := s.db.GetContext(ctx, &total, sqlText, query.args...)
 	return total, err
 }
@@ -456,6 +494,12 @@ func (snap *librarySnapshot) prefixesForUser(user string) []string {
 func filterLibraryOrphans(orphans []DownloadRecord, filter LibraryFilter) []DownloadRecord {
 	items := make([]DownloadRecord, 0, len(orphans))
 	for _, item := range orphans {
+		if (!filter.From.IsZero() && item.CreatedAt.Before(filter.From)) || (!filter.To.IsZero() && !item.CreatedAt.Before(filter.To)) {
+			continue
+		}
+		if (filter.MinBytes != nil && item.Bytes < *filter.MinBytes) || (filter.MaxBytes != nil && item.Bytes > *filter.MaxBytes) {
+			continue
+		}
 		if filter.User == libraryUserUnknown && item.UserScreenName != "" {
 			continue
 		}
@@ -473,11 +517,11 @@ func filterLibraryOrphans(orphans []DownloadRecord, filter LibraryFilter) []Down
 	return items
 }
 
-// mergeLibraryEntries 合并两个各自按 CreatedAt 降序的列表；时间相同时 DB 记录优先
+// mergeLibraryEntries 合并两个使用相同排序规则的列表；时间相同时 DB 记录优先
 // （旧实现是 stable sort，先加入的 DB 记录在前）。合并时按条目键去重：快照里的孤儿列表
 // 与当前 DB 结果之间存在一瞬的时间差（文件刚记录/刚写入），同一文件可能两边各出现一次；
 // 去重时优先保留 DB 记录（ID != 0，信息更全）。
-func mergeLibraryEntries(dbItems, orphans []DownloadRecord, need int) []DownloadRecord {
+func mergeLibraryEntries(dbItems, orphans []DownloadRecord, need int, order string) []DownloadRecord {
 	if need <= 0 {
 		return nil
 	}
@@ -504,7 +548,7 @@ func mergeLibraryEntries(dbItems, orphans []DownloadRecord, need int) []Download
 		case j >= len(orphans):
 			takeDB = true
 		case i < len(dbItems):
-			takeDB = !dbItems[i].CreatedAt.Before(orphans[j].CreatedAt)
+			takeDB = !libraryEntryLess(orphans[j], dbItems[i], order)
 		}
 		if takeDB {
 			add(dbItems[i])
@@ -515,6 +559,25 @@ func mergeLibraryEntries(dbItems, orphans []DownloadRecord, need int) []Download
 		}
 	}
 	return merged
+}
+
+func libraryEntryLess(a, b DownloadRecord, order string) bool {
+	if (order == "size_asc" || order == "size_desc") && a.Bytes != b.Bytes {
+		if order == "size_asc" {
+			return a.Bytes < b.Bytes
+		}
+		return a.Bytes > b.Bytes
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		if order == "date_asc" {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	if a.ID != b.ID {
+		return a.ID > b.ID
+	}
+	return a.FilePath < b.FilePath
 }
 
 // libraryMatchPath 把路径规范成"小写、正斜杠"的形式用于前缀/大小写不敏感比较。

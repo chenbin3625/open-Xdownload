@@ -53,6 +53,52 @@ func TestArchiveUnavailableRelationKeepsIDAndMalformedAvailableBodyFails(t *test
 	}
 }
 
+func TestArchiveIncompleteNestedRelationKeepsIDAndAvailableBodies(t *testing.T) {
+	for _, relationPath := range []string{"reply_to_results", "quoted_tweet_results", "retweeted_status_results"} {
+		t.Run(relationPath, func(t *testing.T) {
+			result := gjson.Parse(`{
+"rest_id":"1422692337499660290","legacy":{"full_text":"Main body"},
+"quoted_tweet_results":{"result":{
+ "rest_id":"1422687112424419329","legacy":{"full_text":"Related body"},
+ "` + relationPath + `":{"result":{"__typename":"TweetWithVisibilityResults","tweet":{
+  "rest_id":"1422678915915583489","legacy":{"conversation_id_str":"1422678915915583489"}
+ }}}
+}}
+}`)
+			tweet, err := TweetFromGraphQLResultWithOptions("", "author", "1422692337499660290", result, ParseOptions{RequireRelated: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tweet.Text != "Main body" || tweet.QuotedTweetID != "1422687112424419329" || len(tweet.Related) != 1 {
+				t.Fatalf("main body or relation lost: %+v", tweet)
+			}
+			related := tweet.Related[0]
+			if related.Text != "Related body" || len(related.Related) != 0 {
+				t.Fatalf("available body lost or incomplete body archived: %+v", related)
+			}
+			var relatedID string
+			switch relationPath {
+			case "reply_to_results":
+				relatedID = related.ReplyToID
+			case "quoted_tweet_results":
+				relatedID = related.QuotedTweetID
+			case "retweeted_status_results":
+				relatedID = related.RetweetedTweetID
+			}
+			if relatedID != "1422678915915583489" {
+				t.Fatalf("incomplete relation ID = %q", relatedID)
+			}
+		})
+	}
+}
+
+func TestArchiveMainTweetStillRequiresBodyStructure(t *testing.T) {
+	result := gjson.Parse(`{"rest_id":"1422678915915583489","legacy":{}}`)
+	if _, err := TweetFromGraphQLResultWithOptions("", "author", "", result, ParseOptions{RequireRelated: true}); err == nil || !strings.Contains(err.Error(), "缺少正文结构") {
+		t.Fatalf("missing main body was accepted: %v", err)
+	}
+}
+
 func TestSyndicationRelationsKeepIDsAndAvailableBodies(t *testing.T) {
 	result := gjson.Parse(`{
 "id_str":"100","text":"Body","created_at":"2026-11-10T12:00:00.000Z",

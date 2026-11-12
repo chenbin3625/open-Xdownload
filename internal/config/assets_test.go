@@ -26,3 +26,20 @@ func TestStorageRuleInheritsEachDefaultField(t *testing.T) {
 		t.Fatalf("filename template = %q, want category override", rule.FilenameTemplate)
 	}
 }
+
+func TestStorageRuleExplicitRootDirectoryAndSeparateFolder(t *testing.T) {
+	document := DefaultStorage("/tmp/archive")
+	on, off := true, false
+	document.Default.SeparateFolder = &on
+	document.Rules[AssetImage] = AssetRule{DirectoryTemplateSet: true, SeparateFolder: &off}
+	rule, _, err := document.Rule(AssetImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rule.DirectoryTemplate != "" || rule.SeparateFolder == nil || *rule.SeparateFolder {
+		t.Fatalf("explicit root/disabled folder was lost: %+v", rule)
+	}
+	if err := document.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

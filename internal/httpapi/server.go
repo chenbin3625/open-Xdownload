@@ -926,14 +926,51 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 	// 每次请求把最多 10 万条记录读进来在 Go 里过滤。
 	page := parsePositiveInt(r, "page", 1, 1, 1000000)
 	pageSize := parsePositiveInt(r, "pageSize", storage.DefaultLibraryPageSize, 1, storage.MaxLibraryPageSize)
+	q := r.URL.Query()
+	order := q.Get("sort")
+	switch order {
+	case "", "date_desc", "date_asc", "size_desc", "size_asc":
+	default:
+		writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的排序方式"))
+		return
+	}
+	filter := storage.LibraryFilter{Kind: strings.TrimSpace(q.Get("kind")), User: strings.TrimSpace(q.Get("user")), Search: strings.TrimSpace(q.Get("search"))}
+	for key, target := range map[string]*time.Time{"from": &filter.From, "to": &filter.To} {
+		if value := q.Get(key); value != "" {
+			date, err := time.Parse("2006-01-02", value)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的日期"))
+				return
+			}
+			*target = date
+		}
+	}
+	if !filter.From.IsZero() && !filter.To.IsZero() && filter.From.After(filter.To) {
+		writeError(w, http.StatusBadRequest, storage.ErrValidation("开始日期不能晚于结束日期"))
+		return
+	}
+	if !filter.To.IsZero() {
+		filter.To = filter.To.AddDate(0, 0, 1)
+	}
+	for key, target := range map[string]**int64{"minBytes": &filter.MinBytes, "maxBytes": &filter.MaxBytes} {
+		if value := q.Get(key); value != "" {
+			bytes, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || bytes < 0 {
+				writeError(w, http.StatusBadRequest, storage.ErrValidation("文件体积必须为非负整数"))
+				return
+			}
+			*target = &bytes
+		}
+	}
+	if filter.MinBytes != nil && filter.MaxBytes != nil && *filter.MinBytes > *filter.MaxBytes {
+		writeError(w, http.StatusBadRequest, storage.ErrValidation("最小体积不能大于最大体积"))
+		return
+	}
 	result, err := s.store.ListLibraryDownloadsPage(r.Context(), storage.LibraryPageOptions{
 		Page:     page,
 		PageSize: pageSize,
-		Filter: storage.LibraryFilter{
-			Kind:   strings.TrimSpace(r.URL.Query().Get("kind")),
-			User:   strings.TrimSpace(r.URL.Query().Get("user")),
-			Search: strings.TrimSpace(r.URL.Query().Get("search")),
-		},
+		Filter:   filter,
+		Sort:     order,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -1604,6 +1641,9 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	if errors.Is(err, storage.ErrJobQueueFull) {
+		w.Header().Set("Retry-After", "60")
+	}
 	var uf *storage.UserFacingError
 	if errors.As(err, &uf) {
 		log.Printf("httpapi %d: %v", uf.Status, err)

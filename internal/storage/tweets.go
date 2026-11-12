@@ -43,6 +43,7 @@ type ArchivedTweet struct {
 }
 
 type TweetFilter struct {
+	Sort                                    string
 	Search, Author, From, To, MediaType, ID string
 	JobID                                   int64
 	Page, PageSize                          int
@@ -408,7 +409,11 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	result.Pagination.Page = min(f.Page, result.Pagination.TotalPages)
 	var ids []string
 	args = append(args, f.PageSize, (result.Pagination.Page-1)*f.PageSize)
-	if err := s.db.SelectContext(ctx, &ids, `SELECT t.id FROM tweets t WHERE `+clause+` ORDER BY published_at DESC,id DESC LIMIT ? OFFSET ?`, args...); err != nil {
+	order := "DESC"
+	if f.Sort == "asc" {
+		order = "ASC"
+	}
+	if err := s.db.SelectContext(ctx, &ids, `SELECT t.id FROM tweets t WHERE `+clause+` ORDER BY published_at `+order+`,id `+order+` LIMIT ? OFFSET ?`, args...); err != nil {
 		return result, err
 	}
 	for _, id := range ids {
@@ -488,6 +493,9 @@ EXISTS(SELECT 1 FROM tweet_jobs tj WHERE tj.job_id=j.id AND tj.tweet_id=?)`, twe
 		if input == tweet.URL || (err == nil && activeTweetID == tweetID) {
 			return Job{}, ErrJobRetryBusy
 		}
+	}
+	if err := checkJobQueueCapacity(ctx, tx, 1); err != nil {
+		return Job{}, err
 	}
 	now := time.Now().UTC()
 	var job Job

@@ -139,20 +139,23 @@ export function CookieSettingsFields({
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field
-            label="auth_token"
-            tooltip={<TipIcon content={cookieSettingsTips().authToken} />}
-          >
-            <PasswordInput
-              aria-label={t("主 Cookie auth_token")}
-              prefix={<Key className="size-3.5 text-fg-subtle" />}
-              suffix={
+            className="cookie-token-field"
+            label={
+              <span className="cookie-field-heading">
+                <span>auth_token</span>
+                <TipIcon content={cookieSettingsTips().authToken} />
                 <CookieTokenStatus
                   {...sharedStatus}
                   client={primaryClient}
                   hasValue={Boolean((draft.authToken ?? "").trim()) && !isClearSentinel(draft.authToken ?? "")}
                   pairComplete={primaryComplete}
                 />
-              }
+              </span>
+            }
+          >
+            <PasswordInput
+              aria-label={t("主 Cookie auth_token")}
+              prefix={<Key className="size-3.5 text-fg-subtle" />}
               value={isClearSentinel(draft.authToken ?? "") ? "" : (draft.authToken ?? "")}
               onChange={(event) =>
                 onChange((current) => ({ ...current, authToken: event.target.value }))
@@ -163,20 +166,23 @@ export function CookieSettingsFields({
           </Field>
 
           <Field
-            label="ct0 (CSRF Token)"
-            tooltip={<TipIcon content={cookieSettingsTips().csrfToken} />}
-          >
-            <PasswordInput
-              aria-label={t("主 Cookie ct0")}
-              prefix={<Key className="size-3.5 text-fg-subtle" />}
-              suffix={
+            className="cookie-token-field"
+            label={
+              <span className="cookie-field-heading">
+                <span>ct0 (CSRF Token)</span>
+                <TipIcon content={cookieSettingsTips().csrfToken} />
                 <CookieTokenStatus
                   {...sharedStatus}
                   client={primaryClient}
                   hasValue={Boolean((draft.csrfToken ?? "").trim()) && !isClearSentinel(draft.csrfToken ?? "")}
                   pairComplete={primaryComplete}
                 />
-              }
+              </span>
+            }
+          >
+            <PasswordInput
+              aria-label={t("主 Cookie ct0")}
+              prefix={<Key className="size-3.5 text-fg-subtle" />}
               value={isClearSentinel(draft.csrfToken ?? "") ? "" : (draft.csrfToken ?? "")}
               onChange={(event) =>
                 onChange((current) => ({ ...current, csrfToken: event.target.value }))
@@ -288,7 +294,10 @@ export function CookieTokenStatus({
         : available === 0
         ? "danger"
         : "warning";
-    label = t("{{value0}}/{{value1}} 可用", { value0: available, value1: aggregateClients.length });
+    label =
+      tone === "success"
+        ? t("全部可用")
+        : t("{{value0}}/{{value1}} 可用", { value0: available, value1: aggregateClients.length });
     detail = aggregateClients.map((item) => cookieClientStatusDetail(item)).join("；");
     icon =
       tone === "success" ? (
@@ -326,8 +335,8 @@ export function CookieTokenStatus({
 
   return (
     <Tooltip content={detail}>
-      <span>
-        <Tag tone={tone} size="sm" icon={icon} aria-label={detail}>
+      <span className="cookie-token-status" tabIndex={0} aria-label={detail}>
+        <Tag tone={tone} size="sm" icon={icon}>
           {label}
         </Tag>
       </span>
@@ -515,38 +524,48 @@ export function BackupCookieInputs({
               key={row.id}
               className="flex flex-col gap-1.5 rounded-control border border-line bg-surface-muted/40 p-2.5"
             >
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <div className="flex-1">
-                  <PasswordInput
-                    aria-label={t("备用 Cookie {{value0}} auth_token", { value0: index + 1 })}
-                    prefix={<Key className="size-3.5 text-fg-subtle" />}
-                    suffix={
+              <div className="cookie-backup-row">
+                <Field
+                  className="cookie-token-field"
+                  label={
+                    <span className="cookie-field-heading">
+                      <span>auth_token</span>
                       <CookieTokenStatus
                         {...statusProps}
                         hasValue={Boolean(row.authToken.trim())}
                       />
-                    }
+                    </span>
+                  }
+                >
+                  <PasswordInput
+                    aria-label={t("备用 Cookie {{value0}} auth_token", { value0: index + 1 })}
+                    prefix={<Key className="size-3.5 text-fg-subtle" />}
                     value={row.authToken}
                     onChange={(event) => updateRow(index, "authToken", event.target.value)}
                     placeholder={t("备用 {{value0}} auth_token", { value0: index + 1 })}
                   />
-                </div>
+                </Field>
 
-                <div className="flex-1">
-                  <PasswordInput
-                    aria-label={t("备用 Cookie {{value0}} ct0", { value0: index + 1 })}
-                    prefix={<Key className="size-3.5 text-fg-subtle" />}
-                    suffix={
+                <Field
+                  className="cookie-token-field"
+                  label={
+                    <span className="cookie-field-heading">
+                      <span>ct0</span>
                       <CookieTokenStatus
                         {...statusProps}
                         hasValue={Boolean(row.csrfToken.trim())}
                       />
-                    }
+                    </span>
+                  }
+                >
+                  <PasswordInput
+                    aria-label={t("备用 Cookie {{value0}} ct0", { value0: index + 1 })}
+                    prefix={<Key className="size-3.5 text-fg-subtle" />}
                     value={row.csrfToken}
                     onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
                     placeholder={t("备用 {{value0}} ct0", { value0: index + 1 })}
                   />
-                </div>
+                </Field>
 
                 <div className="flex shrink-0 items-center justify-end">
                   <Tooltip content={t("删除此备用 Cookie")}>

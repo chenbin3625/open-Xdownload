@@ -8,17 +8,58 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/minio/minio-go/v7"
 )
 
+func TestAssetFilenameCompositionPreservesOrderAndExtensionWithinSystemLimit(t *testing.T) {
+	tweet := parser.TweetData{ID: "2120206875581186293", Text: strings.Repeat("中文😀正文", 100)}
+	media := parser.Media{ID: "1920206875581186293"}
+	for _, template := range []string{"{text}.{ext}", "{tweet_id}.{ext}", "{media_id}.{ext}", "{text}_{tweet_id}_{media_id}.{ext}", "{media_id}_{text}_{tweet_id}.{ext}"} {
+		t.Run(template, func(t *testing.T) {
+			key, err := TemplatePath(config.AssetRule{FilenameTemplate: template}, config.AssetImage, tweet, media, 0, "jpg")
+			if err != nil || len(key) > 240 || !utf8.ValidString(key) || !strings.HasSuffix(key, ".jpg") {
+				t.Fatalf("invalid filename (%d bytes): %q, %v", len(key), key, err)
+			}
+			if strings.Contains(template, "{tweet_id}") && !strings.Contains(key, tweet.ID) {
+				t.Fatalf("tweet ID lost: %q", key)
+			}
+			if strings.HasPrefix(template, "{media_id}") && !strings.HasPrefix(key, media.ID) {
+				t.Fatalf("field order lost: %q", key)
+			}
+			if template == "{text}.{ext}" && len(key) < 230 {
+				t.Fatalf("text was truncated before the filename budget was used: %q", key)
+			}
+		})
+	}
+}
+
+func TestAssetLongLiteralKeepsExtension(t *testing.T) {
+	key, err := TemplatePath(config.AssetRule{FilenameTemplate: strings.Repeat("a", 300) + ".{ext}"}, config.AssetImage, parser.TweetData{}, parser.Media{}, 0, "jpg")
+	if err != nil || len(key) > 240 || !strings.HasSuffix(key, ".jpg") {
+		t.Fatalf("long filename lost extension: %q, %v", key, err)
+	}
+}
+
+func TestAssetSeparateFolderByKind(t *testing.T) {
+	on := true
+	rule := config.AssetRule{DirectoryTemplate: "{username}", FilenameTemplate: "{media_id}.{ext}", SeparateFolder: &on}
+	for _, kind := range config.AssetKinds {
+		key, err := TemplatePath(rule, kind, parser.TweetData{Author: parser.Author{ScreenName: "author"}}, parser.Media{ID: "media"}, 0, "jpg")
+		if err != nil || key != "author/"+string(kind)+"/media.jpg" {
+			t.Fatalf("kind %s: %q, %v", kind, key, err)
+		}
+	}
+}
+
 func TestAssetTemplatesConfinementAndCollisions(t *testing.T) {
 	rule := config.AssetRule{Prefix: "archive", DirectoryTemplate: "{username}/{year}/{month}", FilenameTemplate: "{author_id}_{tweet_id}_{media_id}_{index}_{text}.{ext}"}
 	tweet := parser.TweetData{ID: "123", Author: parser.Author{ID: "42", ScreenName: "../NUL/author"}, Text: strings.Repeat("文本/../<>:\x00", 100), CreatedAt: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)}
 	key, err := TemplatePath(rule, config.AssetImage, tweet, parser.Media{ID: "../p1"}, 2, "jpg")
-	if err != nil || !strings.Contains(key, "/2026/11/") || !strings.Contains(key, "42_123__p1_3_") || !strings.HasSuffix(key, ".jpg") || len(filepath.Base(key)) > 220 {
+	if err != nil || !strings.Contains(key, "/2026/11/") || !strings.Contains(key, "42_123__p1_3_") || !strings.HasSuffix(key, ".jpg") || len(filepath.Base(key)) > config.MaxFilenameLength {
 		t.Fatalf("render: %q %v", key, err)
 	}
 	for _, invalid := range []string{"../outside", "/absolute", "a/../../b", `a\b`} {

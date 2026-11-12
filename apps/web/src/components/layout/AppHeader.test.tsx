@@ -4,14 +4,54 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { AppHeader } from "./AppHeader";
+import { TooltipProvider } from "../semi";
 
 const baseProps = {
   refreshPending: false,
   onRefresh: () => {},
   onQuickSubmit: () => {},
+  failedTweetCount: 0,
+  onOpenFailedDrawer: () => {},
 };
 
 describe("AppHeader", () => {
+  it("再次点击铃铛关闭通知中心", async () => {
+    const user = userEvent.setup();
+    render(<AppHeader {...baseProps} />);
+    const bell = screen.getByRole("button", { name: "通知中心" });
+    await user.click(bell);
+    expect(await screen.findByText("暂无通知")).not.toBeNull();
+    await user.click(bell);
+    expect(bell.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("通过通知中心展示失败数量并打开处理抽屉", async () => {
+    const user = userEvent.setup();
+    const onOpenFailedDrawer = vi.fn();
+    render(<AppHeader {...baseProps} failedTweetCount={5} onOpenFailedDrawer={onOpenFailedDrawer} />);
+
+    expect(screen.getByRole("button", { name: "通知中心" }).textContent).toBe("5");
+    expect(screen.queryByText("失败队列")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "通知中心" }));
+    expect(await screen.findByText("失败队列")).not.toBeNull();
+    expect(screen.getByText("5 条待处理")).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "处理失败" }));
+    expect(onOpenFailedDrawer).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "通知中心" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("失败数量清零后通知中心显示空状态", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<AppHeader {...baseProps} failedTweetCount={5} />);
+    await user.click(screen.getByRole("button", { name: "通知中心" }));
+    expect(await screen.findByText("5 条待处理")).not.toBeNull();
+
+    rerender(<TooltipProvider><AppHeader {...baseProps} failedTweetCount={0} /></TooltipProvider>);
+    expect(await screen.findByText("暂无通知")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "处理失败" })).toBeNull();
+    expect(screen.getByRole("button", { name: "通知中心" }).textContent).toBe("");
+  });
+
   it("回车与点击解析都提交并清空输入", async () => {
     const user = userEvent.setup();
     const onQuickSubmit = vi.fn();

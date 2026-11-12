@@ -226,6 +226,47 @@ it("切换分类/用户时同步把页码重置为 1（一次更新，不发两�
   expect(kinds).toContainEqual({ kind: "videos", page: 1 });
 });
 
+it("还原排序和区间筛选并发送到服务端", async () => {
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL) => pagedResponse(records));
+  vi.stubGlobal("fetch", fetchMock);
+  renderControlled({ sort: "size_desc", from: "2020-06-01", to: "2020-06-30", minBytes: "104858", maxBytes: "2097152" });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  const params = requestParams(fetchMock.mock.calls[0][0]!);
+  expect(Object.fromEntries(params)).toMatchObject({ sort: "size_desc", from: "2020-06-01", to: "2020-06-30", minBytes: "104858", maxBytes: "2097152" });
+  await userEvent.click(screen.getByRole("button", { name: "文件体积（MiB）" }));
+  expect((screen.getByRole("spinbutton", { name: "最小体积" }) as HTMLInputElement).value).toBe("0.1");
+});
+
+it("输入日期、体积时转换 MiB 为字节并在区间无效时停止查询", async () => {
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL) => pagedResponse(records, { total: 121 }));
+  vi.stubGlobal("fetch", fetchMock);
+  renderControlled({ page: 2 });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  await userEvent.click(screen.getByRole("button", { name: "归档日期（UTC）" }));
+  fireEvent.change(screen.getByLabelText("开始日期"), { target: { value: "2020-06-15" } });
+  await waitFor(() => expect(requestParams(fetchMock.mock.calls.at(-1)![0]).get("from")).toBe("2020-06-15"));
+  expect(requestParams(fetchMock.mock.calls.at(-1)![0]).get("page")).toBe("1");
+  await userEvent.click(screen.getByRole("button", { name: "文件体积（MiB）" }));
+  fireEvent.change(screen.getByRole("spinbutton", { name: "最大体积" }), { target: { value: "2" } });
+  await waitFor(() => expect(requestParams(fetchMock.mock.calls.at(-1)![0]).get("maxBytes")).toBe("2097152"));
+  const calls = fetchMock.mock.calls.length;
+  fireEvent.change(screen.getByRole("spinbutton", { name: "最小体积" }), { target: { value: "3" } });
+  expect(screen.getByText("最小体积不能大于最大体积")).toBeTruthy();
+  expect(fetchMock.mock.calls).toHaveLength(calls);
+  await userEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+  await waitFor(() => expect(screen.queryByText("最小体积不能大于最大体积")).toBeNull());
+});
+
+it("切换排序时重置页码，清除筛选保留排序", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(records, { total: 121 })));
+  const { onFilterChange } = renderControlled({ page: 2, from: "2020-06-01", minBytes: "1048576" });
+  await userEvent.click(screen.getByRole("combobox", { name: "排序顺序" }));
+  await userEvent.click(await screen.findByText("体积从大到小"));
+  expect(onFilterChange).toHaveBeenCalledWith({ sort: "size_desc", page: 1 }, undefined);
+  await userEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+  expect(onFilterChange).toHaveBeenLastCalledWith({ kind: "all", user: "all", search: "", from: "", to: "", minBytes: "", maxBytes: "", page: 1 }, undefined);
+});
+
 it("页码超出总页数时收敛到最后一页", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(records, { total: 61, totalPages: 2 })));
   const { onFilterChange } = renderControlled({ page: 5 });

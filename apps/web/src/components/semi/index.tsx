@@ -52,7 +52,7 @@ export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(functi
   const fieldId = useFieldId(); return <InputNumber {...props as React.ComponentProps<typeof InputNumber>} id={id ?? fieldId} value={value ?? ""} forwardedRef={ref as React.ComponentProps<typeof InputNumber>["forwardedRef"]} onChange={v => onChange(v === "" ? null : Number(v))} size={size === "sm" ? "small" : "default"} suffix={addonAfter} />;
 });
 export interface SelectOption { value: string; label: string }
-interface SelectProps { value: string; onChange: (value: string) => void; options: SelectOption[]; placeholder?: string; size?: "sm" | "md"; className?: string; ariaLabel?: string; id?: string }
+interface SelectProps { value: string; onChange: (value: string) => void; options: SelectOption[]; placeholder?: string; size?: "sm" | "md"; className?: string; ariaLabel?: string; id?: string; disabled?: boolean; motion?: boolean }
 export function Select({ onChange, options, size, ariaLabel, id, ...props }: SelectProps) {
   const fieldId = useFieldId(); const labelId = useId();
   return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} id={id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} optionList={options.map(option => ({ ...option, showTick: false }))} onChange={value => onChange(String(value))} size={size === "sm" ? "small" : "default"} /></>;

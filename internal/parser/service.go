@@ -34,7 +34,10 @@ var (
 
 const syndicationTweetResultURL = "https://cdn.syndication.twimg.com/tweet-result"
 
-var ErrTweetUnavailable = errors.New("推文不可用（已删除或受限）")
+var (
+	ErrTweetUnavailable = errors.New("推文不可用（已删除或受限）")
+	errTweetBodyMissing = errors.New("缺少正文结构")
+)
 
 type Service struct {
 	client         *http.Client
@@ -168,7 +171,7 @@ func tweetFromResultDepth(rawURL string, fallbackUsername string, fallbackID str
 		text = legacy.Get("full_text").String()
 	}
 	if options.RequireRelated && !result.Get("note_tweet.note_tweet_results.result.text").Exists() && !result.Get("details.full_text").Exists() && !legacy.Get("full_text").Exists() {
-		return TweetData{}, fmt.Errorf("推文 %s 缺少正文结构", id)
+		return TweetData{}, fmt.Errorf("推文 %s %w", id, errTweetBodyMissing)
 	}
 	// X 返回的推文文本包含 HTML 实体（&amp; &lt; &#39; 等），存储和文件命名前需解码。
 	text = html.UnescapeString(text)
@@ -208,7 +211,8 @@ func tweetFromResultDepth(rawURL string, fallbackUsername string, fallbackID str
 					continue
 				}
 				nestedTweet, nestedErr := tweetFromResultDepth("", "", "", nested, options, depth+1)
-				if nestedErr != nil && options.RequireRelated && !errors.Is(nestedErr, ErrTweetUnavailable) {
+				// 关联推文可能只返回部分字段；保留关系 ID，不把缺失正文当成已归档正文。
+				if nestedErr != nil && options.RequireRelated && !errors.Is(nestedErr, ErrTweetUnavailable) && !errors.Is(nestedErr, errTweetBodyMissing) {
 					return TweetData{}, fmt.Errorf("推文 %s 的关联正文解析失败: %w", id, nestedErr)
 				}
 				if nestedErr == nil && nestedTweet.ID != "" && nestedTweet.ID != tweet.ID {
@@ -334,12 +338,18 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 			client = httpx.Client("", 20*time.Second)
 		}
 	}
+	if err := httpx.WaitXRequest(ctx); err != nil {
+		return TweetData{}, err
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return TweetData{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
+		if response.StatusCode == http.StatusTooManyRequests {
+			httpx.SlowXRequests()
+		}
 		return TweetData{}, fmt.Errorf("X 推文详情请求失败: HTTP %d", response.StatusCode)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))

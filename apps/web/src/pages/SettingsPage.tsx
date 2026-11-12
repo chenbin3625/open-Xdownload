@@ -2,7 +2,6 @@ import React from "react";
 import type { AppConfig } from "../lib/api";
 import { ConfigForm } from "../components/settings/ConfigForm";
 import { AccountSecurity } from "../components/settings/AccountSecurity";
-import { StorageManagement } from "../components/settings/StorageManagement";
 
 export interface SettingsPageProps {
   config: AppConfig;
@@ -16,13 +15,12 @@ export function SettingsPage({
   refreshPending = false,
 }: SettingsPageProps) {
   return (
-    <div className="workspace-page">
+    <div className="workspace-page settings-page">
       <ConfigForm
         config={config}
         onRefresh={onRefresh}
         refreshPending={refreshPending}
       />
-      <StorageManagement />
       <AccountSecurity />
     </div>
   );

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -125,5 +126,61 @@ func TestArchiveUsersResumesFromCommittedCheckpoint(t *testing.T) {
 	}
 	if calls := timelineCalls.Load(); calls != 1 {
 		t.Fatalf("timeline calls = %d, want 1 (only the remaining user)", calls)
+	}
+}
+
+// TestListResumeUsesCheckpointWithoutFetchingMembers 覆盖 P0：列表任务恢复时先读
+// 检查点，已有用户快照就不再翻页拉取成员列表。
+func TestListResumeUsesCheckpointWithoutFetchingMembers(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	cfg := config.AppConfig{DownloadDir: t.TempDir(), StorageType: config.StorageLocal}
+	var memberCalls, timelineCalls atomic.Int64
+	archiveTestPool(t, &cfg, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/ListByRestId"):
+			fmt.Fprint(w, `{"data":{"list":{"id_str":"123","name":"List","member_count":1,"user_results":{"result":{"rest_id":"owner","legacy":{"name":"Owner","screen_name":"owner"}}}}}}`)
+		case strings.HasSuffix(r.URL.Path, "/ListMembers"):
+			memberCalls.Add(1)
+			fmt.Fprint(w, `{"data":{"list":{"members_timeline":{"timeline":{"instructions":[]}}}}}`)
+		case strings.HasSuffix(r.URL.Path, "/UserMedia"):
+			timelineCalls.Add(1)
+			fmt.Fprint(w, `{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[]}}}}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	if _, err := store.UpdateConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, storage.JobKindList, "123", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	users := []xclient.User{{ID: "u1", ScreenName: "alice", Name: "Alice"}}
+	tasks, _, _, err := manager.archiveUserTasks(ctx, cfg, users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.saveArchiveCheckpoint(ctx, job.ID, tasks, 0, archiveStats{}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.processList(ctx, ctx, job)
+
+	if memberCalls.Load() != 0 {
+		t.Fatalf("member requests = %d, want 0 when resuming from checkpoint", memberCalls.Load())
+	}
+	if timelineCalls.Load() != 1 {
+		t.Fatalf("timeline requests = %d, want 1", timelineCalls.Load())
+	}
+	got, err := store.GetJob(ctx, job.ID)
+	if err != nil || got.Status != storage.JobCompleted {
+		t.Fatalf("job = %+v %v", got, err)
 	}
 }

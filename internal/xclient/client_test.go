@@ -42,7 +42,7 @@ func TestFirstBoolSkipsNullAndKeepsExplicitFalse(t *testing.T) {
 	}
 }
 
-func TestClientRetriesTransientFailuresUntilFifthAttempt(t *testing.T) {
+func TestClientRetriesTransientFailuresUntilThirdAttempt(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempt := requests.Add(1)
@@ -97,8 +97,8 @@ func TestPoolGetUserByInputFallsBackToAnotherCookie(t *testing.T) {
 	if user.ID != "user-1" || user.ScreenName != "owner" {
 		t.Fatalf("user = %+v, want backup response", user)
 	}
-	if primaryRequests.Load() != requestMaxAttempts || backupRequests.Load() != 1 {
-		t.Fatalf("requests primary=%d backup=%d, want primary=%d backup=1", primaryRequests.Load(), backupRequests.Load(), requestMaxAttempts)
+	if primaryRequests.Load() != requestMaxAttempts-1 || backupRequests.Load() != 1 {
+		t.Fatalf("requests primary=%d backup=%d, want primary=%d backup=1", primaryRequests.Load(), backupRequests.Load(), requestMaxAttempts-1)
 	}
 }
 
@@ -293,16 +293,73 @@ func TestPoolSelectErrorsWhenAllClientsDisabled(t *testing.T) {
 // fakeTimelineRequester 依次返回预置的 timeline 页面，记录请求次数。
 type fakeTimelineRequester struct {
 	pages []string
+	errs  []error
 	calls int
 }
 
 func (f *fakeTimelineRequester) graphQL(_ context.Context, _ string, _ url.Values) ([]byte, error) {
+	if f.calls < len(f.errs) && f.errs[f.calls] != nil {
+		err := f.errs[f.calls]
+		f.calls++
+		return nil, err
+	}
 	if f.calls >= len(f.pages) {
 		return []byte(`{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":[]}}}}}}`), nil
 	}
 	page := f.pages[f.calls]
 	f.calls++
 	return []byte(page), nil
+}
+
+func TestWalkUserMediaSavesPageCursorAndResumesFromIt(t *testing.T) {
+	first := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"300"}, "page-2"),
+	}}
+	first.errs = []error{nil, &RateLimitedError{RetryAt: time.Now().Add(time.Minute), Cause: ErrAllClientsRateLimited}}
+	var saved []UserMediaTimelinePage
+	_, err := walkUserMediaPages(context.Background(), first, User{ID: "u1"}, UserMediaTimelineOptions{}, func(page UserMediaTimelinePage) error {
+		saved = append(saved, page)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("walk should have stopped at the simulated rate limit")
+	}
+	if len(saved) != 1 || saved[0].Cursor != "page-2" || saved[0].Complete {
+		t.Fatalf("saved pages = %+v, want one unfinished page with cursor page-2", saved)
+	}
+
+	second := &fakeTimelineRequester{pages: []string{
+		timelinePagePayload([]string{"200"}, ""),
+	}}
+	var resumed []UserMediaTimelinePage
+	_, err = walkUserMediaPages(context.Background(), second, User{ID: "u1"}, UserMediaTimelineOptions{Cursor: saved[0].Cursor}, func(page UserMediaTimelinePage) error {
+		resumed = append(resumed, page)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if second.calls != 1 {
+		t.Fatalf("resume requests = %d, want 1", second.calls)
+	}
+	if len(resumed) != 1 || !resumed[0].Complete || len(resumed[0].Tweets) != 1 || resumed[0].Tweets[0].ID != "200" {
+		t.Fatalf("resumed pages = %+v", resumed)
+	}
+}
+
+func TestWalkUserMediaClassifiesStaleCursor(t *testing.T) {
+	requester := &fakeTimelineRequester{errs: []error{
+		&HTTPError{StatusCode: http.StatusBadRequest, Payload: "invalid cursor"},
+	}}
+	_, err := walkUserMediaPages(context.Background(), requester, User{ID: "u1"}, UserMediaTimelineOptions{Cursor: "stale"}, func(UserMediaTimelinePage) error {
+		return nil
+	})
+	if !IsInvalidTimelineCursor(err) {
+		t.Fatalf("error = %v, want ErrInvalidTimelineCursor", err)
+	}
+	if requester.calls != 1 {
+		t.Fatalf("requests = %d, want 1", requester.calls)
+	}
 }
 
 // timelinePagePayload 构造一页 UserMedia timeline：按给定推文 ID 生成带图片媒体的条目，
@@ -593,20 +650,20 @@ func TestPoolGraphQLKeepsAllClientsRateLimitedClassification(t *testing.T) {
 	}
 }
 
-func TestRateLimitResetHeaderIsClamped(t *testing.T) {
+func TestRateLimitResetHeaderPreservesLongCooldown(t *testing.T) {
 	limiter := newRateLimiter()
 	header := http.Header{}
 	header.Set("X-Rate-Limit-Limit", "50")
 	header.Set("X-Rate-Limit-Remaining", "0")
-	// 时钟偏差或异常值：reset 在一天之后。before() 会一直等到 reset，任务带着槽位卡死。
+	// 保存完整期限，before() 交还调度器，不在执行槽内等待。
 	header.Set("X-Rate-Limit-Reset", fmt.Sprint(time.Now().Add(24*time.Hour).Unix()))
 	limiter.after("/p", header)
 	reset, ok := limiter.blockedReset()
 	if !ok {
 		t.Fatal("path should be blocked")
 	}
-	if wait := time.Until(reset); wait > maxRetryAfter+time.Minute {
-		t.Fatalf("blocked for %v, want at most ~%v", wait, maxRetryAfter)
+	if wait := time.Until(reset); wait < 24*time.Hour || wait > 24*time.Hour+5*time.Second {
+		t.Fatalf("blocked for %v, want full 24h with safety margin", wait)
 	}
 }
 
@@ -1270,8 +1327,7 @@ func TestPoolSharesRetryBudgetAcrossCookies(t *testing.T) {
 	if _, err := pool.graphQL(context.Background(), "/i/api/graphql/x/UserMedia", nil); err == nil {
 		t.Fatal("graphQL succeeded, want failure")
 	}
-	// 5 次基础预算 + 每个额外 Cookie 1 次交接，而不是 3 × 5。
-	want := int64(requestMaxAttempts + len(clients) - 1)
+	want := int64(requestMaxAttempts)
 	if got := requests.Load(); got != want {
 		t.Fatalf("requests = %d, want unified budget %d", got, want)
 	}

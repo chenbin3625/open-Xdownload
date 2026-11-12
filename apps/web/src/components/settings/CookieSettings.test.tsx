@@ -22,6 +22,18 @@ it("allows clearing an incomplete primary cookie", () => {
   expect(onChange.mock.calls[0][0](draft)).toMatchObject({ authToken: "__CLEAR__", csrfToken: "__CLEAR__" });
 });
 
+it("将 token 可用性放在各自字段标题旁，密码框保留显示按钮", () => {
+  render(<TooltipProvider><CookieSettingsFields authError="" authResult={null} checking={false} draft={{ authToken: "token", csrfToken: "csrf" } as AppConfig} onChange={vi.fn()} /></TooltipProvider>);
+  for (const label of ["主 Cookie auth_token", "主 Cookie ct0", "备用 Cookie 1 auth_token", "备用 Cookie 1 ct0"]) {
+    const input = screen.getByLabelText(label);
+    const field = input.closest(".semi-field")!;
+    expect(field).toBeTruthy();
+    expect(field.querySelector(".cookie-field-heading .cookie-token-status")).toBeTruthy();
+    expect(field.querySelector(".semi-input-suffix .cookie-token-status")).toBeNull();
+    expect(field.querySelector('button[aria-label="显示"]')).toBeTruthy();
+  }
+});
+
 describe("backup cookie identities", () => {
   it("does not reuse a saved row ID after the module reloads", async () => {
     const saved = { ...emptyBackupCookieRow(), authToken: "********", csrfToken: "********" };

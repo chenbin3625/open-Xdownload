@@ -1,12 +1,14 @@
 import { t, useTranslation } from "../../lib/i18n";
-import { Menu, RefreshCw, Search, WifiOff } from "lucide-react";
+import { Bell, Menu, RefreshCw, Search, TriangleAlert, WifiOff } from "lucide-react";
 import React, { useState } from "react";
-import { Button, Input, Tag, Tooltip } from "@douyinfe/semi-ui";
+import { Badge, Button, Input, Popover, Tag, Tooltip } from "@douyinfe/semi-ui";
 
 export interface AppHeaderProps {
   refreshPending: boolean;
   onRefresh: () => void;
   onQuickSubmit: (input: string) => void;
+  failedTweetCount: number;
+  onOpenFailedDrawer: () => void;
   onToggleMobileMenu?: () => void;
   showMenuButton?: boolean;
   /** SSE 断开时置真：顶部显示"实时更新已断开"，点击可手动重连。 */
@@ -18,6 +20,8 @@ export function AppHeader({
   refreshPending,
   onRefresh,
   onQuickSubmit,
+  failedTweetCount,
+  onOpenFailedDrawer,
   onToggleMobileMenu,
   showMenuButton = false,
   realtimeDisconnected = false,
@@ -25,6 +29,7 @@ export function AppHeader({
 }: AppHeaderProps) {
   useTranslation();
   const [quickInput, setQuickInput] = useState("");
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
 
   const handleSubmit = () => {
     const trimmed = quickInput.trim();
@@ -73,35 +78,81 @@ export function AppHeader({
         </div>
 
         {/* 右侧运行状态与操作 */}
-        <div className="ml-auto hidden shrink-0 items-center gap-2 sm:flex">
-          {realtimeDisconnected && (
-            <Button
-              theme="light"
-              type="warning"
-              onClick={onReconnectRealtime}
-              title={t("实时更新已断开，点击重连")}
-              icon={<WifiOff size={16} />}
-            >
-              <span className="hidden sm:inline">{t("实时更新已断开")}</span>
-            </Button>
-          )}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <div className="hidden items-center gap-2 sm:flex">
+            {realtimeDisconnected && (
+              <Button
+                theme="light"
+                type="warning"
+                onClick={onReconnectRealtime}
+                title={t("实时更新已断开，点击重连")}
+                icon={<WifiOff size={16} />}
+              >
+                <span className="hidden sm:inline">{t("实时更新已断开")}</span>
+              </Button>
+            )}
 
-          <Tag color="blue" className="hidden font-mono sm:inline-flex">
-            v{__APP_VERSION__}
-          </Tag>
+            <Tag color="blue" className="hidden font-mono sm:inline-flex">
+              v{__APP_VERSION__}
+            </Tag>
 
-          <Tooltip content={t("刷新数据")}>
+            <Tooltip content={t("刷新数据")}>
+              <Button
+                theme="borderless"
+                type="tertiary"
+                icon={<RefreshCw className="size-4" />}
+                loading={refreshPending}
+                disabled={refreshPending}
+                aria-busy={refreshPending}
+                onClick={onRefresh}
+                aria-label={t("刷新数据")}
+              />
+            </Tooltip>
+          </div>
+
+          <Popover
+            trigger="click"
+            motion={false}
+            position="bottomRight"
+            visible={notificationsOpen}
+            onVisibleChange={setNotificationsOpen}
+            content={
+              <section aria-label={t("通知中心")} style={{ width: "min(20rem, calc(100vw - 1.5rem))" }}>
+                <div className="border-b border-line px-4 py-3 text-sm font-semibold text-fg">
+                  {t("通知中心")}
+                </div>
+                {failedTweetCount > 0 ? (
+                  <div className="flex items-start gap-3 p-4">
+                    <TriangleAlert className="mt-0.5 size-4 shrink-0 text-danger" />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-fg">{t("失败队列")}</div>
+                      <p className="mt-1 mb-3 text-xs text-fg-muted">
+                        {t("{{count}} 条待处理", { count: failedTweetCount })}
+                      </p>
+                      <Button type="danger" onClick={() => {
+                        setNotificationsOpen(false);
+                        onOpenFailedDrawer();
+                      }}>
+                        {t("处理失败")}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="px-4 py-8 text-center text-sm text-fg-muted">{t("暂无通知")}</p>
+                )}
+              </section>
+            }
+          >
             <Button
               theme="borderless"
               type="tertiary"
-              icon={<RefreshCw className="size-4" />}
-              loading={refreshPending}
-              disabled={refreshPending}
-              aria-busy={refreshPending}
-              onClick={onRefresh}
-              aria-label={t("刷新数据")}
+              icon={<Badge count={failedTweetCount > 0 ? failedTweetCount : undefined} overflowCount={99} type="danger"><Bell className="size-4" /></Badge>}
+              aria-label={t("通知中心")}
+              aria-expanded={notificationsOpen}
+              title={t("通知中心")}
+              onClick={() => setNotificationsOpen((open) => !open)}
             />
-          </Tooltip>
+          </Popover>
         </div>
       </div>
     </header>

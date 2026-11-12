@@ -15,6 +15,7 @@ import (
 func (s *Server) listTweets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filter := storage.TweetFilter{Search: q.Get("search"), Author: q.Get("author"), MediaType: q.Get("mediaType"), ID: q.Get("id"), Page: parsePositiveInt(r, "page", 1, 1, 1000000), PageSize: parsePositiveInt(r, "pageSize", 20, 1, 100)}
+	filter.Sort = q.Get("sort")
 	for key, target := range map[string]*string{"from": &filter.From, "to": &filter.To} {
 		if value := q.Get(key); value != "" {
 			date, err := time.Parse("2006-01-02", value)

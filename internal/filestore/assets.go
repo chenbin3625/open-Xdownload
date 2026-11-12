@@ -36,9 +36,14 @@ func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.Twe
 	if err := config.ValidateAssetTemplate(rule.FilenameTemplate, true); err != nil {
 		return "", err
 	}
-	values := map[string]string{"author_id": tweet.Author.ID, "username": tweet.Author.ScreenName, "tweet_id": tweet.ID, "media_id": media.ID, "index": strconv.Itoa(index + 1), "published_at": tweet.CreatedAt.UTC().Format("20060102T150405Z"), "year": tweet.CreatedAt.UTC().Format("2006"), "month": tweet.CreatedAt.UTC().Format("01"), "day": tweet.CreatedAt.UTC().Format("02"), "text": truncateSegment(tweet.Text, 64), "ext": strings.TrimPrefix(ext, "."), "kind": string(kind)}
+	values := map[string]string{"author_id": tweet.Author.ID, "username": tweet.Author.ScreenName, "tweet_id": tweet.ID, "media_id": media.ID, "index": strconv.Itoa(index + 1), "published_at": tweet.CreatedAt.UTC().Format("20060102T150405Z"), "year": tweet.CreatedAt.UTC().Format("2006"), "month": tweet.CreatedAt.UTC().Format("01"), "day": tweet.CreatedAt.UTC().Format("02"), "text": safeAssetSegment(truncateSegment(tweet.Text, 64)), "ext": strings.TrimPrefix(ext, "."), "kind": string(kind)}
 	render := func(template string) string {
-		return assetTokens.ReplaceAllStringFunc(template, func(token string) string { return safeAssetSegment(values[token[1:len(token)-1]]) })
+		return assetTokens.ReplaceAllStringFunc(template, func(token string) string {
+			if token == "{text}" {
+				return values["text"]
+			}
+			return safeAssetSegment(values[token[1:len(token)-1]])
+		})
 	}
 	parts := []string{}
 	for _, part := range strings.Split(path.Join(rule.Prefix, render(rule.DirectoryTemplate)), "/") {
@@ -46,10 +51,25 @@ func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.Twe
 			parts = append(parts, safeAssetSegment(part))
 		}
 	}
-	name := safeAssetSegment(render(rule.FilenameTemplate))
+	if rule.SeparateFolder != nil && *rule.SeparateFolder && !strings.Contains(rule.DirectoryTemplate, "{kind}") {
+		parts = append(parts, safeAssetSegment(string(kind)))
+	}
+	// Budget text after all other fields so IDs and the extension survive truncation.
+	values["text"] = ""
+	if count := strings.Count(rule.FilenameTemplate, "{text}"); count > 0 {
+		available := max(0, config.MaxFilenameLength-len(render(rule.FilenameTemplate))) / count
+		values["text"] = truncateSegment(cleanAssetSegment(tweet.Text), available)
+	}
+	name := cleanAssetSegment(render(rule.FilenameTemplate))
 	extension := path.Ext(name)
-	if len(name) > 220 {
-		name = truncateSegment(strings.TrimSuffix(name, extension), 220-len(extension)) + extension
+	if len(name) > config.MaxFilenameLength {
+		digest := sha256.Sum256([]byte(name))
+		suffix := "_" + hex.EncodeToString(digest[:6])
+		available := config.MaxFilenameLength - len(extension) - len(suffix)
+		if available < 1 {
+			return "", fmt.Errorf("文件扩展名过长")
+		}
+		name = truncateSegment(strings.TrimSuffix(name, extension), available) + suffix + extension
 	}
 	key := path.Join(append(parts, name)...)
 	if len(key) > 1000 || !validAssetKey(key) {
@@ -68,6 +88,10 @@ func truncateSegment(value string, maxBytes int) string {
 	return value[:maxBytes]
 }
 func safeAssetSegment(value string) string {
+	return truncateSegment(cleanAssetSegment(value), 220)
+}
+
+func cleanAssetSegment(value string) string {
 	value = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || strings.ContainsRune(`<>:"/\|?*`, r) {
 			return '_'
@@ -75,7 +99,6 @@ func safeAssetSegment(value string) string {
 		return r
 	}, value)
 	value = strings.TrimSpace(strings.Trim(value, ". "))
-	value = truncateSegment(value, 220)
 	if value == "" || value == "." || value == ".." {
 		return "_"
 	}

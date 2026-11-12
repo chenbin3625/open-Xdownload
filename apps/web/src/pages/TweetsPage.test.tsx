@@ -42,7 +42,9 @@ it("keeps the full body and available relations when media fails, with local pre
   expect(body.textContent).toBe(tweet.text);
   expect(screen.getByText("Quoted text available offline")).toBeTruthy();
   expect(screen.getByText("One video failed")).toBeTruthy();
-  expect(screen.getByText("媒体部分归档")).toBeTruthy();
+  expect(screen.queryByText("媒体部分归档")).toBeNull();
+  expect(screen.queryByText("正文已归档")).toBeNull();
+  expect(screen.queryByRole("button", { name: "#9" })).toBeNull();
   const image = screen.getByRole("img", { name: "alice · 123" });
   expect(image.getAttribute("src")).toBe("/api/assets/thumbnail");
   await user.click(screen.getByRole("button", { name: /查看图片.*alice.*123.*7/ }));
@@ -51,10 +53,18 @@ it("keeps the full body and available relations when media fails, with local pre
   await user.click(screen.getByRole("button", { name: "重试媒体" }));
   await waitFor(() => expect(retryTweetMedia).toHaveBeenCalledWith("123", expect.anything()));
   expect(body.textContent).toBe(tweet.text);
-  await user.click(screen.getByRole("button", { name: "#9" }));
-  const drawer = await screen.findByRole("dialog", { name: "任务详情 #9" });
-  expect(await within(drawer).findByText("部分失败")).toBeTruthy();
-  expect(within(drawer).getByText("推文与媒体")).toBeTruthy();
+});
+
+it("defaults to all authors with newest first and supports reversing the timeline", async () => {
+  const user = userEvent.setup(); renderArchive();
+  await screen.findByText("Quoted text available offline");
+  expect(vi.mocked(getTweets).mock.calls[0][0].get("author")).toBeNull();
+  expect(vi.mocked(getTweets).mock.calls[0][0].get("sort")).toBe("desc");
+  await user.click(screen.getByRole("combobox", { name: "排序顺序" }));
+  await user.click(screen.getByRole("option", { name: "最早发布优先" }));
+  await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("sort")).toBe("asc"));
+  expect(screen.getByRole("button", { name: "发布时间" })).toBeTruthy();
+  expect(screen.queryByText("同步进度")).toBeNull();
 });
 
 it("persists search, author and pagination in the URL and restores browser navigation", async () => {
@@ -71,6 +81,20 @@ it("persists search, author and pagination in the URL and restores browser navig
   await waitFor(() => expect((screen.getByRole("textbox", { name: "搜索正文" }) as HTMLInputElement).value).toBe("restored"));
   expect((screen.getByRole("textbox", { name: "作者" }) as HTMLInputElement).value).toBe("bob");
   await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("author")).toBe("bob"));
+});
+
+it("filters a chosen date range using API-compatible calendar dates and clears it", async () => {
+  window.history.replaceState(null, "", "/tweets?from=2026-11-01&to=2026-11-30&page=2");
+  const user = userEvent.setup(); renderArchive();
+  await screen.findByText("Quoted text available offline");
+  await user.click(screen.getByRole("button", { name: "发布时间" }));
+  await user.click(await screen.findByRole("gridcell", { name: "2026-11-02" }));
+  await user.click(screen.getByRole("gridcell", { name: "2026-11-10" }));
+  await waitFor(() => expect(new URLSearchParams(window.location.search).get("from")).toBe("2026-11-02"));
+  expect(new URLSearchParams(window.location.search).get("to")).toBe("2026-11-10");
+  expect(new URLSearchParams(window.location.search).get("page")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "清除筛选" }));
+  await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("from")).toBeNull());
 });
 
 it.each(["completed", "not_requested"])("does not offer media retry for %s", async mediaStatus => {

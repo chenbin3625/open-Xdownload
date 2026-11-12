@@ -21,8 +21,15 @@ export interface GalleryRouteState {
   user: string;
   search: string;
   page: number;
+  sort: GallerySort;
+  from: string;
+  to: string;
+  minBytes: string;
+  maxBytes: string;
 }
 
+export const gallerySortValues = ["date_desc", "date_asc", "size_desc", "size_asc"] as const;
+export type GallerySort = typeof gallerySortValues[number];
 export const galleryKindValues = ["all", "images", "videos", "gifs"];
 export const galleryPageSize = 60;
 
@@ -31,6 +38,11 @@ export const defaultGalleryFilter: GalleryRouteState = {
   user: "all",
   search: "",
   page: 1,
+  sort: "date_desc",
+  from: "",
+  to: "",
+  minBytes: "",
+  maxBytes: "",
 };
 
 export type RouteState = {
@@ -102,6 +114,16 @@ export function parseGalleryKind(value: string | null) {
   return galleryKindValues.includes(value ?? "") ? (value as string) : "all";
 }
 
+function parseGalleryDate(value: string | null) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : "";
+}
+
+function parseGalleryBytes(value: string | null) {
+  return value && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? String(Number(value)) : "";
+}
+
 /** 搜索词只保留可打印内容并限制长度，避免超长 query 被写进历史记录。 */
 export function parseSearchKeyword(value: string | null) {
   if (!value) return "";
@@ -129,6 +151,10 @@ export function buildRoutePath(state: RouteQueryState) {
     if (gallery.kind !== "all") params.set("kind", gallery.kind);
     if (gallery.user && gallery.user !== "all") params.set("user", gallery.user);
     if (gallery.search) params.set("q", gallery.search);
+    if (gallery.sort !== defaultGalleryFilter.sort) params.set("sort", gallery.sort);
+    for (const key of ["from", "to", "minBytes", "maxBytes"] as const) {
+      if (gallery[key] !== "") params.set(key, gallery[key]);
+    }
   } else if (section === "tweets" && typeof window !== "undefined" && window.location.pathname === "/tweets") {
     new URLSearchParams(window.location.search).forEach((value, key) => params.set(key, value));
   }
@@ -168,6 +194,11 @@ export function readRouteState(): RouteState {
           user: params.get("user") || "all",
           search: parseSearchKeyword(params.get("q")),
           page: parsePositiveInteger(params.get("page"), 1),
+          sort: gallerySortValues.includes(params.get("sort") as GallerySort) ? params.get("sort") as GallerySort : "date_desc",
+          from: parseGalleryDate(params.get("from")),
+          to: parseGalleryDate(params.get("to")),
+          minBytes: parseGalleryBytes(params.get("minBytes")),
+          maxBytes: parseGalleryBytes(params.get("maxBytes")),
         }
       : { ...defaultGalleryFilter };
 

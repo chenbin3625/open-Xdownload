@@ -73,7 +73,10 @@ func TestHistoricalRecordedRootsAreRecoveredAndReferencedRootsAreRetained(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldRoot := t.TempDir()
+	oldRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	file := filepath.Join(oldRoot, "old.jpg")
 	if err := os.WriteFile(file, []byte("legacy"), 0o600); err != nil {
 		t.Fatal(err)
@@ -118,6 +121,10 @@ func TestLegacyRootRecoveryRetriesMissingFilesAndRejectsSymlinkParents(t *testin
 		t.Fatal(err)
 	}
 	currentRoot, oldRoot, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	oldRoot, err = filepath.EvalSymlinks(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: currentRoot}); err != nil {
 		t.Fatal(err)
 	}

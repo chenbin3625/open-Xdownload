@@ -66,6 +66,25 @@ func TestPoolRequestYieldsWhenSelectedClientBecomesRateLimited(t *testing.T) {
 	}
 }
 
+// TestBeforeYieldsLongLocalWait 覆盖 P0：不走 Pool 的单账号路径也不能把唯一执行槽
+// 卡在限流窗口里，等待超过阈值时返回带恢复时间的结构化错误。
+func TestBeforeYieldsLongLocalWait(t *testing.T) {
+	limiter := newRateLimiter()
+	limiter.limits["/test"] = rateLimitState{remaining: 0, limit: 20, reset: time.Now().Add(time.Minute), ready: true}
+	started := time.Now()
+	err := limiter.before(context.Background(), "/test")
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("before blocked for %s, want an immediate yield", elapsed)
+	}
+	retryAt, ok := RateLimitRetryAt(err)
+	if !ok {
+		t.Fatalf("error = %v, want a rate-limit error with retry time", err)
+	}
+	if wait := time.Until(retryAt); wait <= 0 {
+		t.Fatalf("retryAt = %s, want a future recovery time", retryAt)
+	}
+}
+
 func TestConcurrentPoolReservationsYieldAfterLastAvailableRequest(t *testing.T) {
 	limiter := newRateLimiter()
 	limiter.limits["/test"] = rateLimitState{remaining: 2, limit: 20, reset: time.Now().Add(time.Minute), ready: true}

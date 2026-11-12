@@ -1,18 +1,21 @@
 import { t, useTranslation } from "../lib/i18n";
 import {
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Copy,
   ExternalLink,
   Film,
+  HardDrive,
   Image as ImageIcon,
   PictureInPicture,
   Search,
   Video,
+  X,
 } from "lucide-react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Card, Input, RadioGroup } from "@douyinfe/semi-ui";
+import { Button, Card, Input, InputNumber, RadioGroup, Select } from "@douyinfe/semi-ui";
 import {
   formatBytes,
   getLibraryDownloadsPage,
@@ -25,9 +28,10 @@ import {
   defaultGalleryFilter,
   galleryPageSize,
   type GalleryRouteState,
+  type GallerySort,
 } from "../lib/useRouteState";
 import { Alert, Empty, Skeleton } from "../components/semi";
-import { MediaModal, Tooltip } from "../components/semi";
+import { MediaModal, SimplePopover, Tooltip } from "../components/semi";
 import { Pagination } from "../components/semi";
 import { SearchSelect } from "../components/semi";
 
@@ -248,6 +252,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   const pageSize = galleryPageSize;
   // 输入框即时响应，查询键用 300ms 防抖后的值。
   const debouncedSearch = useDebouncedValue(filter.search, GALLERY_SEARCH_DEBOUNCE_MS);
+  const rangeError = filter.from && filter.to && filter.from > filter.to
+    ? t("开始日期不能晚于结束日期")
+    : filter.minBytes !== "" && filter.maxBytes !== "" && Number(filter.minBytes) > Number(filter.maxBytes)
+      ? t("最小体积不能大于最大体积") : "";
 
   const libraryQuery = useQuery({
     queryKey: [
@@ -257,6 +265,11 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         kind: filter.kind,
         user: filter.user,
         search: debouncedSearch,
+        sort: filter.sort,
+        from: filter.from,
+        to: filter.to,
+        minBytes: filter.minBytes,
+        maxBytes: filter.maxBytes,
       },
     ],
     queryFn: ({ signal }) =>
@@ -267,11 +280,17 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           kind: filter.kind,
           user: filter.user,
           search: debouncedSearch,
+          sort: filter.sort,
+          from: filter.from,
+          to: filter.to,
+          minBytes: filter.minBytes,
+          maxBytes: filter.maxBytes,
         },
         signal,
       ),
     // 翻页/切筛选时保留上一页内容，避免整块骨架闪烁与分页条消失。
     placeholderData: keepPreviousData,
+    enabled: !rangeError,
     staleTime: 10 * 60_000,
     gcTime: 30 * 60_000,
     refetchOnWindowFocus: false,
@@ -318,7 +337,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
   const visibleEntries = indexedDownloads;
   const hasActiveFilter =
-    filter.kind !== "all" || filter.user !== "all" || filter.search.trim() !== "";
+    filter.kind !== "all" || filter.user !== "all" || filter.search.trim() !== "" ||
+    filter.from !== "" || filter.to !== "" || filter.minBytes !== "" || filter.maxBytes !== "";
 
   const previewIndex = useMemo(
     () =>
@@ -408,7 +428,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       <div className="page-heading">
         <h1 className="page-title">{t("媒体归档库")}</h1>
       </div>
-      <div className="page-toolbar">
+      <div className="page-toolbar gallery-toolbar">
         <div className="toolbar-status" role="radiogroup" aria-label={t("类型")}>
           <RadioGroup
             type="button"
@@ -443,8 +463,68 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             placeholder={t("按用户筛选...")}
             className="toolbar-user-select"
           />
+          <label id="gallery-sort-label" className="sr-only">{t("排序顺序")}</label>
+          <Select
+            aria-labelledby="gallery-sort-label"
+            value={filter.sort}
+            onChange={value => updateFilter({ sort: value as GallerySort, page: 1 })}
+            className="gallery-sort"
+            optionList={[
+              { value: "date_desc", label: t("最新归档优先") },
+              { value: "date_asc", label: t("最早归档优先") },
+              { value: "size_desc", label: t("体积从大到小") },
+              { value: "size_asc", label: t("体积从小到大") },
+            ]}
+          />
         </div>
+        <SimplePopover trigger={<Button
+          icon={<CalendarDays size={16} />}
+          theme={filter.from || filter.to ? "light" : "borderless"}
+          type={filter.from || filter.to ? "primary" : "tertiary"}
+          aria-label={t("归档日期（UTC）")}
+          aria-pressed={Boolean(filter.from || filter.to)}
+          title={`${t("归档日期（UTC）")}: ${filter.from || t("不限")} ~ ${filter.to || t("不限")}`}
+        />}>
+        <div className="toolbar-field gallery-range-panel">
+          <label id="gallery-date-label">{t("归档日期（UTC）")}</label>
+          <div className="gallery-range-inputs" role="group" aria-labelledby="gallery-date-label">
+            <Input type="date" aria-label={t("开始日期")} value={filter.from} max={filter.to || undefined} onChange={value => updateFilter({ from: value, page: 1 })} showClear />
+            <span className="text-fg-subtle">~</span>
+            <Input type="date" aria-label={t("结束日期")} value={filter.to} min={filter.from || undefined} onChange={value => updateFilter({ to: value, page: 1 })} showClear />
+          </div>
+        </div>
+        </SimplePopover>
+        <SimplePopover trigger={<Button
+          icon={<HardDrive size={16} />}
+          theme={filter.minBytes !== "" || filter.maxBytes !== "" ? "light" : "borderless"}
+          type={filter.minBytes !== "" || filter.maxBytes !== "" ? "primary" : "tertiary"}
+          aria-label={t("文件体积（MiB）")}
+          aria-pressed={filter.minBytes !== "" || filter.maxBytes !== ""}
+          title={`${t("文件体积（MiB）")}: ${filter.minBytes === "" ? t("不限") : formatBytes(Number(filter.minBytes))} ~ ${filter.maxBytes === "" ? t("不限") : formatBytes(Number(filter.maxBytes))}`}
+        />}>
+        <div className="toolbar-field gallery-range-panel">
+          <label id="gallery-size-label">{t("文件体积（MiB）")}</label>
+          <div className="gallery-range-inputs" role="group" aria-labelledby="gallery-size-label">
+            {(["minBytes", "maxBytes"] as const).map((key, index) => <React.Fragment key={key}>
+              {index > 0 && <span className="text-fg-subtle">~</span>}
+              <InputNumber
+                aria-label={t(index === 0 ? "最小体积" : "最大体积")}
+                placeholder={t("不限")}
+                min={0} max={Number.MAX_SAFE_INTEGER / 1048576}
+                value={filter[key] === "" ? "" : Number((Number(filter[key]) / 1048576).toFixed(6))}
+                onChange={value => {
+                  if (value !== "" && (!Number.isFinite(Number(value)) || Number(value) < 0)) return;
+                  updateFilter({ [key]: value === "" ? "" : String(Math.round(Number(value) * 1048576)), page: 1 }, { replace: true });
+                }}
+              />
+            </React.Fragment>)}
+          </div>
+        </div>
+        </SimplePopover>
+        {hasActiveFilter && <Tooltip title={t("清除筛选")}><Button theme="borderless" type="tertiary" icon={<X size={16} />} aria-label={t("清除筛选")} onClick={() => updateFilter({ kind: "all", user: "all", search: "", from: "", to: "", minBytes: "", maxBytes: "", page: 1 })} /></Tooltip>}
       </div>
+      {rangeError && <Alert type="warning" message={rangeError} />}
+      {libraryQuery.isError && libraryQuery.data && <Alert type="error" message={getErrorMessage(libraryQuery.error)} />}
 
       {libraryQuery.data?.truncated && (
         <Alert type="warning" message={t("媒体库索引已达上限，当前仅显示最近的记录")} />

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { readRouteState, updateBrowserRoute } from "./useRouteState";
+import { defaultGalleryFilter, readRouteState, updateBrowserRoute } from "./useRouteState";
 
 function setUrl(path: string) {
   window.history.replaceState(null, "", path);
@@ -18,7 +18,7 @@ describe("URL 路由状态往返", () => {
     setUrl("/gallery?page=3&kind=videos&user=alice&q=cat");
     const state = readRouteState();
     expect(state.section).toBe("gallery");
-    expect(state.gallery).toEqual({ kind: "videos", user: "alice", search: "cat", page: 3 });
+    expect(state.gallery).toEqual({ ...defaultGalleryFilter, kind: "videos", user: "alice", search: "cat", page: 3 });
     expect(state.shouldReplace).toBe(false);
   });
 
@@ -31,6 +31,21 @@ describe("URL 路由状态往返", () => {
       jobStatus: "failed",
       shouldReplace: false,
     });
+  });
+
+  it("往返保存媒体库排序、日期和体积区间", () => {
+    setUrl("/gallery?sort=size_asc&from=2020-06-01&to=2020-06-30&minBytes=0&maxBytes=1048576");
+    const state = readRouteState();
+    expect(state.gallery).toMatchObject({ sort: "size_asc", from: "2020-06-01", to: "2020-06-30", minBytes: "0", maxBytes: "1048576" });
+    expect(state.shouldReplace).toBe(false);
+    updateBrowserRoute({ section: "gallery", gallery: { ...state.gallery, page: 2 } });
+    expect(readRouteState().gallery).toEqual({ ...state.gallery, page: 2 });
+  });
+
+  it("清理非法媒体库区间和排序", () => {
+    setUrl("/gallery?sort=bad&from=2020-02-30&to=bad&minBytes=-1&maxBytes=NaN");
+    expect(readRouteState().gallery).toEqual(defaultGalleryFilter);
+    expect(readRouteState().shouldReplace).toBe(true);
   });
 
   it("非法或冗余参数会触发一次 replace 规范化", () => {

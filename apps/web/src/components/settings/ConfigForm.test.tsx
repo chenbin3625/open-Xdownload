@@ -14,7 +14,7 @@ vi.mock("../../lib/api", async (importOriginal) => ({
   checkAuth: vi.fn().mockResolvedValue({ ok: true, message: "ok" }),
 }));
 
-vi.mock("./StorageSettings", () => ({ StorageSettings: () => null }));
+vi.mock("./StorageManagement", () => ({ StorageManagement: () => null }));
 
 it("keeps edits made while a configuration save is pending", async () => {
   const config: api.AppConfig = {
@@ -53,8 +53,11 @@ it("associates settings controls with their visible labels", () => {
   );
 
   expect(screen.getByRole("textbox", { name: "网络代理 (Proxy)" })).not.toBeNull();
-  expect(screen.getByRole("spinbutton", { name: "最大文件名长度" })).not.toBeNull();
-  expect(screen.getByRole("combobox", { name: "文件命名策略" })).not.toBeNull();
+  expect(screen.queryByRole("spinbutton", { name: "最大文件名长度" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "文件命名策略" })).toBeNull();
+  expect(screen.getByRole("heading", { name: "下载与归档" })).toBeTruthy();
+  expect(screen.getByRole("switch", { name: "切换保护账号自动关注" })).toBeTruthy();
+  expect(document.querySelector("details")).toBeNull();
   expect(screen.queryByRole("group", { name: "明暗主题模式" })).toBeNull();
   expect(screen.queryByRole("group", { name: "主题强调色" })).toBeNull();
 });

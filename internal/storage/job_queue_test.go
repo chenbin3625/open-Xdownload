@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -179,5 +180,90 @@ func TestJobCheckpointRoundTrip(t *testing.T) {
 	}
 	if _, ok, _ := store.LoadJobCheckpoint(ctx, job.ID); ok {
 		t.Fatal("checkpoint not deleted")
+	}
+}
+
+// TestClaimPendingJobsAgesBackgroundSources 覆盖 P0 优先级老化：后台任务刚入队时
+// 让手动任务先跑；等待超过偏移量后，后台任务能越过新入队任务被领取。
+func TestClaimPendingJobsAgesBackgroundSources(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	drafts := make([]JobDraft, 0, 50)
+	for index := 0; index < 50; index++ {
+		drafts = append(drafts, JobDraft{
+			Kind:   JobKindUser,
+			Input:  fmt.Sprintf("scheduled-%d", index),
+			Title:  "scheduled",
+			Source: JobSourceSchedule,
+		})
+	}
+	scheduled, err := store.CreateJobs(ctx, drafts)
+	if err != nil || len(scheduled) != len(drafts) {
+		t.Fatalf("create scheduled: %d %v", len(scheduled), err)
+	}
+	manual, err := store.CreateJob(ctx, JobKindUser, "manual", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimPendingJobs(ctx, 1)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != manual.ID {
+		t.Fatalf("claimed %+v %v, want manual job %d", claimed, err, manual.ID)
+	}
+
+	aged := scheduled[0]
+	agedAt := time.Now().UTC().Add(-31 * time.Minute)
+	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET enqueue_ns = ?, enqueued_at = ? WHERE id = ?`, agedAt.UnixNano(), agedAt, aged.ID); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := store.CreateJob(ctx, JobKindUser, "manual-fresh", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = store.ClaimPendingJobs(ctx, 1)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != aged.ID {
+		t.Fatalf("claimed %+v %v, want aged scheduled job %d to overtake fresh manual job %d", claimed, err, aged.ID, fresh.ID)
+	}
+}
+
+// TestCreateJobsAndScheduleSkipActiveDuplicates 覆盖 P0 入队去重：批量粘贴与计划
+// 触发都不能为已排队的同 kind+input 再插入一行。
+func TestCreateJobsAndScheduleSkipActiveDuplicates(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	active, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.CreateJobs(ctx, []JobDraft{
+		{Kind: JobKindUser, Input: "alice", Title: "alice"},
+		{Kind: JobKindUser, Input: "alice", Title: "alice"},
+		{Kind: JobKindUser, Input: "bob", Title: "bob"},
+	})
+	if err != nil || len(jobs) != 1 || jobs[0].Input != "bob" {
+		t.Fatalf("batch dedupe = %+v %v, want only bob", jobs, err)
+	}
+
+	schedule, err := store.CreateArchiveSchedule(ctx, ArchiveSchedule{
+		Name:            "daily",
+		Enabled:         true,
+		IntervalMinutes: MinArchiveScheduleIntervalMinutes,
+		Items:           []ArchiveScheduleItem{{Kind: JobKindUser, Input: "alice"}, {Kind: JobKindUser, Input: "carol"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = store.CreateScheduledArchiveJobs(ctx, schedule, time.Now().UTC())
+	if err != nil || len(jobs) != 1 || jobs[0].Input != "carol" {
+		t.Fatalf("schedule dedupe = %+v %v, want only carol (alice already active as %d)", jobs, err, active.ID)
 	}
 }

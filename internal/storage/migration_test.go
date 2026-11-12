@@ -380,15 +380,15 @@ func TestAutomaticRetryIndexesAndRetryBackoff(t *testing.T) {
 	if err := store.TouchFailedTweet(ctx, failed.ID, "boom again"); err != nil {
 		t.Fatal(err)
 	}
-	// 格式统一：created_at 与 next_retry_at 必须使用同一种文本布局（都由驱动绑定
-	// time.Time），不能混入 SQL datetime() 写出的"无时区"格式——旧的混合格式会让
-	// julianday() 对一半行返回 0，也让任何 SQL 时间函数静默出错。
+	// 格式统一：created_at 与 next_retry_at 必须使用同一种文本布局。启用
+	// _texttotime 后，驱动把 DATETIME 扫描成 time.Time，再 CAST 到 TEXT 时统一
+	// 输出 RFC3339Nano；不能混入 SQL datetime() 写出的"无时区"格式。
 	var createdAtText, nextRetryAtText string
 	if err := store.db.QueryRow(`SELECT CAST(created_at AS TEXT), CAST(next_retry_at AS TEXT) FROM failed_tweets WHERE id = ?`, failed.ID).
 		Scan(&createdAtText, &nextRetryAtText); err != nil {
 		t.Fatal(err)
 	}
-	const driverLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+	const driverLayout = time.RFC3339Nano
 	createdAtParsed, err := time.Parse(driverLayout, createdAtText)
 	if err != nil {
 		t.Fatalf("created_at %q does not use the driver time layout: %v", createdAtText, err)

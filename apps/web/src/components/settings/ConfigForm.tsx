@@ -1,7 +1,6 @@
 import { t, useTranslation } from "../../lib/i18n";
 import {
   Download,
-  HardDrive,
   RefreshCw,
   Save,
   ShieldCheck,
@@ -22,7 +21,7 @@ import { toast } from "../semi";
 import { CookieSettingsFields } from "./CookieSettings";
 import { readEnvOverridden } from "./EnvOverrideNote";
 import { DownloadSettingsFields } from "./DownloadSettings";
-import { StorageSettings } from "./StorageSettings";
+import { StorageManagement } from "./StorageManagement";
 import { LanguageSettings } from "./LanguageSettings";
 
 export function ConfigForm({
@@ -201,9 +200,9 @@ export function ConfigForm({
   );
 
   return (
-    <div className="workspace-page">
+    <div className="workspace-page settings-form">
       <div className="page-heading">
-        <h1 className="page-title">{t("系统与存储配置")}</h1>
+        <h1 className="page-title">{t("设置")}</h1>
 
         <div className="page-actions">
           {draftDirty ? (
@@ -251,34 +250,32 @@ export function ConfigForm({
         </div>
       </div>
 
-      <LanguageSettings />
+      <StorageManagement />
 
-      <section className="semi-settings-section">
-        <h2 className="settings-section-title"><HardDrive size={16} />{t("存储设置")}</h2>
-        <StorageSettings draft={draft} onChange={updateDraft} envOverridden={envOverridden} />
-      </section>
+      <div className="settings-secondary-grid">
+        <section className="semi-settings-section settings-download">
+          <h2 className="settings-section-title"><Download size={16} />{t("下载与归档")}</h2>
+          <DownloadSettingsFields
+            draft={draft}
+            onChange={updateDraft}
+            onAuthChange={updateAuthDraft}
+            envOverridden={envOverridden}
+          />
+        </section>
 
-      <section className="semi-settings-section">
-        <h2 className="settings-section-title"><Download size={16} />{t("网络与下载调度")}</h2>
-        <DownloadSettingsFields
-          draft={draft}
-          onChange={updateDraft}
-          onAuthChange={updateAuthDraft}
-          envOverridden={envOverridden}
-        />
-      </section>
-
-      <section className="semi-settings-section">
-        <h2 className="settings-section-title"><ShieldCheck size={16} />{t("X / Twitter Cookie 凭证")}</h2>
-        <CookieSettingsFields
-          authError={authError}
-          authResult={authResult}
-          checking={authChecking}
-          draft={draft}
-          onChange={updateAuthDraft}
-          envOverridden={envOverridden}
-        />
-      </section>
+        <section className="semi-settings-section settings-cookies">
+          <h2 className="settings-section-title"><ShieldCheck size={16} />{t("X / Twitter Cookie 凭证")}</h2>
+          <CookieSettingsFields
+            authError={authError}
+            authResult={authResult}
+            checking={authChecking}
+            draft={draft}
+            onChange={updateAuthDraft}
+            envOverridden={envOverridden}
+          />
+        </section>
+      </div>
+      <section className="semi-settings-section"><LanguageSettings /></section>
     </div>
   );
 }

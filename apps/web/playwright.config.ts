@@ -12,6 +12,7 @@ export default defineConfig({
     baseURL: process.env.OPEN_XDOWNLOAD_PREVIEW_URL ?? "http://10.10.11.3:8787",
     trace: "retain-on-failure",
     storageState: ".playwright-auth.json",
+    extraHTTPHeaders: { "X-XDownload-Request": "1" },
     screenshot: "only-on-failure",
     launchOptions: { args: ["--no-sandbox"] },
   },

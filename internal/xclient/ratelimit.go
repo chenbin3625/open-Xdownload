@@ -10,16 +10,21 @@ import (
 )
 
 type rateLimitState struct {
-	remaining int
-	limit     int
-	reset     time.Time
-	ready     bool
+	remaining   int
+	limit       int
+	reset       time.Time
+	ready       bool
+	nextRequest time.Time
+	failures    int
 }
 
 type rateLimiter struct {
-	mu        sync.Mutex
-	limits    map[string]rateLimitState
-	lastPrune time.Time
+	mu            sync.Mutex
+	limits        map[string]rateLimitState
+	lastPrune     time.Time
+	accountUntil  time.Time
+	limitedStreak int
+	lastLimited   time.Time
 }
 
 func newRateLimiter() *rateLimiter {
@@ -53,42 +58,26 @@ const maxLocalRateLimitWait = 3 * time.Second
 
 func (rl *rateLimiter) before(ctx context.Context, path string) error {
 	rl.prune()
-	const maxWaitIterations = 3
-	for i := 0; ; i++ {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rl.mu.Lock()
-		state, ok := rl.limits[path]
-		if !ok || !state.ready || time.Now().After(state.reset) {
-			rl.mu.Unlock()
-			return nil
-		}
-		threshold := max(1, state.limit/50)
-		if state.remaining > threshold {
-			state.remaining--
-			rl.limits[path] = state
-			rl.mu.Unlock()
-			return nil
-		}
-		wait := time.Until(state.reset.Add(5 * time.Second))
-		if yieldsOnRateLimit(ctx) {
-			// Pool 路径：立即交还，由 Pool 换用其他 Cookie / 调用方释放执行槽。
-			// 带上恢复时间，单账号回退路径也能据此重新入队而不是当成普通失败。
-			rl.mu.Unlock()
-			if wait <= 0 {
-				return errRateLimitBusyWait
+		now := time.Now()
+		readyAt := rl.readyAtLocked(path, now)
+		if !readyAt.After(now) {
+			state, ok := rl.limits[path]
+			if ok && state.ready && now.Before(state.reset) {
+				state.remaining--
+				rl.limits[path] = state
 			}
-			return &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait}
+			rl.mu.Unlock()
+			return nil
 		}
 		rl.mu.Unlock()
-		if wait <= 0 {
-			return nil
-		}
-		if wait > maxLocalRateLimitWait {
-			// 直接使用单个账号（例如主账号专用时间线）：不在原地等到限流复位，
-			// 返回结构化限流错误与恢复时间，让任务检查点保存后让出执行槽。
-			return &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait}
-		}
-		if i >= maxWaitIterations {
-			return errRateLimitBusyWait
+		wait := time.Until(readyAt)
+		if yieldsOnRateLimit(ctx) || wait > maxLocalRateLimitWait {
+			return &RateLimitedError{Path: path, RetryAt: readyAt, Cause: errRateLimitBusyWait}
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -98,6 +87,25 @@ func (rl *rateLimiter) before(ctx context.Context, path string) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// 调用方持有 mu；账号冷却优先，接口配额和主动匀速都使用同一个可恢复时间。
+func (rl *rateLimiter) readyAtLocked(path string, now time.Time) time.Time {
+	var readyAt time.Time
+	if !rl.accountUntil.IsZero() {
+		readyAt = rl.accountUntil.Add(5 * time.Second)
+	}
+	state, ok := rl.limits[path]
+	if ok && state.ready {
+		if state.remaining <= max(1, state.limit/50) {
+			if reset := state.reset.Add(5 * time.Second); reset.After(readyAt) {
+				readyAt = reset
+			}
+		} else if now.Before(state.reset) && state.nextRequest.After(readyAt) {
+			readyAt = state.nextRequest
+		}
+	}
+	return readyAt
 }
 
 func (rl *rateLimiter) after(path string, header http.Header) {
@@ -126,18 +134,25 @@ func (rl *rateLimiter) after(path string, header http.Header) {
 	if err != nil {
 		return
 	}
-	// 与 Retry-After 同样截断：时钟偏差或异常的 reset 值会让 before() 一直阻塞到该时刻，
-	// 任务带着并发槽位卡死（只有 ctx 能打断）。
 	reset := time.Unix(resetUnix, 0)
-	if latest := time.Now().Add(maxRetryAfter); reset.After(latest) {
-		reset = latest
+	if limit <= 0 {
+		return
+	}
+	remaining = max(0, min(remaining, limit))
+	var next time.Time
+	if remaining > max(1, limit/50) && time.Now().Before(reset) {
+		interval := time.Duration(float64(time.Until(reset)) / (float64(remaining) * 0.8))
+		next = time.Now().Add(max(3*time.Second, interval))
 	}
 	rl.mu.Lock()
+	failures := rl.limits[path].failures
 	rl.limits[path] = rateLimitState{
-		remaining: remaining,
-		limit:     limit,
-		reset:     reset,
-		ready:     true,
+		remaining:   remaining,
+		limit:       limit,
+		reset:       reset,
+		ready:       true,
+		nextRequest: next,
+		failures:    failures,
 	}
 	rl.mu.Unlock()
 }
@@ -146,7 +161,53 @@ func (rl *rateLimiter) after(path string, header http.Header) {
 // omitted the standard X-Rate-Limit headers. Pool callers can then yield the
 // request to another cookie instead of disabling this valid credential.
 func (rl *rateLimiter) markRateLimited(path string, header http.Header) {
-	rl.markRateLimitedFor(path, parseRetryAfter(header))
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	state := rl.limits[path]
+	if now.Sub(rl.lastLimited) > 30*time.Minute {
+		rl.limitedStreak = 0
+		state.failures = 0
+	}
+	state.failures = min(state.failures+1, 5)
+	block := parseRetryAfter(header)
+	if block <= 0 {
+		block = min(time.Minute*time.Duration(1<<uint(state.failures-1)), 15*time.Minute)
+	}
+	state.reset = maxTime(state.reset, now.Add(block))
+	state.limit = max(1, state.limit)
+	state.remaining = 0
+	state.ready = true
+	rl.limits[path] = state
+	rl.limitedStreak++
+	rl.lastLimited = now
+	if rl.limitedStreak >= 2 {
+		rl.accountUntil = maxTime(rl.accountUntil, state.reset)
+	}
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+func (rl *rateLimiter) markAccountCooldown(block time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.accountUntil = maxTime(rl.accountUntil, time.Now().Add(block))
+}
+
+func (rl *rateLimiter) succeeded(path string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.limitedStreak = 0
+	state, ok := rl.limits[path]
+	if ok {
+		state.failures = 0
+		rl.limits[path] = state
+	}
 }
 
 // markRateLimitedFor 以指定冷却时长把 path 标记为不可用；block<=0 时默认 1 分钟。
@@ -188,28 +249,23 @@ func (rl *rateLimiter) refund(path string) {
 	}
 }
 
-// maxRetryAfter 限制 Retry-After 的采纳上限。上游（或中间 CDN）可能返回
-// Retry-After: 86400，而 before() 会一直等到该时刻——任务会带着并发槽位阻塞
-// 一整天，表现为永远卡在 resolving。Pool.Select 早已有 maxPoolSelectWait 这类
-// 上界，这里补齐同样的约束。
-const maxRetryAfter = 15 * time.Minute
-
 // parseRetryAfter 解析 Retry-After 响应头（秒数或 HTTP-date），无法解析返回 0。
-// 返回值上限为 maxRetryAfter。
+// 保留完整冷却期限；长等待由调度器延迟入队，不占用任务执行槽。
 func parseRetryAfter(header http.Header) time.Duration {
 	raw := header.Get("Retry-After")
 	if raw == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(raw); err == nil {
-		if secs < 0 {
-			return 0
+	if secs, err := strconv.ParseUint(raw, 10, 64); err == nil {
+		const maxDuration = time.Duration(1<<63 - 1)
+		if secs > uint64(maxDuration/time.Second) {
+			return maxDuration
 		}
-		return min(time.Duration(secs)*time.Second, maxRetryAfter)
+		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(raw); err == nil {
 		if d := time.Until(t); d > 0 {
-			return min(d, maxRetryAfter)
+			return d
 		}
 	}
 	return 0
@@ -218,33 +274,34 @@ func parseRetryAfter(header http.Header) time.Duration {
 func (rl *rateLimiter) wouldBlock(path string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	state, ok := rl.limits[path]
-	if !ok || !state.ready || time.Now().After(state.reset) {
-		return false
-	}
-	threshold := max(1, state.limit/50)
-	return state.remaining <= threshold
+	now := time.Now()
+	return rl.readyAtLocked(path, now).After(now)
 }
 
 // blockedReset 返回本限流器所有（任一路径）受限状态中最快结束限流的时间（reset+5s 裕量），
 // 供 Pool.Select 在全部客户端受限时据此等待；无受限返回 false。
-func (rl *rateLimiter) blockedReset() (time.Time, bool) {
+func (rl *rateLimiter) blockedReset(paths ...string) (time.Time, bool) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	var earliest time.Time
 	found := false
-	for _, state := range rl.limits {
-		if !state.ready || time.Now().After(state.reset) {
+	now := time.Now()
+	if len(paths) > 0 {
+		reset := rl.readyAtLocked(paths[0], now)
+		return reset, reset.After(now)
+	}
+	for path := range rl.limits {
+		reset := rl.readyAtLocked(path, now)
+		if !reset.After(now) {
 			continue
 		}
-		if state.remaining > max(1, state.limit/50) {
-			continue
-		}
-		reset := state.reset.Add(5 * time.Second)
 		if !found || reset.Before(earliest) {
 			earliest = reset
 			found = true
 		}
+	}
+	if !found && rl.accountUntil.Add(5*time.Second).After(now) {
+		return rl.accountUntil.Add(5 * time.Second), true
 	}
 	return earliest, found
 }
@@ -265,14 +322,16 @@ func (rl *rateLimiter) snapshot() []RateLimitSnapshot {
 		if !state.ready {
 			continue
 		}
-		threshold := max(1, state.limit/50)
 		items = append(items, RateLimitSnapshot{
 			Path:      path,
 			Limit:     state.limit,
 			Remaining: state.remaining,
 			Reset:     state.reset,
-			Blocked:   state.remaining <= threshold && time.Now().Before(state.reset),
+			Blocked:   rl.readyAtLocked(path, time.Now()).After(time.Now()),
 		})
+	}
+	if rl.accountUntil.After(time.Now()) {
+		items = append(items, RateLimitSnapshot{Path: "*", Reset: rl.accountUntil, Blocked: true})
 	}
 	return items
 }

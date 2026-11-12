@@ -50,7 +50,7 @@ const mockJobs: Job[] = [
     status: "completed",
     input: "https://x.com/user/status/123",
     title: "推文 123",
-    progress: 100,
+    progress: 1,
     message: "下载完成",
     createdAt: "2026-09-15T08:00:00Z",
     updatedAt: "2026-09-15T08:01:00Z",
@@ -61,7 +61,7 @@ const mockJobs: Job[] = [
     status: "failed",
     input: "@failed_user",
     title: "用户 failed_user",
-    progress: 10,
+    progress: 0.1,
     message: "任务失败",
     error: "用户不存在或已被封禁 (404 Not Found)",
     createdAt: "2026-09-15T09:00:00Z",
@@ -73,7 +73,7 @@ const mockJobs: Job[] = [
     status: "completed_with_errors",
     input: "https://x.com/user/status/456",
     title: "推文 456",
-    progress: 80,
+    progress: 0.8,
     message: "部分媒体失败",
     error: "部分媒体链接已过期",
     createdAt: "2026-09-15T10:00:00Z",
@@ -151,7 +151,8 @@ describe("TaskCenterPage 移动端", () => {
 
     expect(screen.queryByRole("table")).toBeNull();
     expect(screen.getByRole("list", { name: "任务列表" })).toBeTruthy();
-    expect(screen.getByText("部分媒体链接已过期")).toBeTruthy();
+    expect(screen.queryByText("部分媒体链接已过期")).toBeNull();
+    expect(screen.getByRole("button", { name: "部分失败 · 80%" })).toBeTruthy();
     expect(api.getJobFiles).not.toHaveBeenCalled();
 
     await user.click(screen.getAllByRole("button", { name: "展开详情" })[0]);
@@ -184,7 +185,8 @@ describe("TaskCenterPage", () => {
     vi.mocked(api.retryJob).mockReset();
   });
 
-  it("在表格的执行进度列中展示错误信息并高亮异常状态", () => {
+  it("列表只展示紧凑状态，悬停或聚焦后展示执行详情", async () => {
+    const user = userEvent.setup();
     renderWithClient(
       <TaskCenterPage
         jobs={mockJobs}
@@ -197,11 +199,17 @@ describe("TaskCenterPage", () => {
       />,
     );
 
-    // 错误任务应当展示具体的错误原因
-    expect(screen.getByText("用户不存在或已被封禁 (404 Not Found)")).not.toBeNull();
-    expect(screen.getByText("部分媒体链接已过期")).not.toBeNull();
-    // 正常任务展示其 message
-    expect(screen.getByText("下载完成")).not.toBeNull();
+    expect(screen.queryByText("用户不存在或已被封禁 (404 Not Found)")).toBeNull();
+    expect(screen.queryByText("下载完成")).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    const status = screen.getByRole("button", { name: "失败 · 10%" });
+    await user.hover(status);
+    expect(await screen.findByText("用户不存在或已被封禁 (404 Not Found)")).toBeTruthy();
+    expect(screen.getByText("10%")).toBeTruthy();
+    await user.unhover(status);
+    await waitFor(() => expect(screen.queryByText("用户不存在或已被封禁 (404 Not Found)")).toBeNull());
+    act(() => status.focus());
+    expect(await screen.findByText("用户不存在或已被封禁 (404 Not Found)")).toBeTruthy();
   });
 
   it("展开错误任务时，在详情顶部显示错误 Alert 和重试按钮", async () => {
@@ -459,10 +467,9 @@ describe("TaskCenterPage", () => {
       />,
     );
 
-    // 验证表格进度列中展示聚合后的错误原因与数量提示，而非长字符串截断
-    expect(
-      screen.getByText("X 客户端暂时全部限流，请稍后重试 (31项)"),
-    ).not.toBeNull();
+    expect(screen.queryByText("X 客户端暂时全部限流，请稍后重试 (31项)")).toBeNull();
+    await user.hover(screen.getByRole("button", { name: "部分失败 · 100%" }));
+    expect(await screen.findByText("X 客户端暂时全部限流，请稍后重试 (31项)")).toBeTruthy();
 
     // 展开详情
     const expandBtn = screen.getByLabelText("展开详情");

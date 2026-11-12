@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +54,12 @@ func TestRateLimitedJobReturnsExecutionSlot(t *testing.T) {
 	if claimedNow, err := store.ClaimPendingJobs(ctx, 1); err != nil || len(claimedNow) != 0 {
 		t.Fatalf("cooling job was claimed: %+v %v", claimedNow, err)
 	}
+	manager.metricsMu.Lock()
+	metrics := manager.metrics[job.ID]
+	manager.metricsMu.Unlock()
+	if metrics.RateLimitYields != 1 {
+		t.Fatalf("rate-limit yield metric = %d, want 1", metrics.RateLimitYields)
+	}
 }
 
 // TestPlainAllClientsRateLimitedUsesConservativeCooldown 保证没有结构化恢复时间的
@@ -86,5 +93,39 @@ func TestPlainAllClientsRateLimitedUsesConservativeCooldown(t *testing.T) {
 	}
 	if time.Until(*updated.AvailableAt) < 30*time.Second {
 		t.Fatalf("cooldown = %s, want conservative >= 30s", time.Until(*updated.AvailableAt))
+	}
+}
+
+// TestRateLimitDeferCapFailsJobWithReason 覆盖 P0：累计推迟超过上限后不再无限
+// 重排，任务明确失败并在 Error 中写明原因。
+func TestRateLimitDeferCapFailsJobWithReason(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	job, err := store.CreateJob(ctx, storage.JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimPendingJobs(ctx, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %+v %v", claimed, err)
+	}
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	retryAt := time.Now().Add(maxRateLimitDefer + time.Minute)
+	manager.fail(ctx, claimed[0], "", &xclient.RateLimitedError{Path: "/i/api/graphql/x/UserMedia", RetryAt: retryAt})
+
+	updated, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != storage.JobFailed {
+		t.Fatalf("status = %s, want failed", updated.Status)
+	}
+	if !strings.Contains(updated.Error, "限流累计推迟超过") || !strings.Contains(updated.Error, maxRateLimitDefer.String()) {
+		t.Fatalf("error = %q, want cumulative defer reason", updated.Error)
 	}
 }
