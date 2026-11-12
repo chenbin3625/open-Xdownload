@@ -43,6 +43,7 @@ type Service struct {
 
 type ParseOptions struct {
 	IncludeNestedTweets bool
+	RequireRelated      bool
 
 	// StopAtTweetID 用于增量归档：getUserTimeline 翻页时遇到该推文即停止，
 	// 因为 timeline 按时间倒序，遇到已归档的旧推文即可早停，避免全量拉取。
@@ -138,9 +139,11 @@ func BestVariant(variants []MediaVariant) MediaVariant {
 }
 
 func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions) (TweetData, error) {
-	if result.Get("__typename").String() == "TweetWithVisibilityResults" {
-		result = result.Get("tweet")
-	}
+	return tweetFromResultDepth(rawURL, fallbackUsername, fallbackID, result, options, 0)
+}
+
+func tweetFromResultDepth(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions, depth int) (TweetData, error) {
+	result = unwrapTweetResult(result)
 	if kind := result.Get("__typename").String(); kind == "TweetTombstone" || kind == "TweetUnavailable" {
 		return TweetData{}, ErrTweetUnavailable
 	}
@@ -159,18 +162,66 @@ func tweetFromResult(rawURL string, fallbackUsername string, fallbackID string, 
 	}
 	text := result.Get("note_tweet.note_tweet_results.result.text").String()
 	if text == "" {
+		text = result.Get("details.full_text").String()
+	}
+	if text == "" {
 		text = legacy.Get("full_text").String()
+	}
+	if options.RequireRelated && !result.Get("note_tweet.note_tweet_results.result.text").Exists() && !result.Get("details.full_text").Exists() && !legacy.Get("full_text").Exists() {
+		return TweetData{}, fmt.Errorf("推文 %s 缺少正文结构", id)
 	}
 	// X 返回的推文文本包含 HTML 实体（&amp; &lt; &#39; 等），存储和文件命名前需解码。
 	text = html.UnescapeString(text)
-	return TweetData{
-		ID:        id,
-		URL:       canonicalTweetURL(author.ScreenName, id),
-		Text:      text,
-		CreatedAt: createdAt,
-		Author:    author,
-		Media:     parseTweetResultMedia(result, options),
-	}, nil
+	if millis := result.Get("details.created_at_ms").Int(); millis > 0 {
+		createdAt = time.UnixMilli(millis).UTC()
+	}
+	tweet := TweetData{
+		ID:               id,
+		URL:              canonicalTweetURL(author.ScreenName, id),
+		Text:             text,
+		CreatedAt:        createdAt,
+		Author:           author,
+		Media:            parseTweetResultMedia(result, options),
+		ConversationID:   legacy.Get("conversation_id_str").String(),
+		ReplyToID:        legacy.Get("in_reply_to_status_id_str").String(),
+		QuotedTweetID:    legacy.Get("quoted_status_id_str").String(),
+		RetweetedTweetID: legacy.Get("retweeted_status_id_str").String(),
+	}
+	if tweet.ReplyToID == "" {
+		tweet.ReplyToID = result.Get("reply_to_results.rest_id").String()
+	}
+	if tweet.ConversationID == "" {
+		tweet.ConversationID = result.Get("details.conversation_id").String()
+	}
+	if depth < 2 {
+		for _, relation := range []struct {
+			paths  []string
+			target *string
+		}{
+			{[]string{"reply_to_results.result", "in_reply_to_status_result.result"}, &tweet.ReplyToID},
+			{[]string{"quoted_tweet_results.result", "quoted_status_result.result", "legacy.quoted_status_result.result"}, &tweet.QuotedTweetID},
+			{[]string{"legacy.retweeted_status_results.result", "retweeted_status_results.result", "legacy.retweeted_status_result.result", "retweeted_status_result.result"}, &tweet.RetweetedTweetID},
+		} {
+			for _, nestedPath := range relation.paths {
+				nested := result.Get(nestedPath)
+				if !nested.Exists() {
+					continue
+				}
+				nestedTweet, nestedErr := tweetFromResultDepth("", "", "", nested, options, depth+1)
+				if nestedErr != nil && options.RequireRelated && !errors.Is(nestedErr, ErrTweetUnavailable) {
+					return TweetData{}, fmt.Errorf("推文 %s 的关联正文解析失败: %w", id, nestedErr)
+				}
+				if nestedErr == nil && nestedTweet.ID != "" && nestedTweet.ID != tweet.ID {
+					*relation.target = nestedTweet.ID
+					tweet.Related = append(tweet.Related, nestedTweet)
+				} else if nestedID := unwrapTweetResult(nested).Get("rest_id").String(); nestedID != "" {
+					*relation.target = nestedID
+				}
+				break
+			}
+		}
+	}
+	return tweet, nil
 }
 
 func parseAuthor(result gjson.Result, fallbackUsername string) Author {
@@ -212,6 +263,7 @@ func collectTweetResultMedia(result gjson.Result, items *[]Media, seen map[strin
 	}
 	result = unwrapTweetResult(result)
 	legacy := result.Get("legacy")
+	appendUniqueMedia(items, seen, parseMedia(result.Get("media_entities2")))
 	if legacy.Exists() {
 		appendUniqueMedia(items, seen, parseMedia(legacy.Get("extended_entities.media")))
 		appendUniqueMedia(items, seen, parseMedia(legacy.Get("entities.media")))
@@ -222,6 +274,9 @@ func collectTweetResultMedia(result gjson.Result, items *[]Media, seen map[strin
 		return
 	}
 	for _, path := range []string{
+		"quoted_tweet_results.result",
+		"retweeted_status_results.result",
+		"legacy.retweeted_status_results.result",
 		"legacy.retweeted_status_result.result",
 		"retweeted_status_result.result",
 		"quoted_status_result.result",
@@ -306,6 +361,14 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 }
 
 func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions) (TweetData, error) {
+	return tweetFromSyndicationDepth(rawURL, fallbackUsername, fallbackID, result, options, 0)
+}
+
+func tweetFromSyndicationDepth(rawURL string, fallbackUsername string, fallbackID string, result gjson.Result, options ParseOptions, depth int) (TweetData, error) {
+	result = unwrapSyndicationResult(result)
+	if kind := result.Get("__typename").String(); kind == "TweetTombstone" || kind == "TweetUnavailable" {
+		return TweetData{}, ErrTweetUnavailable
+	}
 	id := result.Get("id_str").String()
 	if id == "" {
 		id = fallbackID
@@ -322,14 +385,62 @@ func tweetFromSyndication(rawURL string, fallbackUsername string, fallbackID str
 	if err != nil {
 		return TweetData{}, err
 	}
-	return TweetData{
-		ID:        id,
-		URL:       canonicalTweetURL(author.ScreenName, id),
-		Text:      html.UnescapeString(result.Get("text").String()),
-		CreatedAt: createdAt,
-		Author:    author,
-		Media:     parseSyndicationMedia(result, options),
-	}, nil
+	tweet := TweetData{
+		ID:               id,
+		URL:              canonicalTweetURL(author.ScreenName, id),
+		Text:             html.UnescapeString(result.Get("text").String()),
+		CreatedAt:        createdAt,
+		Author:           author,
+		Media:            parseSyndicationMedia(result, options),
+		ConversationID:   firstString(result.Get("conversation_id_str"), result.Get("conversation_id")),
+		ReplyToID:        firstString(result.Get("in_reply_to_status_id_str"), result.Get("in_reply_to_status_id"), result.Get("reply_to_id")),
+		QuotedTweetID:    firstString(result.Get("quoted_status_id_str"), result.Get("quoted_status_id"), result.Get("quoted_tweet_id")),
+		RetweetedTweetID: firstString(result.Get("retweeted_status_id_str"), result.Get("retweeted_status_id"), result.Get("retweeted_tweet_id")),
+	}
+	if depth < 2 {
+		for _, relation := range []struct {
+			paths  []string
+			target *string
+		}{
+			{[]string{"in_reply_to_status", "in_reply_to_status_result", "reply_to"}, &tweet.ReplyToID},
+			{[]string{"quoted_tweet", "quoted_status", "quoted_status_result", "quoted_tweet_result"}, &tweet.QuotedTweetID},
+			{[]string{"retweeted_tweet", "retweeted_status", "retweeted_status_result", "retweeted_tweet_result"}, &tweet.RetweetedTweetID},
+		} {
+			for _, relationPath := range relation.paths {
+				nested := result.Get(relationPath)
+				if !nested.Exists() {
+					continue
+				}
+				nestedTweet, nestedErr := tweetFromSyndicationDepth("", "", "", nested, options, depth+1)
+				if nestedErr != nil && options.RequireRelated && !errors.Is(nestedErr, ErrTweetUnavailable) {
+					return TweetData{}, fmt.Errorf("推文 %s 的关联正文解析失败: %w", id, nestedErr)
+				}
+				if nestedErr == nil && nestedTweet.ID != "" && nestedTweet.ID != tweet.ID {
+					*relation.target = nestedTweet.ID
+					tweet.Related = append(tweet.Related, nestedTweet)
+				} else if nestedID := firstString(nested.Get("id_str"), nested.Get("rest_id"), nested.Get("id")); nestedID != "" {
+					*relation.target = nestedID
+				}
+				break
+			}
+		}
+	}
+	return tweet, nil
+}
+
+func unwrapSyndicationResult(result gjson.Result) gjson.Result {
+	for depth := 0; depth < 8; depth++ {
+		if result.Get("tweet").Exists() && !result.Get("id_str").Exists() && !result.Get("text").Exists() {
+			result = result.Get("tweet")
+			continue
+		}
+		if result.Get("result").Exists() && !result.Get("id_str").Exists() && !result.Get("text").Exists() {
+			result = result.Get("result")
+			continue
+		}
+		return result
+	}
+	return result
 }
 
 func tweetCreatedAt(raw, layout, id string) (time.Time, error) {

@@ -1220,3 +1220,59 @@ func TestTimelineUnknownInstructionShapeReturnsError(t *testing.T) {
 		t.Fatalf("error = %v, want unknown timeline shape error", err)
 	}
 }
+
+func TestPoolSelectYieldsToSchedulerWithRetryAt(t *testing.T) {
+	now := time.Now()
+	limiter := newRateLimiter()
+	limiter.limits["/x"] = rateLimitState{remaining: 0, limit: 20, reset: now.Add(10 * time.Second), ready: true}
+	pool := &Pool{clients: []*Client{
+		{limiter: limiter, retryBackoff: func(int) time.Duration { return 0 }},
+	}}
+
+	start := time.Now()
+	_, err := pool.Select(WithYieldToScheduler(context.Background()), "/x")
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Select blocked for %s; scheduler mode must yield immediately", elapsed)
+	}
+	var limited *RateLimitedError
+	if !errors.As(err, &limited) {
+		t.Fatalf("err = %v, want *RateLimitedError", err)
+	}
+	if !IsAllClientsRateLimited(err) {
+		t.Fatalf("err = %v, want classified as all clients rate limited", err)
+	}
+	retryAt, ok := RateLimitRetryAt(err)
+	if !ok || retryAt.Before(now.Add(5*time.Second)) || retryAt.After(now.Add(20*time.Second)) {
+		t.Fatalf("retryAt = %s ok=%v, want ~+15s", retryAt, ok)
+	}
+	if limited.Path != "/x" {
+		t.Fatalf("path = %q, want /x", limited.Path)
+	}
+}
+
+func TestPoolSharesRetryBudgetAcrossCookies(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "try again", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	clients := make([]*Client, 0, 3)
+	for i := 0; i < 3; i++ {
+		clients = append(clients, &Client{
+			http:         server.Client(),
+			baseURL:      server.URL,
+			retryBackoff: func(int) time.Duration { return 0 },
+		})
+	}
+	pool := &Pool{clients: clients}
+	if _, err := pool.graphQL(context.Background(), "/i/api/graphql/x/UserMedia", nil); err == nil {
+		t.Fatal("graphQL succeeded, want failure")
+	}
+	// 5 次基础预算 + 每个额外 Cookie 1 次交接，而不是 3 × 5。
+	want := int64(requestMaxAttempts + len(clients) - 1)
+	if got := requests.Load(); got != want {
+		t.Fatalf("requests = %d, want unified budget %d", got, want)
+	}
+}

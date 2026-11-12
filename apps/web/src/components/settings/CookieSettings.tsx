@@ -13,11 +13,11 @@ import {
 import React, { useEffect, useState } from "react";
 import type { AppConfig, AuthCheck, ClientStatus } from "../../lib/api";
 import { cn } from "../../lib/cn";
-import { Button } from "../ui/Button";
-import { Alert } from "../ui/Feedback";
-import { Field, PasswordInput, Textarea } from "../ui/Input";
-import { Tooltip } from "../ui/Overlay";
-import { Tag, type Tone } from "../ui/Tag";
+import { Button } from "@douyinfe/semi-ui";
+import { Alert } from "../semi";
+import { Field, PasswordInput, Textarea } from "../semi";
+import { Tooltip } from "../semi";
+import { Tag, type Tone } from "../semi";
 import { EnvOverrideNote } from "./EnvOverrideNote";
 
 export type CookieClientStatus = ClientStatus;
@@ -123,8 +123,9 @@ export function CookieSettingsFields({
           <span className="text-sm font-semibold text-fg">{t("主账号 Cookie (Primary)")}</span>
           {primaryConfigured && (
             <Button
-              size="sm"
-              variant="ghost"
+              theme="borderless"
+              type="tertiary"
+              icon={<Trash2 size={16} />}
               onClick={() =>
                 onChange((current) => ({
                   ...current,
@@ -133,7 +134,6 @@ export function CookieSettingsFields({
                 }))
               }
             >
-              <Trash2 className="size-3.5" />
               {t("清除")}</Button>
           )}
         </div>
@@ -432,8 +432,7 @@ export function BackupCookieInputs({
         </div>
         <div className="flex items-center gap-2">
           <Button
-            size="sm"
-            variant="secondary"
+            type="tertiary"
             icon={<ClipboardPaste className="size-3.5" />}
             onClick={() => setBatchOpen((open) => !open)}
             aria-expanded={batchOpen}
@@ -441,8 +440,7 @@ export function BackupCookieInputs({
           >
             {t("批量粘贴")}</Button>
           <Button
-            size="sm"
-            variant="secondary"
+            type="tertiary"
             icon={<Plus className="size-3.5" />}
             onClick={addRow}
           >
@@ -476,15 +474,14 @@ export function BackupCookieInputs({
             )}
             <div className="flex items-center justify-end gap-2">
               <Button
-                size="sm"
-                variant="text"
+                type="tertiary"
                 onClick={() => {
                   setBatchOpen(false);
                   setBatchText("");
                 }}
               >
                 {t("取消")}</Button>
-              <Button size="sm" variant="primary" disabled={!canImport} onClick={importPastedRows}>
+              <Button theme="solid" disabled={!canImport} onClick={importPastedRows}>
                 {t("导入")}{canImport ? t(" {{value0}} 个账号", { value0: parsedBatch.rows.length }) : ""}
               </Button>
             </div>
@@ -532,7 +529,6 @@ export function BackupCookieInputs({
                     value={row.authToken}
                     onChange={(event) => updateRow(index, "authToken", event.target.value)}
                     placeholder={t("备用 {{value0}} auth_token", { value0: index + 1 })}
-                    size="sm"
                   />
                 </div>
 
@@ -549,16 +545,14 @@ export function BackupCookieInputs({
                     value={row.csrfToken}
                     onChange={(event) => updateRow(index, "csrfToken", event.target.value)}
                     placeholder={t("备用 {{value0}} ct0", { value0: index + 1 })}
-                    size="sm"
                   />
                 </div>
 
                 <div className="flex shrink-0 items-center justify-end">
                   <Tooltip content={t("删除此备用 Cookie")}>
                     <Button
-                      size="sm"
-                      variant="ghost"
-                      circle
+                      theme="borderless"
+                      type="danger"
                       icon={<Trash2 className="size-3.5 text-danger" />}
                       onClick={() => removeRow(index)}
                       aria-label={t("删除备用 Cookie {{value0}}", { value0: index + 1 })}

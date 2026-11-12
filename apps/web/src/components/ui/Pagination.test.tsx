@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Pagination, buildPageItems } from "./Pagination";
+import { Pagination, buildPageItems } from "../semi";
 
 describe("buildPageItems", () => {
   it("总页数不超过 7 时全部列出，不折叠", () => {
@@ -33,17 +33,17 @@ describe("Pagination", () => {
     const { unmount } = render(
       <Pagination page={1} pageSize={10} total={100} onPageChange={() => {}} />,
     );
-    expect(screen.getByRole("button", { name: "上一页" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "下一页" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "上一页" }).getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "下一页" }).getAttribute("aria-disabled")).toBe("false");
     unmount();
 
     render(<Pagination page={10} pageSize={10} total={100} onPageChange={() => {}} />);
-    expect(screen.getByRole("button", { name: "下一页" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "下一页" }).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("当前页用 aria-current 标记", () => {
+  it("当前页用 aria-current 标记", async () => {
     render(<Pagination page={3} pageSize={10} total={100} onPageChange={() => {}} />);
-    expect(screen.getByRole("button", { name: "第 3 页" }).getAttribute("aria-current")).toBe("page");
+    expect((await screen.findByRole("button", { name: "第 3 页" })).getAttribute("aria-current")).toBe("page");
   });
 
   it("点击页码回传目标页", async () => {
@@ -51,25 +51,25 @@ describe("Pagination", () => {
     const onPageChange = vi.fn();
     render(<Pagination page={1} pageSize={10} total={100} onPageChange={onPageChange} />);
 
-    await user.click(screen.getByRole("button", { name: "第 2 页" }));
+    await user.click(await screen.findByRole("button", { name: "第 2 页" }));
     expect(onPageChange).toHaveBeenCalledWith(2);
 
     await user.click(screen.getByRole("button", { name: "下一页" }));
     expect(onPageChange).toHaveBeenLastCalledWith(2);
   });
 
-  it("page 超出范围时收敛到最后一页，不会渲染越界页码", () => {
+  it("page 超出范围时收敛到最后一页，不会渲染越界页码", async () => {
     // 后端 total 变小而前端 page 还停在旧值时不能崩
     render(<Pagination page={99} pageSize={10} total={30} onPageChange={() => {}} />);
-    expect(screen.getByRole("button", { name: "第 3 页" }).getAttribute("aria-current")).toBe("page");
+    expect((await screen.findByRole("button", { name: "第 3 页" })).getAttribute("aria-current")).toBe("page");
     expect(screen.queryByRole("button", { name: "第 4 页" })).toBeNull();
   });
 
-  it("total 为 0 时仍渲染第 1 页且两侧翻页均禁用", () => {
+  it("total 为 0 时仍渲染第 1 页且两侧翻页均禁用", async () => {
     render(<Pagination page={1} pageSize={10} total={0} onPageChange={() => {}} />);
-    expect(screen.getByRole("button", { name: "第 1 页" })).not.toBeNull();
-    expect(screen.getByRole("button", { name: "上一页" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "下一页" }).hasAttribute("disabled")).toBe(true);
+    expect(await screen.findByRole("button", { name: "第 1 页" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "上一页" }).getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "下一页" }).getAttribute("aria-disabled")).toBe("true");
   });
 
   it("未传 onPageSizeChange 时不渲染每页条数选择器", () => {
@@ -77,30 +77,30 @@ describe("Pagination", () => {
     expect(screen.queryByRole("combobox", { name: "每页条数" })).toBeNull();
   });
 
-  it("pageSize 为 0 时不渲染 Infinity 页码", () => {
+  it("pageSize 为 0 时不渲染 Infinity 页码", async () => {
     // 除零会让 Math.ceil(total / 0) = Infinity，页码里会出现 "Infinity"
     render(<Pagination page={1} pageSize={0} total={100} onPageChange={() => {}} />);
     expect(screen.queryByText("Infinity")).toBeNull();
-    expect(screen.getByRole("button", { name: "第 1 页" })).not.toBeNull();
+    expect(await screen.findByRole("button", { name: "第 1 页" })).not.toBeNull();
   });
 
-  it("total 为负或 page 非有限值时收敛到第 1 页", () => {
+  it("total 为负或 page 非有限值时收敛到第 1 页", async () => {
     const { unmount } = render(
       <Pagination page={1} pageSize={10} total={-5} onPageChange={() => {}} />,
     );
     expect(screen.getByText("共 0 条")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "第 1 页" })).not.toBeNull();
+    expect(await screen.findByRole("button", { name: "第 1 页" })).not.toBeNull();
     unmount();
 
     render(<Pagination page={Number.NaN} pageSize={10} total={30} onPageChange={() => {}} />);
     expect(screen.queryByText("NaN")).toBeNull();
-    expect(screen.getByRole("button", { name: "第 1 页" })).not.toBeNull();
+    expect(await screen.findByRole("button", { name: "第 1 页" })).not.toBeNull();
   });
 
-  it("当前页码使用品牌色的配对前景色", () => {
+  it("当前页码使用 Semi 的激活态", async () => {
     render(<Pagination page={2} pageSize={10} total={100} onPageChange={() => {}} />);
-    const current = screen.getByRole("button", { name: "第 2 页" });
-    expect(current.className).toContain("text-brand-contrast");
+    const current = await screen.findByRole("button", { name: "第 2 页" });
+    expect(current.className).toContain("semi-page-item-active");
     expect(current.className).not.toContain("text-white");
   });
 

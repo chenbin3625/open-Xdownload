@@ -670,6 +670,24 @@ func TestUpgradeRekeysVideoVariantsToMediaID(t *testing.T) {
 // "missing destination name"：本测试让这种遗漏在 CI 里直接失败。结构变更时：递增
 // schemaVersion，并在这里登记新版本的完整列集合。
 var schemaColumnsForVersion = map[int]string{
+	7: "app_account(id,password_hash,session_key,username);" +
+		"app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
+		"archive_media(id,media_type,payload,source_url);" +
+		"archive_schedules(claim_version,created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
+		"asset_migration_progress(failed,job_id,last_id,max_id,processed,total);" +
+		"assets(content_hash,content_type,created_at,id,kind,object_key,policy_version,size,target_id,target_version);" +
+		"dashboard_counters(active,completed,failed,failed_tweet_count,id,total);" +
+		"download_assets(asset_id,download_id,kind);download_roots(last_seen_at,path);" +
+		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,tweet_id);" +
+		"failed_media(created_at,error,id,job_id,media_url);failed_tweets(created_at,entity_id,error,id,job_id,next_retry_at,payload,retry_count,tweet_id,updated_at);" +
+		"job_storage(job_id,policy_version);jobs(archive_mode,backfill,created_at,error,id,input,kind,message,progress,status,title,updated_at);" +
+		"list_entities(id,list_id,name,parent_dir,updated_at);media_assets(asset_id,error,job_id,kind,media_key,status,updated_at);" +
+		"media_context(media_key,payload,position,tweet_id);schema_migrations(applied_at,name);storage_versions(created_at,document,version);" +
+		"tweet_jobs(body_status,job_id,media_error,media_status,tweet_id);tweet_media(media_id,position,tweet_id);tweet_relations(related_id,relation,tweet_id);" +
+		"tweet_sync(count,cursor,error,head_id,last_id,status,updated_at,user_id);tweets(archived_at,author_id,author_name,body,id,payload,published_at,screen_name,updated_at);" +
+		"twitter_lists(id,name,owner_user_id,updated_at);unavailable_media(created_at,error,media_url,tweet_id,updated_at);" +
+		"user_entities(id,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id);user_links(id,list_entity_id,name,updated_at,user_id);" +
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
 	6: "app_account(id,password_hash,session_key,username);" +
 		"app_config(additional_cookies,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,proxy_url,storage_type,updated_at);" +
 		"archive_schedules(claim_version,created_at,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,updated_at);" +
@@ -751,6 +769,29 @@ var schemaColumnsForVersion = map[int]string{
 		"user_links(id,list_entity_id,name,updated_at,user_id);" +
 		"user_previous_names(id,name,recorded_at,screen_name,user_id);" +
 		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
+}
+
+// v8 在 v7 基础上：jobs 增加 enqueued_at / available_at / source，新增 job_checkpoints。
+// 直接从 v7 派生，避免手工复制整段列集合时漏改某个未受影响的表。
+func init() {
+	v8 := strings.Replace(schemaColumnsForVersion[7],
+		"jobs(archive_mode,backfill,created_at,error,id,input,kind,message,progress,status,title,updated_at)",
+		"jobs(archive_mode,available_at,available_ns,backfill,created_at,enqueue_ns,enqueued_at,error,id,input,kind,message,progress,source,status,title,updated_at)", 1)
+	v8 = strings.Replace(v8, "job_storage(", "job_checkpoints(job_id,payload,updated_at);job_storage(", 1)
+	schemaColumnsForVersion[8] = v8
+
+	// v9 在 v8 基础上：jobs 增加 deferred_seconds、user_entities 增加
+	// last_full_scan_at，新增 media_sync（媒体时间线逐页游标）。
+	v9 := strings.Replace(v8,
+		"jobs(archive_mode,available_at,available_ns,backfill,created_at,enqueue_ns,enqueued_at,error,id,input,kind,message,progress,source,status,title,updated_at)",
+		"jobs(archive_mode,available_at,available_ns,backfill,created_at,deferred_seconds,enqueue_ns,enqueued_at,error,id,input,kind,message,progress,source,status,title,updated_at)", 1)
+	v9 = strings.Replace(v9,
+		"user_entities(id,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id)",
+		"user_entities(id,last_full_scan_at,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id)", 1)
+	v9 = strings.Replace(v9,
+		"media_context(media_key,payload,position,tweet_id);",
+		"media_context(media_key,payload,position,tweet_id);media_sync(count,cursor,error,last_seen_tweet_id,status,stop_id,updated_at,user_id);", 1)
+	schemaColumnsForVersion[9] = v9
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {

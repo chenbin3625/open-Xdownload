@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -179,5 +180,80 @@ func TestArchiveCursorAcrossSnowflakeDigitLengths(t *testing.T) {
 	}
 	if got.LastSeenTweetID != newer {
 		t.Fatalf("cursor regressed from %s to %s", newer, got.LastSeenTweetID)
+	}
+}
+
+func TestFullTimelineBackfillAndCheckpointReplay(t *testing.T) {
+	for _, scenario := range []struct {
+		name, status, lastID, wantCursor string
+		wantCount                        int
+	}{
+		{name: "completed starts historical scan", status: "completed", lastID: "100", wantCount: 1},
+		{name: "failed incremental loses old boundary", status: "failed", lastID: "100", wantCount: 1},
+		{name: "interrupted incremental loses old boundary", status: "interrupted", lastID: "100", wantCount: 1},
+		{name: "interrupted historical scan replays saved page", status: "interrupted", wantCursor: "saved-page", wantCount: 5},
+		{name: "failed historical scan replays saved page", status: "failed", wantCursor: "saved-page", wantCount: 5},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := storage.Open(filepath.Join(t.TempDir(), "timeline.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			cfg := config.AppConfig{DownloadDir: t.TempDir(), StorageType: config.StorageLocal}
+			cursors := make(chan string, 1)
+			pool := archiveTestPool(t, &cfg, func(w http.ResponseWriter, r *http.Request) {
+				var variables struct {
+					Cursor string `json:"cursor"`
+				}
+				if err := json.Unmarshal([]byte(r.URL.Query().Get("variables")), &variables); err != nil {
+					t.Error(err)
+				}
+				cursors <- variables.Cursor
+				fmt.Fprint(w, `{"data":{"user_result_by_screen_name":{"result":{"profile_with_replies_timeline_v2":{"timeline":{"instructions":[{"__typename":"TimelineAddEntries","entries":[{"content":{"__typename":"TimelineTimelineItem","content":{"__typename":"TimelineTweet","tweet_results":{"result":{"__typename":"Tweet","rest_id":"90","legacy":{"full_text":"historical pure text","created_at":"Tue Nov 10 12:00:00 +0000 2026"},"core":{"user_results":{"result":{"rest_id":"42","core":{"screen_name":"author","name":"Author"}}}}}}}}}]}]}}}}}}`)
+			})
+			user := xclient.User{ID: "42", ScreenName: "author", Name: "Author"}
+			if _, err := store.UpsertUser(ctx, storageUser(user)); err != nil {
+				t.Fatal(err)
+			}
+			manager := NewManager(store, parser.NewService(), NewEventBus())
+			entity, dir, err := manager.ensureUserEntity(ctx, cfg, user)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.UpdateUserEntityLastSeenTweet(ctx, entity.ID, "999"); err != nil {
+				t.Fatal(err)
+			}
+			job, err := store.CreateArchiveJob(ctx, storage.JobDraft{Kind: storage.JobKindUser, Input: "author", ArchiveMode: storage.ArchiveTweets, Backfill: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.GetTweetSync(ctx, user.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SaveTweetSync(ctx, storage.TweetSync{UserID: user.ID, LastID: scenario.lastID, Cursor: "saved-page", HeadID: "110", Status: scenario.status, Count: 4}); err != nil {
+				t.Fatal(err)
+			}
+			// Simulate a crash after the body commit but before the page checkpoint commit.
+			if err := store.ArchiveTweet(ctx, job.ID, parser.TweetData{ID: "90", Text: "historical pure text", Author: parser.Author{ID: "42", ScreenName: "author"}}, "skipped"); err != nil {
+				t.Fatal(err)
+			}
+			stats, err := manager.archiveFullTimeline(ctx, ctx, job, cfg, pool, user, entity, dir, nil)
+			if err != nil || stats.Tweets != 1 {
+				t.Fatalf("historical scan: %+v %v", stats, err)
+			}
+			if cursor := <-cursors; cursor != scenario.wantCursor {
+				t.Fatalf("cursor = %q, want %q", cursor, scenario.wantCursor)
+			}
+			state, err := store.GetTweetSync(ctx, user.ID)
+			if err != nil || state.Status != "completed" || state.Count != scenario.wantCount || state.Cursor != "" || state.LastID == "" {
+				t.Fatalf("checkpoint: %+v %v", state, err)
+			}
+			tweet, err := store.GetTweet(ctx, "90")
+			if err != nil || tweet.Text != "historical pure text" || len(tweet.JobIDs) != 1 || tweet.JobIDs[0] != job.ID || len(tweet.Media) != 0 {
+				t.Fatalf("idempotent body replay: %+v %v", tweet, err)
+			}
+		})
 	}
 }

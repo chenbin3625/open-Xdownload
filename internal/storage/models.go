@@ -22,13 +22,37 @@ const (
 type JobKind string
 
 const (
-	JobKindTweetLink   JobKind = "tweet_link"
-	JobKindMediaURL    JobKind = "media_url"
-	JobKindUser        JobKind = "user"
-	JobKindList        JobKind = "list"
-	JobKindFollowing   JobKind = "following"
-	JobKindFailedRetry JobKind = "failed_retry"
+	JobKindTweetLink       JobKind = "tweet_link"
+	JobKindMediaURL        JobKind = "media_url"
+	JobKindUser            JobKind = "user"
+	JobKindList            JobKind = "list"
+	JobKindFollowing       JobKind = "following"
+	JobKindFailedRetry     JobKind = "failed_retry"
+	JobKindAssetDerivative JobKind = "asset_derivative"
+	JobKindAssetMigration  JobKind = "asset_migration"
 )
+
+// JobSource 标记任务的来源，用于排队公平性：手动任务更快响应，后台任务仍通过
+// enqueued_at 的老化获得固定执行份额（见 ClaimPendingJobs）。
+type JobSource string
+
+const (
+	JobSourceManual      JobSource = "manual"
+	JobSourceSchedule    JobSource = "schedule"
+	JobSourceAutoRetry   JobSource = "auto_retry"
+	JobSourceMaintenance JobSource = "maintenance"
+)
+
+// Normalized 把未知/空来源收敛为 manual，避免历史数据或调用方拼写差异导致
+// 排序 CASE 落空（按 0 处理会让后台任务获得手动优先级）。
+func (s JobSource) Normalized() JobSource {
+	switch s {
+	case JobSourceSchedule, JobSourceAutoRetry, JobSourceMaintenance:
+		return s
+	default:
+		return JobSourceManual
+	}
+}
 
 type Job struct {
 	ID        int64     `json:"id" db:"id"`
@@ -41,18 +65,41 @@ type Job struct {
 	Error     string    `json:"error,omitempty" db:"error"`
 	CreatedAt time.Time `json:"createdAt" db:"created_at"`
 	UpdatedAt time.Time `json:"updatedAt" db:"updated_at"`
+	// EnqueuedAt 是最近一次进入等待队列的时间。它与 CreatedAt 分离：自动重试会复用
+	// 旧任务行，若仍按 created_at 排序就会凭首次创建时间插到新建手动任务前面。
+	EnqueuedAt time.Time `json:"enqueuedAt" db:"enqueued_at"`
+	// EnqueueNS 是 EnqueuedAt 的 UnixNano 整数排序键。SQLite 的日期函数不解析 Go
+	// 驱动写入的 RFC3339Nano（小数秒 9 位），用整数键保证排序与比较无格式依赖。
+	EnqueueNS int64 `json:"-" db:"enqueue_ns"`
+	// AvailableAt 非空且未到期时任务不会被领取：限流冷却或分段让出时，调度器把
+	// 任务重新置为 pending 并在此时间之后才允许再次执行，从而释放唯一执行槽。
+	// AvailableNS 是 0（可执行）或该时间的 UnixNano 整数比较键。
+	AvailableAt *time.Time `json:"availableAt,omitempty" db:"available_at"`
+	AvailableNS int64      `json:"-" db:"available_ns"`
+	Source      JobSource  `json:"source" db:"source"`
+	// DeferredSeconds 是任务因限流被重新排队所累计的推迟时长。超过上限后任务不再
+	// 无限等待，而是明确失败并写明原因。
+	DeferredSeconds int64       `json:"-" db:"deferred_seconds"`
+	ArchiveMode     ArchiveMode `json:"archiveMode" db:"archive_mode"`
+	Backfill        bool        `json:"backfill" db:"backfill"`
 }
 
 type JobDraft struct {
-	Kind  JobKind
-	Input string
-	Title string
+	Kind        JobKind
+	Input       string
+	Title       string
+	ArchiveMode ArchiveMode
+	Backfill    bool
+	// Source 为空时按 manual 处理；定时计划由调度器显式设为 schedule。
+	Source JobSource
 }
 
 type ArchiveScheduleItem struct {
-	Kind  JobKind `json:"kind"`
-	Input string  `json:"input"`
-	Title string  `json:"title"`
+	Kind        JobKind     `json:"kind"`
+	Input       string      `json:"input"`
+	Title       string      `json:"title"`
+	ArchiveMode ArchiveMode `json:"archiveMode,omitempty"`
+	Backfill    bool        `json:"backfill,omitempty"`
 }
 
 type ArchiveSchedule struct {
@@ -76,17 +123,18 @@ type ArchiveSchedule struct {
 }
 
 type DownloadRecord struct {
-	ID             int64     `json:"id" db:"id"`
-	JobID          int64     `json:"jobId" db:"job_id"`
-	TweetID        string    `json:"tweetId" db:"tweet_id"`
-	MediaURL       string    `json:"mediaUrl" db:"media_url"`
-	PreviewURL     string    `json:"previewUrl,omitempty" db:"preview_url"`
-	FilePath       string    `json:"filePath" db:"file_path"`
-	Bytes          int64     `json:"bytes" db:"bytes"`
-	CreatedAt      time.Time `json:"createdAt" db:"created_at"`
-	UserScreenName string    `json:"userScreenName,omitempty" db:"user_screen_name"`
-	UserName       string    `json:"userName,omitempty" db:"user_name"`
-	FileURL        string    `json:"fileUrl,omitempty" db:"-"`
+	ID             int64                       `json:"id" db:"id"`
+	JobID          int64                       `json:"jobId" db:"job_id"`
+	TweetID        string                      `json:"tweetId" db:"tweet_id"`
+	MediaURL       string                      `json:"mediaUrl" db:"media_url"`
+	PreviewURL     string                      `json:"previewUrl,omitempty" db:"preview_url"`
+	FilePath       string                      `json:"filePath" db:"file_path"`
+	Bytes          int64                       `json:"bytes" db:"bytes"`
+	CreatedAt      time.Time                   `json:"createdAt" db:"created_at"`
+	UserScreenName string                      `json:"userScreenName,omitempty" db:"user_screen_name"`
+	UserName       string                      `json:"userName,omitempty" db:"user_name"`
+	FileURL        string                      `json:"fileUrl,omitempty" db:"-"`
+	AssetURLs      map[config.AssetKind]string `json:"assetUrls,omitempty" db:"-"`
 	// MediaKey 是 media_url 的媒体身份键（downloader.MediaIdentity），同一份媒体内容的
 	// 不同 URL 写法共用同一个键，用于跨推文判断"已有可用文件"并跳过；不对外暴露。
 	MediaKey    string `json:"-" db:"media_key"`
@@ -148,7 +196,10 @@ type UserEntity struct {
 	LatestReleaseTime sql.NullTime  `json:"-" db:"latest_release_time"`
 	MediaCount        sql.NullInt64 `json:"-" db:"media_count"`
 	LastSeenTweetID   string        `json:"-" db:"last_seen_tweet_id"`
-	UpdatedAt         time.Time     `json:"updatedAt" db:"updated_at"`
+	// LastFullScanAt 是最近一次成功完成全量媒体扫描的时间；定时任务据此每隔
+	// 7 天为每个用户补一次全量（媒体数量不变时也能发现删除后重发、补预览图等）。
+	LastFullScanAt sql.NullTime `json:"-" db:"last_full_scan_at"`
+	UpdatedAt      time.Time    `json:"updatedAt" db:"updated_at"`
 }
 
 type List struct {

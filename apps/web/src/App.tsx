@@ -2,6 +2,7 @@ import { t, useTranslation } from "./lib/i18n";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Menu, RefreshCw, WifiOff } from "lucide-react";
 import React, { useCallback, useEffect, useState } from "react";
+import { Button, Layout } from "@douyinfe/semi-ui";
 import {
   archiveScheduleQueryRoot,
   configQueryRoot,
@@ -24,9 +25,8 @@ import { jobStatusBucket } from "./lib/jobStatus";
 import { useBreakpointUp } from "./lib/useMediaQuery";
 import { useRouteState } from "./lib/useRouteState";
 
-import { Alert, ListSkeleton } from "./components/ui/Feedback";
-import { Button } from "./components/ui/Button";
-import { Drawer } from "./components/ui/Overlay";
+import { Alert, ListSkeleton } from "./components/semi";
+import { Drawer } from "./components/semi";
 
 import { AppSidebar } from "./components/layout/AppSidebar";
 import { AppHeader } from "./components/layout/AppHeader";
@@ -38,6 +38,7 @@ import { TaskCenterPage } from "./pages/TaskCenterPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
 import { GalleryPage } from "./pages/GalleryPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { TweetsPage } from "./pages/TweetsPage";
 import { AuthGate } from "./components/auth/AuthGate";
 
 // 侧边栏的 overview / workbench / tasks 都指向任务调度中心这一个页面。
@@ -87,7 +88,7 @@ function Workbench() {
   const isWorkbenchActive =
     isTaskCenterActive ||
     activeSection === "schedules" ||
-    activeSection === "gallery";
+    activeSection === "gallery" || activeSection === "tweets";
 
   const { sseConnected, reconnect: reconnectEvents } = useDashboardEvents(
     queryClient,
@@ -198,7 +199,7 @@ function Workbench() {
   };
 
   return (
-    <div className="app-shell flex h-dvh w-full overflow-hidden bg-canvas">
+    <Layout hasSider={!isCompact} className="app-shell flex h-dvh w-full overflow-hidden bg-canvas">
       {/* 任意接口请求在途时的全局顶部加载进度条 */}
       <GlobalLoadingBar />
 
@@ -313,6 +314,7 @@ function Workbench() {
             {activeSection === "gallery" && (
               <GalleryPage filter={gallery} onFilterChange={handleGalleryChange} />
             )}
+            {activeSection === "tweets" && <TweetsPage />}
 
             {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
             {activeSection === "settings" && config.isLoading && (
@@ -330,7 +332,8 @@ function Workbench() {
         </main>
         <div className="flex shrink-0 items-center gap-2 border-t border-line bg-surface px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:hidden">
           <Button
-            variant="text"
+            theme="borderless"
+            type="tertiary"
             icon={<Menu className="size-4" />}
             onClick={() => setMobileMenuOpen(true)}
             aria-label={t("打开导航菜单")}
@@ -338,7 +341,8 @@ function Workbench() {
           <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg-muted">open-Xdownload</span>
           {!sseConnected && (
             <Button
-              variant="text"
+              theme="borderless"
+              type="tertiary"
               icon={<WifiOff className="size-4 text-warning" />}
               onClick={reconnectEvents}
               aria-label={t("实时更新已断开，点击重连")}
@@ -346,9 +350,12 @@ function Workbench() {
             />
           )}
           <Button
-            variant="text"
+            theme="borderless"
+            type="tertiary"
             icon={<RefreshCw className="size-4" />}
             loading={manualRefreshPending}
+            disabled={manualRefreshPending}
+            aria-busy={manualRefreshPending}
             onClick={handleManualRefresh}
             aria-label={t("刷新数据")}
           />
@@ -369,6 +376,6 @@ function Workbench() {
         onClose={() => setFailedDrawerOpen(false)}
         total={failedTweetCount}
       />
-    </div>
+    </Layout>
   );
 }

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Button } from "./Button";
-import { Drawer, Modal, Popconfirm } from "./Overlay";
+import { Button } from "@douyinfe/semi-ui";
+import { Drawer, Modal, Popconfirm, SearchSelect, Select } from "../semi";
 
 describe("Modal", () => {
   it("焦点被限制在弹窗内，Tab 不会跑到背景元素上", async () => {
@@ -35,8 +35,30 @@ describe("Modal", () => {
       </Modal>,
     );
 
-    await user.keyboard("{Escape}");
+    fireEvent.keyDown(document, { key: "Escape", keyCode: 27 });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([["Select", Select], ["SearchSelect", SearchSelect]] as const)("%s 的 Escape 先关闭选项层，再关闭弹窗", async (_name, Control) => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return <Modal open={open} onClose={() => { onClose(); setOpen(false); }} title="选择存储">
+        <Control ariaLabel="存储目标" value="local" onChange={() => {}} options={[{ value: "local", label: "本地" }]} />
+      </Modal>;
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("combobox", { name: "存储目标" });
+    await user.click(trigger);
+    expect(screen.getByRole("option", { name: "本地" })).not.toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape", keyCode: 27 });
+    await waitFor(() => expect(screen.queryByRole("option")).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(trigger);
+    fireEvent.keyDown(trigger, { key: "Escape", keyCode: 27 });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("关闭时不渲染任何内容", () => {
@@ -75,7 +97,7 @@ describe("Popconfirm", () => {
     await user.click(screen.getByRole("button", { name: "确定" }));
 
     expect(onConfirm).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("确认删除？")).toBeNull();
+    await waitFor(() => expect(screen.queryByText("确认删除？")).toBeNull());
   });
 
   it("暴露 alertdialog 语义并关联标题/说明", async () => {

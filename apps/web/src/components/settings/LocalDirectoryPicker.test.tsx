@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest";
 import * as api from "../../lib/api";
 import { renderWithProviders, screen, waitFor } from "../../test/render";
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
-import { TooltipProvider } from "../ui/Overlay";
+import { TooltipProvider } from "../semi";
 
 vi.mock("../../lib/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../lib/api")>(),

@@ -7,10 +7,12 @@ import {
   Film,
   Image as ImageIcon,
   PictureInPicture,
+  Search,
   Video,
 } from "lucide-react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Card, Input, RadioGroup } from "@douyinfe/semi-ui";
 import {
   formatBytes,
   getLibraryDownloadsPage,
@@ -24,14 +26,10 @@ import {
   galleryPageSize,
   type GalleryRouteState,
 } from "../lib/useRouteState";
-import { Button } from "../components/ui/Button";
-import { Card } from "../components/ui/Card";
-import { Segmented } from "../components/ui/Controls";
-import { Alert, Empty, Skeleton } from "../components/ui/Feedback";
-import { SearchInput } from "../components/ui/Input";
-import { MediaModal, Tooltip } from "../components/ui/Overlay";
-import { Pagination } from "../components/ui/Pagination";
-import { SearchSelect } from "../components/ui/SearchSelect";
+import { Alert, Empty, Skeleton } from "../components/semi";
+import { MediaModal, Tooltip } from "../components/semi";
+import { Pagination } from "../components/semi";
+import { SearchSelect } from "../components/semi";
 
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".avif"];
@@ -88,6 +86,7 @@ function VideoPoster({
   useTranslation();
   const sources = useMemo(() => {
     const list: { url: string; remote: boolean }[] = [];
+    if (item.assetUrls?.video_cover) list.push({ url: item.assetUrls.video_cover, remote: false });
     if (item.id > 0) {
       list.push({ url: `/api/library/downloads/${item.id}/preview`, remote: false });
     }
@@ -95,7 +94,7 @@ function VideoPoster({
       list.push({ url: item.previewUrl, remote: true });
     }
     return list;
-  }, [item.previewUrl, item.id]);
+  }, [item.previewUrl, item.id, item.assetUrls?.video_cover]);
   const [sourceIndex, setSourceIndex] = useState(0);
 
   return (
@@ -147,10 +146,9 @@ const GalleryCard = React.memo(function GalleryCard({
 
   return (
     <Card
-      hoverable
-      size="sm"
-      className="group min-w-0 rounded-lg border-line/80 hover:border-brand-500/40 hover:-translate-y-1 transition-all duration-300 shadow-xs hover:shadow-raised sm:rounded-2xl"
-      bodyClassName="p-2 sm:p-3"
+      shadows="hover"
+      className="group min-w-0"
+      bodyStyle={{ padding: 12 }}
       cover={
         <div className="aspect-square relative flex items-center justify-center overflow-hidden bg-surface-muted border-b border-line">
           {isVideo ? (
@@ -167,7 +165,7 @@ const GalleryCard = React.memo(function GalleryCard({
                 <span className="text-[11px] font-mono">{ext}</span>
               </div>
               <img
-                src={previewURL}
+                src={item.assetUrls?.thumbnail ?? previewURL}
                 alt={fileName}
                 loading="lazy"
                 decoding="async"
@@ -203,24 +201,23 @@ const GalleryCard = React.memo(function GalleryCard({
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-1 pt-2 border-t border-line/70 text-[11px] text-fg-subtle">
+          {item.tweetId && <a className="text-brand-600" href={`/tweets?id=${item.tweetId}`}>{t("archive.title")}</a>}
           <span className="font-mono tabular-nums text-[10px]">{formatDateTime(item.createdAt)}</span>
           <div className="flex items-center gap-1">
             <Tooltip title={t("复制本地路径")}>
               <Button
-                size="sm"
-                variant="text"
-                circle
-                icon={<Copy className="size-3" />}
+                theme="borderless"
+                type="tertiary"
+                icon={<Copy size={16} />}
                 onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
                 aria-label={t("复制本地路径")}
               />
             </Tooltip>
             <Tooltip title={t("复制媒体直链")}>
               <Button
-                size="sm"
-                variant="text"
-                circle
-                icon={<ExternalLink className="size-3" />}
+                theme="borderless"
+                type="tertiary"
+                icon={<ExternalLink size={16} />}
                 onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
                 aria-label={t("复制下载直链")}
               />
@@ -407,46 +404,44 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   );
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* 顶部标题与筛选工具栏 */}
-      <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">{t("媒体归档库")}</h1>
-          <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
-            {t("集中浏览所有已下载的高清图片、动态 GIF 与 4K 视频原片")}</p>
+    <div className="workspace-page">
+      <div className="page-heading">
+        <h1 className="page-title">{t("媒体归档库")}</h1>
+      </div>
+      <div className="page-toolbar">
+        <div className="toolbar-status" role="radiogroup" aria-label={t("类型")}>
+          <RadioGroup
+            type="button"
+            buttonSize="middle"
+            value={filter.kind}
+            onChange={(event) => updateFilter({ kind: String(event.target.value), page: 1 })}
+            options={[
+              { label: t("全部 ({{value0}})", { value0: categoryCounts.all }), value: "all" },
+              { label: t("图片 ({{value0}})", { value0: categoryCounts.images }), value: "images" },
+              { label: t("视频 ({{value0}})", { value0: categoryCounts.videos }), value: "videos" },
+              { label: t("动图 ({{value0}})", { value0: categoryCounts.gifs }), value: "gifs" },
+            ]}
+          />
         </div>
 
-        <div className="flex w-full min-w-0 flex-wrap items-center gap-2.5 xl:w-auto">
-          <div className="w-full min-w-0 sm:w-auto">
-            <Segmented
-              size="md"
-              value={filter.kind}
-              onChange={(val) => updateFilter({ kind: val, page: 1 })}
-              options={[
-                { label: t("全部 ({{value0}})", { value0: categoryCounts.all }), value: "all" },
-                { label: t("图片 ({{value0}})", { value0: categoryCounts.images }), value: "images" },
-                { label: t("视频 ({{value0}})", { value0: categoryCounts.videos }), value: "videos" },
-                { label: t("动图 ({{value0}})", { value0: categoryCounts.gifs }), value: "gifs" },
-              ]}
-            />
-          </div>
-
-          <div className="w-full min-w-0 sm:w-56">
-            <SearchSelect
-              value={filter.user}
-              onChange={(val) => updateFilter({ user: val, page: 1 })}
-              options={[{ value: "all", label: t("全部用户") }, ...userOptions]}
-              placeholder={t("按用户筛选...")}
-              className="h-11 w-full sm:h-9"
-            />
-          </div>
-
-          <SearchInput
+        <div className="toolbar-filters">
+          <Input
+            prefix={<Search size={16} />}
+            aria-label={t("搜索文件名、推文 ID...")}
             placeholder={t("搜索文件名、推文 ID...")}
             value={filter.search}
-            onChange={(e) => updateFilter({ search: e.target.value, page: 1 }, { replace: true })}
-            allowClear
-            containerClassName="w-full sm:w-52"
+            onChange={(value) => updateFilter({ search: value, page: 1 }, { replace: true })}
+            showClear
+            className="toolbar-search"
+          />
+
+          <SearchSelect
+            ariaLabel={t("按用户筛选...")}
+            value={filter.user}
+            onChange={(val) => updateFilter({ user: val, page: 1 })}
+            options={[{ value: "all", label: t("全部用户") }, ...userOptions]}
+            placeholder={t("按用户筛选...")}
+            className="toolbar-user-select"
           />
         </div>
       </div>
@@ -459,15 +454,16 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       {libraryQuery.isLoading ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
           {Array.from({ length: 12 }, (_, index) => (
-            <Card key={index} size="sm" bodyClassName="p-2 space-y-2">
+            <Card key={index} bodyStyle={{ padding: 12 }}>
+              <div className="space-y-2">
               <Skeleton className="aspect-square w-full rounded" />
               <Skeleton className="h-3 w-4/5" />
               <Skeleton className="h-2.5 w-1/2" />
+              </div>
             </Card>
           ))}
         </div>
       ) : libraryQuery.isError && !libraryQuery.data ? (
-        <Card className="py-8">
           <Alert
             type="error"
             showIcon
@@ -475,17 +471,16 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             description={getErrorMessage(libraryQuery.error)}
             action={
               <Button
-                size="sm"
-                variant="default"
+                type="tertiary"
                 loading={libraryQuery.isFetching}
+                disabled={libraryQuery.isFetching}
+                aria-busy={libraryQuery.isFetching}
                 onClick={() => void libraryQuery.refetch()}
               >
                 {t("重试")}</Button>
             }
           />
-        </Card>
       ) : visibleEntries.length === 0 ? (
-        <Card className="text-center py-12">
           <Empty
             description={
               hasActiveFilter
@@ -493,7 +488,6 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 : t("暂无归档文件记录。完成下载任务后，媒体文件将自动在此呈现。")
             }
           />
-        </Card>
       ) : (
         <div
           className={
@@ -599,15 +593,13 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
                 <div className="flex items-center gap-2">
                   <Button
-                    size="sm"
-                    variant="default"
+                    type="tertiary"
                     icon={<Copy className="size-3.5" />}
                     onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
                   >
                     {t("复制本地路径")}</Button>
                   <Button
-                    size="sm"
-                    variant="default"
+                    type="tertiary"
                     icon={<ExternalLink className="size-3.5" />}
                     onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
                   >

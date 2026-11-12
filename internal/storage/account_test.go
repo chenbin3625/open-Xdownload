@@ -41,7 +41,7 @@ func TestUpgradeRequiresAccountSetupAndPreservesData(t *testing.T) {
 		t.Fatalf("upgrade lost existing job: %+v %v", existing, err)
 	}
 	var version int
-	if err := store.db.Get(&version, `PRAGMA user_version`); err != nil || version != 6 {
+	if err := store.db.Get(&version, `PRAGMA user_version`); err != nil || version != schemaVersion {
 		t.Fatalf("schema version = %d: %v", version, err)
 	}
 }

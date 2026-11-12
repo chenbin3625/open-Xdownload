@@ -7,22 +7,14 @@ import {
   listLocalDirectories,
   type LocalDirectoryListing,
 } from "../../lib/api";
-import {
-  AppEmpty,
-  EllipsisText,
-  Stack,
-  Toolbar,
-  getErrorMessage,
-  notifyError,
-} from "../common/CommonUI";
-import { Button } from "../ui/Button";
-import { Card } from "../ui/Card";
-import { Alert } from "../ui/Feedback";
-import { Input } from "../ui/Input";
-import { Tooltip } from "../ui/Overlay";
-import { Spinner } from "../ui/Spinner";
-import { toast } from "../ui/Toast";
-import { Tree, type TreeNode } from "../ui/Tree";
+import { getErrorMessage, notifyError } from "../common/CommonUI";
+import { Button, Card, Empty, Typography } from "@douyinfe/semi-ui";
+import { Alert } from "../semi";
+import { Input } from "../semi";
+import { Tooltip } from "../semi";
+import { Spinner } from "../semi";
+import { toast } from "../semi";
+import { Tree, type TreeNode } from "../semi";
 
 export type DirectoryTreeNode = TreeNode & {
   path: string;
@@ -123,9 +115,9 @@ export function LocalDirectoryPicker({
   }
 
   return (
-    <Stack size={10}>
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="min-w-[240px] flex-1">
+    <div className="flex w-full min-w-0 flex-col gap-2.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-1 basis-60">
           <Input
             aria-label={t("下载目录")}
             prefix={<Folder className="size-4 text-fg-subtle" />}
@@ -135,56 +127,58 @@ export function LocalDirectoryPicker({
             placeholder="/path/to/downloads"
           />
         </div>
-        <Button
-          variant="secondary"
-          onClick={openSelectedPath}
-          disabled={!selectedPath.trim() || listing.isLoading}
-        >
-          {t("打开")}</Button>
-        <Button
-          variant="secondary"
-          icon={<FolderPlus className="size-3.5" />}
-          onClick={createSelectedPath}
-          loading={createDirectory.isPending}
-          disabled={!selectedPath.trim()}
-        >
-          {t("创建")}</Button>
-        <Button
-          variant="primary"
-          onClick={() => onSelect(selectedPath.trim())}
-          disabled={!selectedPath.trim()}
-        >
-          {t("选择此目录")}</Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            type="tertiary"
+            onClick={openSelectedPath}
+            disabled={!selectedPath.trim() || listing.isLoading}
+          >
+            {t("打开")}</Button>
+          <Button
+            type="tertiary"
+            icon={<FolderPlus className="size-3.5" />}
+            onClick={createSelectedPath}
+            loading={createDirectory.isPending}
+            disabled={!selectedPath.trim() || createDirectory.isPending}
+            aria-busy={createDirectory.isPending}
+          >
+            {t("创建")}</Button>
+          <Button
+            theme="solid"
+            onClick={() => onSelect(selectedPath.trim())}
+            disabled={!selectedPath.trim()}
+          >
+            {t("选择此目录")}</Button>
+        </div>
       </div>
 
-      <Card size="sm" bodyClassName="p-3">
-        <Stack size={8}>
-          <Toolbar>
+      <Card bodyStyle={{ padding: 16 }}>
+        <div className="flex w-full min-w-0 flex-col gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <Button
-              size="sm"
-              variant="secondary"
+              type="tertiary"
               icon={<ArrowUp className="size-3.5" />}
               disabled={!listing.data?.parent || listing.isLoading || listing.isError}
               onClick={() => listing.data?.parent && setRootPath(listing.data.parent)}
             >
               {t("上级目录")}</Button>
-            <EllipsisText
+            <Typography.Text
+              type="tertiary"
               title={resolvedPath}
-              className="flex-1 text-xs font-mono text-fg-muted px-2 min-w-0"
+              className="min-w-0 flex-1 truncate px-2 font-mono text-xs"
             >
               {resolvedPath}
-            </EllipsisText>
+            </Typography.Text>
             <Tooltip content={t("刷新目录")}>
               <Button
-                size="sm"
-                variant="ghost"
-                circle
+                theme="borderless"
+                type="tertiary"
                 icon={<RefreshCw className={`size-3.5 ${listing.isFetching ? "animate-spin" : ""}`} />}
                 onClick={() => listing.refetch()}
                 aria-label={t("刷新目录")}
               />
             </Tooltip>
-          </Toolbar>
+          </div>
 
           {listing.isError && (
             <Alert
@@ -202,9 +196,9 @@ export function LocalDirectoryPicker({
             />
           )}
 
-          <div className="relative min-h-[140px] rounded-control border border-line bg-surface p-1">
+          <div className="directory-tree-panel">
             {listing.isLoading ? (
-              <div className="flex h-32 items-center justify-center">
+              <div className="flex h-24 items-center justify-center">
                 <Spinner className="size-5" />
               </div>
             ) : !listing.isError && treeData.length > 0 ? (
@@ -217,12 +211,12 @@ export function LocalDirectoryPicker({
                 loadChildren={loadDirectoryNode}
               />
             ) : (
-              <AppEmpty description={t("没有子目录")} />
+              <Empty description={t("没有子目录")} className="py-6" />
             )}
           </div>
-        </Stack>
+        </div>
       </Card>
-    </Stack>
+    </div>
   );
 }
 

@@ -20,15 +20,17 @@ import {
   type JobKind,
   type JobRequest,
   type TweetData,
+  type ArchiveMode,
 } from "../../lib/api";
 import { notifyError } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
-import { Button } from "../ui/Button";
-import { Checkbox, Tabs, type TabItem } from "../ui/Controls";
-import { Input, NumberInput, Textarea } from "../ui/Input";
-import { Modal } from "../ui/Overlay";
-import { Spinner } from "../ui/Spinner";
-import { toast } from "../ui/Toast";
+import { Button } from "@douyinfe/semi-ui";
+import { Checkbox, Tabs, type TabItem } from "../semi";
+import { Input, NumberInput, Textarea } from "../semi";
+import { Modal } from "../semi";
+import { Spinner } from "../semi";
+import { toast } from "../semi";
+import { Field, Select } from "../semi";
 
 export interface CreateJobModalProps {
   open: boolean;
@@ -141,6 +143,8 @@ export function CreateJobModal({
   useTranslation();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<string>("user");
+  const [archiveMode, setArchiveMode] = useState<ArchiveMode>("both");
+  const [backfill, setBackfill] = useState(false);
 
   const [tweetUrl, setTweetUrl] = useState("");
   const [batchInputs, setBatchInputs] = useState<Partial<Record<BatchKind, string>>>({});
@@ -207,7 +211,7 @@ export function CreateJobModal({
         const title = parsedTweet
           ? t("推文 @{{value0}} ({{value1}})", { value0: parsedTweet.author.screenName, value1: parsedTweet.id })
           : `Tweet ${targetUrl.split("/").pop() || targetUrl}`;
-        return [await createJob("tweet_link", targetUrl, title)];
+        return [await createJob("tweet_link", targetUrl, title, { archiveMode, backfill })];
       }
 
       if (currentBatchItems.length === 0) {
@@ -221,13 +225,13 @@ export function CreateJobModal({
             t("自动归档 ({{value0}} 个目标)", { value0: currentBatchItems.length }),
           enabled: true,
           intervalMinutes,
-          items: currentBatchItems,
+          items: currentBatchItems.map(item => ({ ...item, archiveMode, backfill })),
         };
         await createArchiveSchedule(payload);
         return [];
       }
 
-      return await createJobsBatch({ items: currentBatchItems });
+      return await createJobsBatch({ items: currentBatchItems.map(item => ({ ...item, archiveMode, backfill })) });
     },
     onSuccess: (jobs, _variables, request) => {
       void invalidateWorkbenchQueries(queryClient);
@@ -287,6 +291,7 @@ export function CreateJobModal({
           </div>
           <Textarea
             rows={6}
+            aria-label={tab.label}
             value={batchInputs[tab.kind] ?? ""}
             onChange={(e) =>
               setBatchInputs((current) => ({ ...current, [tab.kind]: e.target.value }))
@@ -319,9 +324,10 @@ export function CreateJobModal({
               placeholder="https://x.com/username/status/1234567890"
             />
             <Button
-              variant="primary"
-              disabled={!tweetUrl.trim()}
+              theme="solid"
+              disabled={!tweetUrl.trim() || parseMutation.isPending}
               loading={parseMutation.isPending}
+              aria-busy={parseMutation.isPending}
               onClick={handleParseTweet}
               className="shrink-0"
             >
@@ -385,12 +391,13 @@ export function CreateJobModal({
               : t("将同时创建 {{value0}} 个后台下载任务", { value0: currentBatchItems.length })}
           </span>
           <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" onClick={handleClose}>
+            <Button type="tertiary" onClick={handleClose}>
               {t("取消")}</Button>
             <Button
-              variant="primary"
-              disabled={!canSubmit}
+              theme="solid"
+              disabled={!canSubmit || createJobsMutation.isPending}
               loading={createJobsMutation.isPending}
+              aria-busy={createJobsMutation.isPending}
               onClick={() => createJobsMutation.mutate()}
               icon={<Download className="size-4" />}
             >
@@ -405,6 +412,10 @@ export function CreateJobModal({
       }
     >
       <div className="space-y-4 py-1">
+        <Field label={t("archive.mode")} className="mb-4">
+          <Select value={archiveMode} onChange={value => setArchiveMode(value as ArchiveMode)} ariaLabel={t("archive.mode")} options={[{ value: "both", label: t("archive.both") }, { value: "tweets", label: t("archive.textOnly") }, { value: "media", label: t("archive.mediaOnly") }]} />
+        </Field>
+        {activeTab !== "tweet_link" && archiveMode !== "media" && <div className="mb-4"><Checkbox checked={backfill} onChange={setBackfill} label={t("archive.backfill")} /></div>}
         <Tabs
           value={activeTab}
           onChange={(key) => {
@@ -426,31 +437,28 @@ export function CreateJobModal({
               <Checkbox
                 checked={isSchedule}
                 onChange={(checked) => setIsSchedule(checked)}
+                ariaLabel={t("是否保存为自动归档计划（定期抓取）？")}
               />
             </div>
 
             {isSchedule && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-line text-xs">
-                <div>
-                  <div className="mb-1 text-fg-muted font-medium">{t("计划名称")}</div>
+                <Field label={t("计划名称")}>
                   <Input
                     value={scheduleName}
                     onChange={(e) => setScheduleName(e.target.value)}
                     placeholder={t("例如：重点博主媒体日常归档")}
-                    size="sm"
                   />
-                </div>
-                <div>
-                  <div className="mb-1 text-fg-muted font-medium">{t("调度频率 (分钟)")}</div>
+                </Field>
+                <Field label={t("调度频率 (分钟)")}>
                   <NumberInput
                     min={5}
                     max={43200}
                     value={intervalMinutes}
                     onChange={(val) => setIntervalMinutes(val ?? 360)}
-                    size="sm"
                     addonAfter={t("分钟")}
                   />
-                </div>
+                </Field>
               </div>
             )}
           </div>

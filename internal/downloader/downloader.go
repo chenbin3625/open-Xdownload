@@ -69,7 +69,7 @@ type Options struct {
 	ProxyURL          string
 	MaxFilenameLength int
 	// ExistingFileOwner 判定 path 处的文件是否属于本次下载（同一推文同一媒体）。
-	// 为 nil 时保持原有行为：已存在且完整则跳过，残缺文件则视为崩溃残留并覆盖。
+	// 为 nil 时已存在且完整则跳过；大小不一致的文件归属不明，保留它并使用编号后缀。
 	// 返回 false 表示该文件属于其他推文（命名冲突）：不得跳过也不得覆盖，应下载并
 	// 发布到带编号后缀的路径，保证两个推文的媒体都保留。
 	ExistingFileOwner func(path string) bool
@@ -140,9 +140,8 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		return Result{}, fmt.Errorf("%w: %s", ErrUnknownMediaType, strings.TrimSpace(rawURL))
 	}
 	basePath := filepath.Join(dir, filename)
-	// 已存在且大小与 Content-Length 一致 → 视为完整下载，跳过；大小不一致说明是崩溃/中断
-	// 留下的残缺文件，需要重新下载（覆盖）。Content-Length 未知时不凭文件存在判断完整性，
-	// 重新下载并在发布前替换旧文件。
+	// 大小匹配时可复用文件；不匹配时只有确认属于本次媒体的文件才允许原位恢复，
+	// 否则它可能是另一个并发下载刚发布的完整文件。
 	existing, complete, replaceExisting, err := existingFileState(basePath, response.ContentLength)
 	if err != nil {
 		return Result{}, err
@@ -158,9 +157,8 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 			return existing, nil
 		}
 		replaceExisting = false
-	} else if replaceExisting && options.ExistingFileOwner != nil && !options.ExistingFileOwner(basePath) {
-		// 残缺文件同样可能属于其他推文（其下载尚未完成）：不覆盖它，改写到编号后缀路径。
-		replaceExisting = false
+	} else if replaceExisting {
+		replaceExisting = options.ExistingFileOwner != nil && options.ExistingFileOwner(basePath)
 	}
 	// 原子写入：先写临时文件，fsync 后以不覆盖已有文件的方式发布到最终路径，避免
 	// 崩溃留下被当作完整下载的残缺文件。临时文件名用短前缀 + 随机串，避免并发下载

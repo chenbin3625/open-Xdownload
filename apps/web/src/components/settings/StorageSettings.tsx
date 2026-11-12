@@ -1,7 +1,6 @@
 import { t, useTranslation } from "../../lib/i18n";
 import React from "react";
 import type { AppConfig } from "../../lib/api";
-import { Stack } from "../common/CommonUI";
 import { EnvOverrideNote } from "./EnvOverrideNote";
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
 
@@ -20,12 +19,12 @@ export function StorageSettings({
 }) {
   useTranslation();
   return (
-    <Stack size={16}>
+    <div className="flex w-full flex-col gap-4">
       <LocalDirectoryPicker
         path={draft.downloadDir}
         onSelect={(downloadDir) => onChange((current) => ({ ...current, downloadDir }))}
       />
       <EnvOverrideNote show={envOverridden.includes("downloadDir")} />
-    </Stack>
+    </div>
   );
 }

@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
   -o /out/open-xdownload ./cmd/server
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates su-exec tzdata \
+RUN apk add --no-cache ca-certificates ffmpeg su-exec tzdata \
   && mkdir -p /data /downloads
 WORKDIR /app
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

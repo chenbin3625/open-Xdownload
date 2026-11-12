@@ -1,0 +1,28 @@
+package config
+
+import "testing"
+
+func TestStorageRuleInheritsEachDefaultField(t *testing.T) {
+	document := DefaultStorage("/tmp/archive")
+	document.Default.Prefix = "default-root"
+	document.Rules = map[AssetKind]AssetRule{
+		AssetVideo: {TargetID: "local", FilenameTemplate: "video_{tweet_id}.{ext}"},
+	}
+
+	rule, target, err := document.Rule(AssetVideo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" {
+		t.Fatalf("target = %q, want local", target.ID)
+	}
+	if rule.Prefix != document.Default.Prefix {
+		t.Fatalf("prefix = %q, want inherited %q", rule.Prefix, document.Default.Prefix)
+	}
+	if rule.DirectoryTemplate != document.Default.DirectoryTemplate {
+		t.Fatalf("directory template = %q, want inherited %q", rule.DirectoryTemplate, document.Default.DirectoryTemplate)
+	}
+	if rule.FilenameTemplate != "video_{tweet_id}.{ext}" {
+		t.Fatalf("filename template = %q, want category override", rule.FilenameTemplate)
+	}
+}

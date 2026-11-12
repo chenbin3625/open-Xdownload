@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TooltipProvider } from "../components/ui/Overlay";
+import { TooltipProvider } from "../components/semi";
 import type { DownloadRecord } from "../lib/api";
 import { defaultGalleryFilter, type GalleryRouteState } from "../lib/useRouteState";
 import { GalleryPage } from "./GalleryPage";

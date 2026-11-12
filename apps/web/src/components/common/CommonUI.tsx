@@ -3,25 +3,18 @@ import { Check, Copy } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import type { JobKind } from "../../lib/api";
 import { cn } from "../../lib/cn";
-import { Button } from "../ui/Button";
-import { Empty as UiEmpty, ListSkeleton as UiListSkeleton } from "../ui/Feedback";
-import { Tooltip } from "../ui/Overlay";
-import { Pagination as UiPagination } from "../ui/Pagination";
-import { LoadingOverlay } from "../ui/Spinner";
-import { toast } from "../ui/Toast";
-
-export type TextTone = "secondary" | "success" | "warning" | "danger";
+import { Button, Empty } from "@douyinfe/semi-ui";
+import { ListSkeleton as UiListSkeleton } from "../semi";
+import { Tooltip } from "../semi";
+import { Pagination as UiPagination } from "../semi";
+import { LoadingOverlay } from "../semi";
+import { toast } from "../semi";
 
 export const fullWidthStyle: React.CSSProperties = { width: "100%" };
 
 export const defaultListPageSizeOptions = [5, 10, 20, 50];
 export const tablePageSizeOptions = [10, 20, 50, 100];
 export const failedTweetPageSizeOptions = [10, 20, 50];
-
-export function AppEmpty({ description, className }: { description: string; className?: string }) {
-  useTranslation();
-  return <UiEmpty description={description} className={cn("my-2", className)} />;
-}
 
 export function ListSkeleton({ rows = 4, avatar = true }: { rows?: number; avatar?: boolean }) {
   useTranslation();
@@ -42,75 +35,6 @@ export function LoadingSurface({
     <LoadingOverlay loading={!!loading} tip={tip}>
       <div className="min-w-0">{children}</div>
     </LoadingOverlay>
-  );
-}
-
-export function Stack({
-  children,
-  size = 12,
-  style,
-  className,
-}: {
-  children: React.ReactNode;
-  size?: number;
-  style?: React.CSSProperties;
-  className?: string;
-}) {
-  useTranslation();
-  return (
-    <div
-      style={{ gap: `${size}px`, ...style }}
-      className={cn("flex w-full flex-col", className)}
-    >
-      {children}
-    </div>
-  );
-}
-
-export function Toolbar({ children, className }: { children: React.ReactNode; className?: string }) {
-  useTranslation();
-  return (
-    <div className={cn("flex w-full flex-wrap items-center justify-between gap-2.5", className)}>
-      {children}
-    </div>
-  );
-}
-
-export function EllipsisText({
-  children,
-  code,
-  style,
-  title,
-  type,
-  className,
-}: {
-  children: React.ReactNode;
-  code?: boolean;
-  style?: React.CSSProperties;
-  title?: string;
-  type?: TextTone;
-  className?: string;
-}) {
-  useTranslation();
-  const toneClass = {
-    secondary: "text-fg-muted",
-    success: "text-success",
-    warning: "text-warning",
-    danger: "text-danger",
-  };
-  return (
-    <span
-      title={title}
-      style={style}
-      className={cn(
-        "block max-w-full truncate",
-        code && "font-mono text-xs rounded bg-surface-muted px-1 py-0.5",
-        type ? toneClass[type] : "text-fg-body",
-        className,
-      )}
-    >
-      {children}
-    </span>
   );
 }
 
@@ -212,8 +136,8 @@ export function PaginatedList<TItem>({
 
   if (items.length === 0) {
     return (
-      <Stack size={8}>
-        <AppEmpty description={emptyDescription} />
+      <div className="flex w-full flex-col gap-2">
+        <Empty description={emptyDescription} className="my-2" />
         <AppPagination
           current={pagination.page}
           itemName={itemName}
@@ -222,13 +146,13 @@ export function PaginatedList<TItem>({
           total={pagination.total}
           onChange={pagination.onChange}
         />
-      </Stack>
+      </div>
     );
   }
 
   return (
     <LoadingSurface loading={loading}>
-      <Stack size={8}>
+      <div className="flex w-full flex-col gap-2">
         <div
           style={maxHeight ? { maxHeight, overflow: "auto" } : undefined}
           className={cn(
@@ -250,7 +174,7 @@ export function PaginatedList<TItem>({
           total={pagination.total}
           onChange={pagination.onChange}
         />
-      </Stack>
+      </div>
     </LoadingSurface>
   );
 }
@@ -322,8 +246,8 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
   return (
     <Tooltip content={copied ? t("已复制") : label}>
       <Button
-        size="sm"
-        variant={copied ? "primary" : "ghost"}
+        theme="borderless"
+        type={copied ? "primary" : "tertiary"}
         icon={copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
         onClick={handleCopy}
         aria-label={label}
@@ -383,6 +307,8 @@ export function kindLabel(kind: JobKind) {
     list: t("列表"),
     following: t("关注"),
     failed_retry: t("失败重试"),
+    asset_derivative: t("storage.derivativeJob"),
+    asset_migration: t("storage.migrationJob"),
   };
   return labels[kind] ?? t("未知类型");
 }

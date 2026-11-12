@@ -66,6 +66,114 @@ func TestDownloadRootsSeededOnOpenAndUpdate(t *testing.T) {
 	}
 }
 
+func TestHistoricalRecordedRootsAreRecoveredAndReferencedRootsAreRetained(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := t.TempDir()
+	file := filepath.Join(oldRoot, "old.jpg")
+	if err := os.WriteFile(file, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "old", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, MediaURL: "https://pbs.twimg.com/old.jpg", FilePath: file}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM download_roots; DELETE FROM schema_migrations WHERE name='recover_recorded_download_roots'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for index := 0; index < MaxDownloadRoots+5; index++ {
+		if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: t.TempDir()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roots, err := store.DownloadRoots(ctx)
+	if err != nil || !containsString(roots, oldRoot) {
+		t.Fatalf("referenced historical root lost: %v %v", roots, err)
+	}
+}
+
+func TestLegacyRootRecoveryRetriesMissingFilesAndRejectsSymlinkParents(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRoot, oldRoot, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: currentRoot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "escape.jpg"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	knownLink := filepath.Join(currentRoot, "user")
+	unknownLink := filepath.Join(t.TempDir(), "unknown")
+	for _, link := range []string{knownLink, unknownLink} {
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job, err := store.CreateJob(ctx, JobKindMediaURL, "legacy", "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, path := range []string{filepath.Join(oldRoot, "offline.jpg"), filepath.Join(knownLink, "escape.jpg"), filepath.Join(unknownLink, "escape.jpg")} {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: fmt.Sprint(index), MediaURL: fmt.Sprintf("https://pbs.twimg.com/%d.jpg", index), FilePath: path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE name='recover_recorded_download_roots'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marked int
+	if err := store.db.Get(&marked, `SELECT COUNT(*) FROM schema_migrations WHERE name='recover_recorded_download_roots'`); err != nil || marked != 0 {
+		t.Fatalf("temporarily unavailable root was finalized: %d %v", marked, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldRoot, "offline.jpg"), []byte("restored NAS"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	roots, err := store.DownloadRoots(ctx)
+	if err != nil || !containsString(roots, oldRoot) {
+		t.Fatalf("restored legacy root not recovered: %v %v", roots, err)
+	}
+	if containsString(roots, knownLink) || containsString(roots, unknownLink) || containsString(roots, outside) {
+		t.Fatalf("symlink parent promoted into trusted roots: %v", roots)
+	}
+}
+
 // TestPruneDownloadRootsRemovesUnsafeAndCaps 验证回滚保护（VERIFY R-F）与上限：
 // `/`、家目录这类历史遗留根必须被清理；数量按最近使用/最长前缀保留在 MaxDownloadRoots。
 func TestPruneDownloadRootsRemovesUnsafeAndCaps(t *testing.T) {

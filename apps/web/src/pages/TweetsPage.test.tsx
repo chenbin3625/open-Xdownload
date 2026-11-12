@@ -1,0 +1,112 @@
+// @vitest-environment jsdom
+import React from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, it, vi } from "vitest";
+import { renderWithProviders, screen } from "../test/render";
+import { getTweetProgress, getTweets, retryTweetMedia, type ArchivedTweet } from "../lib/archive";
+import { api, type Job } from "../lib/api";
+import { TweetsPage } from "./TweetsPage";
+
+vi.mock("../lib/archive", async original => ({ ...await original<typeof import("../lib/archive")>(), getTweets: vi.fn(), getTweetProgress: vi.fn(), retryTweetMedia: vi.fn() }));
+vi.mock("../lib/api", async original => ({ ...await original<typeof import("../lib/api")>(), api: vi.fn() }));
+
+const tweet: ArchivedTweet = {
+  id: "123", url: "https://x.com/alice/status/123", text: "Long archived body ".repeat(90),
+  author: { id: "42", name: "Alice", screenName: "alice" }, createdAt: "2026-11-10T12:00:00Z",
+  media: [{ id: "photo", type: "photo", url: "https://pbs.twimg.com/photo.jpg", previewUrl: "", bestUrl: "", variants: [] }],
+  downloads: [{ id: 7, jobId: 9, tweetId: "123", mediaUrl: "https://pbs.twimg.com/photo.jpg", filePath: "asset:photo/photo.jpg", fileUrl: "/api/assets/original", assetUrls: { thumbnail: "/api/assets/thumbnail" }, bytes: 20, createdAt: "2026-11-10T12:00:00Z" }],
+  jobIds: [9], bodyStatus: "completed", mediaStatus: "partial", mediaError: "One video failed",
+  archivedAt: "2026-11-11T00:00:00Z", quotedTweetId: "122",
+  related: [{ id: "122", url: "https://x.com/bob/status/122", author: { id: "43", name: "Bob", screenName: "bob" }, text: "Quoted text available offline", createdAt: "2026-11-09T00:00:00Z", media: [] }],
+};
+const job: Job = { id: 9, kind: "tweet_link", status: "completed_with_errors", input: tweet.url, title: "Alice archive", archiveMode: "both", progress: 1, message: "One media failed", createdAt: "2026-11-11T00:00:00Z", updatedAt: "2026-11-11T00:00:00Z" };
+
+function renderArchive() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return renderWithProviders(<QueryClientProvider client={client}><TweetsPage /></QueryClientProvider>);
+}
+
+beforeEach(() => {
+  vi.clearAllMocks(); window.history.replaceState(null, "", "/tweets");
+  vi.mocked(getTweets).mockImplementation(async query => ({ items: [tweet], pagination: { page: Number(query.get("page") ?? 1), pageSize: 20, total: 40, totalPages: 2 } }));
+  vi.mocked(getTweetProgress).mockResolvedValue({ items: [{ userId: "42", lastId: "123", headId: "123", cursor: "resume", status: "interrupted", error: "", count: 12, updatedAt: "2026-11-11T00:00:00Z" }] });
+  vi.mocked(retryTweetMedia).mockResolvedValue(job);
+  vi.mocked(api).mockResolvedValue(job);
+});
+
+it("keeps the full body and available relations when media fails, with local previews and independent retry", async () => {
+  const user = userEvent.setup(); renderArchive();
+  const body = await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });
+  expect(body.textContent).toBe(tweet.text);
+  expect(screen.getByText("Quoted text available offline")).toBeTruthy();
+  expect(screen.getByText("One video failed")).toBeTruthy();
+  expect(screen.getByText("媒体部分归档")).toBeTruthy();
+  const image = screen.getByRole("img", { name: "alice · 123" });
+  expect(image.getAttribute("src")).toBe("/api/assets/thumbnail");
+  await user.click(screen.getByRole("button", { name: /查看图片.*alice.*123.*7/ }));
+  expect(within(screen.getByRole("dialog")).getByRole("img", { name: "@alice · 123" }).getAttribute("src")).toBe("/api/assets/original");
+  fireEvent.keyDown(document, { key: "Escape", keyCode: 27 });
+  await user.click(screen.getByRole("button", { name: "重试媒体" }));
+  await waitFor(() => expect(retryTweetMedia).toHaveBeenCalledWith("123", expect.anything()));
+  expect(body.textContent).toBe(tweet.text);
+  await user.click(screen.getByRole("button", { name: "#9" }));
+  const drawer = await screen.findByRole("dialog", { name: "任务详情 #9" });
+  expect(await within(drawer).findByText("部分失败")).toBeTruthy();
+  expect(within(drawer).getByText("推文与媒体")).toBeTruthy();
+});
+
+it("persists search, author and pagination in the URL and restores browser navigation", async () => {
+  window.history.replaceState(null, "", "/tweets?author=alice&from=2026-11-01&mediaType=text");
+  const user = userEvent.setup(); renderArchive();
+  await screen.findByText("Quoted text available offline");
+  const initial = vi.mocked(getTweets).mock.calls[0][0];
+  expect(initial.get("author")).toBe("alice"); expect(initial.get("from")).toBe("2026-11-01"); expect(initial.get("mediaType")).toBe("text");
+  await user.type(screen.getByRole("textbox", { name: "搜索正文" }), "offline");
+  await waitFor(() => expect(new URLSearchParams(window.location.search).get("search")).toBe("offline"));
+  await user.click(await screen.findByRole("button", { name: "第 2 页" }));
+  await waitFor(() => expect(new URLSearchParams(window.location.search).get("page")).toBe("2"));
+  act(() => { window.history.replaceState(null, "", "/tweets?author=bob&search=restored"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await waitFor(() => expect((screen.getByRole("textbox", { name: "搜索正文" }) as HTMLInputElement).value).toBe("restored"));
+  expect((screen.getByRole("textbox", { name: "作者" }) as HTMLInputElement).value).toBe("bob");
+  await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("author")).toBe("bob"));
+});
+
+it.each(["completed", "not_requested"])("does not offer media retry for %s", async mediaStatus => {
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, mediaStatus }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+  renderArchive();
+  await screen.findByText("Quoted text available offline");
+  expect(screen.queryByRole("button", { name: "重试媒体" })).toBeNull();
+});
+
+it("keeps canceled pending media retryable and disables the command while queuing", async () => {
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, mediaStatus: "pending" }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+  let finish!: (value: Job) => void;
+  vi.mocked(retryTweetMedia).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  const user = userEvent.setup(); renderArchive();
+  const button = await screen.findByRole("button", { name: "重试媒体" });
+  await user.click(button);
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(true));
+  await user.click(button);
+  expect(retryTweetMedia).toHaveBeenCalledTimes(1);
+  await act(async () => { finish(job); });
+});
+
+it("does not label pure-text archives as missing media", async () => {
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, media: [], downloads: [], mediaStatus: "not_requested" }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+  renderArchive();
+  await screen.findByText("Quoted text available offline");
+  expect(screen.queryByText("媒体尚未归档")).toBeNull();
+  expect(screen.queryByRole("button", { name: "重试媒体" })).toBeNull();
+});
+
+it.each(["m4v", "ogv"])("plays archived .%s media as video with its independently stored cover", async extension => {
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, downloads: [{ ...tweet.downloads[0], filePath: `asset:video/clip.${extension}`, fileUrl: "/api/assets/video", assetUrls: { video_cover: "/api/assets/cover" } }] }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+  const { container } = renderArchive();
+  await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });
+  const video = container.querySelector("video");
+  expect(video?.getAttribute("src")).toBe("/api/assets/video");
+  expect(video?.getAttribute("poster")).toBe("/api/assets/cover");
+  expect(screen.queryByRole("img", { name: "alice · 123" })).toBeNull();
+});

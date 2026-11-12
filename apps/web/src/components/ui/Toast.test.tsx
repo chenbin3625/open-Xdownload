@@ -3,7 +3,7 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Toaster, toast } from "./Toast";
+import { Toaster, toast } from "../semi";
 
 // 命令式 API 的 store 是模块级的，用例之间必须清干净
 function clearAll() {
@@ -98,10 +98,9 @@ describe("toast", () => {
     expect(screen.queryByText("手动关闭")).toBeNull();
   });
 
-  it("容器常驻 aria-live，内容变化才播报", () => {
+  it("通过 Semi alert 播报通知", () => {
     render(<Toaster />);
-    // 容器随通知一起挂载/卸载会导致读屏漏读，因此空列表时也要在
-    const live = document.querySelector("[aria-live='polite']");
-    expect(live).not.toBeNull();
+    act(() => { toast.info({ message: "已更新" }); });
+    expect(screen.getByRole("alert").textContent).toContain("已更新");
   });
 });

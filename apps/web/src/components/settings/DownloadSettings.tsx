@@ -2,10 +2,10 @@ import { t, useTranslation } from "../../lib/i18n";
 import { HelpCircle } from "lucide-react";
 import React from "react";
 import type { AppConfig, FileNamingMode } from "../../lib/api";
-import { Select } from "../ui/Controls";
-import { Switch } from "../ui/Controls";
-import { Field, Input, NumberInput } from "../ui/Input";
-import { Tooltip } from "../ui/Overlay";
+import { Select } from "../semi";
+import { Switch } from "../semi";
+import { Field, Input, NumberInput } from "../semi";
+import { Tooltip } from "../semi";
 import { EnvOverrideNote } from "./EnvOverrideNote";
 
 function fileNamingOptions(): Array<{ value: FileNamingMode; label: string }> {

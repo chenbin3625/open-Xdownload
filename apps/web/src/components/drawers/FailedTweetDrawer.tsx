@@ -1,8 +1,8 @@
 import { t, useTranslation } from "../../lib/i18n";
 import { AlertCircle } from "lucide-react";
 import React from "react";
-import { Drawer } from "../ui/Overlay";
-import { Tag } from "../ui/Tag";
+import { Drawer } from "../semi";
+import { Tag } from "../semi";
 import { FailedTweetQueue } from "../jobs/FailedTweetQueue";
 
 export interface FailedTweetDrawerProps {

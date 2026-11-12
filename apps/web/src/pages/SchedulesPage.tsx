@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import React from "react";
+import { Button, Card, Switch } from "@douyinfe/semi-ui";
 import {
   deleteArchiveSchedule,
   runArchiveSchedule,
@@ -20,13 +21,10 @@ import {
   notifyError,
 } from "../components/common/CommonUI";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
-import { Button } from "../components/ui/Button";
-import { Card } from "../components/ui/Card";
-import { Switch } from "../components/ui/Controls";
-import { Alert, Empty, Skeleton } from "../components/ui/Feedback";
-import { Popconfirm } from "../components/ui/Overlay";
-import { Tag } from "../components/ui/Tag";
-import { toast } from "../components/ui/Toast";
+import { Alert, Empty, Skeleton } from "../components/semi";
+import { Popconfirm } from "../components/semi";
+import { Tag } from "../components/semi";
+import { toast } from "../components/semi";
 
 export interface SchedulesPageProps {
   schedules: ArchiveSchedule[];
@@ -86,16 +84,11 @@ export function SchedulesPage({
   });
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* 顶部标题与行动 */}
-      <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">{t("自动归档计划")}</h1>
-          <p className="mt-0.5 text-xs text-fg-muted">
-            {t("配置定时轮询任务，定时扫描指定用户时间线、列表或关注成员，自动同步最新媒体")}</p>
-        </div>
+    <div className="workspace-page">
+      <div className="page-heading">
+        <h1 className="page-title">{t("自动归档计划")}</h1>
         <Button
-          variant="primary"
+          theme="solid"
           icon={<Plus className="size-4" />}
           onClick={onOpenCreateModal}
         >
@@ -107,7 +100,7 @@ export function SchedulesPage({
       ) : loading && schedules.length === 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 3 }, (_, index) => (
-            <Card key={index} size="sm">
+            <Card key={index} bodyStyle={{ padding: 16 }}>
               <div className="space-y-3 p-1">
                 <Skeleton className="h-5 w-3/5" />
                 <Skeleton className="h-4 w-full" />
@@ -118,7 +111,6 @@ export function SchedulesPage({
           ))}
         </div>
       ) : schedules.length === 0 ? (
-        <Card className="text-center py-8">
           <Empty
             description={
               <div className="space-y-1.5">
@@ -129,31 +121,28 @@ export function SchedulesPage({
             }
           >
             <Button
-              variant="primary"
-              size="sm"
+              theme="solid"
               icon={<Plus className="size-3.5" />}
               onClick={onOpenCreateModal}
               className="mt-2"
             >
               {t("立即创建第一个计划")}</Button>
           </Empty>
-        </Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {schedules.map((schedule) => (
             <Card
               key={schedule.id}
-              hoverable
-              size="sm"
+              shadows="hover"
               title={
-                <div className="flex items-center gap-2 max-w-[80%]">
+                <div className="flex min-w-0 items-center gap-2">
                   <Clock className="size-4 shrink-0 text-brand-500" />
                   <span className="truncate font-semibold text-sm text-fg" title={schedule.name}>
                     {schedule.name}
                   </span>
                 </div>
               }
-              extra={
+              headerExtraContent={
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] text-fg-muted font-normal">
                     {schedule.enabled ? t("运行中") : t("已暂停")}
@@ -162,21 +151,23 @@ export function SchedulesPage({
                     checked={schedule.enabled}
                     loading={toggleEnabled.isPending && toggleEnabled.variables?.id === schedule.id}
                     onChange={() => toggleEnabled.mutate(schedule)}
-                    ariaLabel={t("切换计划 {{value0}} 状态", { value0: schedule.name })}
+                    disabled={toggleEnabled.isPending && toggleEnabled.variables?.id === schedule.id}
+                    aria-label={t("切换计划 {{value0}} 状态", { value0: schedule.name })}
                   />
                 </div>
               }
-              bodyClassName="space-y-3"
+              bodyStyle={{ padding: 16 }}
             >
+              <div className="space-y-4">
               {/* 核心参数 */}
               <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded-control bg-surface-muted/60 p-2 border border-line/60">
+                <div className="min-w-0">
                   <span className="text-fg-subtle block text-[11px]">{t("执行周期")}</span>
                   <span className="font-medium text-fg mt-0.5 block">
                     {formatIntervalMinutes(schedule.intervalMinutes)}
                   </span>
                 </div>
-                <div className="rounded-control bg-surface-muted/60 p-2 border border-line/60">
+                <div className="min-w-0">
                   <span className="text-fg-subtle block text-[11px]">{t("下次运行")}</span>
                   <span className="font-mono text-fg mt-0.5 block truncate" title={schedule.nextRunAt}>
                     {schedule.nextRunAt ? formatDateTime(schedule.nextRunAt) : t("计算中")}
@@ -205,8 +196,8 @@ export function SchedulesPage({
               </div>
 
               {/* 上次运行与操作栏 */}
-              <div className="flex items-center justify-between pt-2 border-t border-line text-xs">
-                <span className="text-[11px] text-fg-subtle font-mono truncate max-w-[150px]">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-line text-xs">
+                <span className="min-w-0 text-xs text-fg-subtle font-mono">
                   {t("上次: ")}{schedule.lastRunAt ? formatDateTime(schedule.lastRunAt) : t("从未")}
                 </span>
 
@@ -219,23 +210,27 @@ export function SchedulesPage({
                     onConfirm={() => removeSchedule.mutate(schedule.id)}
                   >
                     <Button
-                      variant="text"
-                      size="sm"
+                      theme="borderless"
+                      type="danger"
                       icon={<Trash2 className="size-3.5 text-danger" />}
                       loading={removeSchedule.isPending && removeSchedule.variables === schedule.id}
+                      disabled={removeSchedule.isPending && removeSchedule.variables === schedule.id}
+                      aria-busy={removeSchedule.isPending && removeSchedule.variables === schedule.id}
                       aria-label={t("删除计划")}
                     />
                   </Popconfirm>
 
                   <Button
-                    variant="default"
-                    size="sm"
+                    type="tertiary"
                     icon={<Play className="size-3.5" />}
                     loading={runSchedule.isPending && runSchedule.variables === schedule.id}
+                    disabled={runSchedule.isPending && runSchedule.variables === schedule.id}
+                    aria-busy={runSchedule.isPending && runSchedule.variables === schedule.id}
                     onClick={() => runSchedule.mutate(schedule.id)}
                   >
                     {t("立即执行")}</Button>
                 </div>
+              </div>
               </div>
             </Card>
           ))}

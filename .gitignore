@@ -11,6 +11,9 @@ node_modules/
 dist/
 build/
 coverage/
+playwright-report/
+test-results/
+.playwright-auth.json
 *.tsbuildinfo
 !internal/webui/dist/
 !internal/webui/dist/.gitkeep

@@ -5,7 +5,7 @@ import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../../lib/api";
 import { act, renderWithProviders, screen, waitFor } from "../../test/render";
-import { toast } from "../ui/Toast";
+import { toast } from "../semi";
 import { CreateJobModal, detectQuickInputTab, parseScreenName } from "./CreateJobModal";
 
 vi.mock("../../lib/api", async (importOriginal) => {
@@ -204,6 +204,6 @@ describe("CreateJobModal", () => {
     await user.type(screen.getByPlaceholderText("https://x.com/username/status/1234567890"), "x.com/OpenAI/status/123");
     await user.click(screen.getByRole("button", { name: /立即下载/ }));
 
-    await waitFor(() => expect(api.createJob).toHaveBeenCalledWith("tweet_link", "https://x.com/OpenAI/status/123", expect.any(String)));
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledWith("tweet_link", "https://x.com/OpenAI/status/123", expect.any(String), { archiveMode: "both", backfill: false }));
   });
 });

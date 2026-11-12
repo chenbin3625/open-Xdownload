@@ -16,14 +16,14 @@ import {
   type AuthCheck,
 } from "../../lib/api";
 import { getErrorMessage, notifyError } from "../common/CommonUI";
-import { Button } from "../ui/Button";
-import { SectionCard } from "../ui/Card";
-import { Popconfirm, Tooltip } from "../ui/Overlay";
-import { toast } from "../ui/Toast";
+import { Button } from "@douyinfe/semi-ui";
+import { Popconfirm, Tooltip } from "../semi";
+import { toast } from "../semi";
 import { CookieSettingsFields } from "./CookieSettings";
 import { readEnvOverridden } from "./EnvOverrideNote";
 import { DownloadSettingsFields } from "./DownloadSettings";
 import { StorageSettings } from "./StorageSettings";
+import { LanguageSettings } from "./LanguageSettings";
 
 export function ConfigForm({
   config,
@@ -191,25 +191,21 @@ export function ConfigForm({
 
   const reloadButton = (
     <Button
-      variant="secondary"
-      circle
+      type="tertiary"
       icon={<RefreshCw className={`size-3.5 ${refreshPending ? "animate-spin" : ""}`} />}
       loading={refreshPending}
+      disabled={refreshPending}
+      aria-busy={refreshPending}
       aria-label={t("重新加载配置")}
     />
   );
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* 页头 + 浮动操作区 */}
-      <div className="sticky top-0 z-10 -mx-3 -mt-3 bg-canvas/80 px-3 pt-3 pb-3 backdrop-blur-md border-b border-line flex flex-wrap items-center justify-between gap-3 sm:-mx-4 sm:-mt-4 sm:px-4 sm:pt-4">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">{t("系统与存储配置")}</h1>
-          <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
-            {t("存储位置、网络代理与 X Cookie 集中管理，修改后点击右上角统一保存")}</p>
-        </div>
+    <div className="workspace-page">
+      <div className="page-heading">
+        <h1 className="page-title">{t("系统与存储配置")}</h1>
 
-        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+        <div className="page-actions">
           {draftDirty ? (
             // 有未保存修改：二次确认后再丢弃
             <Popconfirm
@@ -224,58 +220,56 @@ export function ConfigForm({
           ) : (
             <Tooltip content={t("重新加载配置")}>
               <Button
-                variant="secondary"
-                circle
+                type="tertiary"
                 icon={<RefreshCw className={`size-3.5 ${refreshPending ? "animate-spin" : ""}`} />}
                 loading={refreshPending}
+                disabled={refreshPending}
+                aria-busy={refreshPending}
                 onClick={reloadConfig}
                 aria-label={t("重新加载配置")}
               />
             </Tooltip>
           )}
           <Button
-            variant="secondary"
+            type="tertiary"
             icon={<ShieldCheck className="size-4" />}
             loading={authChecking}
+            disabled={authChecking}
+            aria-busy={authChecking}
             onClick={() => void runAuthCheck(draft, true)}
           >
             {t("检测 Cookie")}</Button>
           <Button
-            variant="primary"
+            theme="solid"
             icon={<Save className="size-4" />}
             loading={mutation.isPending}
+            disabled={mutation.isPending}
+            aria-busy={mutation.isPending}
             onClick={() => mutation.mutate(configDiff(normalizeConfig(config), draft))}
           >
             {t("保存配置")}</Button>
         </div>
       </div>
 
-      <SectionCard
-        icon={<HardDrive className="size-4" />}
-        title={t("存储设置")}
-        description={t("选择媒体下载文件的保存方式与目标目录")}
-      >
-        <StorageSettings draft={draft} onChange={updateDraft} envOverridden={envOverridden} />
-      </SectionCard>
+      <LanguageSettings />
 
-      <SectionCard
-        icon={<Download className="size-4" />}
-        title={t("网络与下载调度")}
-        description={t("控制代理连接、文件命名方式与下载相关开关")}
-      >
+      <section className="semi-settings-section">
+        <h2 className="settings-section-title"><HardDrive size={16} />{t("存储设置")}</h2>
+        <StorageSettings draft={draft} onChange={updateDraft} envOverridden={envOverridden} />
+      </section>
+
+      <section className="semi-settings-section">
+        <h2 className="settings-section-title"><Download size={16} />{t("网络与下载调度")}</h2>
         <DownloadSettingsFields
           draft={draft}
           onChange={updateDraft}
           onAuthChange={updateAuthDraft}
           envOverridden={envOverridden}
         />
-      </SectionCard>
+      </section>
 
-      <SectionCard
-        icon={<ShieldCheck className="size-4" />}
-        title={t("X / Twitter Cookie 凭证")}
-        description={t("配置主账号与备用多账号凭证池，用于规避 API 频率限制")}
-      >
+      <section className="semi-settings-section">
+        <h2 className="settings-section-title"><ShieldCheck size={16} />{t("X / Twitter Cookie 凭证")}</h2>
         <CookieSettingsFields
           authError={authError}
           authResult={authResult}
@@ -284,7 +278,7 @@ export function ConfigForm({
           onChange={updateAuthDraft}
           envOverridden={envOverridden}
         />
-      </SectionCard>
+      </section>
     </div>
   );
 }

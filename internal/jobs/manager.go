@@ -92,6 +92,24 @@ const (
 	retryBatchLimit = 200
 )
 
+var (
+	// archiveSliceBudget 是列表/关注归档单次占用执行槽的时间预算：到达后在用户边界
+	// 保存检查点并让出，让排队中的手动任务获得执行机会。这只是“切片”，不是降低
+	// 总处理量——任务会以 pending 状态继续，直到全部用户完成。变量而非常量，便于
+	// 用 0 预算测试分段恢复。
+	archiveSliceBudget = 3 * time.Minute
+	// retrySliceBudget 是失败推文重试单次占用执行槽的时间预算。每一项处理完都会
+	// 更新/删除 failed_tweets 行，因此让出后可按原语义继续剩余条目。
+	retrySliceBudget = 2 * time.Minute
+	// maxRateLimitDefer 是单个任务因限流累计被推迟的时长上限。超过后不再无限期
+	// 等待，任务明确失败并在错误里写明原因。
+	maxRateLimitDefer = 6 * time.Hour
+)
+
+// errYieldExecution 表示长任务在安全边界主动归还执行槽（不是失败）。调用方应把
+// 任务重新置为 pending，而不是写失败态。
+var errYieldExecution = errors.New("task yielded execution slot")
+
 func NewManager(store *storage.Store, parserService *parser.Service, eventBus *EventBus) *Manager {
 	return &Manager{
 		store:      store,
@@ -426,6 +444,9 @@ func (m *Manager) maybeMaintain(ctx context.Context) {
 }
 
 func (m *Manager) startJob(parent context.Context, job storage.Job) {
+	// 账号池全部限流时立即把任务交还调度器（见 xclient.RateLimitedError），
+	// 避免唯一执行槽在限流窗口里空等约 15 分钟。
+	parent = xclient.WithYieldToScheduler(parent)
 	jobCtx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
 	if _, exists := m.active[job.ID]; exists {
@@ -466,6 +487,10 @@ func (m *Manager) process(ctx context.Context, saveCtx context.Context, job stor
 		return
 	}
 	m.save(saveCtx, job)
+	if _, err := m.store.FreezeJobStorage(saveCtx, job.ID); err != nil {
+		m.fail(saveCtx, job, "", err)
+		return
+	}
 
 	switch job.Kind {
 	case storage.JobKindTweetLink:
@@ -480,6 +505,10 @@ func (m *Manager) process(ctx context.Context, saveCtx context.Context, job stor
 		m.processFollowing(ctx, saveCtx, job)
 	case storage.JobKindFailedRetry:
 		m.processFailedRetry(ctx, saveCtx, job)
+	case storage.JobKindAssetDerivative:
+		m.processAssetDerivative(ctx, saveCtx, job)
+	case storage.JobKindAssetMigration:
+		m.processAssetMigration(ctx, saveCtx, job)
 	default:
 		job.Status = storage.JobFailed
 		job.Progress = 1
@@ -495,12 +524,64 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	tweet, err := m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
+	var tweet parser.TweetData
+	_, tweetID, _ := parser.ExtractTweetURL(job.Input)
+	archived, archiveErr := m.store.GetTweet(saveCtx, tweetID)
+	if job.ArchiveMode == storage.ArchiveMedia {
+		// Signed video URLs expire. Refresh the payload for every media retry;
+		// retain the archived copy only when the refresh endpoint is unavailable.
+		tweet, err = m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
+		if archiveErr == nil {
+			if err == nil && downloadableMediaCount(tweet) > 0 {
+				archived.Media = mergeRefreshedMedia(archived.Media, tweet.Media)
+			}
+			tweet, err = archived.TweetData, nil
+		}
+	} else {
+		if job.ArchiveMode.IncludesTweets() {
+			options := parserOptionsFromConfig(cfg)
+			options.RequireRelated = true
+			tweet, err = xclient.FetchTweet(ctx, cfg, tweetID, options)
+		} else {
+			tweet, err = m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
+		}
+	}
 	if err != nil {
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
 			return
 		}
+		m.fail(saveCtx, job, "", err)
+		return
+	}
+	if job.ArchiveMode.IncludesTweets() {
+		status := "pending"
+		if job.ArchiveMode == storage.ArchiveTweets || len(tweet.Media) == 0 {
+			status = "not_requested"
+		}
+		if err := m.store.ArchiveTweet(saveCtx, job.ID, tweet, status); err != nil {
+			m.fail(saveCtx, job, "", err)
+			return
+		}
+		if job.ArchiveMode == storage.ArchiveTweets || len(tweet.Media) == 0 {
+			job.Status = storage.JobCompleted
+			job.Progress = 1
+			job.Message = "推文正文已归档"
+			job.Error = ""
+			m.save(saveCtx, job)
+			return
+		}
+	} else {
+		mediaStatus := "pending"
+		if len(tweet.Media) == 0 {
+			mediaStatus = "not_requested"
+		}
+		if err := m.store.ArchiveTweetMediaOnly(saveCtx, job.ID, tweet, mediaStatus); err != nil {
+			m.fail(saveCtx, job, "", err)
+			return
+		}
+	}
+	if err := m.store.RememberMediaContext(saveCtx, tweet); err != nil {
 		m.fail(saveCtx, job, "", err)
 		return
 	}
@@ -510,6 +591,10 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		job.Progress = 1
 		job.Message = "链接已识别，但还没有解析到媒体 URL"
 		job.Error = "这条推文没有可下载媒体"
+		if err := m.store.SetTweetMediaResult(saveCtx, job.ID, tweet.ID, "failed", job.Error); err != nil {
+			m.fail(saveCtx, job, "", err)
+			return
+		}
 		m.save(saveCtx, job)
 		return
 	}
@@ -535,6 +620,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		}
 		result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, "", tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL)
 		if err != nil {
+			_ = m.store.SetTweetMediaResult(saveCtx, job.ID, tweet.ID, "failed", err.Error())
 			if isCancellation(ctx, err) {
 				m.handleInterrupt(ctx, saveCtx, job)
 				return
@@ -544,6 +630,10 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		}
 		if result.unavailable {
 			unavailable++
+		}
+		if err := m.store.LinkRelatedTweetMedia(saveCtx, job.ID, tweet, media); err != nil {
+			m.fail(saveCtx, job, mediaURL, err)
+			return
 		}
 	}
 	if ctx.Err() != nil {
@@ -561,6 +651,20 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		job.Status = storage.JobCompletedWithErrors
 		job.Error = fmt.Sprintf("%d 个媒体未解析到下载地址", unresolved)
 		job.Message = "下载部分完成：" + job.Error
+	}
+	mediaStatus := "completed"
+	if unresolved > 0 || unavailable > 0 {
+		mediaStatus = "partial"
+	}
+	if err := m.store.SetTweetMediaResult(saveCtx, job.ID, tweet.ID, mediaStatus, job.Error); err != nil {
+		m.fail(saveCtx, job, "", err)
+		return
+	}
+	if mediaStatus == "completed" {
+		if err := m.store.DeleteFailedTweetsByTweetID(saveCtx, tweet.ID); err != nil {
+			m.fail(saveCtx, job, "", err)
+			return
+		}
 	}
 	m.save(saveCtx, job)
 }
@@ -624,6 +728,10 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 	}
 	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, []xclient.User{user}, nil, 0.12, 0.94)
 	if err != nil {
+		if errors.Is(err, errYieldExecution) {
+			m.yieldJob(saveCtx, job, "分段执行中，稍后继续")
+			return
+		}
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
 			return
@@ -641,6 +749,13 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 // failRetryJob 处理失败重试任务的失败：自动重试任务额外开启退避窗口（任务行会被
 // Reserve 复用到下一次，没有窗口会每 30s 重试一次必然失败的任务）。
 func (m *Manager) failRetryJob(ctx context.Context, job storage.Job, err error) {
+	// 限流有明确的恢复时间，交给 fail() 重新入队即可，不应再叠加 10 分钟的
+	// “自动重试失败”暂停窗口（那会让已经可恢复的任务多等一轮）。
+	if retryAt, ok := xclient.RateLimitRetryAt(err); ok {
+		if !m.rateLimitDeferExceeded(job, retryAt) && m.requeueForRateLimit(ctx, job, retryAt) {
+			return
+		}
+	}
 	if job.Kind == storage.JobKindFailedRetry && job.Input == automaticRetryJobInput {
 		m.mu.Lock()
 		m.autoRetryFailedUntil = time.Now().Add(autoRetryBackoffWindow)
@@ -663,6 +778,10 @@ func (m *Manager) processFailedRetry(ctx context.Context, saveCtx context.Contex
 	retried, err := m.retryFailedTweets(ctx, saveCtx, job, cfg, job.Input != automaticRetryJobInput)
 	if ctx.Err() != nil {
 		m.handleInterrupt(ctx, saveCtx, job)
+		return
+	}
+	if errors.Is(err, errYieldExecution) {
+		m.yieldJob(saveCtx, job, fmt.Sprintf("已重试 %d 条，分段继续处理剩余失败推文", retried))
 		return
 	}
 	if err != nil {
@@ -712,20 +831,35 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	job.Message = "正在获取列表成员"
-	job.Progress = 0.12
-	m.save(saveCtx, job)
-	members, err := pool.GetListMembers(ctx, list)
-	if err != nil {
-		if isCancellation(ctx, err) {
-			m.handleInterrupt(ctx, saveCtx, job)
+	var members []xclient.User
+	if cp, ok, checkpointErr := m.loadArchiveCheckpoint(saveCtx, job.ID); checkpointErr != nil {
+		m.fail(saveCtx, job, "", checkpointErr)
+		return
+	} else if ok && len(cp.Tasks) > 0 {
+		// 上次切片已把成员快照写入检查点：不要重新拉取成员列表（大列表可能翻很多页）。
+		job.Message = "从检查点继续归档"
+		job.Progress = 0.18
+		m.save(saveCtx, job)
+	} else {
+		job.Message = "正在获取列表成员"
+		job.Progress = 0.12
+		m.save(saveCtx, job)
+		members, err = pool.GetListMembers(ctx, list)
+		if err != nil {
+			if isCancellation(ctx, err) {
+				m.handleInterrupt(ctx, saveCtx, job)
+				return
+			}
+			m.fail(saveCtx, job, "", err)
 			return
 		}
-		m.fail(saveCtx, job, "", err)
-		return
 	}
 	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, members, &listEntity, 0.18, 0.94)
 	if err != nil {
+		if errors.Is(err, errYieldExecution) {
+			m.yieldJob(saveCtx, job, "分段执行中，稍后继续剩余用户")
+			return
+		}
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
 			return
@@ -759,20 +893,35 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	job.Message = "正在获取关注用户"
-	job.Progress = 0.12
-	m.save(saveCtx, job)
-	members, err := pool.GetFollowing(ctx, owner)
-	if err != nil {
-		if isCancellation(ctx, err) {
-			m.handleInterrupt(ctx, saveCtx, job)
+	var members []xclient.User
+	if cp, ok, checkpointErr := m.loadArchiveCheckpoint(saveCtx, job.ID); checkpointErr != nil {
+		m.fail(saveCtx, job, "", checkpointErr)
+		return
+	} else if ok && len(cp.Tasks) > 0 {
+		// 关注列表可能很大：恢复时直接使用检查点里的用户快照，不再重新翻页拉取。
+		job.Message = "从检查点继续归档"
+		job.Progress = 0.18
+		m.save(saveCtx, job)
+	} else {
+		job.Message = "正在获取关注用户"
+		job.Progress = 0.12
+		m.save(saveCtx, job)
+		members, err = pool.GetFollowing(ctx, owner)
+		if err != nil {
+			if isCancellation(ctx, err) {
+				m.handleInterrupt(ctx, saveCtx, job)
+				return
+			}
+			m.fail(saveCtx, job, "", err)
 			return
 		}
-		m.fail(saveCtx, job, "", err)
-		return
 	}
 	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, members, nil, 0.18, 0.94)
 	if err != nil {
+		if errors.Is(err, errYieldExecution) {
+			m.yieldJob(saveCtx, job, "分段执行中，稍后继续剩余用户")
+			return
+		}
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
 			return
@@ -804,6 +953,13 @@ type mediaDownloadResult struct {
 }
 
 func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time, previewURLs ...string) (mediaDownloadResult, error) {
+	document, err := m.store.FreezeJobStorage(saveCtx, job.ID)
+	if err != nil {
+		return mediaDownloadResult{}, err
+	}
+	if document.Enabled {
+		return m.downloadAssetMedia(ctx, saveCtx, job, cfg, document, mediaURL, tweetID, largePhoto, modTime, previewURLs...)
+	}
 	previewURL := ""
 	if len(previewURLs) > 0 {
 		previewURL = previewURLs[0]
@@ -1120,6 +1276,17 @@ type archiveStats struct {
 // skipped 是跳过总数的对外口径（Job.Message 用）。
 func (s archiveStats) skipped() int { return s.SkippedUsers + s.SkippedMedia }
 
+// merge 把一批（一页或一个用户）的统计累加进来。
+func (s *archiveStats) merge(delta archiveStats) {
+	s.Users += delta.Users
+	s.Tweets += delta.Tweets
+	s.Downloaded += delta.Downloaded
+	s.SkippedUsers += delta.SkippedUsers
+	s.SkippedMedia += delta.SkippedMedia
+	s.Failed += delta.Failed
+	s.Issues = append(s.Issues, delta.Issues...)
+}
+
 type archiveUserTask struct {
 	index        int
 	order        int
@@ -1163,39 +1330,152 @@ func xPoolConfigKey(cfg config.AppConfig) string {
 	}, "\x00")
 }
 
+// archiveCheckpointTask 是 archiveUserTask 的可序列化形式（检查点需要跨进程恢复）。
+type archiveCheckpointTask struct {
+	Index        int          `json:"index"`
+	Order        int          `json:"order"`
+	MissingMedia int          `json:"missingMedia"`
+	PrimaryOnly  bool         `json:"primaryOnly"`
+	User         xclient.User `json:"user"`
+}
+
+// archiveCheckpoint 保存列表/关注归档的分段进度。Tasks 只在首次建立时排序一次，
+// 后续切片按同一顺序继续，避免每次重新排序导致已处理用户被重排/重复。
+type archiveCheckpoint struct {
+	Tasks []archiveCheckpointTask `json:"tasks"`
+	Next  int                     `json:"next"`
+	Stats archiveStats            `json:"stats"`
+}
+
+func checkpointTasks(tasks []archiveUserTask) []archiveCheckpointTask {
+	items := make([]archiveCheckpointTask, len(tasks))
+	for i, task := range tasks {
+		items[i] = archiveCheckpointTask{
+			Index:        task.index,
+			Order:        task.order,
+			MissingMedia: task.missingMedia,
+			PrimaryOnly:  task.primaryOnly,
+			User:         task.user,
+		}
+	}
+	return items
+}
+
+func (cp archiveCheckpoint) userTasks() []archiveUserTask {
+	tasks := make([]archiveUserTask, len(cp.Tasks))
+	for i, item := range cp.Tasks {
+		tasks[i] = archiveUserTask{
+			index:        item.Index,
+			order:        item.Order,
+			missingMedia: item.MissingMedia,
+			primaryOnly:  item.PrimaryOnly,
+			user:         item.User,
+		}
+	}
+	return tasks
+}
+
+func (m *Manager) loadArchiveCheckpoint(ctx context.Context, jobID int64) (archiveCheckpoint, bool, error) {
+	payload, ok, err := m.store.LoadJobCheckpoint(ctx, jobID)
+	if err != nil || !ok {
+		return archiveCheckpoint{}, false, err
+	}
+	var cp archiveCheckpoint
+	if err := json.Unmarshal(payload, &cp); err != nil {
+		// 检查点损坏不能阻塞任务：丢弃后从头开始（媒体去重保证不会产生重复文件）。
+		log.Printf("job %d: discard corrupt archive checkpoint: %v", jobID, err)
+		_ = m.store.DeleteJobCheckpoint(ctx, jobID)
+		return archiveCheckpoint{}, false, nil
+	}
+	return cp, true, nil
+}
+
+func (m *Manager) saveArchiveCheckpoint(ctx context.Context, jobID int64, tasks []archiveUserTask, next int, stats archiveStats) error {
+	if next < 0 {
+		next = 0
+	}
+	if next > len(tasks) {
+		next = len(tasks)
+	}
+	payload, err := json.Marshal(archiveCheckpoint{
+		Tasks: checkpointTasks(tasks),
+		Next:  next,
+		Stats: stats,
+	})
+	if err != nil {
+		return err
+	}
+	return m.store.SaveJobCheckpoint(ctx, jobID, payload)
+}
+
+// yieldJob 在安全边界把任务放回队列并立即允许再次领取。刷新 enqueued_at 让其他
+// 排队任务先获得执行槽；与本任务自身的检查点配合，恢复时不会重做已提交的用户。
+func (m *Manager) yieldJob(ctx context.Context, job storage.Job, message string) {
+	updated, err := m.store.RequeueJobAt(ctx, job.ID, time.Now().UTC(), message)
+	if err != nil {
+		log.Printf("yield job %d: %v", job.ID, err)
+		return
+	}
+	if updated != nil {
+		m.publishJob(ctx, "job.updated", *updated)
+	}
+}
+
 func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, users []xclient.User, listEntity *storage.ListEntity, start float64, end float64) (archiveStats, error) {
 	stats := archiveStats{}
-	if len(users) == 0 {
-		return stats, nil
+	var tasks []archiveUserTask
+	completed := 0
+	resumed := false
+
+	// 优先从检查点恢复：上一轮切片已完成的数据/失败队列都已提交，直接续跑。
+	if cp, ok, err := m.loadArchiveCheckpoint(saveCtx, job.ID); err != nil {
+		return stats, err
+	} else if ok && len(cp.Tasks) > 0 {
+		tasks = cp.userTasks()
+		stats = cp.Stats
+		completed = cp.Next
+		if completed > len(tasks) {
+			completed = len(tasks)
+		}
+		resumed = true
 	}
-	// 私密时间线固定使用主账号；过滤和自动关注也必须使用相同账号的关系信息。
-	resolvedUsers := make([]xclient.User, 0, len(users))
-	for _, user := range users {
-		if err := ctx.Err(); err != nil {
+
+	if !resumed {
+		if len(users) == 0 {
+			return stats, nil
+		}
+		// 私密时间线固定使用主账号；过滤和自动关注也必须使用相同账号的关系信息。
+		resolvedUsers := make([]xclient.User, 0, len(users))
+		for _, user := range users {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
+			if user.Protected && user.ID != "" && pool != nil && pool.Primary() != nil {
+				refreshed, err := pool.Primary().GetUserByID(ctx, user.ID)
+				if err != nil {
+					if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) {
+						return stats, err
+					}
+					stats.Failed++
+					stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的主账号关系失败: %v", fallbackUserName(user), err))
+					continue
+				}
+				user = refreshed
+			}
+			resolvedUsers = append(resolvedUsers, user)
+		}
+		var skippedUsers int
+		var skippedIssues []string
+		var err error
+		tasks, skippedUsers, skippedIssues, err = m.archiveUserTasks(ctx, cfg, resolvedUsers)
+		if err != nil {
 			return stats, err
 		}
-		if user.Protected && user.ID != "" && pool != nil && pool.Primary() != nil {
-			refreshed, err := pool.Primary().GetUserByID(ctx, user.ID)
-			if err != nil {
-				if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) {
-					return stats, err
-				}
-				stats.Failed++
-				stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的主账号关系失败: %v", fallbackUserName(user), err))
-				continue
-			}
-			user = refreshed
+		stats.SkippedUsers += skippedUsers
+		stats.Issues = append(stats.Issues, skippedIssues...)
+		if len(tasks) == 0 {
+			return stats, nil
 		}
-		resolvedUsers = append(resolvedUsers, user)
-	}
-	tasks, skippedUsers, skippedIssues, err := m.archiveUserTasks(ctx, cfg, resolvedUsers)
-	if err != nil {
-		return stats, err
-	}
-	stats.SkippedUsers += skippedUsers
-	stats.Issues = append(stats.Issues, skippedIssues...)
-	if len(tasks) == 0 {
-		return stats, nil
 	}
 
 	progressJob := job
@@ -1210,7 +1490,6 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		stats.Issues = append(stats.Issues, delta.Issues...)
 	}
 
-	completed := 0
 	lastProgressWrite := time.Time{}
 	// saveProgress 用于进度类中间状态，按 progressWriteInterval 节流（P1），丢弃中间
 	// 更新不会影响正确性：终态由 finishTask/completeArchive 即时写入。
@@ -1228,8 +1507,8 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 	}
 	// finishTask 每完成一个用户即时写入：写放大主要来自"每个媒体"的进度保存；
 	// 每用户的完成事件频率低，即时写入可让进度条保持准确。
-	finishTask := func() {
-		completed++
+	finishTask := func(done int) {
+		completed = done
 		progressJob.Status = storage.JobResolving
 		progressJob.Progress = start + (end-start)*float64(completed)/float64(len(tasks))
 		progressJob.Message = fmt.Sprintf("已同步用户 %d/%d", completed, len(tasks))
@@ -1237,33 +1516,52 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		m.save(saveCtx, progressJob)
 	}
 
-	for _, task := range tasks {
+	sliceStart := time.Now()
+	sliceStartIndex := completed
+	for index := completed; index < len(tasks); index++ {
+		task := tasks[index]
+		// 只在用户边界让出：本用户的数据与失败队列已提交，下一个切片从这里继续。
+		// 至少处理一个用户，避免预算为 0 时在同一位置反复让出。
+		if index > sliceStartIndex && time.Since(sliceStart) >= archiveSliceBudget {
+			if err := m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, index, stats); err != nil {
+				return stats, err
+			}
+			return stats, errYieldExecution
+		}
 		if err := ctx.Err(); err != nil {
+			// 关停/取消：尽力保存边界进度，恢复时不必从头开始。
+			_ = m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, index, stats)
 			return stats, err
 		}
 		saveProgress(
 			storage.JobResolving,
 			fmt.Sprintf("同步用户 %d/%d @%s", task.order+1, len(tasks), fallbackUserName(task.user)),
 		)
-		delta, err := m.archiveUser(ctx, saveCtx, job, cfg, pool, task.user, listEntity, func(message string) {
+		delta, err := m.archiveUserWithBudget(ctx, saveCtx, job, cfg, pool, task.user, listEntity, func(message string) {
 			saveProgress(storage.JobDownloading, message)
-		})
+		}, func() bool { return time.Since(sliceStart) >= archiveSliceBudget })
 		addStats(delta)
 		if err != nil {
 			var pathError *os.PathError
 			var linkError *os.LinkError
 			if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) ||
 				(!errors.As(err, &pathError) && !errors.As(err, &linkError)) {
+				// 限流中止等：保存已完成用户，任务重新入队后从下一个用户继续。
+				_ = m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, index, stats)
 				return stats, err
 			}
 			// 单用户文件系统错误记录后继续；存储等基础设施错误必须上抛。
 			stats.Failed++
 			stats.Issues = append(stats.Issues, fmt.Sprintf("归档 @%s 失败: %v", fallbackUserName(task.user), err))
 			log.Printf("archiveUser @%s: %v", fallbackUserName(task.user), err)
-			finishTask()
+			finishTask(index + 1)
 			continue
 		}
-		finishTask()
+		finishTask(index + 1)
+	}
+	// 全部用户完成：删除检查点，下一次运行重新获取/排序。
+	if err := m.store.DeleteJobCheckpoint(saveCtx, job.ID); err != nil {
+		return stats, err
 	}
 	return stats, nil
 }
@@ -1333,6 +1631,13 @@ func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, us
 }
 
 func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, listEntity *storage.ListEntity, updateDownloading func(message string)) (archiveStats, error) {
+	return m.archiveUserWithBudget(ctx, saveCtx, job, cfg, pool, user, listEntity, updateDownloading, nil)
+}
+
+// archiveUserWithBudget 是 archiveUser 的带时间预算版本。shouldYield 非空时，媒体
+// 时间线每处理完一页就检查一次；到预算后在页边界保存游标并返回 errYieldExecution，
+// 让大账号不必一次占满唯一执行槽。
+func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, listEntity *storage.ListEntity, updateDownloading func(message string), shouldYield func() bool) (archiveStats, error) {
 	stats := archiveStats{}
 	release, waited, err := m.lockUser(ctx, user.ID)
 	if err != nil {
@@ -1373,50 +1678,185 @@ func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job 
 		stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的媒体时间线失败: 没有可用 X 客户端", fallbackUserName(user)))
 		return stats, nil
 	}
+	if job.ArchiveMode.IncludesTweets() {
+		return m.archiveFullTimeline(ctx, saveCtx, job, cfg, pool, user, entity, dir, updateDownloading)
+	}
 
 	opts := parserOptionsFromConfig(cfg)
-	if cfg.IncrementalArchive {
-		// 增量归档（配置开关）：从上次成功位置早停，节省 X API 配额。游标随每次
-		// 归档无条件写入，因此开关切换后无需迁移即可生效。
-		opts.StopAtTweetID = entity.LastSeenTweetID
+	scheduled := job.Source.Normalized() == storage.JobSourceSchedule
+	fullScan := true
+	if scheduled {
+		// 定时运行默认增量早停（与全局 IncrementalArchive 开关无关）：媒体数没增长
+		// 的用户直接跳过，不发时间线请求；每 7 天仍为该用户安排一次全量扫描，
+		// 覆盖"删一条又发一条数量不变"、补预览图等增量检测看不到的变化。
+		fullScan = mediaFullScanDue(entity, time.Now())
+		if !fullScan {
+			if user.MediaCount > 0 && entity.MediaCount.Valid && user.MediaCount <= int(entity.MediaCount.Int64) {
+				stats.SkippedUsers++
+				return stats, nil
+			}
+			opts.StopAtTweetID = entity.LastSeenTweetID
+		}
 	}
-	tweets, fetchStats, err := pool.GetUserMediaWithOptionsStats(ctx, user, opts)
+	// 手动运行始终全量（opts.StopAtTweetID 保持为空）。
+
+	downloaded, err := m.archiveMediaTimeline(ctx, saveCtx, job, cfg, pool, user, entity, dir, opts, updateDownloading, shouldYield)
+	stats.merge(downloaded)
 	if err != nil {
-		if isCancellation(ctx, err) {
+		if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) || errors.Is(err, errYieldExecution) {
 			return stats, err
 		}
-		if shouldAbortArchiveUsers(err) {
+		// 单个用户的时间线错误（解析失败/游标异常等）不拖垮整个批次；分页游标已按
+		// 已处理页保存，下一轮从这里继续。
+		if _, limited := xclient.RateLimitRetryAt(err); limited {
 			return stats, err
 		}
 		stats.Failed++
 		stats.Issues = append(stats.Issues, fmt.Sprintf("读取 @%s 的媒体时间线失败: %v", fallbackUserName(user), err))
 		return stats, nil
 	}
-	if fetchStats.SkippedTweets > 0 {
-		// 单条推文解析失败被 xclient 跳过（毒丸）：只记 Issue，任务继续；游标靠
-		// fetchStats.LastSeenTweetID 越过它们，避免下一轮重复抓同一页。
-		stats.Issues = append(stats.Issues, fmt.Sprintf("跳过 @%s 的 %d 条无法解析的推文", fallbackUserName(user), fetchStats.SkippedTweets))
+	if err := m.syncUserMediaCount(saveCtx, entity.ID, user.MediaCount); err != nil {
+		return stats, err
 	}
-	if len(tweets) == 0 {
-		// 没有可用推文也必须推进游标，否则毒丸是哪一轮的最新推文就会永远重扫。
-		if fetchStats.LastSeenTweetID != "" && newerTweetID(fetchStats.LastSeenTweetID, entity.LastSeenTweetID) {
-			if err := m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, fetchStats.LastSeenTweetID); err != nil {
-				return stats, err
-			}
+	if fullScan {
+		if err := m.store.UpdateUserEntityLastFullScan(saveCtx, entity.ID, time.Now().UTC()); err != nil {
+			return stats, err
 		}
-		return stats, m.syncUserMediaCount(saveCtx, entity.ID, user.MediaCount)
 	}
-	downloaded, err := m.archiveTweetsWithSeen(ctx, saveCtx, job, cfg, user, entity, dir, tweets, updateDownloading, fetchStats.LastSeenTweetID)
-	stats.Tweets += downloaded.Tweets
-	stats.Downloaded += downloaded.Downloaded
-	stats.SkippedUsers += downloaded.SkippedUsers
-	stats.SkippedMedia += downloaded.SkippedMedia
-	stats.Failed += downloaded.Failed
-	stats.Issues = append(stats.Issues, downloaded.Issues...)
+	return stats, nil
+}
+
+// mediaFullScanInterval 是定时任务对单个用户执行一次全量媒体扫描的周期。各用户的
+// 完成时间不同，因此全量扫描自然错开，不会每周集中到同一次运行。
+const mediaFullScanInterval = 7 * 24 * time.Hour
+
+func mediaFullScanDue(entity storage.UserEntity, now time.Time) bool {
+	if !entity.LastFullScanAt.Valid {
+		return true
+	}
+	return now.Sub(entity.LastFullScanAt.Time) >= mediaFullScanInterval
+}
+
+// archiveMediaTimeline 按页抓取 UserMedia 时间线：每页媒体处理完（可重试失败已写入
+// 失败队列）才保存下一页游标；整轮成功结束后才推进 user_entities.last_seen_tweet_id。
+// 限流/分段让出最多丢掉尚未处理的那一页，恢复时从保存的页继续。
+func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, entity storage.UserEntity, dir string, opts parser.ParseOptions, update func(string), shouldYield func() bool) (archiveStats, error) {
+	stats := archiveStats{}
+	state, err := m.store.GetMediaSync(saveCtx, user.ID)
 	if err != nil {
 		return stats, err
 	}
-	return stats, m.syncUserMediaCount(saveCtx, entity.ID, user.MediaCount)
+	stopID := opts.StopAtTweetID
+	if state.StopID != stopID {
+		// 全量/增量边界变化后旧页码不再有意义（全量必须从顶部开始）。
+		state.Cursor = ""
+		state.StopID = stopID
+		state.Count = 0
+	}
+	state.Status = "running"
+	state.Error = ""
+	if err := m.store.SaveMediaSync(saveCtx, state); err != nil {
+		return stats, err
+	}
+	startCursor := state.Cursor
+
+	for attempt := 0; attempt < 2; attempt++ {
+		runStats := archiveStats{}
+		pageNewest := ""
+		walkStats, walkErr := pool.WalkUserMedia(ctx, user, xclient.UserMediaTimelineOptions{
+			Cursor: state.Cursor,
+			StopID: stopID,
+			Parse:  opts,
+		}, func(page xclient.UserMediaTimelinePage) error {
+			if update != nil {
+				update(fmt.Sprintf("媒体归档 @%s：%d", fallbackUserName(user), state.Count+len(page.Tweets)))
+			}
+			delta, err := m.archiveTweetsBatch(ctx, saveCtx, job, cfg, user, entity, dir, page.Tweets, update)
+			if err != nil {
+				return err
+			}
+			runStats.merge(delta)
+			state.Count += len(page.Tweets)
+			if len(page.Tweets) > 0 {
+				if newest := newestTweetID(page.Tweets); newerTweetID(newest, pageNewest) {
+					pageNewest = newest
+				}
+			}
+			if page.Complete {
+				// 整轮完成后游标清空；增量游标在下一轮成功结束后才前移。
+				state.Cursor = ""
+				state.Status = "completed"
+			} else {
+				state.Cursor = page.Cursor
+				state.Status = "running"
+			}
+			state.StopID = stopID
+			state.Error = ""
+			if newerTweetID(pageNewest, state.LastSeenTweetID) {
+				state.LastSeenTweetID = pageNewest
+			}
+			if err := m.store.SaveMediaSync(saveCtx, state); err != nil {
+				return err
+			}
+			if !page.Complete && shouldYield != nil && shouldYield() {
+				state.Status = "interrupted"
+				state.Error = errYieldExecution.Error()
+				if err := m.store.SaveMediaSync(saveCtx, state); err != nil {
+					return err
+				}
+				return errYieldExecution
+			}
+			return nil
+		})
+		if walkStats.SkippedTweets > 0 {
+			// 单条推文解析失败被 xclient 跳过（毒丸）：只记 Issue，继续翻页；最终游标
+			// 会用 walkStats.LastSeenTweetID 越过它们。
+			runStats.Issues = append(runStats.Issues, fmt.Sprintf("跳过 @%s 的 %d 条无法解析的推文", fallbackUserName(user), walkStats.SkippedTweets))
+		}
+		stats.merge(runStats)
+		if walkErr == nil {
+			cursor := state.LastSeenTweetID
+			if newerTweetID(walkStats.LastSeenTweetID, cursor) {
+				cursor = walkStats.LastSeenTweetID
+			}
+			if newerTweetID(pageNewest, cursor) {
+				cursor = pageNewest
+			}
+			if err := m.advanceUserCursor(saveCtx, entity.ID, cursor); err != nil {
+				return stats, err
+			}
+			return stats, nil
+		}
+
+		// 中断时也保留本轮已经见到的最大 ID，供最终增量游标合并（游标仍不推进）。
+		if newerTweetID(walkStats.LastSeenTweetID, state.LastSeenTweetID) {
+			state.LastSeenTweetID = walkStats.LastSeenTweetID
+		}
+		if errors.Is(walkErr, errYieldExecution) || isCancellation(ctx, walkErr) {
+			state.Status = "interrupted"
+			state.Error = walkErr.Error()
+			_ = m.store.SaveMediaSync(saveCtx, state)
+			return stats, walkErr
+		}
+		if attempt == 0 && startCursor != "" && xclient.IsInvalidTimelineCursor(walkErr) {
+			// 保存的游标已失效：清空后从第 0 页重翻。已下载的媒体会被去重跳过。
+			state.Cursor = ""
+			state.StopID = stopID
+			state.Count = 0
+			state.Status = "running"
+			state.Error = ""
+			if saveErr := m.store.SaveMediaSync(saveCtx, state); saveErr != nil {
+				return stats, saveErr
+			}
+			startCursor = ""
+			continue
+		}
+		state.Status = "interrupted"
+		state.Error = walkErr.Error()
+		_ = m.store.SaveMediaSync(saveCtx, state)
+		return stats, walkErr
+	}
+	return stats, errors.New("媒体时间线游标连续失效")
 }
 
 // archiveTweets 下载一批时间线推文的媒体，并推进该用户的增量游标。
@@ -1433,8 +1873,57 @@ func (m *Manager) archiveTweets(ctx context.Context, saveCtx context.Context, jo
 // （含被 xclient 跳过的解析失败推文）。游标取它与成功解析推文 ID 的较大者，保证毒丸不会
 // 让增量归档退化为全量重扫。
 func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string), seenLastID string) (archiveStats, error) {
+	stats, err := m.archiveTweetsBatch(ctx, saveCtx, job, cfg, user, entity, dir, tweets, updateDownloading)
+	if err != nil {
+		return stats, err
+	}
+	if job.ArchiveMode.IncludesTweets() || len(tweets) == 0 {
+		return stats, nil
+	}
+	// 游标取本轮见到的最新推文 ID（数值最大）。timeline 按时间倒序，但首页可能含
+	// 置顶推文（ID 较旧却排在最前），若用 tweets[0].ID 作游标，下次增量归档会在首页
+	// 对其精确命中而立即早停，漏掉比置顶更新的推文。无论开关是否开启都写入，切换
+	// 开关后游标始终可用。写入失败需上抛日志，否则增量归档会因游标缺失而全量重扫。
+	//
+	// 策略：本函数成功返回时（可重试失败已入队、不可解析媒体只记 Issue）无条件推进
+	// 游标——否则一条长期失败的推文会让"增量归档"退化为每次全量扫描。真正需要阻塞
+	// 推进的只有"失败未能入队/写入失败"，那些路径直接 return error（本轮不写游标）。
+	cursor := newestTweetID(tweets)
+	if newerTweetID(seenLastID, cursor) {
+		cursor = seenLastID
+	}
+	return stats, m.advanceUserCursor(saveCtx, entity.ID, cursor)
+}
+
+// archiveTweetsBatch 处理一批时间线推文的正文/媒体，但不推进增量游标。媒体时间线
+// 按页调用它：每页的失败已写入失败队列后再保存分页游标，整轮结束后才统一前移游标。
+func (m *Manager) archiveTweetsBatch(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string)) (archiveStats, error) {
 	stats := archiveStats{Tweets: len(tweets)}
 	for _, tweet := range tweets {
+		if err := m.store.RememberMediaContext(saveCtx, tweet); err != nil {
+			return stats, err
+		}
+		if job.ArchiveMode.IncludesTweets() {
+			status := "pending"
+			if job.ArchiveMode == storage.ArchiveTweets || len(tweet.Media) == 0 {
+				status = "not_requested"
+			}
+			if err := m.store.ArchiveTweet(saveCtx, job.ID, tweet, status); err != nil {
+				return stats, err
+			}
+			if job.ArchiveMode == storage.ArchiveTweets {
+				continue
+			}
+		} else {
+			status := "pending"
+			if len(tweet.Media) == 0 {
+				status = "not_requested"
+			}
+			if err := m.store.ArchiveTweetMediaOnly(saveCtx, job.ID, tweet, status); err != nil {
+				return stats, err
+			}
+		}
+		tweetErrors := []string{}
 		for mediaIndex, media := range tweet.Media {
 			if ctx.Err() != nil {
 				return stats, context.Canceled
@@ -1446,6 +1935,7 @@ func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Con
 				// 退避被反复重试而永不清理），也不阻塞增量游标（否则该用户会永久全量
 				// 重扫）。是否重新解析取决于 xclient 未来能否给出可下载地址。
 				stats.Failed++
+				tweetErrors = append(tweetErrors, "媒体未解析到下载地址")
 				stats.Issues = append(stats.Issues, fmt.Sprintf("推文 %s 的媒体 %d 未解析到下载地址", tweet.ID, mediaIndex+1))
 				continue
 			}
@@ -1463,6 +1953,7 @@ func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Con
 					return stats, fmt.Errorf("磁盘写入失败，中止归档: %w", err)
 				}
 				stats.Failed++
+				tweetErrors = append(tweetErrors, err.Error())
 				if _, recordErr := m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()}); recordErr != nil {
 					return stats, recordErr
 				}
@@ -1478,33 +1969,47 @@ func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Con
 			} else {
 				stats.Downloaded++
 			}
+			if result.unavailable {
+				tweetErrors = append(tweetErrors, "媒体永久不可用")
+				stats.Failed++
+			}
+			if err := m.store.LinkRelatedTweetMedia(saveCtx, job.ID, tweet, media); err != nil {
+				return stats, err
+			}
 		}
-	}
-	if len(tweets) > 0 {
-		// 游标取本轮见到的最新推文 ID（数值最大）。timeline 按时间倒序，但首页可能含
-		// 置顶推文（ID 较旧却排在最前），若用 tweets[0].ID 作游标，下次增量归档会在首页
-		// 对其精确命中而立即早停，漏掉比置顶更新的推文。无论开关是否开启都写入，切换
-		// 开关后游标始终可用。写入失败需上抛日志，否则增量归档会因游标缺失而全量重扫。
-		//
-		// 策略：本函数成功返回时（可重试失败已入队、不可解析媒体只记 Issue）无条件推进
-		// 游标——否则一条长期失败的推文会让"增量归档"退化为每次全量扫描。真正需要阻塞
-		// 推进的只有"失败未能入队/写入失败"，那些路径直接 return error（本轮不写游标）。
-		cursor := newestTweetID(tweets)
-		if newerTweetID(seenLastID, cursor) {
-			cursor = seenLastID
+		status := "completed"
+		if len(tweetErrors) > 0 {
+			status = "partial"
 		}
-		// 游标只前进不回退：并发/重扫场景下（例如同一用户被两个任务先后处理，或上层传入
-		// 的 entity 快照较旧）不能让一次旧结果把已推进的游标写回去，否则会重复归档。
-		if current, err := m.store.GetUserEntity(saveCtx, entity.ID); err != nil {
+		if len(tweet.Media) == 0 {
+			status = "not_requested"
+		}
+		if err := m.store.SetTweetMediaResult(saveCtx, job.ID, tweet.ID, status, strings.Join(tweetErrors, "; ")); err != nil {
 			return stats, err
-		} else if newerTweetID(current.LastSeenTweetID, cursor) {
-			cursor = current.LastSeenTweetID
 		}
-		if err := m.store.UpdateUserEntityLastSeenTweet(saveCtx, entity.ID, cursor); err != nil {
-			return stats, err
+		if status == "completed" {
+			if err := m.store.DeleteFailedTweetsByTweetID(saveCtx, tweet.ID); err != nil {
+				return stats, err
+			}
 		}
 	}
 	return stats, nil
+}
+
+// advanceUserCursor 只前进不回退：并发/重扫场景下（例如同一用户被两个任务先后处理，
+// 或上层传入的 entity 快照较旧）不能让一次旧结果把已推进的游标写回去。
+func (m *Manager) advanceUserCursor(ctx context.Context, entityID int64, cursor string) error {
+	if cursor == "" {
+		return nil
+	}
+	current, err := m.store.GetUserEntity(ctx, entityID)
+	if err != nil {
+		return err
+	}
+	if newerTweetID(current.LastSeenTweetID, cursor) {
+		cursor = current.LastSeenTweetID
+	}
+	return m.store.UpdateUserEntityLastSeenTweet(ctx, entityID, cursor)
 }
 
 func (m *Manager) lockUser(ctx context.Context, userID string) (func(), bool, error) {
@@ -1567,9 +2072,15 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 		return 0, err
 	}
 	retried := 0
-	for _, item := range items {
+	sliceStart := time.Now()
+	for index, item := range items {
 		if ctx.Err() != nil {
 			return retried, ctx.Err()
+		}
+		// 时间预算到点在条目边界让出。每条目的状态在处理结束时已写入/删除，
+		// 重新入队后继续剩余条目，"全部重试"的语义不变（只是分成多个切片）。
+		if index > 0 && time.Since(sliceStart) >= retrySliceBudget {
+			return retried, errYieldExecution
 		}
 		entity, err := m.store.GetUserEntity(saveCtx, item.EntityID)
 		if err != nil {
@@ -1585,6 +2096,15 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 			}
 			continue
 		}
+		if fresh, refreshErr := m.parser.ParseTweetLinkWithClient(ctx, tweet.URL, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg)); refreshErr == nil && downloadableMediaCount(fresh) > 0 {
+			tweet.Media = mergeRefreshedMedia(tweet.Media, fresh.Media)
+		}
+		if ctx.Err() != nil {
+			return retried, ctx.Err()
+		}
+		if err := m.store.RememberMediaContext(saveCtx, tweet); err != nil {
+			return retried, err
+		}
 		target, err := filestore.New(cfg)
 		if err != nil {
 			if touchErr := m.store.TouchFailedTweet(saveCtx, item.ID, err.Error()); touchErr != nil {
@@ -1595,21 +2115,26 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 		dir := target.Join(entity.ParentDir, entity.Name)
 		failed := false
 		downloadable := false
+		succeeded := 0
+		var mediaErrors []string
 		var lastErr error
 		for index, media := range tweet.Media {
 			mediaURL := bestMediaURL(media)
 			if mediaURL == "" {
 				// 该媒体不可解析，跳过它继续处理同一推文的其它媒体；若整条推文都没有
 				// 可下载媒体，重试永远不会成功，直接清理队列条目（见下方 downloadable）。
+				mediaErrors = append(mediaErrors, "媒体未解析到下载地址")
 				continue
 			}
 			downloadable = true
 			// 跳过已下载的媒体，避免重试时把之前已成功的部分再下一遍。
-			if _, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL); err != nil {
+			result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, index), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL)
+			if err != nil {
 				var databaseError interface{ Code() int }
 				if isCancellation(ctx, err) || errors.As(err, &databaseError) {
 					return retried, err
 				}
+				mediaErrors = append(mediaErrors, err.Error())
 				// 只有确实永久失效（404/410/DMCA）才写入 unavailable_media：该表以
 				// media_url 为键且对所有推文生效，一旦写错就永久拦截。X 对过期的
 				// video.twimg.com 签名例行返回裸 403，那是瞬时状态，必须留在失败
@@ -1630,6 +2155,27 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 				failed, lastErr = true, err
 				break
 			}
+			if result.unavailable {
+				mediaErrors = append(mediaErrors, "媒体永久不可用")
+			} else {
+				succeeded++
+			}
+			if err := m.store.LinkRelatedTweetMedia(saveCtx, item.JobID, tweet, media); err != nil {
+				return retried, err
+			}
+		}
+		if len(tweet.Media) == 0 {
+			mediaErrors = append(mediaErrors, "媒体未解析到下载地址")
+		}
+		status := "completed"
+		if len(mediaErrors) > 0 {
+			status = "failed"
+			if succeeded > 0 {
+				status = "partial"
+			}
+		}
+		if err := m.store.SetTweetMediaResult(saveCtx, item.JobID, tweet.ID, status, strings.Join(mediaErrors, "; ")); err != nil {
+			return retried, err
 		}
 		if !downloadable {
 			// 没有任何可下载地址：写一条失败媒体记录留痕后删除队列条目，避免它按
@@ -1646,7 +2192,9 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 			if err := m.store.DeleteFailedTweet(saveCtx, item.ID); err != nil {
 				return retried, err
 			}
-			retried++
+			if len(mediaErrors) == 0 {
+				retried++
+			}
 		} else if ctx.Err() == nil {
 			// 重试失败的条目续期排到队尾，避免持续失败的头部条目永远挡住后面的条目。
 			if err := m.store.TouchFailedTweet(saveCtx, item.ID, lastErr.Error()); err != nil {
@@ -1864,6 +2412,7 @@ func (m *Manager) syncUserMediaCount(ctx context.Context, entityID int64, mediaC
 }
 
 func (m *Manager) completeArchive(ctx context.Context, job storage.Job, stats archiveStats, retried int) {
+	_ = m.store.DeleteJobCheckpoint(ctx, job.ID)
 	remainingFailedTweets, err := m.store.CountFailedTweetsForJob(ctx, job.ID)
 	if stats.Failed > 0 || err != nil || remainingFailedTweets > 0 {
 		job.Status = storage.JobCompletedWithErrors
@@ -1877,7 +2426,19 @@ func (m *Manager) completeArchive(ctx context.Context, job storage.Job, stats ar
 }
 
 func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, err error) {
+	// 账号池全部限流不是任务失败：把任务放回队列并设置冷却时间，立即释放执行槽。
+	// 限额恢复后同一任务会从已提交的进度/检查点继续。
+	if retryAt, ok := xclient.RateLimitRetryAt(err); ok {
+		if !m.rateLimitDeferExceeded(job, retryAt) {
+			if m.requeueForRateLimit(ctx, job, retryAt) {
+				return
+			}
+		} else {
+			err = fmt.Errorf("限流累计推迟超过 %s，任务不再重试: %w", maxRateLimitDefer, err)
+		}
+	}
 	err = queryIDStaleHint(err)
+	_ = m.store.DeleteJobCheckpoint(ctx, job.ID)
 	if mediaURL != "" {
 		_, _ = m.store.CreateFailedMedia(ctx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()})
 	}
@@ -1886,6 +2447,37 @@ func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, er
 	job.Message = "任务失败"
 	job.Error = err.Error()
 	m.save(ctx, job)
+}
+
+// rateLimitDeferExceeded 判断本次限流等待是否会让任务累计推迟超过上限。
+func (m *Manager) rateLimitDeferExceeded(job storage.Job, retryAt time.Time) bool {
+	wait := time.Until(retryAt)
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return time.Duration(job.DeferredSeconds)*time.Second+wait > maxRateLimitDefer
+}
+
+// requeueForRateLimit 把限流任务置为 pending 并推迟到 retryAt。返回 true 表示已经
+// 处理（包括任务在此期间被用户取消/进入终态，无需再写失败态）。
+func (m *Manager) requeueForRateLimit(ctx context.Context, job storage.Job, retryAt time.Time) bool {
+	wait := time.Until(retryAt)
+	if wait < time.Second {
+		wait = time.Second
+	}
+	message := fmt.Sprintf("账号池限流，累计推迟约 %s，约 %s 后继续",
+		(time.Duration(job.DeferredSeconds)*time.Second + wait).Round(time.Second), wait.Round(time.Second))
+	updated, err := m.store.RequeueJobAtWithDefer(ctx, job.ID, retryAt, message, wait)
+	if err != nil {
+		log.Printf("requeue rate-limited job %d: %v", job.ID, err)
+		return false
+	}
+	if updated == nil {
+		// 已被取消或进入终态：不要把它改写成 failed。
+		return true
+	}
+	m.publishJob(ctx, "job.updated", *updated)
+	return true
 }
 
 func (m *Manager) save(ctx context.Context, job storage.Job) {

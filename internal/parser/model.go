@@ -36,12 +36,17 @@ type Author struct {
 }
 
 type TweetData struct {
-	ID        string    `json:"id"`
-	URL       string    `json:"url"`
-	Text      string    `json:"text"`
-	CreatedAt time.Time `json:"createdAt"`
-	Author    Author    `json:"author"`
-	Media     []Media   `json:"media"`
+	ID               string      `json:"id"`
+	URL              string      `json:"url"`
+	Text             string      `json:"text"`
+	CreatedAt        time.Time   `json:"createdAt"`
+	Author           Author      `json:"author"`
+	Media            []Media     `json:"media"`
+	ConversationID   string      `json:"conversationId,omitempty"`
+	ReplyToID        string      `json:"replyToId,omitempty"`
+	QuotedTweetID    string      `json:"quotedTweetId,omitempty"`
+	RetweetedTweetID string      `json:"retweetedTweetId,omitempty"`
+	Related          []TweetData `json:"related,omitempty"`
 }
 
 func (tweet TweetData) BestMediaURLs() []string {

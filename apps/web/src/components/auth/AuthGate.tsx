@@ -4,9 +4,9 @@ import { LogIn, RefreshCw, UserPlus } from "lucide-react";
 import React, { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getLoginSession, loginAccount, type LoginSession } from "../../lib/api";
 import { saveSessionToken, sessionInvalidatedEvent, sessionTokenKey } from "../../lib/session";
-import { Button } from "../ui/Button";
-import { Field, Input } from "../ui/Input";
-import { Spinner } from "../ui/Spinner";
+import { Button } from "@douyinfe/semi-ui";
+import { Field, Input } from "../semi";
+import { Spinner } from "../semi";
 
 export const AccountContext = createContext("");
 
@@ -137,7 +137,7 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
         <Input type="password" autoComplete="new-password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)} minLength={8} required disabled={pending} />
       </Field>}
       {error && <p role="alert" className="break-words text-sm text-danger-strong">{error}</p>}
-      <Button type="submit" variant="primary" block loading={pending} icon={setup ? <UserPlus className="size-4" /> : <LogIn className="size-4" />}>
+      <Button htmlType="submit" theme="solid" block loading={pending} disabled={pending} aria-busy={pending} icon={setup ? <UserPlus className="size-4" /> : <LogIn className="size-4" />}>
         {setup ? t("创建账号") : t("登录")}
       </Button>
     </form>

@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { TooltipProvider } from "./components/ui/Overlay";
+import { TooltipProvider } from "./components/semi";
 import type { Job } from "./lib/api";
 
 // jsdom 没有 EventSource / matchMedia，这里给最小桩。

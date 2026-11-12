@@ -106,7 +106,12 @@ const sqliteOpenOptions = "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma
 // v5：archive_schedules.claim_version（计划领取整数乐观锁）、download_roots.last_seen_at
 // （可信根上限/最近使用清理）；同时 DROP 只写不读的 user_previous_names 及其触发器。
 // v6: app_account stores the single local login and its persistent session key.
-const schemaVersion = 6
+// v7: tweets/archive asset pipeline tables (already present in v7).
+// v8: jobs.enqueued_at/source/available_at（排队公平性与限流冷却让出执行槽）、
+// job_checkpoints 表（长任务分段执行的检查点）。
+// v9: jobs.deferred_seconds（限流累计推迟上限）、user_entities.last_full_scan_at
+// （定时任务每 7 天的全量扫描基线）、media_sync 表（媒体时间线逐页游标）。
+const schemaVersion = 9
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -297,11 +302,40 @@ CREATE TABLE IF NOT EXISTS jobs (
 	message TEXT NOT NULL DEFAULT '',
 	error TEXT NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL,
-	updated_at DATETIME NOT NULL
+	updated_at DATETIME NOT NULL,
+	enqueued_at DATETIME NOT NULL,
+	enqueue_ns INTEGER NOT NULL DEFAULT 0,
+	available_at DATETIME,
+	available_ns INTEGER NOT NULL DEFAULT 0,
+	source TEXT NOT NULL DEFAULT 'manual',
+	deferred_seconds INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs (created_at DESC, id DESC);
+-- 领取查询：status + available_ns 过滤，再按 enqueue_ns/id 排序。
+CREATE INDEX IF NOT EXISTS idx_jobs_pending_queue ON jobs (status, available_ns, enqueue_ns, id);
+
+-- job_checkpoints 保存长任务的分段进度（用户边界等）。payload 为 JSON，随任务删除。
+CREATE TABLE IF NOT EXISTS job_checkpoints (
+	job_id INTEGER PRIMARY KEY,
+	payload TEXT NOT NULL,
+	updated_at DATETIME NOT NULL,
+	FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+
+-- media_sync 保存每个用户的媒体时间线逐页游标。限流/分段让出后从下一页继续，
+-- 已下载的媒体由 downloads 去重跳过；整轮完成后再写 user_entities.last_seen_tweet_id。
+CREATE TABLE IF NOT EXISTS media_sync (
+	user_id TEXT PRIMARY KEY,
+	cursor TEXT NOT NULL DEFAULT '',
+	stop_id TEXT NOT NULL DEFAULT '',
+	last_seen_tweet_id TEXT NOT NULL DEFAULT '',
+	count INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL DEFAULT '',
+	error TEXT NOT NULL DEFAULT '',
+	updated_at DATETIME NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS archive_schedules (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,6 +417,7 @@ CREATE INDEX IF NOT EXISTS idx_downloads_created_at
 		latest_release_time DATETIME,
 		media_count INTEGER,
 		last_seen_tweet_id TEXT NOT NULL DEFAULT '',
+		last_full_scan_at DATETIME,
 		updated_at DATETIME NOT NULL,
 		UNIQUE(user_id, parent_dir),
 		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -483,6 +518,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return err
 	}
 	if err := s.addMissingIndexes(); err != nil {
+		return err
+	}
+	if err := s.migrateArchive(); err != nil {
+		return err
+	}
+	if err := s.migrateAssets(); err != nil {
 		return err
 	}
 	return s.setSchemaVersion()
@@ -603,6 +644,16 @@ func (s *Store) addMissingColumns() error {
 			return err
 		}
 	}
+	// user_entities：定时任务每 7 天全量扫描一次的基线（v9）。
+	var hasLastFullScan int
+	if err := tx.Get(&hasLastFullScan, `SELECT COUNT(*) FROM pragma_table_info('user_entities') WHERE name = 'last_full_scan_at'`); err != nil {
+		return err
+	}
+	if hasLastFullScan == 0 {
+		if _, err := tx.Exec(`ALTER TABLE user_entities ADD COLUMN last_full_scan_at DATETIME`); err != nil {
+			return err
+		}
+	}
 	var hasPreviewURL int
 	if err := tx.Get(&hasPreviewURL, `SELECT COUNT(*) FROM pragma_table_info('downloads') WHERE name = 'preview_url'`); err != nil {
 		return err
@@ -667,6 +718,89 @@ func (s *Store) addMissingColumns() error {
 	}
 	if hasRootSeenAt == 0 {
 		if _, err := tx.Exec(`ALTER TABLE download_roots ADD COLUMN last_seen_at DATETIME`); err != nil {
+			return err
+		}
+	}
+	// jobs：排队公平性与限流冷却（v8）。历史行没有入队时间，用 created_at 回填，
+	// 使升级后的旧排队任务不会因 NULL 排到最前/最后。
+	var hasEnqueuedAt int
+	if err := tx.Get(&hasEnqueuedAt, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'enqueued_at'`); err != nil {
+		return err
+	}
+	if hasEnqueuedAt == 0 {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN enqueued_at DATETIME`); err != nil {
+			return err
+		}
+	}
+	var hasAvailableAt int
+	if err := tx.Get(&hasAvailableAt, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'available_at'`); err != nil {
+		return err
+	}
+	if hasAvailableAt == 0 {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN available_at DATETIME`); err != nil {
+			return err
+		}
+	}
+	var hasJobSource int
+	if err := tx.Get(&hasJobSource, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'source'`); err != nil {
+		return err
+	}
+	if hasJobSource == 0 {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`); err != nil {
+			return err
+		}
+	}
+	// jobs：整数排序/冷却键（v8）。避免依赖 SQLite 对 RFC3339Nano 的解析。
+	var hasEnqueueNS int
+	if err := tx.Get(&hasEnqueueNS, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'enqueue_ns'`); err != nil {
+		return err
+	}
+	if hasEnqueueNS == 0 {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN enqueue_ns INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	var hasAvailableNS int
+	if err := tx.Get(&hasAvailableNS, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'available_ns'`); err != nil {
+		return err
+	}
+	if hasAvailableNS == 0 {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN available_ns INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	// jobs：限流累计推迟时长（v9）。
+	var hasDeferredSeconds int
+	if err := tx.Get(&hasDeferredSeconds, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'deferred_seconds'`); err != nil {
+		return err
+	}
+	if hasDeferredSeconds == 0 {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN deferred_seconds INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	// 幂等回填：若上次在 ALTER 与回填之间崩溃，这里仍会补上。
+	if _, err := tx.Exec(`UPDATE jobs SET enqueued_at = created_at WHERE enqueued_at IS NULL OR enqueued_at = ''`); err != nil {
+		return err
+	}
+	// enqueue_ns 需要 Go 侧解析时间：SQLite 日期函数不接受驱动写入的 9 位小数秒。
+	type legacyJob struct {
+		ID         int64     `db:"id"`
+		CreatedAt  time.Time `db:"created_at"`
+		EnqueuedAt time.Time `db:"enqueued_at"`
+	}
+	var pendingNS []legacyJob
+	if err := tx.Select(&pendingNS, `
+SELECT id, created_at, COALESCE(enqueued_at, created_at) AS enqueued_at
+FROM jobs WHERE enqueue_ns = 0`); err != nil {
+		return err
+	}
+	for _, row := range pendingNS {
+		at := row.EnqueuedAt
+		if at.IsZero() {
+			at = row.CreatedAt
+		}
+		if _, err := tx.Exec(`UPDATE jobs SET enqueue_ns = ? WHERE id = ?`, at.UnixNano(), row.ID); err != nil {
 			return err
 		}
 	}
@@ -1258,7 +1392,23 @@ func (s *Store) seedDownloadRoots(ctx context.Context) error {
 	stored = stored.Normalized()
 	effective := config.EffectiveDownloadDir(stored)
 	keep := make([]string, 0, 2)
-	for _, root := range []string{stored.DownloadDir, effective} {
+	roots := []string{stored.DownloadDir, effective}
+	var documents []string
+	if err := s.db.SelectContext(ctx, &documents, `SELECT document FROM storage_versions`); err != nil {
+		return err
+	}
+	for _, raw := range documents {
+		var document config.StorageDocument
+		if err := json.Unmarshal([]byte(raw), &document); err != nil {
+			return err
+		}
+		for _, target := range document.Targets {
+			if target.Type == "local" || target.Type == "nas" {
+				roots = append(roots, target.Root)
+			}
+		}
+	}
+	for _, root := range roots {
 		if strings.TrimSpace(root) == "" {
 			continue
 		}
@@ -1279,6 +1429,63 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 		}
 		keep = append(keep, clean)
 	}
+	// Pre-v4 databases did not register historical roots. Recover only the
+	// immediate parents of existing, regular, recorded media files, once. This
+	// never promotes a filesystem/home root or follows a file symlink.
+	var recovered int
+	if err := s.db.GetContext(ctx, &recovered, `SELECT COUNT(*) FROM schema_migrations WHERE name='recover_recorded_download_roots'`); err != nil {
+		return err
+	}
+	if recovered == 0 {
+		knownRoots, err := s.DownloadRoots(ctx)
+		if err != nil {
+			return err
+		}
+		var paths []string
+		if err := s.db.SelectContext(ctx, &paths, `SELECT DISTINCT file_path FROM downloads WHERE file_path<>''`); err != nil {
+			return err
+		}
+		unresolved := false
+		for _, filePath := range paths {
+			if !filepath.IsAbs(filePath) || !IsLibraryMediaPath(filePath) {
+				continue
+			}
+			covered := false
+			for _, root := range knownRoots {
+				if relative, err := filepath.Rel(root, filePath); err == nil && filepath.IsLocal(relative) {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				continue
+			}
+			info, err := os.Lstat(filePath)
+			if err != nil {
+				unresolved = true
+				continue
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			root := filepath.Dir(filepath.Clean(filePath))
+			resolvedRoot, err := filepath.EvalSymlinks(root)
+			if err != nil || !sameFilesystemPath(root, resolvedRoot) {
+				continue
+			}
+			if err := validateTrustedDownloadRoot(root); err != nil {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO download_roots(path,last_seen_at) VALUES(?,?) ON CONFLICT(path) DO NOTHING`, root, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+		if !unresolved {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migrations(name,applied_at) VALUES('recover_recorded_download_roots',?) ON CONFLICT(name) DO NOTHING`, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+	}
 	if _, err := s.PruneDownloadRoots(ctx, keep); err != nil {
 		return err
 	}
@@ -1286,7 +1493,7 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 }
 
 // PruneDownloadRoots 清理可信下载根表：删除不可信根（`/`、家目录等历史遗留值），并把
-// 数量限制在 MaxDownloadRoots。keep 中的根永远保留；其余按 last_seen_at 降序（最近使用），
+// 未被文件引用的根数量限制在 MaxDownloadRoots。keep 和下载记录仍引用的根永远保留；其余按 last_seen_at 降序，
 // 同时间按路径长度降序（更长/更具体的根优先）。返回删除行数。
 func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, error) {
 	type rootRow struct {
@@ -1313,17 +1520,24 @@ func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, err
 	}
 	candidates := make([]candidate, 0, len(rows))
 	remove := make([]string, 0)
+	keptCount := 0
 	for _, row := range rows {
 		clean := filepath.Clean(row.Path)
-		if _, ok := keepSet[clean]; ok {
-			candidates = append(candidates, candidate{path: row.Path, lastSeen: row.LastSeen.Time, kept: true})
-			continue
-		}
 		if rootErr := validateTrustedDownloadRoot(row.Path); rootErr != nil {
 			remove = append(remove, row.Path)
 			continue
 		}
-		candidates = append(candidates, candidate{path: row.Path, lastSeen: row.LastSeen.Time})
+		_, kept := keepSet[clean]
+		if !kept {
+			prefix := strings.TrimRight(clean, `/\`) + string(filepath.Separator)
+			if err := s.db.GetContext(ctx, &kept, `SELECT EXISTS(SELECT 1 FROM downloads WHERE substr(file_path,1,?)=?)`, utf8.RuneCountInString(prefix), prefix); err != nil {
+				return 0, err
+			}
+		}
+		if kept {
+			keptCount++
+		}
+		candidates = append(candidates, candidate{path: row.Path, lastSeen: row.LastSeen.Time, kept: kept})
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].kept != candidates[j].kept {
@@ -1338,8 +1552,8 @@ func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, err
 		return candidates[i].path < candidates[j].path
 	})
 	limit := MaxDownloadRoots
-	if len(keepSet) > limit {
-		limit = len(keepSet)
+	if keptCount > limit {
+		limit = keptCount
 	}
 	for index := limit; index < len(candidates); index++ {
 		remove = append(remove, candidates[index].path)
@@ -1353,12 +1567,18 @@ func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, err
 }
 
 func (s *Store) CreateJob(ctx context.Context, kind JobKind, input string, title string) (Job, error) {
+	return s.CreateJobFromSource(ctx, kind, input, title, JobSourceManual)
+}
+
+// CreateJobFromSource 创建任务并显式标记来源。enqueued_at 与 created_at 都取当前时间；
+// 自动重试复用旧行时必须调用 Requeue* 刷新 enqueued_at，而不是依赖 created_at。
+func (s *Store) CreateJobFromSource(ctx context.Context, kind JobKind, input string, title string, source JobSource) (Job, error) {
 	now := time.Now().UTC()
 	job := Job{}
 	err := s.db.GetContext(ctx, &job, `
-INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
-VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-RETURNING *`, kind, JobPending, input, title, "排队中", now, now)
+INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source)
+VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+RETURNING *`, kind, JobPending, input, title, "排队中", now, now, now, now.UnixNano(), source.Normalized())
 	return job, err
 }
 
@@ -1404,20 +1624,42 @@ func (s *Store) ClaimPendingJobs(ctx context.Context, limit int) ([]Job, error) 
 	if limit > 64 {
 		limit = 64
 	}
+	now := time.Now().UTC()
+	// 排序键是 enqueued_at（最近一次入队），而不是 created_at（首次创建）：自动重试
+	// 复用旧行并刷新 enqueued_at 后，不会凭首次创建时间插到新手动任务前面。
+	// 各来源附加固定“迟到量”形成加权轮转：manual 立即参与，schedule/auto_retry/
+	// maintenance 依次靠后；但这些任务等待越久，enqueued_at 越早，最终仍会越过
+	// 新入队的低优先级任务，从而获得有保证的执行份额（不会饥饿）。
 	rows, err := s.db.QueryxContext(ctx, `
 	UPDATE jobs SET
 		status = ?,
 		progress = ?,
 		message = ?,
 		error = '',
+		available_at = NULL,
+		available_ns = 0,
 		updated_at = ?
 	WHERE id IN (
 		SELECT id FROM jobs
 		WHERE status = ?
-		ORDER BY created_at ASC
+		  AND (available_ns = 0 OR available_ns <= ?)
+		ORDER BY
+			-- 整数纳秒保留完整精度；各来源附加固定“迟到量”形成加权轮转：
+			-- manual 立即参与，schedule/auto_retry/maintenance 依次靠后，但等待
+			-- 越久 enqueue_ns 越小，最终仍会越过新入队的低优先级任务。
+			-- 偏移量与"一个批次排空时间"同量级：手动任务立即参与；后台任务
+			-- 等够 30/60/120 分钟后 enqueue_ns 自然追平并越过新入队任务。
+			enqueue_ns +
+			CASE source
+				WHEN 'schedule' THEN 1800000000000
+				WHEN 'auto_retry' THEN 3600000000000
+				WHEN 'maintenance' THEN 7200000000000
+				ELSE 0
+			END ASC,
+			id ASC
 		LIMIT ?
 	)
-	RETURNING *`, JobResolving, 0.1, "正在解析", time.Now().UTC(), JobPending, limit)
+	RETURNING *`, JobResolving, 0.1, "正在解析", now, JobPending, now.UnixNano(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1519,11 +1761,15 @@ SELECT COUNT(*) FROM jobs WHERE kind = ? AND input = ? AND status IN (`+activeJo
 	now := time.Now().UTC()
 	retried := Job{}
 	if err := tx.GetContext(ctx, &retried, `
-INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
-VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-RETURNING *`, job.Kind, JobPending, job.Input, job.Title, "排队中", now, now); err != nil {
+INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source)
+VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+RETURNING *`, job.Kind, JobPending, job.Input, job.Title, "排队中", now, now, now, now.UnixNano(), JobSourceManual); err != nil {
 		return Job{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET archive_mode=?, backfill=? WHERE id=?`, job.ArchiveMode, job.Backfill, retried.ID); err != nil {
+		return Job{}, err
+	}
+	retried.ArchiveMode, retried.Backfill = job.ArchiveMode, job.Backfill
 	if err := tx.Commit(); err != nil {
 		return Job{}, err
 	}
@@ -1531,16 +1777,23 @@ RETURNING *`, job.Kind, JobPending, job.Input, job.Title, "排队中", now, now)
 }
 
 func (s *Store) RequeueInterruptedJobs(ctx context.Context) ([]Job, error) {
+	now := time.Now().UTC()
+	// 中断恢复重新入队：刷新 enqueued_at 让它们与启动后新建任务公平竞争；
+	// 清空 available_at 立即恢复执行。
 	rows, err := s.db.QueryxContext(ctx, `
 	UPDATE jobs SET
 		status = ?,
 		progress = 0,
 		message = ?,
 		error = '',
+		available_at = NULL,
+		available_ns = 0,
+		enqueued_at = ?,
+		enqueue_ns = ?,
 		updated_at = ?
 	WHERE status IN (`+interruptedStatusesSQL+`)
 	RETURNING *`,
-		JobPending, "上次运行中断，等待恢复", time.Now().UTC())
+		JobPending, "上次运行中断，等待恢复", now, now.UnixNano(), now)
 	if err != nil {
 		return nil, err
 	}
@@ -1557,7 +1810,56 @@ func (s *Store) RequeueInterruptedJobs(ctx context.Context) ([]Job, error) {
 	return jobs, rows.Err()
 }
 
+// RequeueJobAt 把仍在活动中的任务重新置为 pending，并在 availableAt 之前不再领取。
+// 用于两类让出调度槽的场景：
+//   - 账号池全部限流：避免任务在唯一执行槽里等待 15 分钟，冷却结束后再竞争；
+//   - 长任务分段：在用户/批次边界保存检查点后让出，让其他任务获得执行机会。
+//
+// 刷新 enqueued_at，使刚让出的任务与新建任务公平排队；available_at 负责冷却。
+// 用户取消（canceled）或已终态的任务不会被复活，此时返回 (nil, nil)。
+func (s *Store) RequeueJobAt(ctx context.Context, id int64, availableAt time.Time, message string) (*Job, error) {
+	return s.requeueJobAt(ctx, id, availableAt, message, 0)
+}
+
+// RequeueJobAtWithDefer 与 RequeueJobAt 相同，并把本次等待时长累加到 deferred_seconds。
+// 只用于限流重排：累计值达到调用方上限后，任务应明确失败而不是无限推迟。
+func (s *Store) RequeueJobAtWithDefer(ctx context.Context, id int64, availableAt time.Time, message string, deferFor time.Duration) (*Job, error) {
+	return s.requeueJobAt(ctx, id, availableAt, message, int64(deferFor/time.Second))
+}
+
+func (s *Store) requeueJobAt(ctx context.Context, id int64, availableAt time.Time, message string, deferSeconds int64) (*Job, error) {
+	now := time.Now().UTC()
+	if deferSeconds < 0 {
+		deferSeconds = 0
+	}
+	job := Job{}
+	err := s.db.GetContext(ctx, &job, `
+UPDATE jobs SET
+	status = ?,
+	message = ?,
+	error = '',
+	available_at = ?,
+	available_ns = ?,
+	enqueued_at = ?,
+	enqueue_ns = ?,
+	deferred_seconds = deferred_seconds + ?,
+	updated_at = ?
+WHERE id = ? AND status IN (`+activeJobStatusesSQL+`)
+RETURNING *`, JobPending, message, availableAt.UTC(), availableAt.UTC().UnixNano(), now, now.UnixNano(), deferSeconds, now, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (s *Store) CreateJobs(ctx context.Context, drafts []JobDraft) ([]Job, error) {
+	return s.createJobs(ctx, drafts, true)
+}
+
+func (s *Store) createJobs(ctx context.Context, drafts []JobDraft, dedupe bool) ([]Job, error) {
 	if len(drafts) == 0 {
 		return []Job{}, nil
 	}
@@ -1568,7 +1870,7 @@ func (s *Store) CreateJobs(ctx context.Context, drafts []JobDraft) ([]Job, error
 	}
 	defer tx.Rollback()
 
-	jobs, err := s.insertJobs(ctx, tx, drafts, "排队中", now)
+	jobs, err := s.insertJobs(ctx, tx, drafts, "排队中", now, dedupe)
 	if err != nil {
 		return nil, err
 	}
@@ -1578,21 +1880,60 @@ func (s *Store) CreateJobs(ctx context.Context, drafts []JobDraft) ([]Job, error
 	return jobs, nil
 }
 
-func (s *Store) insertJobs(ctx context.Context, tx *sqlx.Tx, drafts []JobDraft, message string, now time.Time) ([]Job, error) {
+func (s *Store) insertJobs(ctx context.Context, tx *sqlx.Tx, drafts []JobDraft, message string, now time.Time, dedupe bool) ([]Job, error) {
 	if len(drafts) == 0 {
 		return []Job{}, nil
 	}
+	if dedupe {
+		// 入队去重：相同 kind+input 已有活动任务（pending/resolving/downloading）时不再插入。
+		// 批量创建与计划触发的目标清单常有重复（多个计划/一次粘贴多行），重复任务只会
+		// 各自占用执行槽并重复请求 X 接口。RetryJob 已有同样的检查，这里补齐批量路径。
+		type activeJobKey struct {
+			Kind  JobKind `db:"kind"`
+			Input string  `db:"input"`
+		}
+		activeRows := []activeJobKey{}
+		if err := tx.SelectContext(ctx, &activeRows, `
+SELECT kind, input FROM jobs WHERE status IN (`+activeJobStatusesSQL+`)`); err != nil {
+			return nil, err
+		}
+		active := make(map[string]struct{}, len(activeRows))
+		for _, row := range activeRows {
+			active[string(row.Kind)+"\x00"+row.Input] = struct{}{}
+		}
+		filtered := make([]JobDraft, 0, len(drafts))
+		seen := make(map[string]struct{}, len(drafts))
+		for _, draft := range drafts {
+			key := string(draft.Kind) + "\x00" + draft.Input
+			if _, exists := active[key]; exists {
+				continue
+			}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			filtered = append(filtered, draft)
+		}
+		if len(filtered) == 0 {
+			return []Job{}, nil
+		}
+		drafts = filtered
+	}
+
 	var query strings.Builder
 	query.WriteString(`
-INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at)
+INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source, archive_mode, backfill)
 VALUES `)
-	args := make([]any, 0, len(drafts)*7)
+	args := make([]any, 0, len(drafts)*10)
 	for index, draft := range drafts {
 		if index > 0 {
 			query.WriteString(",")
 		}
-		query.WriteString("(?, ?, ?, ?, 0, ?, ?, ?)")
-		args = append(args, draft.Kind, JobPending, draft.Input, draft.Title, message, now, now)
+		if !draft.ArchiveMode.Valid() {
+			return nil, ErrValidation("无效的归档模式")
+		}
+		query.WriteString("(?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, draft.Kind, JobPending, draft.Input, draft.Title, message, now, now, now, now.UnixNano(), draft.Source.Normalized(), draft.ArchiveMode.Normalized(), draft.Backfill)
 	}
 	query.WriteString(" RETURNING *")
 
@@ -1810,11 +2151,17 @@ WHERE id = ?`,
 		return nil, err
 	}
 
+	// 到期自动触发属于后台来源；用户点“立即运行”走 CreateJobsForArchiveSchedule
+	// （requireEnabled=false），按手动任务优先响应。
+	source := JobSourceManual
+	if requireEnabled {
+		source = JobSourceSchedule
+	}
 	drafts := make([]JobDraft, 0, len(schedule.Items))
 	for _, item := range schedule.Items {
-		drafts = append(drafts, JobDraft{Kind: item.Kind, Input: item.Input, Title: item.Title})
+		drafts = append(drafts, JobDraft{Kind: item.Kind, Input: item.Input, Title: item.Title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, Source: source})
 	}
-	jobs, err := s.insertJobs(ctx, tx, drafts, "定时归档排队中", runAt)
+	jobs, err := s.insertJobs(ctx, tx, drafts, "定时归档排队中", runAt, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2720,6 +3067,15 @@ UPDATE user_entities SET last_seen_tweet_id = ?, updated_at = ? WHERE id = ?`,
 	return err
 }
 
+// UpdateUserEntityLastFullScan 记录一次成功完成的全量媒体扫描，供定时任务判断
+// 该用户是否已超过 7 天未全量扫描。
+func (s *Store) UpdateUserEntityLastFullScan(ctx context.Context, id int64, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE user_entities SET last_full_scan_at = ?, updated_at = ? WHERE id = ?`,
+		at.UTC(), time.Now().UTC(), id)
+	return err
+}
+
 func (s *Store) UpsertList(ctx context.Context, list List) (List, error) {
 	now := time.Now().UTC()
 	err := s.db.GetContext(ctx, &list, `
@@ -2933,9 +3289,9 @@ SELECT * FROM jobs WHERE kind = ? AND input = ? ORDER BY id DESC LIMIT 1`,
 	if errors.Is(err, sql.ErrNoRows) {
 		inserted := Job{}
 		if err := tx.GetContext(ctx, &inserted, `
-INSERT INTO jobs(kind, status, input, title, progress, message, error, created_at, updated_at)
-VALUES (?, ?, ?, '自动重试失败推文', 0, '排队中', '', ?, ?)
-RETURNING *`, JobKindFailedRetry, JobPending, AutomaticFailedRetryInput, now, now); err != nil {
+INSERT INTO jobs(kind, status, input, title, progress, message, error, created_at, updated_at, enqueued_at, enqueue_ns, source)
+VALUES (?, ?, ?, '自动重试失败推文', 0, '排队中', '', ?, ?, ?, ?, ?)
+RETURNING *`, JobKindFailedRetry, JobPending, AutomaticFailedRetryInput, now, now, now, now.UnixNano(), JobSourceAutoRetry); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -2951,10 +3307,16 @@ RETURNING *`, JobKindFailedRetry, JobPending, AutomaticFailedRetryInput, now, no
 		return nil, tx.Commit()
 	}
 	reset := Job{}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_storage WHERE job_id=?`, current.ID); err != nil {
+		return nil, err
+	}
+	// 复用旧行时必须刷新 enqueued_at：否则本轮重试会凭原始 created_at 反复插到
+	// 新建手动任务前面（P0 的核心问题）。
 	if err := tx.GetContext(ctx, &reset, `
-UPDATE jobs SET status = ?, progress = 0, message = ?, error = '', updated_at = ?
+UPDATE jobs SET status = ?, progress = 0, message = ?, error = '', available_at = NULL,
+	available_ns = 0, enqueued_at = ?, enqueue_ns = ?, source = ?, updated_at = ?
 WHERE id = ? AND status NOT IN (`+activeJobStatusesSQL+`)
-RETURNING *`, JobPending, "排队中", now, current.ID); err != nil {
+RETURNING *`, JobPending, "排队中", now, now.UnixNano(), JobSourceAutoRetry, now, current.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// 事务是 immediate 的，正常不会发生；保守地当成"已被别人领取"。
 			return nil, tx.Commit()
@@ -3063,6 +3425,11 @@ func (s *Store) DeleteFailedTweet(ctx context.Context, id int64) error {
 	return err
 }
 
+func (s *Store) DeleteFailedTweetsByTweetID(ctx context.Context, tweetID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM failed_tweets WHERE tweet_id = ?`, tweetID)
+	return err
+}
+
 func (s *Store) DeleteAllFailedTweets(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM failed_tweets`)
 	return err
@@ -3118,6 +3485,9 @@ func prepareArchiveScheduleForSave(schedule ArchiveSchedule) (ArchiveSchedule, e
 	items := make([]ArchiveScheduleItem, 0, len(schedule.Items))
 	seen := map[string]struct{}{}
 	for _, item := range schedule.Items {
+		if !item.ArchiveMode.Valid() {
+			return ArchiveSchedule{}, ErrValidation("无效的归档模式")
+		}
 		item.Input = strings.TrimSpace(item.Input)
 		item.Title = strings.TrimSpace(item.Title)
 		if item.Input == "" {

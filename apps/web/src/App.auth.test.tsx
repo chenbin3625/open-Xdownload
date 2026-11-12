@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
-import { TooltipProvider } from "./components/ui/Overlay";
+import { TooltipProvider } from "./components/semi";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
@@ -82,7 +82,7 @@ it("keeps login across reloads and clears it after a password change", async () 
   await userEvent.type(screen.getByLabelText("当前密码"), "initial-password");
   await userEvent.type(screen.getByLabelText("新密码"), "replacement-password");
   await userEvent.type(screen.getByLabelText("确认新密码"), "replacement-password");
-  await userEvent.click(screen.getByRole("button", { name: "修改密码" }));
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "修改密码" }));
   expect(await screen.findByRole("heading", { name: "登录" })).toBeTruthy();
   expect(Object.values(localStorage)).not.toContain("permanent-token");
   const passwordRequest = fetchMock.mock.calls.find(([path]) => path === "/api/auth/password");

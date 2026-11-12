@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Field, Input, NumberInput, PasswordInput, Textarea } from "./Input";
+import { Field, Input, NumberInput, PasswordInput, Textarea } from "../semi";
 
 describe("Input", () => {
   it("onPressEnter 只在回车时触发", async () => {
@@ -100,10 +100,11 @@ describe("NumberInput", () => {
 
     const input = screen.getByLabelText("并发数");
     input.focus();
-    await user.keyboard("{ArrowUp}");
+    fireEvent.keyDown(input, { key: "ArrowUp", keyCode: 38 });
     expect((input as HTMLInputElement).value).toBe("6");
 
-    await user.keyboard("{ArrowDown}{ArrowDown}");
+    fireEvent.keyDown(input, { key: "ArrowDown", keyCode: 40 });
+    fireEvent.keyDown(input, { key: "ArrowDown", keyCode: 40 });
     expect((input as HTMLInputElement).value).toBe("2");
   });
 });

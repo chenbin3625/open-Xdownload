@@ -7,6 +7,7 @@ export type SectionKey =
   | "tasks"
   | "schedules"
   | "gallery"
+  | "tweets"
   | "settings";
 
 /** 任务中心的状态筛选（客户端过滤当前页，进 URL 只为刷新/分享还原）。 */
@@ -51,6 +52,7 @@ export const sectionRoutes: Record<SectionKey, string> = {
   tasks: "/tasks",
   schedules: "/schedules",
   gallery: "/gallery",
+  tweets: "/tweets",
   settings: "/settings",
 };
 
@@ -62,6 +64,7 @@ export const routeSections: Record<string, SectionKey> = {
   "/tasks": "tasks",
   "/schedules": "schedules",
   "/gallery": "gallery",
+  "/tweets": "tweets",
   "/settings": "settings",
 };
 
@@ -126,6 +129,8 @@ export function buildRoutePath(state: RouteQueryState) {
     if (gallery.kind !== "all") params.set("kind", gallery.kind);
     if (gallery.user && gallery.user !== "all") params.set("user", gallery.user);
     if (gallery.search) params.set("q", gallery.search);
+  } else if (section === "tweets" && typeof window !== "undefined" && window.location.pathname === "/tweets") {
+    new URLSearchParams(window.location.search).forEach((value, key) => params.set(key, value));
   }
 
   const query = params.toString();

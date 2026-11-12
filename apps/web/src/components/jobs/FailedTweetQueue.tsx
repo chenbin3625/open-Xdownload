@@ -11,23 +11,19 @@ import {
   type FailedTweet,
 } from "../../lib/api";
 import {
-  AppEmpty,
   AppPagination,
   CopyButton,
-  EllipsisText,
   ListSkeleton,
   LoadingSurface,
-  Stack,
-  Toolbar,
   failedTweetPageSizeOptions,
   formatDateTime,
   notifyError,
 } from "../common/CommonUI";
-import { Button } from "../ui/Button";
-import { Popconfirm } from "../ui/Overlay";
-import { Tag } from "../ui/Tag";
-import { Alert } from "../ui/Feedback";
-import { toast } from "../ui/Toast";
+import { Button, Empty, Typography } from "@douyinfe/semi-ui";
+import { Popconfirm } from "../semi";
+import { Tag } from "../semi";
+import { Alert } from "../semi";
+import { toast } from "../semi";
 import { dashboardMetaQueryRoot, failedTweetQueryRoot, jobsQueryRoot } from "../../lib/api";
 
 export function FailedTweetQueue({ total }: { total: number }) {
@@ -92,18 +88,18 @@ export function FailedTweetQueue({ total }: { total: number }) {
   });
 
   return (
-    <Stack size={12}>
-      <Toolbar>
+    <div className="flex w-full flex-col gap-3">
+      <div className="flex w-full flex-wrap items-center justify-between gap-2">
         <span className="text-xs text-fg-muted">
           {pagination.total > 0 ? t("共 {{value0}} 条失败记录", { value0: pagination.total }) : t("暂无失败记录")}
         </span>
         <div className="flex items-center gap-2">
           <Button
-            size="sm"
-            variant="secondary"
+            type="tertiary"
             icon={<RotateCcw className="size-3.5" />}
             loading={retryAll.isPending}
-            disabled={pagination.total === 0}
+            disabled={pagination.total === 0 || retryAll.isPending}
+            aria-busy={retryAll.isPending}
             onClick={() => retryAll.mutate()}
           >
             {t("全部重试")}</Button>
@@ -116,16 +112,16 @@ export function FailedTweetQueue({ total }: { total: number }) {
             onConfirm={() => clearAll.mutate()}
           >
             <Button
-              size="sm"
-              variant="danger"
+              type="danger"
               icon={<Trash2 className="size-3.5" />}
               loading={clearAll.isPending}
-              disabled={pagination.total === 0}
+              disabled={pagination.total === 0 || clearAll.isPending}
+              aria-busy={clearAll.isPending}
             >
               {t("清空")}</Button>
           </Popconfirm>
         </div>
-      </Toolbar>
+      </div>
 
       {failedTweetsQuery.isError ? (
         <Alert
@@ -135,9 +131,10 @@ export function FailedTweetQueue({ total }: { total: number }) {
           description={failedTweetsQuery.error.message}
           action={
             <Button
-              size="sm"
-              variant="default"
+              type="tertiary"
               loading={failedTweetsQuery.isFetching}
+              disabled={failedTweetsQuery.isFetching}
+              aria-busy={failedTweetsQuery.isFetching}
               onClick={() => void failedTweetsQuery.refetch()}
             >
               {t("重试")}</Button>
@@ -146,7 +143,7 @@ export function FailedTweetQueue({ total }: { total: number }) {
       ) : failedTweetsQuery.isLoading && pageItems.length === 0 ? (
         <ListSkeleton rows={pageSize} />
       ) : pageItems.length === 0 ? (
-        <AppEmpty description={t("暂无失败推文")} />
+        <Empty description={t("暂无失败推文")} className="py-8" />
       ) : (
         <LoadingSurface loading={failedTweetsQuery.isFetching}>
           <div className="divide-y divide-line rounded-card border border-line bg-surface">
@@ -165,9 +162,13 @@ export function FailedTweetQueue({ total }: { total: number }) {
                         {item.userScreenName ? `@${item.userScreenName}` : item.userId || t("未知用户")}
                       </Tag>
                     </div>
-                    <EllipsisText type="danger" title={item.error} className="text-xs">
+                    <Typography.Text
+                      type="danger"
+                      title={item.error}
+                      className="block max-w-full truncate text-xs"
+                    >
                       {item.error || t("未知错误")}
-                    </EllipsisText>
+                    </Typography.Text>
                     <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
                       <span className="font-mono">{t("推文 ")}{item.tweetId}</span>
                       <span>{formatDateTime(item.updatedAt || item.createdAt)}</span>
@@ -186,10 +187,12 @@ export function FailedTweetQueue({ total }: { total: number }) {
                     onConfirm={() => removeOne.mutate(item.id)}
                   >
                     <Button
-                      size="sm"
-                      variant="ghost"
+                      theme="borderless"
+                      type="danger"
                       icon={<Trash2 className="size-3.5 text-danger" />}
                       loading={removeOne.isPending && removeOne.variables === item.id}
+                      disabled={removeOne.isPending && removeOne.variables === item.id}
+                      aria-busy={removeOne.isPending && removeOne.variables === item.id}
                       aria-label={t("删除此条记录")}
                     />
                   </Popconfirm>
@@ -211,6 +214,6 @@ export function FailedTweetQueue({ total }: { total: number }) {
           setPageSize(nextPageSize);
         }}
       />
-    </Stack>
+    </div>
   );
 }

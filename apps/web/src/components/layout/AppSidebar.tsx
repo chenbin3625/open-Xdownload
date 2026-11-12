@@ -6,13 +6,12 @@ import {
   Settings,
   TriangleAlert,
   ListChecks,
+  FileText,
 } from "lucide-react";
-import React from "react";
+import React, { useLayoutEffect, useRef } from "react";
+import { Button, Divider, Nav, Tooltip } from "@douyinfe/semi-ui";
 import { cn } from "../../lib/cn";
 import type { SectionKey } from "../../lib/useRouteState";
-import { Button } from "../ui/Button";
-import { Divider } from "../ui/Feedback";
-import { Tooltip } from "../ui/Overlay";
 
 export interface AppSidebarProps {
   activeSection: SectionKey;
@@ -36,6 +35,7 @@ export function AppSidebar({
 }: AppSidebarProps) {
   useTranslation();
   const currentKey = taskCenterSections.includes(activeSection) ? "tasks" : activeSection;
+  const sidebar = useRef<HTMLElement>(null);
 
   const navItems: {
     key: SectionKey;
@@ -57,6 +57,7 @@ export function AppSidebar({
       icon: <Images className="size-4 shrink-0" />,
       label: t("媒体归档"),
     },
+    { key: "tweets", icon: <FileText className="size-4 shrink-0" />, label: t("archive.title") },
     {
       key: "settings",
       icon: <Settings className="size-4 shrink-0" />,
@@ -64,44 +65,26 @@ export function AppSidebar({
     },
   ];
 
+  useLayoutEffect(() => {
+    sidebar.current?.querySelector('[role="menu"]')?.setAttribute("aria-label", t("主导航"));
+    sidebar.current?.querySelectorAll('[role="menuitem"]').forEach((element, index) => {
+      if (navItems[index]?.key === currentKey) element.setAttribute("aria-current", "page"); else element.removeAttribute("aria-current");
+    });
+  });
+
   return (
-    <aside className="flex min-h-full w-full shrink-0 flex-col justify-between border-r border-line/80 bg-surface/90 backdrop-blur-md select-none lg:w-48">
+    <aside ref={sidebar} className="app-sidebar flex min-h-full w-full shrink-0 flex-col justify-between border-r border-line bg-surface select-none lg:w-56">
       <div className="p-3">
         {/* 品牌区 */}
         <div className="flex items-center gap-2.5 px-1 pt-1 pb-3">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-600 text-base font-bold text-brand-contrast shadow-sm shadow-brand-500/30">
-            𝕏
-          </span>
+          <img src="/icon.svg" alt="" className="size-8 shrink-0" />
           <div className="min-w-0">
             <div className="truncate text-sm font-bold tracking-tight text-fg">open-Xdownload</div>
             <p className="text-[11px] text-fg-muted font-medium truncate">{t("推文多媒体归档工作台")}</p>
           </div>
         </div>
 
-        {/* 手写导航列表：单选语义用 aria-current 表达，不需要 Menu 的全部键盘模型 */}
-        <nav aria-label={t("主导航")} className="mt-1 flex flex-col gap-1">
-          {navItems.map((item) => {
-            const active = item.key === currentKey;
-            return (
-              <button
-                key={item.key}
-                type="button"
-                aria-current={active ? "page" : undefined}
-                onClick={() => onSectionChange(item.key)}
-                className={cn(
-                  "flex h-11 cursor-pointer items-center gap-2.5 rounded-control px-2.5 lg:h-9",
-                  "text-sm transition-all duration-150 relative",
-                  active
-                    ? "bg-brand-500/10 font-semibold text-brand-500 border border-brand-500/20 shadow-2xs"
-                    : "text-fg-body hover:bg-surface-hover hover:text-fg border border-transparent",
-                )}
-              >
-                <span className={active ? "text-brand-500" : "text-fg-subtle"}>{item.icon}</span>
-                <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
+        <Nav aria-label={t("主导航")} selectedKeys={[currentKey]} onSelect={data => onSectionChange(data.itemKey as SectionKey)} items={navItems.map(item => ({ itemKey: item.key, text: item.label, icon: item.icon }))} style={{ border: 0, width: "100%" }} />
 
         {/* 失败推文入口 */}
         {failedTweetCount > 0 && (
@@ -113,7 +96,7 @@ export function AppSidebar({
                   <TriangleAlert className="size-3.5 text-danger" />
                   {t("失败队列")}</span>
               </div>
-              <Button variant="danger" size="sm" block onClick={onOpenFailedDrawer}>
+              <Button type="danger" block onClick={onOpenFailedDrawer}>
                 {t("处理失败")}</Button>
             </div>
           </>
@@ -131,7 +114,7 @@ export function AppSidebar({
             {storageType.toUpperCase()}
           </span>
         </div>
-        <Tooltip title={storagePath}>
+        <Tooltip content={storagePath}>
           <p className="truncate font-mono text-[11px] text-fg-muted hover:text-fg transition-colors">
             {storagePath || "/downloads"}
           </p>

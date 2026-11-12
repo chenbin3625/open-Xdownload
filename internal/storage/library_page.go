@@ -21,7 +21,7 @@ const (
 	DefaultLibraryPageSize = 60
 	// MaxLibraryPageSize 是分页请求 pageSize 的上限。
 	MaxLibraryPageSize = 200
-	// MaxDownloadRoots 是 download_roots 表中可信下载根的保留上限（见 PruneDownloadRoots）。
+	// MaxDownloadRoots caps unreferenced roots. Roots still used by downloads are retained.
 	MaxDownloadRoots = 32
 )
 

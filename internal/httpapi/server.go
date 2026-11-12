@@ -42,9 +42,9 @@ type Server struct {
 	bcryptSem chan struct{}
 }
 
-const maxLoginAttempts = 10              // 窗口内最大尝试次数
-const loginRateWindow = 5 * time.Minute  // 滑动窗口时长
-const maxConcurrentBcrypt = 2            // 并发 bcrypt 上限
+const maxLoginAttempts = 10             // 窗口内最大尝试次数
+const loginRateWindow = 5 * time.Minute // 滑动窗口时长
+const maxConcurrentBcrypt = 2           // 并发 bcrypt 上限
 
 func NewServer(store *storage.Store, parserService *parser.Service, manager *jobs.Manager, eventBus *jobs.EventBus) *Server {
 	return &Server{
@@ -99,6 +99,13 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/auth/login", s.login)
 	r.Put("/api/auth/password", s.changePassword)
 	read("/api/config", s.getConfig)
+	read("/api/storage", s.getStorage)
+	r.Put("/api/storage", s.updateStorage)
+	r.Post("/api/storage/preview", s.previewStoragePath)
+	r.Post("/api/storage/migrate", s.migrateStorage)
+	read("/api/assets/{assetID}", s.serveAsset)
+	read("/api/assets/derivatives/status", s.listDerivatives)
+	r.Post("/api/assets/derivatives/retry", s.retryDerivative)
 	r.Put("/api/config", s.updateConfig)
 	read("/api/local-directories", s.listLocalDirectories)
 	r.Post("/api/local-directories", s.createLocalDirectory)
@@ -118,6 +125,10 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/jobs/{id}/retry", s.retryJob)
 	read("/api/events", s.events)
 	read("/api/library/downloads", s.listDownloads)
+	read("/api/archive/tweets", s.listTweets)
+	read("/api/archive/tweets/{tweetID}", s.getTweet)
+	read("/api/archive/progress", s.tweetProgress)
+	r.Post("/api/archive/tweets/{tweetID}/retry-media", s.retryTweetMedia)
 	read("/api/library/downloads/{id}/file", s.serveDownloadFile)
 	read("/api/library/downloads/{id}/preview", s.serveDownloadPreview)
 	read("/api/library/file", s.serveLibraryFile)
@@ -446,7 +457,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	job, err := s.store.CreateJob(r.Context(), kind, input, title)
+	job, err := s.store.CreateArchiveJob(r.Context(), storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: req.ArchiveMode, Backfill: req.Backfill})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -484,7 +495,7 @@ func (s *Server) createJobsBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[key] = struct{}{}
-		prepared = append(prepared, storage.JobDraft{Kind: kind, Input: input, Title: title})
+		prepared = append(prepared, storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill})
 	}
 	if len(prepared) == 0 {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("没有可创建的任务"))
@@ -600,9 +611,11 @@ func (s *Server) runArchiveSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 type jobRequest struct {
-	Kind  storage.JobKind `json:"kind"`
-	Input string          `json:"input"`
-	Title string          `json:"title"`
+	Kind        storage.JobKind     `json:"kind"`
+	Input       string              `json:"input"`
+	Title       string              `json:"title"`
+	ArchiveMode storage.ArchiveMode `json:"archiveMode"`
+	Backfill    bool                `json:"backfill"`
 }
 
 type batchJobRequest struct {
@@ -663,6 +676,9 @@ type localDirectoryEntry struct {
 }
 
 func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKind, string, string, error) {
+	if !req.ArchiveMode.Valid() {
+		return "", "", "", storage.ErrValidation("无效的归档模式")
+	}
 	if req.Kind == "" {
 		req.Kind = storage.JobKindTweetLink
 	}
@@ -902,6 +918,7 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		if truncated {
 			w.Header().Set("X-Result-Truncated", "true")
 		}
+		s.enrichAssetURLs(r, items)
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
@@ -930,6 +947,7 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 			result.Items[index].FileURL = "/api/library/file?path=" + url.QueryEscape(result.Items[index].FilePath)
 		}
 	}
+	s.enrichAssetURLs(r, result.Items)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -937,6 +955,9 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if s.serveDownloadAsset(w, r, id, true) {
 		return
 	}
 	record, err := s.store.GetDownload(r.Context(), id)
@@ -960,6 +981,10 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := os.Stat(videoPath); err != nil {
 		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	if storage.IsLibraryMediaPath(videoPath) && !isVideoURL(videoPath) {
+		http.ServeFile(w, r, videoPath)
 		return
 	}
 	posterPath := videoPath + ".preview.jpg"
@@ -1355,6 +1380,9 @@ func (s *Server) serveDownloadFile(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if s.serveDownloadAsset(w, r, id, false) {
 		return
 	}
 	record, err := s.store.GetDownload(r.Context(), id)

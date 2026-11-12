@@ -1,40 +1,17 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Button } from "./Button";
-import { Checkbox, Select, Segmented, Switch, Tabs } from "./Controls";
-import { Field } from "./Input";
-import { SearchSelect } from "./SearchSelect";
+import { Checkbox, Select, Switch, Tabs } from "../semi";
+import { Field } from "../semi";
+import { SearchSelect } from "../semi";
 
 const options = [
   { value: "all", label: "全部" },
   { value: "user", label: "用户归档" },
   { value: "list", label: "列表归档" },
 ];
-
-describe("Segmented", () => {
-  it("暴露 radiogroup 语义并标记当前项", () => {
-    render(<Segmented value="user" onChange={() => {}} options={options} ariaLabel="视图" />);
-    expect(screen.getByRole("radiogroup", { name: "视图" })).not.toBeNull();
-    expect(screen.getByRole("radio", { name: "用户归档" }).getAttribute("aria-checked")).toBe("true");
-  });
-
-  it("点击其他项切换，点当前项不回传空值", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    render(<Segmented value="user" onChange={onChange} options={options} />);
-
-    await user.click(screen.getByRole("radio", { name: "列表归档" }));
-    expect(onChange).toHaveBeenCalledWith("list");
-
-    // ToggleGroup 允许取消选中，这里必须挡住空值，否则筛选器会被清空
-    onChange.mockClear();
-    await user.click(screen.getByRole("radio", { name: "用户归档" }));
-    expect(onChange).not.toHaveBeenCalledWith("");
-  });
-});
 
 describe("Switch", () => {
   it("点击回传布尔值", async () => {
@@ -118,8 +95,13 @@ describe("SearchSelect", () => {
     const user = userEvent.setup();
     render(<SearchSelect value="all" onChange={() => {}} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("button", { name: "筛选" }));
-    await user.type(screen.getByPlaceholderText("搜索..."), "列表");
+    await user.click(screen.getByRole("combobox", { name: "筛选" }));
+    const search = screen.getByRole("combobox", { name: "筛选 搜索..." });
+    expect(document.activeElement).toBe(search);
+    expect(search.getAttribute("aria-autocomplete")).toBe("list");
+    const list = document.getElementById(search.getAttribute("aria-controls")!);
+    expect(list?.getAttribute("role")).toBe("listbox");
+    await user.type(search, "列表");
 
     expect(screen.getAllByRole("option")).toHaveLength(1);
     expect(screen.getByRole("option", { name: "列表归档" })).not.toBeNull();
@@ -129,7 +111,7 @@ describe("SearchSelect", () => {
     const user = userEvent.setup();
     render(<SearchSelect value="all" onChange={() => {}} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("button", { name: "筛选" }));
+    await user.click(screen.getByRole("combobox", { name: "筛选" }));
     await user.type(screen.getByPlaceholderText("搜索..."), "zzz");
 
     expect(screen.queryAllByRole("option")).toHaveLength(0);
@@ -141,18 +123,18 @@ describe("SearchSelect", () => {
     const onChange = vi.fn();
     render(<SearchSelect value="all" onChange={onChange} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("button", { name: "筛选" }));
+    await user.click(screen.getByRole("combobox", { name: "筛选" }));
     const search = screen.getByPlaceholderText("搜索...");
-    expect(screen.getByRole("combobox", { name: "筛选" })).toBe(search);
+    expect(screen.getByRole("combobox", { name: "筛选" }).getAttribute("aria-expanded")).toBe("true");
     expect(document.activeElement).toBe(search);
 
-    await user.keyboard("{ArrowDown}");
+    fireEvent.keyDown(search, { key: "ArrowDown", keyCode: 40 });
     // aria-activedescendant 必须指向真实存在的 option，否则读屏读不出高亮
     const activeId = search.getAttribute("aria-activedescendant");
     expect(activeId).not.toBeNull();
     expect(document.getElementById(activeId as string)).not.toBeNull();
 
-    await user.keyboard("{Enter}");
+    fireEvent.keyDown(search, { key: "Enter", keyCode: 13 });
     expect(onChange).toHaveBeenCalledWith("user");
     expect(screen.queryByPlaceholderText("搜索...")).toBeNull();
   });
@@ -161,98 +143,16 @@ describe("SearchSelect", () => {
     const user = userEvent.setup();
     render(<SearchSelect value="list" onChange={() => {}} options={options} ariaLabel="筛选" />);
 
-    await user.click(screen.getByRole("button", { name: "筛选" }));
+    await user.click(screen.getByRole("combobox", { name: "筛选" }));
     expect(screen.getByRole("option", { name: "列表归档" }).getAttribute("aria-selected")).toBe(
       "true",
     );
   });
 
-  it("支持 sm 尺寸并渲染对应高度样式", () => {
+  it("使用 Semi 的 small 尺寸", () => {
     render(<SearchSelect value="all" size="sm" onChange={() => {}} options={options} ariaLabel="小号选择器" />);
-    const trigger = screen.getByRole("button", { name: "小号选择器" });
-    expect(trigger.className).toContain("h-7");
-    expect(trigger.className).toContain("text-xs");
+    const trigger = screen.getByRole("combobox", { name: "小号选择器" });
+    expect(trigger.className).toContain("semi-select-small");
   });
 });
 
-describe("Segmented", () => {
-  it("支持 md 尺寸并渲染对应高度样式", () => {
-    render(
-      <Segmented
-        size="md"
-        value="all"
-        onChange={() => {}}
-        options={[{ label: "全部", value: "all" }, { label: "进行中", value: "active" }]}
-      />,
-    );
-    const item = screen.getByRole("radio", { name: "全部" });
-    expect(item.className).toContain("h-7");
-    expect(item.className).toContain("text-sm");
-  });
-});
-
-describe("Button", () => {
-  it("无文本且带图标的按钮自动应用正方形尺寸样式", () => {
-    const { rerender } = render(
-      <Button size="sm" icon={<span data-testid="icon" />} aria-label="纯图标按钮" />,
-    );
-    const smButton = screen.getByRole("button", { name: "纯图标按钮" });
-    expect(smButton.className).toContain("size-7");
-    expect(smButton.className).toContain("p-0");
-    expect(smButton.className).toContain("rounded-control");
-
-    rerender(
-      <Button size="md" icon={<span data-testid="icon" />} aria-label="中号纯图标按钮" />,
-    );
-    const mdButton = screen.getByRole("button", { name: "中号纯图标按钮" });
-    expect(mdButton.className).toContain("size-9");
-    expect(mdButton.className).toContain("p-0");
-  });
-
-  it("circle 属性渲染 rounded-full", () => {
-    render(<Button circle icon={<span data-testid="icon" />} aria-label="圆按钮" />);
-    const circleBtn = screen.getByRole("button", { name: "圆按钮" });
-    expect(circleBtn.className).toContain("rounded-full");
-    expect(circleBtn.className).toContain("size-9");
-  });
-
-  it("loading 时禁用并标记 aria-busy", () => {
-    render(<Button loading>提交</Button>);
-    const button = screen.getByRole("button", { name: "提交" });
-    expect(button.hasAttribute("disabled")).toBe(true);
-    expect(button.getAttribute("aria-busy")).toBe("true");
-  });
-
-  it("loading 时不触发 onClick", async () => {
-    const user = userEvent.setup();
-    const onClick = vi.fn();
-    render(
-      <Button loading onClick={onClick}>
-        提交
-      </Button>,
-    );
-    await user.click(screen.getByRole("button", { name: "提交" }));
-    expect(onClick).not.toHaveBeenCalled();
-  });
-
-  it("asChild 把样式套到子元素上，不额外包一层按钮", () => {
-    render(
-      <Button asChild>
-        <a href="/docs">文档</a>
-      </Button>,
-    );
-    expect(screen.queryByRole("button")).toBeNull();
-    expect(screen.getByRole("link", { name: "文档" })).not.toBeNull();
-  });
-
-  it("asChild 支持 loading 状态", () => {
-    render(
-      <Button asChild loading>
-        <a href="/docs">文档</a>
-      </Button>,
-    );
-    const link = screen.getByRole("link", { name: "文档" });
-    expect(link.getAttribute("aria-busy")).toBe("true");
-    expect(link.getAttribute("aria-disabled")).toBe("true");
-  });
-});

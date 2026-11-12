@@ -87,7 +87,7 @@ export default defineConfig({
           if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react";
           if (id.includes("/@tanstack/")) return "query";
           if (id.includes("/lucide-react/")) return "icons";
-          if (id.includes("/radix-ui/") || id.includes("/@radix-ui/")) return "radix";
+          if (id.includes("/@douyinfe/")) return "semi";
           return "vendor";
         },
       },

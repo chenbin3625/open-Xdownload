@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { Tooltip } from "radix-ui";
+import { TooltipProvider } from "../semi";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -17,7 +17,7 @@ afterEach(cleanup);
 it("allows clearing an incomplete primary cookie", () => {
   const onChange = vi.fn();
   const draft = { authToken: "********", csrfToken: "" } as AppConfig;
-  render(<Tooltip.Provider><CookieSettingsFields authError="" authResult={null} checking={false} draft={draft} onChange={onChange} /></Tooltip.Provider>);
+  render(<TooltipProvider><CookieSettingsFields authError="" authResult={null} checking={false} draft={draft} onChange={onChange} /></TooltipProvider>);
   fireEvent.click(screen.getByRole("button", { name: /^清除$/ }));
   expect(onChange.mock.calls[0][0](draft)).toMatchObject({ authToken: "__CLEAR__", csrfToken: "__CLEAR__" });
 });
@@ -99,7 +99,7 @@ describe("BackupCookieInputs 批量粘贴", () => {
   function renderInputs(value = "") {
     const onChange = vi.fn();
     render(
-      <Tooltip.Provider>
+      <TooltipProvider>
         <BackupCookieInputs
           checked={false}
           checking={false}
@@ -108,7 +108,7 @@ describe("BackupCookieInputs 批量粘贴", () => {
           value={value}
           onChange={onChange}
         />
-      </Tooltip.Provider>,
+      </TooltipProvider>,
     );
     return onChange;
   }

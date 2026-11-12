@@ -5,7 +5,7 @@ import React from "react";
 import { expect, it } from "vitest";
 import { renderWithProviders, screen } from "../test/render";
 import { SettingsPage } from "./SettingsPage";
-import { act, fireEvent } from "@testing-library/react";
+import { act, fireEvent, waitFor } from "@testing-library/react";
 import i18n from "../lib/i18n";
 import type { AppConfig } from "../lib/api";
 
@@ -23,9 +23,9 @@ it("switches settings to English without losing the unsaved configuration draft"
   </QueryClientProvider>);
   const proxy = screen.getByRole("textbox", { name: "网络代理 (Proxy)" });
   await user.type(proxy, "http://unsaved:7890");
-  fireEvent.keyDown(screen.getByRole("combobox", { name: "界面语言" }), { key: "ArrowDown" });
+  await user.click(screen.getByRole("combobox", { name: "界面语言" }));
   await user.click(screen.getByRole("option", { name: "English" }));
-  expect(document.documentElement.lang).toBe("en");
+  await waitFor(() => expect(document.documentElement.lang).toBe("en"));
   expect(localStorage.getItem("open-xdownload-language")).toBe("en");
   expect(screen.getByRole("textbox", { name: "Network proxy (Proxy)" })).toBe(proxy);
   expect((proxy as HTMLInputElement).value).toBe("http://unsaved:7890");

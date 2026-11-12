@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { describe, expect, it } from "vitest";
-import { Table, type TableColumn } from "./Table";
+import { Table, type TableColumn } from "../semi";
 
 interface Row {
   id: number;
@@ -51,6 +51,7 @@ describe("Table", () => {
     );
 
     expect(screen.queryByText("详情 第一行")).toBeNull();
+    expect(screen.getAllByRole("button")).toHaveLength(rows.length);
 
     const toggle = screen.getAllByRole("button", { name: "展开详情" })[0];
     expect(toggle.getAttribute("aria-expanded")).toBe("false");

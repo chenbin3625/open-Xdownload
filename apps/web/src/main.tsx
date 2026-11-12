@@ -1,12 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "./index.css";
+import "@douyinfe/semi-ui/lib/es/_base/base.css";
 import "./lib/i18n";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ApiError } from "./lib/api";
-import { TooltipProvider } from "./components/ui/Overlay";
-import { Toaster } from "./components/ui/Toast";
+import { TooltipProvider } from "./components/semi";
+import { Toaster } from "./components/semi";
 import { hydrateAppQueries, takeAppBootstrap } from "./lib/bootstrap";
 import { readRouteState } from "./lib/useRouteState";
 

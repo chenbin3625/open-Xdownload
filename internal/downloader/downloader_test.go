@@ -151,7 +151,9 @@ func TestDownloadWithOptionsRedownloadsPartialLocalFile(t *testing.T) {
 		t.Fatalf("seed partial file: %v", err)
 	}
 
-	result, err := newTestDownloader().DownloadWithOptions(context.Background(), server.URL+"/movie.mp4", dir, "media", Options{})
+	result, err := newTestDownloader().DownloadWithOptions(context.Background(), server.URL+"/movie.mp4", dir, "media", Options{
+		ExistingFileOwner: func(path string) bool { return path == existing },
+	})
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}

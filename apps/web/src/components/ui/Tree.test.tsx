@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Tree, type TreeNode } from "./Tree";
+import { Tree, type TreeNode } from "../semi";
 
 // 受控外壳：把 expandedKeys / selectedKey 的状态放在测试侧，
 // 与真实调用点（LocalDirectoryPicker）的用法一致。

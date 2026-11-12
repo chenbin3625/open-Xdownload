@@ -104,13 +104,6 @@ describe("主题对比度 token", () => {
     }
   });
 
-  it("Tag 的 soft 色标签使用 strong 文本色", () => {
-    const tag = readFileSync(path.join(here, "Tag.tsx"), "utf8");
-    for (const name of ["success", "warning", "danger", "info"]) {
-      expect(tag, `Tag 的 ${name} 仍使用未加深的状态色`).toContain(`text-${name}-strong`);
-    }
-  });
-
   it("::selection 用配对前景色而不是写死白字", () => {
     const selection = blockBody("::selection {");
     expect(selection).toContain("color: var(--brand-contrast);");
@@ -123,7 +116,7 @@ describe("主题对比度 token", () => {
 // 除此之外 ui/ 与 settings/ 下不应再出现"实心底 + text-white"。
 describe("组件不再写死白字叠实心底色", () => {
   const dirs = [
-    path.join(here, "."),
+    path.join(here, "../semi"),
     path.join(here, "../settings"),
   ];
   const forbidden = [
@@ -133,22 +126,6 @@ describe("组件不再写死白字叠实心底色", () => {
     "bg-danger text-white",
     "bg-info text-white",
   ];
-
-  it("Pagination 当前页 / Tag 计数气泡 / Checkbox 勾 / Switch 滑块都用配对 token", () => {
-    const read = (file: string) => readFileSync(path.join(here, file), "utf8");
-    const pagination = read("Pagination.tsx");
-    expect(pagination).toContain("text-brand-contrast");
-
-    const tag = read("Tag.tsx");
-    for (const name of ["brand", "success", "warning", "danger", "info"]) {
-      expect(tag, `CountBadge 的 ${name} 未使用配对色`).toContain(`text-${name}-contrast`);
-    }
-
-    const controls = read("Controls.tsx");
-    // Checkbox 勾号用品牌配对色；Switch 滑块用 --surface 而不是写死白色
-    expect(controls).toContain("text-brand-contrast");
-    expect(controls).not.toContain("bg-white");
-  });
 
   it.each(dirs)("%s 下没有 '实心底 + text-white' 组合", (dir) => {
     const files = readdirSync(dir).filter((name) => name.endsWith(".tsx") && !name.includes(".test."));

@@ -16,7 +16,12 @@ export type JobKind =
   | "user"
   | "list"
   | "following"
-  | "failed_retry";
+  | "failed_retry"
+  | "asset_derivative"
+  | "asset_migration";
+
+export type ArchiveMode = "tweets" | "media" | "both";
+export type AssetKind = "image" | "video" | "thumbnail" | "video_cover";
 
 export type FileNamingMode = "tweet_text" | "user_tweet";
 export type StorageType = "local";
@@ -48,12 +53,16 @@ export interface Job {
   error?: string;
   createdAt: string;
   updatedAt: string;
+  archiveMode?: ArchiveMode;
+  backfill?: boolean;
 }
 
 export interface JobRequest {
   kind: JobKind;
   input: string;
   title?: string;
+  archiveMode?: ArchiveMode;
+  backfill?: boolean;
 }
 
 export interface BatchJobRequest {
@@ -64,6 +73,8 @@ export interface ArchiveScheduleItem {
   kind: JobKind;
   input: string;
   title?: string;
+  archiveMode?: ArchiveMode;
+  backfill?: boolean;
 }
 
 export interface ArchiveSchedule {
@@ -113,6 +124,11 @@ export interface TweetData {
     screenName: string;
   };
   media: Media[];
+  conversationId?: string;
+  replyToId?: string;
+  quotedTweetId?: string;
+  retweetedTweetId?: string;
+  related?: TweetData[];
 }
 
 export interface DownloadRecord {
@@ -127,6 +143,7 @@ export interface DownloadRecord {
   userScreenName?: string;
   userName?: string;
   fileUrl?: string;
+  assetUrls?: Partial<Record<AssetKind, string>>;
 }
 
 export interface FailedMedia {
@@ -445,10 +462,10 @@ export const parseTweetLink = (url: string) =>
     body: JSON.stringify({ url }),
   });
 
-export const createJob = (kind: JobKind, input: string, title = "") =>
+export const createJob = (kind: JobKind, input: string, title = "", options?: { archiveMode: ArchiveMode; backfill: boolean }) =>
   api<Job>("/api/jobs", {
     method: "POST",
-    body: JSON.stringify({ kind, input, title }),
+    body: JSON.stringify({ kind, input, title, ...options }),
   });
 
 export const createJobsBatch = (request: BatchJobRequest) =>

@@ -4,9 +4,9 @@ import React, { useContext, useState } from "react";
 import { changeAccountPassword } from "../../lib/api";
 import { invalidateSession } from "../../lib/session";
 import { AccountContext } from "../auth/AuthGate";
-import { Button } from "../ui/Button";
-import { Field, Input } from "../ui/Input";
-import { Modal } from "../ui/Overlay";
+import { Button } from "@douyinfe/semi-ui";
+import { Field, Input } from "../semi";
+import { Modal } from "../semi";
 
 export function AccountSecurity() {
   useTranslation();
@@ -45,12 +45,10 @@ export function AccountSecurity() {
   }
 
   return (
-    <section className="border-t border-line pt-6">
+    <section className="semi-settings-section">
+      <h2 className="settings-section-title"><KeyRound size={16} />{t("账号安全")}</h2>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
-          <h2 className="text-base font-semibold text-fg">{t("账号安全")}</h2>
-          <p className="mt-2 break-all text-sm text-fg-muted">{username}</p>
-        </div>
+        <p className="min-w-0 break-all text-sm text-fg-muted">{username}</p>
         <Button icon={<KeyRound className="size-4" />} onClick={() => setOpen(true)}>{t("修改密码")}</Button>
       </div>
       <Modal open={open} onClose={close} title={t("修改密码")} description={t("修改成功后需重新登录。")}>
@@ -67,8 +65,8 @@ export function AccountSecurity() {
           </Field>
           {error && <p role="alert" className="break-words text-sm text-danger-strong sm:col-span-2">{error}</p>}
           <div className="flex justify-end gap-2 sm:col-span-2">
-            <Button onClick={close} disabled={pending}>{t("取消")}</Button>
-            <Button type="submit" variant="primary" icon={<KeyRound className="size-4" />} loading={pending}>{t("修改密码")}</Button>
+            <Button type="tertiary" onClick={close} disabled={pending}>{t("取消")}</Button>
+            <Button htmlType="submit" theme="solid" icon={<KeyRound className="size-4" />} loading={pending} disabled={pending} aria-busy={pending}>{t("修改密码")}</Button>
           </div>
         </form>
       </Modal>

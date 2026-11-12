@@ -46,6 +46,11 @@ func (rl *rateLimiter) prune() {
 
 var errRateLimitBusyWait = errors.New("rate limiter: 连续等待次数超限，放弃本次请求")
 
+// maxLocalRateLimitWait 是 before() 在直接使用单个 Client（不经过 Pool）时原地
+// 阻塞的上限。超过它说明本次限流窗口较长，继续占用任务执行槽只会空耗时间；
+// 直接返回带恢复时间的限流错误，让调度器把任务重新入队。
+const maxLocalRateLimitWait = 3 * time.Second
+
 func (rl *rateLimiter) before(ctx context.Context, path string) error {
 	rl.prune()
 	const maxWaitIterations = 3
@@ -63,14 +68,24 @@ func (rl *rateLimiter) before(ctx context.Context, path string) error {
 			rl.mu.Unlock()
 			return nil
 		}
-		if yieldsOnRateLimit(ctx) {
-			rl.mu.Unlock()
-			return errRateLimitBusyWait
-		}
 		wait := time.Until(state.reset.Add(5 * time.Second))
+		if yieldsOnRateLimit(ctx) {
+			// Pool 路径：立即交还，由 Pool 换用其他 Cookie / 调用方释放执行槽。
+			// 带上恢复时间，单账号回退路径也能据此重新入队而不是当成普通失败。
+			rl.mu.Unlock()
+			if wait <= 0 {
+				return errRateLimitBusyWait
+			}
+			return &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait}
+		}
 		rl.mu.Unlock()
 		if wait <= 0 {
 			return nil
+		}
+		if wait > maxLocalRateLimitWait {
+			// 直接使用单个账号（例如主账号专用时间线）：不在原地等到限流复位，
+			// 返回结构化限流错误与恢复时间，让任务检查点保存后让出执行槽。
+			return &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait}
 		}
 		if i >= maxWaitIterations {
 			return errRateLimitBusyWait

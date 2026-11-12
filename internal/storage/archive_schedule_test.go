@@ -282,6 +282,13 @@ func TestScheduleClaimUsesItemsFromClaimTransaction(t *testing.T) {
 			}
 			t.Fatalf("%s claim created jobs for %v, want [carol] (stale snapshot items used)", name, inputs)
 		}
+		// 入队去重会拒绝与上一种领取方式刚创建的 carol 相同的活动任务，因此先取消，
+		// 让下一种领取方式重新验证一次"使用领取事务里的最新 items"。
+		for _, job := range jobs {
+			if _, err := store.CancelJob(ctx, job.ID); err != nil {
+				t.Fatalf("%s cancel: %v", name, err)
+			}
+		}
 	}
 }
 

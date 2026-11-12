@@ -83,6 +83,48 @@ var (
 
 const requestMaxAttempts = 5
 
+// requestTotalBudget 是一次“逻辑请求”跨 Cookie 重试的总耗时上限。次数预算见
+// newRequestBudget：默认 requestMaxAttempts，每多一个 Cookie 只额外允许一次
+// 交接尝试，避免瞬时故障下放大到 5 × Cookie 数。
+const requestTotalBudget = 5 * time.Minute
+
+type requestBudget struct {
+	mu        sync.Mutex
+	remaining int
+	deadline  time.Time
+}
+
+func newRequestBudget(attempts int, timeout time.Duration) *requestBudget {
+	if attempts < 1 {
+		attempts = 1
+	}
+	return &requestBudget{remaining: attempts, deadline: time.Now().Add(timeout)}
+}
+
+func (b *requestBudget) acquire() bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.remaining <= 0 || time.Now().After(b.deadline) {
+		return false
+	}
+	b.remaining--
+	return true
+}
+
+type requestBudgetKey struct{}
+
+func withRequestBudget(ctx context.Context, budget *requestBudget) context.Context {
+	return context.WithValue(ctx, requestBudgetKey{}, budget)
+}
+
+func requestBudgetFrom(ctx context.Context) *requestBudget {
+	budget, _ := ctx.Value(requestBudgetKey{}).(*requestBudget)
+	return budget
+}
+
 // 空页（items 为空但 Bottom cursor 仍在前进）连续出现多少次后停止翻页，防止异常响应
 // 让单个用户翻满 1000 页、空耗 API 配额。
 const maxConsecutiveEmptyPages = 3
@@ -91,6 +133,57 @@ const maxConsecutiveEmptyPages = 3
 const paginationPageDelay = 250 * time.Millisecond
 
 var ErrAllClientsRateLimited = errors.New("X 客户端暂时全部限流，请稍后重试")
+
+// RateLimitedError 在账号池暂时无可用客户端时携带最早可恢复时间，供调度器把任务
+// 重新置为 pending 并设置 available_at，而不是让唯一执行槽空等限流窗口。
+type RateLimitedError struct {
+	Path    string
+	RetryAt time.Time
+	Cause   error
+}
+
+func (e *RateLimitedError) Error() string {
+	if e == nil {
+		return ErrAllClientsRateLimited.Error()
+	}
+	if e.RetryAt.IsZero() {
+		return ErrAllClientsRateLimited.Error()
+	}
+	return fmt.Sprintf("%s（最早 %s 恢复）", ErrAllClientsRateLimited.Error(), e.RetryAt.Format(time.RFC3339))
+}
+
+func (e *RateLimitedError) Unwrap() error { return e.Cause }
+
+// Is 保持原有分类：调用方仍可用 errors.Is(err, ErrAllClientsRateLimited) 判断
+// “全部账号限流”，从而中止逐个用户的批量归档。
+func (e *RateLimitedError) Is(target error) bool { return target == ErrAllClientsRateLimited }
+
+// RateLimitRetryAt 返回限流错误的最早恢复时间；不是限流错误时返回 false。
+// 没有结构化时间的旧错误按 1 分钟保守退避。
+func RateLimitRetryAt(err error) (time.Time, bool) {
+	var limited *RateLimitedError
+	if errors.As(err, &limited) && !limited.RetryAt.IsZero() {
+		return limited.RetryAt, true
+	}
+	if errors.Is(err, ErrAllClientsRateLimited) {
+		return time.Now().Add(time.Minute), true
+	}
+	return time.Time{}, false
+}
+
+// schedulerYieldKey 标记请求来自调度器：账号池全部限流时立即返回结构化错误，
+// 而不是在任务内部等待最长 maxPoolSelectWait（约 15 分钟）占用执行槽。
+type schedulerYieldKey struct{}
+
+// WithYieldToScheduler 让当前请求在账号池全部限流时立即交还给调度器。
+func WithYieldToScheduler(ctx context.Context) context.Context {
+	return context.WithValue(ctx, schedulerYieldKey{}, true)
+}
+
+func yieldsToScheduler(ctx context.Context) bool {
+	yield, _ := ctx.Value(schedulerYieldKey{}).(bool)
+	return yield
+}
 
 // ErrClientDisabled 表示该 Cookie 近期因认证失败被标记为不可用。它不是瞬时错误：
 // 同一客户端重试只会立刻再次命中，应交给 Pool 换用其他 Cookie。
@@ -379,11 +472,16 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 		if wait <= 0 {
 			wait = 200 * time.Millisecond
 		}
+		// 调度器模式下不在这里等：把最早的恢复时间交回去，让任务释放执行槽。
+		// 直接媒体下载、其他接口或下一个任务可以先运行。
+		if yieldsToScheduler(ctx) {
+			return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited}
+		}
 		if wait > maxPoolSelectWaitStep {
 			wait = maxPoolSelectWaitStep
 		}
 		if waited+wait > maxPoolSelectWait {
-			return nil, ErrAllClientsRateLimited
+			return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited}
 		}
 		waited += wait
 		timer := time.NewTimer(wait)
@@ -675,24 +773,44 @@ func getUserTimeline(ctx context.Context, requester timelineRequester, user User
 }
 
 func getUserTimelineWithStats(ctx context.Context, requester timelineRequester, user User, options parser.ParseOptions) ([]parser.TweetData, MediaFetchStats, error) {
+	if !user.Visible() {
+		return nil, MediaFetchStats{}, nil
+	}
+	tweets := []parser.TweetData{}
+	stats, err := walkUserMediaPages(ctx, requester, user, UserMediaTimelineOptions{
+		StopID: options.StopAtTweetID,
+		Parse:  options,
+	}, func(page UserMediaTimelinePage) error {
+		tweets = append(tweets, page.Tweets...)
+		return nil
+	})
+	return tweets, stats, err
+}
+
+// walkUserMediaPages 逐页抓取 UserMedia 时间线，并在每页解析/早停判断完成后调用 save。
+// 调用方可以在 save 里处理本页媒体并持久化 page.Cursor；与 GetUserMediaWithOptionsStats
+// 的"先攒完整条时间线再返回"不同，这里的内存占用只与本页大小相关。
+//
+// 早停、置顶、空页、cursor 不前进等语义与旧实现完全一致，便于既有测试与行为保持。
+func walkUserMediaPages(ctx context.Context, requester timelineRequester, user User, options UserMediaTimelineOptions, save func(UserMediaTimelinePage) error) (MediaFetchStats, error) {
 	stats := MediaFetchStats{}
 	if !user.Visible() {
-		return nil, stats, nil
+		return stats, nil
 	}
-	cursor := ""
+	cursor := options.Cursor
 	seenCursor := map[string]struct{}{}
 	seenTweetIDs := map[string]struct{}{}
-	tweets := []parser.TweetData{}
+	parsedTweets := 0
 	emptyPages := 0
 	// 首页命中的 stopID 可能是置顶项；页尾仍比 stopID 新时必须继续翻页。
-	// 仅在配置开启增量归档时才会传入 StopAtTweetID；为空时全程翻页（全量扫描）。
+	// 为空时全程翻页（全量扫描）。
 	reachedStop := false
-	for page := 0; page < 1000 && !reachedStop; page++ {
+	for page := 0; page < 1000; page++ {
 		if page > 0 {
 			// 翻页间微小间隔，防止连续高频请求触发 X 接口短时限流与 WAF
 			select {
 			case <-ctx.Done():
-				return nil, stats, ctx.Err()
+				return stats, ctx.Err()
 			case <-time.After(paginationPageDelay):
 			}
 		}
@@ -711,27 +829,34 @@ func getUserTimelineWithStats(ctx context.Context, requester timelineRequester, 
 		values.Set("fieldToggles", `{"withArticlePlainText":false}`)
 		payload, err := requester.graphQL(ctx, userMediaPath, values)
 		if err != nil {
-			return nil, stats, err
+			// 恢复用的游标可能已过期（用户删推/服务端分页令牌轮换）。显式分类后由上层
+			// 清空游标、退回第 0 页重翻；已下载媒体会被去重跳过。
+			if cursor != "" && isInvalidCursorError(err) {
+				return stats, fmt.Errorf("%w: %v", ErrInvalidTimelineCursor, err)
+			}
+			return stats, err
 		}
 		items, next, err := timelineItems(payload, "data.user.result.timeline_v2.timeline.instructions")
 		if err != nil {
-			return nil, stats, err
+			return stats, err
 		}
 		if len(items) == 0 {
 			if next == "" {
-				break
-			}
-			// 空页但 cursor 仍在前进：连续多次才停，避免单页被服务端过滤就提前结束；
-			// 同时防止异常响应让单个用户翻满 1000 页。
-			emptyPages++
-			if emptyPages >= maxConsecutiveEmptyPages {
-				log.Printf("xclient: 时间线连续 %d 页为空但 cursor 仍在前进，停止翻页 (user=%s)", emptyPages, user.ID)
-				break
+				// 没有更多条目：本页即结束。
+			} else {
+				// 空页但 cursor 仍在前进：连续多次才停，避免单页被服务端过滤就提前结束；
+				// 同时防止异常响应让单个用户翻满 1000 页。
+				emptyPages++
+				if emptyPages >= maxConsecutiveEmptyPages {
+					log.Printf("xclient: 时间线连续 %d 页为空但 cursor 仍在前进，停止翻页 (user=%s)", emptyPages, user.ID)
+					next = ""
+				}
 			}
 		} else {
 			emptyPages = 0
 		}
 		lastTweetID := ""
+		pageTweets := []parser.TweetData{}
 		for _, item := range items {
 			result := item.Get("tweet_results.result")
 			if !result.Exists() {
@@ -750,7 +875,7 @@ func getUserTimelineWithStats(ctx context.Context, requester timelineRequester, 
 				}
 				seenTweetIDs[id] = struct{}{}
 			}
-			if options.StopAtTweetID != "" && !reachedStop && shouldStopAt(id, options.StopAtTweetID, page) {
+			if options.StopID != "" && !reachedStop && shouldStopAt(id, options.StopID, page) {
 				// 不能立即 return：page 0 的精确命中可能落在置顶推文上——上次归档时它恰为
 				// 最新推文（newestTweetID 游标就是它），而其后仍排着本次新增的推文。继续
 				// 扫完本页，只保留数值更新的项，再根据页尾判断是否继续翻页。
@@ -759,11 +884,11 @@ func getUserTimelineWithStats(ctx context.Context, requester timelineRequester, 
 			if reachedStop {
 				// 已到上次归档位置：数值不新于 stopID 的推文均已归档（含 stopID 本身），跳过；
 				// 仅保留比 stopID 新的（置顶命中场景）。
-				if !tweetIDNewerThan(id, options.StopAtTweetID) {
+				if !tweetIDNewerThan(id, options.StopID) {
 					continue
 				}
 			}
-			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result, options)
+			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result, options.Parse)
 			if errors.Is(err, parser.ErrTweetUnavailable) {
 				continue
 			}
@@ -778,35 +903,40 @@ func getUserTimelineWithStats(ctx context.Context, requester timelineRequester, 
 			if len(tweet.Media) == 0 {
 				continue
 			}
-			tweets = append(tweets, tweet)
+			pageTweets = append(pageTweets, tweet)
 		}
-		if page == 0 && reachedStop && tweetIDNewerThan(lastTweetID, options.StopAtTweetID) {
+		if page == 0 && reachedStop && tweetIDNewerThan(lastTweetID, options.StopID) {
 			reachedStop = false
 		}
-		if reachedStop {
-			break
+		complete := reachedStop || next == ""
+		if !complete {
+			if next == cursor {
+				// 服务端没有推进 cursor：立即结束，避免死循环。
+				complete = true
+			} else if _, seen := seenCursor[next]; seen {
+				// 回退到已见过的游标：同样结束，避免循环。
+				complete = true
+			}
 		}
-		if next == "" {
-			break
+		batch := UserMediaTimelinePage{Tweets: pageTweets, Cursor: next, Complete: complete}
+		if err := save(batch); err != nil {
+			return stats, err
 		}
-		if next == cursor {
-			// 服务端没有推进 cursor：立即停止，避免死循环。
-			break
-		}
-		if _, ok := seenCursor[next]; ok {
-			break
+		parsedTweets += len(pageTweets)
+		if complete {
+			// 安全检查：timeline 返回了推文条目但全部被解析失败跳过。这通常意味着 X 改了
+			// 推文结构或 legacy 字段缺失，而非"该用户没有媒体推文"。若当成正常空结果返回，
+			// 上层会推进增量游标，导致这些推文的媒体被永久跳过。
+			if parsedTweets == 0 && stats.SkippedTweets > 0 && len(seenTweetIDs) == stats.SkippedTweets {
+				return stats, fmt.Errorf("时间线返回了 %d 条推文但全部解析失败（user=%s，跳过的推文: %s）",
+					stats.SkippedTweets, user.ID, strings.Join(stats.SkippedTweetIDs, ", "))
+			}
+			return stats, nil
 		}
 		seenCursor[next] = struct{}{}
 		cursor = next
 	}
-	// 安全检查：timeline 返回了推文条目但全部被解析失败跳过。这通常意味着 X 改了
-	// 推文结构或 legacy 字段缺失，而非"该用户没有媒体推文"。若当成正常空结果返回，
-	// 上层会推进增量游标，导致这些推文的媒体被永久跳过。
-	if len(tweets) == 0 && stats.SkippedTweets > 0 && len(seenTweetIDs) == stats.SkippedTweets {
-		return nil, stats, fmt.Errorf("时间线返回了 %d 条推文但全部解析失败（user=%s，跳过的推文: %s）",
-			stats.SkippedTweets, user.ID, strings.Join(stats.SkippedTweetIDs, ", "))
-	}
-	return tweets, stats, nil
+	return stats, errors.New("媒体时间线超过安全页数上限，保留进度以供继续")
 }
 
 // shouldStopAt 判断 timeline 翻页是否应在 tweetID 处停止。timeline 按时间倒序：
@@ -1122,6 +1252,11 @@ func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]b
 func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Values) ([]byte, *Client, error) {
 	var lastErr error
 	failures, handoffs := 0, 0
+	// 同一逻辑请求跨 Cookie 共享重试预算：首个 Cookie 仍有 requestMaxAttempts 次，
+	// 每个额外 Cookie 只允许一次交接尝试（而不是各自 5 次），并受总耗时约束。
+	if requestBudgetFrom(ctx) == nil {
+		ctx = withRequestBudget(ctx, newRequestBudget(requestMaxAttempts+max(0, len(p.clients)-1), requestTotalBudget))
+	}
 	// 限流交还不计入失败次数，但总数有界：限流复位后若仍反复 429，最终按失败处理。
 	maxHandoffs := max(1, len(p.clients)) * requestMaxAttempts
 	for failures < max(1, len(p.clients)) {
@@ -1168,6 +1303,13 @@ func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Va
 func (c *Client) do(ctx context.Context, method string, path string, query url.Values, form url.Values) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < requestMaxAttempts; attempt++ {
+		// 跨 Cookie 共享的重试预算：耗尽后不再发起请求，把最后一次错误上抛。
+		if budget := requestBudgetFrom(ctx); budget != nil && !budget.acquire() {
+			if lastErr == nil {
+				lastErr = errors.New("请求重试预算耗尽")
+			}
+			return nil, lastErr
+		}
 		payload, err := c.doOnce(ctx, method, path, query, form)
 		if err == nil {
 			c.clearError()
@@ -1215,6 +1357,9 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 		return nil, err
 	}
 	endpoint = endpoint.JoinPath(path)
+	if strings.HasPrefix(path, "/graphql/") && c.requestBaseURL() == host {
+		endpoint.Host = "api.x.com"
+	}
 	if query != nil {
 		endpoint.RawQuery = query.Encode()
 	}
@@ -1231,6 +1376,9 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 	request.Header.Set("X-Csrf-Token", c.csrfToken)
 	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Accept", "application/json")
+	if strings.HasPrefix(path, "/graphql/") {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if form != nil {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -1326,8 +1474,12 @@ func encodeVariables(value any) string {
 }
 
 func (c *Client) setCookieHeaders(request *http.Request) {
-	request.AddCookie(&http.Cookie{Name: "auth_token", Value: c.authToken})
-	request.AddCookie(&http.Cookie{Name: "ct0", Value: c.csrfToken})
+	if c.authToken != "" {
+		request.AddCookie(&http.Cookie{Name: "auth_token", Value: c.authToken})
+	}
+	if c.csrfToken != "" {
+		request.AddCookie(&http.Cookie{Name: "ct0", Value: c.csrfToken})
+	}
 }
 
 // 限流/账号锁定的 API 错误码：即使 data 非空也必须上报，不能当成可容忍的 partial error。
@@ -1395,6 +1547,12 @@ func isTolerablePartialError(entry gjson.Result, err *APIError) bool {
 // 这类错误不再做客户端内重试（88 以前被当 transient，会让 Client-only 路径等 15 分钟）。
 func isRateLimitError(err error) bool {
 	if errors.Is(err, errRateLimitBusyWait) {
+		return true
+	}
+	// before() 在直接使用单账号且等待较长时也会返回带恢复时间的 RateLimitedError；
+	// Pool 仍应把它当成可交还错误，尝试其他 Cookie。
+	var limited *RateLimitedError
+	if errors.As(err, &limited) {
 		return true
 	}
 	var apiErr *APIError

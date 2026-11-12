@@ -12,11 +12,13 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
   Sparkles,
   XCircle,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Button, Card, Input, RadioGroup, Select, Typography } from "@douyinfe/semi-ui";
 import { getJobProgressDisplay, parseAggregatedErrors } from "../lib/jobErrors";
 import {
   cancelJob,
@@ -49,17 +51,14 @@ import {
 } from "../lib/jobStatus";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 import { useBreakpointUp } from "../lib/useMediaQuery";
-import { Button } from "../components/ui/Button";
-import { Card } from "../components/ui/Card";
-import { Segmented, Select, Tabs } from "../components/ui/Controls";
-import { Alert, Descriptions, Empty, Progress } from "../components/ui/Feedback";
-import { SearchInput } from "../components/ui/Input";
-import { Tooltip } from "../components/ui/Overlay";
-import { Pagination } from "../components/ui/Pagination";
-import { LoadingOverlay, Spinner } from "../components/ui/Spinner";
-import { Table, type TableColumn } from "../components/ui/Table";
-import { Avatar, StatusDot, Tag, type Tone } from "../components/ui/Tag";
-import { toast } from "../components/ui/Toast";
+import { Tabs } from "../components/semi";
+import { Alert, Descriptions, Empty, Progress } from "../components/semi";
+import { Tooltip } from "../components/semi";
+import { Pagination } from "../components/semi";
+import { LoadingOverlay, Spinner } from "../components/semi";
+import { Table, type TableColumn } from "../components/semi";
+import { Avatar, StatusDot, Tag, type Tone } from "../components/semi";
+import { toast } from "../components/semi";
 import { cn } from "../lib/cn";
 
 export type StatusFilterType = "all" | "active" | "completed" | "failed";
@@ -226,18 +225,19 @@ export function TaskCenterPage({
     <div className="flex items-center justify-end gap-1.5">
       {cancelableStatuses.includes(record.status) && (
         <Button
-          variant="danger"
-          size="sm"
+          type="danger"
           loading={cancel.isPending && cancel.variables === record.id}
+          disabled={cancel.isPending && cancel.variables === record.id}
+          aria-busy={cancel.isPending && cancel.variables === record.id}
           onClick={() => cancel.mutate(record.id)}
         >
           {t("取消")}</Button>
       )}
       {retryableStatuses.includes(record.status) && (
         <Button
-          variant="default"
-          size="sm"
+          type="tertiary"
           loading={retry.isPending && retry.variables === record.id}
+          aria-busy={retry.isPending && retry.variables === record.id}
           disabled={retry.isPending}
           onClick={() => retry.mutate(record.id)}
         >
@@ -333,179 +333,129 @@ export function TaskCenterPage({
   );
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* 顶部标题与操作栏 */}
-      <div className="flex flex-wrap items-center justify-between gap-4 pb-1">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-fg">{t("任务调度中心")}</h1>
-          <p className="mt-0.5 hidden text-xs text-fg-muted sm:block">
-            {t("监控所有已创建的推文与归档任务、过滤检索并查看下载文件记录")}</p>
-        </div>
-        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:gap-2.5">
+    <div className="workspace-page">
+      <div className="page-heading">
+        <h1 className="page-title">{t("任务调度中心")}</h1>
+        <div className="page-actions">
           {failedTweetCount > 0 && (
             <Button
-              variant="danger"
+              type="danger"
               icon={<AlertCircle className="size-4" />}
               onClick={onOpenFailedDrawer}
-              className="flex-1 sm:flex-none"
             >
               {t("失败记录 (")}{failedTweetCount})
             </Button>
           )}
           <Button
-            variant="primary"
+            theme="solid"
             icon={<Plus className="size-4" />}
             onClick={onOpenCreateModal}
-            className="flex-1 sm:flex-none"
           >
             {t("新建任务")}</Button>
         </div>
       </div>
 
-      {/* 核心指标统计卡片 (现代玻璃风格) */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
-        <Card
-          size="sm"
-          bodyClassName="p-3 sm:p-4"
-          className="relative overflow-hidden border-t-2 border-t-brand-500 bg-gradient-to-b from-brand-500/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-fg-muted">{t("下载中任务")}</span>
-            <div className="hidden size-7 items-center justify-center rounded-lg bg-brand-500/10 sm:flex">
-              <StatusDot tone={displayStats.active > 0 ? "brand" : "default"} pulse={displayStats.active > 0} />
-            </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Card bodyStyle={{ padding: 16 }}>
+          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+            <span>{t("下载中任务")}</span>
+            <StatusDot tone={displayStats.active > 0 ? "brand" : "default"} pulse={displayStats.active > 0} />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
-            {displayStats.active}
-          </div>
-          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">{t("当前正在排队与拉取")}</p>
+          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.active}</div>
         </Card>
-
-        <Card
-          size="sm"
-          bodyClassName="p-3 sm:p-4"
-          className="relative overflow-hidden border-t-2 border-t-success bg-gradient-to-b from-success/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-fg-muted">{t("已完成")}</span>
-            <div className="hidden size-7 items-center justify-center rounded-lg bg-success-soft sm:flex">
-              <CheckCircle2 className="size-3.5 text-success" />
-            </div>
+        <Card bodyStyle={{ padding: 16 }}>
+          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+            <span>{t("已完成")}</span><CheckCircle2 size={16} className="text-success" />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
-            {displayStats.completed}
-          </div>
-          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">{t("媒体已全部入库")}</p>
+          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.completed}</div>
         </Card>
-
-        <Card
-          size="sm"
-          bodyClassName="p-3 sm:p-4"
-          className="relative overflow-hidden border-t-2 border-t-danger bg-gradient-to-b from-danger/[0.04] to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-fg-muted">{t("异常 / 失败")}</span>
-            <div className="hidden size-7 items-center justify-center rounded-lg bg-danger-soft sm:flex">
-              <AlertCircle className="size-3.5 text-danger" />
-            </div>
+        <Card bodyStyle={{ padding: 16 }}>
+          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+            <span>{t("异常 / 失败")}</span><AlertCircle size={16} className="text-danger" />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
-            {displayStats.failed}
-          </div>
-          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">{t("包含部分失败与致命失败")}</p>
+          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.failed}</div>
         </Card>
-
-        <Card
-          size="sm"
-          bodyClassName="p-3 sm:p-4"
-          className="relative overflow-hidden border-t-2 border-t-line-strong bg-gradient-to-b from-surface-muted/50 to-transparent hover:-translate-y-0.5 hover:shadow-raised transition-all duration-200 cursor-default"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-fg-muted">{t("任务总数")}</span>
-            <div className="hidden size-7 items-center justify-center rounded-lg bg-surface-muted border border-line sm:flex">
-              <FolderCheck className="size-3.5 text-brand-500" />
-            </div>
+        <Card bodyStyle={{ padding: 16 }}>
+          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+            <span>{t("任务总数")}</span><FolderCheck size={16} />
           </div>
-          <div className="mt-2 text-2xl font-bold font-mono tabular-nums text-fg sm:text-3xl">
-            {displayStats.total}
-          </div>
-          <p className="mt-0.5 hidden text-[11px] text-fg-subtle sm:block">{t("库内已记录的任务总规模")}</p>
+          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.total}</div>
         </Card>
       </div>
 
       {/* 过滤筛选工具栏 */}
-      <div className="min-w-0 border-y border-line py-3">
-        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between flex-wrap">
-          {/* 状态分类 Segmented */}
-          <Tooltip title={t("括号内为当前页的任务计数，全局统计见侧边栏与上方卡片")}>
-            <div className="min-w-0 max-w-full">
-              <Segmented
-                size="md"
-                value={statusFilter}
-                onChange={(val) => changeStatusFilter(val as StatusFilterType)}
-                options={[
-                  { label: t("全部 ({{value0}})", { value0: jobs.length }), value: "all" },
-                  {
-                    label: (
-                      <span className="flex items-center gap-1.5">
-                        {bucketCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
-                        <span>{t("下载中 (")}{bucketCounts.active})</span>
-                      </span>
-                    ),
-                    value: "active",
-                  },
-                  { label: t("已完成 ({{value0}})", { value0: bucketCounts.completed }), value: "completed" },
-                  {
-                    label: (
-                      <span className="flex items-center gap-1.5">
-                        {bucketCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
-                        <span>{t("失败/异常 (")}{bucketCounts.failed})</span>
-                      </span>
-                    ),
-                    value: "failed",
-                  },
-                ]}
-              />
-            </div>
-          </Tooltip>
-
-          {/* 搜索与类型选择 */}
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <SearchInput
-              placeholder={t("按标题、用户名、错误信息或 ID 搜索...")}
-              value={searchKeyword}
-              onChange={(e) => setSearchKeyword(e.target.value)}
-              allowClear
-              containerClassName="w-full sm:w-56"
-            />
-
-            <Select
-              value={kindFilter}
-              onChange={setKindFilter}
-              className="min-w-0 flex-1 sm:w-36 sm:flex-none"
-              ariaLabel={t("任务类型")}
+      <div className="page-toolbar">
+        <Tooltip title={t("括号内为当前页的任务计数，全局统计见侧边栏与上方卡片")}>
+          <div className="toolbar-status" role="radiogroup" aria-label={t("当前状态")}>
+            <RadioGroup
+              type="button"
+              buttonSize="middle"
+              value={statusFilter}
+              onChange={(event) => changeStatusFilter(event.target.value as StatusFilterType)}
               options={[
-                { value: "all", label: t("全部任务类型") },
-                { value: "tweet_link", label: t("单条推文") },
-                { value: "user", label: t("用户媒体") },
-                { value: "list", label: t("列表媒体") },
-                { value: "following", label: t("关注媒体") },
-                { value: "failed_retry", label: t("重试任务") },
+                { label: t("全部 ({{value0}})", { value0: jobs.length }), value: "all" },
+                {
+                  label: (
+                    <span className="flex items-center gap-1.5">
+                      {bucketCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
+                      <span>{t("下载中 (")}{bucketCounts.active})</span>
+                    </span>
+                  ),
+                  value: "active",
+                },
+                { label: t("已完成 ({{value0}})", { value0: bucketCounts.completed }), value: "completed" },
+                {
+                  label: (
+                    <span className="flex items-center gap-1.5">
+                      {bucketCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
+                      <span>{t("失败/异常 (")}{bucketCounts.failed})</span>
+                    </span>
+                  ),
+                  value: "failed",
+                },
               ]}
             />
-
-            {/* 该按钮走失败推文队列的重试接口，只看队列计数，与失败任务数无关 */}
-            {failedTweetCount > 0 && (
-              <Button
-                variant="default"
-                size="md"
-                icon={<RotateCcw className="size-4" />}
-                loading={retryAllFailed.isPending}
-                onClick={() => retryAllFailed.mutate()}
-              >
-                {t("重试失败推文")}</Button>
-            )}
           </div>
+        </Tooltip>
+
+        <div className="toolbar-filters">
+          <Input
+            prefix={<Search size={16} />}
+            aria-label={t("按标题、用户名、错误信息或 ID 搜索...")}
+            placeholder={t("按标题、用户名、错误信息或 ID 搜索...")}
+            value={searchKeyword}
+            onChange={setSearchKeyword}
+            showClear
+            className="toolbar-search"
+          />
+
+          <Select
+            value={kindFilter}
+            onChange={(value) => setKindFilter(String(value))}
+            className="toolbar-select"
+            aria-label={t("任务类型")}
+            optionList={[
+              { value: "all", label: t("全部任务类型") },
+              { value: "tweet_link", label: t("单条推文") },
+              { value: "user", label: t("用户媒体") },
+              { value: "list", label: t("列表媒体") },
+              { value: "following", label: t("关注媒体") },
+              { value: "failed_retry", label: t("重试任务") },
+            ]}
+          />
+
+          {/* 该按钮走失败推文队列的重试接口，只看队列计数，与失败任务数无关 */}
+          {failedTweetCount > 0 && (
+            <Button
+              type="tertiary"
+              icon={<RotateCcw className="size-4" />}
+              loading={retryAllFailed.isPending}
+              disabled={retryAllFailed.isPending}
+              aria-busy={retryAllFailed.isPending}
+              onClick={() => retryAllFailed.mutate()}
+            >
+              {t("重试失败推文")}</Button>
+          )}
         </div>
       </div>
 
@@ -532,7 +482,6 @@ export function TaskCenterPage({
           {paginationFooter}
         </div>
       ) : (
-        <Card size="sm" bodyClassName="p-0">
           <Table<Job>
             columns={columns}
             data={filteredJobs}
@@ -548,7 +497,6 @@ export function TaskCenterPage({
             )}
             footer={paginationFooter}
           />
-        </Card>
       )}
     </div>
   );
@@ -613,8 +561,8 @@ function MobileJobCard({
         <JobProgress job={job} />
         <div className="flex items-center justify-between border-t border-line pt-2">
           <Button
-            variant="text"
-            size="sm"
+            theme="borderless"
+            type="tertiary"
             aria-label={expanded ? t("收起详情") : t("展开详情")}
             aria-expanded={expanded}
             aria-controls={expanded ? panelId : undefined}
@@ -689,9 +637,8 @@ function JobErrorAlert({ job }: { job: Job }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span>{title}</span>
           <Button
-            size="sm"
-            variant="ghost"
-            className="h-6 px-2 text-[11px] text-danger hover:text-danger-600 hover:bg-danger/10"
+            theme="borderless"
+            type="danger"
             onClick={() => void handleCopy()}
             icon={copied ? <Check className="size-3 text-success" /> : <Copy className="size-3" />}
           >
@@ -745,6 +692,7 @@ function JobErrorAlert({ job }: { job: Job }) {
                           {hasMoreTargets && (
                             <button
                               type="button"
+                              aria-expanded={isExpanded}
                               onClick={() => toggleExpand(group.id)}
                               className="text-[11px] text-brand-600 hover:underline cursor-pointer"
                             >
@@ -870,9 +818,8 @@ function ExpandedJobDetails({
             <div className="flex shrink-0 items-center gap-1">
               <Tooltip title={t("复制文件完整本地路径")}>
                 <Button
-                  variant="ghost"
-                  size="sm"
-                  circle
+                  theme="borderless"
+                  type="tertiary"
                   icon={<Copy className="size-3.5" />}
                   onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
                   aria-label={t("复制本地路径")}
@@ -919,9 +866,8 @@ function ExpandedJobDetails({
           <div className="flex shrink-0 items-center gap-1">
             <Tooltip title={t("复制媒体地址")}>
               <Button
-                variant="ghost"
-                size="sm"
-                circle
+                theme="borderless"
+                type="tertiary"
                 icon={<Copy className="size-3.5" />}
                 onClick={() => void copyToClipboard(item.mediaUrl, t("媒体地址"))}
                 aria-label={t("复制媒体地址")}
@@ -934,7 +880,7 @@ function ExpandedJobDetails({
   );
 
   return (
-    <div className="space-y-3 bg-surface-muted/50 p-3 md:rounded-card md:border md:border-line md:p-4">
+    <div className="space-y-4 bg-surface-muted/50 p-4">
       {/* 顶部元信息与操作栏 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Descriptions
@@ -972,13 +918,14 @@ function ExpandedJobDetails({
             },
           ]}
         />
+        <Typography.Text link={{ href: `/tweets?jobId=${job.id}` }}>{t("archive.title")}</Typography.Text>
         {retryableStatuses.includes(job.status) && (
           <Button
-            variant="secondary"
-            size="sm"
+            type="tertiary"
             icon={<RotateCcw className="size-3.5" />}
             onClick={onRetry}
             loading={retryingJobId === job.id}
+            aria-busy={retryingJobId === job.id}
             disabled={retryingJobId !== undefined}
           >
             {t("重试此任务")}</Button>
@@ -1004,7 +951,7 @@ function ExpandedJobDetails({
           message={t("读取文件清单失败")}
           description={getErrorMessage(filesQuery.error)}
           action={
-            <Button size="sm" variant="default" onClick={() => void filesQuery.refetch()}>
+            <Button type="tertiary" onClick={() => void filesQuery.refetch()}>
               {t("重试")}</Button>
           }
         />
