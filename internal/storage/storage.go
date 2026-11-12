@@ -2263,9 +2263,8 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 	return items, err
 }
 
-// ListLibraryDownloads enriches archive records with the owning user when the
-// file was saved under a user entity directory. Older records remain valid and
-// simply return empty user fields when no entity can be inferred.
+// ListLibraryDownloads enriches records with the archived tweet author, falling
+// back to the owning user entity directory for older records.
 //
 // 用户归属在 Go 侧按路径前缀匹配完成（而非 SQL LIKE）：目录名来自用户显示名，
 // 常含 `_`/`%` 等字符，LIKE 会把它们当通配符产生误归属。匹配不区分大小写，
@@ -2304,7 +2303,8 @@ func (s *Store) ListLibraryDownloadsWithStatus(ctx context.Context, limit int) (
 
 	items := []DownloadRecord{}
 	err := s.db.SelectContext(ctx, &items, `
-SELECT d.* FROM downloads d
+SELECT d.*, COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
+FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id
 ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit+1)
 	if err != nil {
 		return nil, false, err

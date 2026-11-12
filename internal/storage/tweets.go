@@ -203,7 +203,11 @@ ON CONFLICT(tweet_id,job_id) DO NOTHING`, tweet.ID, jobID, bodyStatus, mediaStat
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateLibraryDownloadsCache()
+	return nil
 }
 
 func (s *Store) SetTweetMediaResult(ctx context.Context, jobID int64, tweetID, status, message string) error {

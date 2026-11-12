@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
+	"github.com/chenbin3625/open-Xdownload/internal/parser"
 )
 
 func writeLibraryTestFile(t *testing.T, path string, content string) {
@@ -346,5 +347,177 @@ func TestListLibraryDownloadsPageDerivesPreviewURL(t *testing.T) {
 	}
 	if page.Items[0].PreviewURL == "" || !strings.Contains(page.Items[0].PreviewURL, "ext_tw_video_thumb") {
 		t.Fatalf("derived preview url = %q", page.Items[0].PreviewURL)
+	}
+}
+
+func TestLibraryDownloadsUseArchivedAuthors(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, JobKindUser, "bob", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertUser(ctx, User{ID: "bob", ScreenName: "bob", Name: "Bob"}); err != nil {
+		t.Fatal(err)
+	}
+	entity, err := store.EnsureUserEntity(ctx, "bob", root, "Bob(bob)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDir := filepath.Join(entity.ParentDir, entity.Name)
+	fixtures := []struct {
+		id, path, screen, name string
+		archive                bool
+	}{
+		{"flat", filepath.Join(root, "images", "flat.jpg"), "alice", "Alice", true},
+		{"remote", "asset:remote/video.mp4", "alice", "Alice", true},
+		{"conflict", filepath.Join(legacyDir, "shared.jpg"), "alice", "Alice", true},
+		{"legacy", filepath.Join(legacyDir, "legacy.jpg"), "bob", "Bob", false},
+		{"all", filepath.Join(root, "all.jpg"), "all", "All", true},
+		{"unknown", filepath.Join(root, "known-unknown.jpg"), "unknown", "Unknown", true},
+		{"unattributed", filepath.Join(root, "unattributed.jpg"), "", "", false},
+	}
+	for _, fixture := range fixtures {
+		if fixture.archive {
+			if err := store.ArchiveTweetMediaOnly(ctx, job.ID, parser.TweetData{ID: fixture.id, Author: parser.Author{ID: fixture.screen, ScreenName: fixture.screen, Name: fixture.name}}, "available"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: fixture.id, MediaURL: "https://pbs.twimg.com/media/" + fixture.id + ".jpg", FilePath: fixture.path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := store.ListLibraryDownloads(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []struct {
+		name  string
+		items []DownloadRecord
+	}{{"page", page.Items}, {"legacy", legacy}} {
+		byID := map[string]DownloadRecord{}
+		for _, item := range result.items {
+			byID[item.TweetID] = item
+		}
+		for _, fixture := range fixtures {
+			if got, ok := byID[fixture.id]; !ok || got.UserScreenName != fixture.screen || got.UserName != fixture.name {
+				t.Errorf("%s author for %s = %+v, want %s/%s", result.name, fixture.id, got, fixture.screen, fixture.name)
+			}
+		}
+	}
+	labels := map[string]string{}
+	for _, user := range page.Users {
+		labels[user.Value] = user.Label
+	}
+	for value, want := range map[string]string{"alice": "Alice (@alice)", "bob": "Bob (@bob)", "@all": "All (@all)", "@unknown": "Unknown (@unknown)", "unknown": "未识别用户"} {
+		if labels[value] != want {
+			t.Errorf("user option %s = %q, want %q", value, labels[value], want)
+		}
+	}
+	for user, want := range map[string]int{"alice": 3, "bob": 1, "@all": 1, "@unknown": 1, "unknown": 1} {
+		filtered, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{Filter: LibraryFilter{User: user}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filtered.Pagination.Total != want || len(filtered.Items) != want {
+			t.Errorf("%s filter: total=%d items=%d, want %d", user, filtered.Pagination.Total, len(filtered.Items), want)
+		}
+		for _, item := range filtered.Items {
+			screen := strings.TrimPrefix(user, "@")
+			if user == "unknown" {
+				screen = ""
+			}
+			if item.UserScreenName != screen {
+				t.Errorf("%s filter included author %q", user, item.UserScreenName)
+			}
+		}
+	}
+}
+
+func TestLibraryAuthorChangesRefreshCachedUsers(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: "tweet", MediaURL: "https://pbs.twimg.com/media/a.jpg", FilePath: "asset:a/a.jpg"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", "Alice", "Alice Updated"} {
+		if name != "" {
+			if err := store.ArchiveTweet(ctx, job.ID, parser.TweetData{ID: "tweet", Author: parser.Author{ID: "alice", ScreenName: "alice", Name: name}}, "available"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		page, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy, err := store.ListLibraryDownloads(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) != 1 || len(legacy) != 1 || page.Items[0].UserName != name || legacy[0].UserName != name {
+			t.Fatalf("author %q: page=%+v legacy=%+v", name, page.Items, legacy)
+		}
+		wantUser, wantLabel := "unknown", "未识别用户"
+		if name != "" {
+			wantUser, wantLabel = "alice", name+" (@alice)"
+		}
+		if len(page.Users) != 1 || page.Users[0].Value != wantUser || page.Users[0].Label != wantLabel {
+			t.Fatalf("author %q: stale user options %+v", name, page.Users)
+		}
+	}
+}
+
+func TestLibraryAuthorFiltersUseLatestRecordForSharedFiles(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateJob(ctx, JobKindUser, "bob", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"alice", "bob"} {
+		if err := store.ArchiveTweet(ctx, job.ID, parser.TweetData{ID: id, Author: parser.Author{ID: id, ScreenName: id, Name: id}}, "available"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"alice", "bob"} {
+		if _, err := store.CreateDownload(ctx, DownloadRecord{JobID: job.ID, TweetID: id, MediaURL: "https://pbs.twimg.com/media/shared.jpg", FilePath: "asset:shared/shared.jpg"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for user, want := range map[string]int{"all": 1, "alice": 0, "bob": 1, "unknown": 0} {
+		page, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{Filter: LibraryFilter{User: user}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Pagination.Total != want || len(page.Items) != want {
+			t.Errorf("%s filter: total=%d items=%d, want %d", user, page.Pagination.Total, len(page.Items), want)
+		}
+		if len(page.Users) != 1 || page.Users[0].Value != "bob" {
+			t.Errorf("users for shared file = %+v, want only bob", page.Users)
+		}
 	}
 }

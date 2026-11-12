@@ -198,7 +198,9 @@ const GalleryCard = React.memo(function GalleryCard({
         </div>
 
         <div className="truncate font-mono text-[11px] text-fg-muted flex items-center gap-1">
-          <span className="min-w-0 truncate">{item.userName || t("未识别用户")}</span>
+          {(item.userName || !item.userScreenName) && (
+            <span className="min-w-0 truncate">{item.userName || t("未识别用户")}</span>
+          )}
           {item.userScreenName && (
             <span className="min-w-0 truncate text-brand-500 font-medium">@{item.userScreenName}</span>
           )}
@@ -620,9 +622,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         }}
         title={
           previewEntry
-            ? `${previewEntry.item.userName || t("未识别用户")}${
-                previewEntry.item.userScreenName ? `  @${previewEntry.item.userScreenName}` : ""
-              }`
+            ? [previewEntry.item.userName, previewEntry.item.userScreenName ? `@${previewEntry.item.userScreenName}` : ""].filter(Boolean).join("  ") || t("未识别用户")
             : ""
         }
       >

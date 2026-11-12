@@ -30,12 +30,12 @@ const (
 	libraryKindImages = "images"
 	libraryKindVideos = "videos"
 	libraryKindGifs   = "gifs"
-	// libraryUserUnknown 表示"没有归属用户"的过滤值（文件不在任何 user_entities 目录下）。
+	// libraryUserUnknown 表示既无归档作者、也无法从 user_entities 目录推断归属的文件。
 	libraryUserUnknown = "unknown"
 )
 
 // LibraryFilter 是媒体库分页的服务端过滤条件。Kind/User/Search 为空或 "all" 表示不过滤；
-// User 的 "unknown" 表示没有归属用户（不在任何 user_entities 目录下）的文件。
+// User 的 "unknown" 表示既无归档作者、也无用户实体目录归属的文件。
 type LibraryFilter struct {
 	Kind               string
 	User               string
@@ -234,7 +234,7 @@ type libraryQuery struct {
 	entryWhere  string // Applied after deduplication so older records cannot reappear.
 	sort        string
 	args        []any
-	userUnknown bool // User=="unknown"：归属判定必须在 Go 侧做，SQL 不含用户条件
+	userUnknown bool // User=="unknown"：缺少归档作者时，在 Go 侧补做目录归属判定
 	noMatch     bool // 条件不可能匹配任何记录
 }
 
@@ -252,29 +252,32 @@ func buildLibraryQuery(filter LibraryFilter, snap *librarySnapshot) libraryQuery
 		args = append(args, filter.Search, filter.Search, filter.Search)
 	}
 	result := libraryQuery{}
-	if filter.User != libraryKindAll {
-		if filter.User == libraryUserUnknown {
-			// 归属由 user_entities 目录前缀决定，SQLite 无法在表达式深度/参数上限内表达
-			// "不在任意实体目录下"，因此这里的用户条件留到 Go 侧逐条判定。
-			result.userUnknown = true
-		} else {
-			prefixes := snap.prefixesForUser(strings.TrimPrefix(filter.User, "@"))
-			if len(prefixes) == 0 {
-				return libraryQuery{noMatch: true}
-			}
-			parts := make([]string, 0, len(prefixes))
-			for _, prefix := range prefixes {
-				parts = append(parts, "instr(lower(replace(d.file_path, char(92), '/')), ?) = 1")
-				args = append(args, prefix)
-			}
-			conds = append(conds, "("+strings.Join(parts, " OR ")+")")
-		}
-	}
 	if len(conds) > 0 {
 		result.where = "WHERE " + strings.Join(conds, " AND ")
 	}
 	result.args = args
 	var entryConds []string
+	if filter.User != libraryKindAll {
+		if filter.User == libraryUserUnknown {
+			// 目录前缀可能很多，无作者记录的目录归属留到 Go 侧逐条判定。
+			result.userUnknown = true
+		} else {
+			user := strings.TrimPrefix(filter.User, "@")
+			prefixes := snap.prefixesForUser(user)
+			parts := make([]string, 0, len(prefixes))
+			userSQL := "user_screen_name = ?"
+			result.args = append(result.args, user)
+			for _, prefix := range prefixes {
+				parts = append(parts, "instr(lower(replace(file_path, char(92), '/')), ?) = 1")
+				result.args = append(result.args, prefix)
+			}
+			if len(parts) > 0 {
+				userSQL += " OR (user_screen_name = '' AND (" + strings.Join(parts, " OR ") + "))"
+			}
+			// 先按文件去重，再筛选作者，避免同一文件的旧下载记录重新出现。
+			entryConds = append(entryConds, "("+userSQL+")")
+		}
+	}
 	if !filter.From.IsZero() {
 		entryConds = append(entryConds, "julianday(created_at) >= julianday(?)")
 		result.args = append(result.args, filter.From.UTC().Format(time.RFC3339Nano))
@@ -377,14 +380,17 @@ func libraryEntriesSQL(query libraryQuery) string {
 WITH filtered AS (
 	SELECT d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes,
 		d.created_at, d.media_key, d.content_hash,
+		COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name,
 		CASE WHEN d.file_path = '' THEN 'record:' || d.id ELSE d.file_path END AS entry_key
 	FROM downloads d
+	LEFT JOIN tweets t ON t.id = d.tweet_id
 	` + query.where + `
 ), ranked AS (
 	SELECT filtered.*, ROW_NUMBER() OVER (PARTITION BY entry_key ORDER BY created_at DESC, id DESC) AS rn
 	FROM filtered
 )
-SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash
+SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash,
+	user_screen_name, user_name
 FROM ranked
 WHERE rn = 1` + query.entryWhere
 }
@@ -423,7 +429,7 @@ func (s *Store) countLibraryEntries(ctx context.Context, query libraryQuery) (in
 	return total, err
 }
 
-// scanUnknownLibraryEntries 在 SQL 侧只应用 kind/search，归属在 Go 侧按实体前缀判定：
+// scanUnknownLibraryEntries 对缺少归档作者的记录在 Go 侧补做目录归属判定：
 // 返回前 need 条无归属记录，并统计满足过滤条件的无归属总数。仅用于 user=="unknown"
 // （该过滤值在正常前端里很少被选中，扫描成本可接受）。
 func (s *Store) scanUnknownLibraryEntries(ctx context.Context, query libraryQuery, snap *librarySnapshot, need int) ([]DownloadRecord, int, error) {
@@ -446,6 +452,9 @@ func (s *Store) scanUnknownLibraryEntries(ctx context.Context, query libraryQuer
 			break
 		}
 		for _, item := range batch {
+			if item.UserScreenName != "" {
+				continue
+			}
 			if _, ok := snap.matchUser(item.FilePath); ok {
 				continue
 			}
@@ -691,37 +700,30 @@ ORDER BY ue.id`); err != nil {
 		addUser(entity.ScreenName, entity.UserName)
 	}
 
-	// 单次流式扫描 downloads：建立已记录路径集合（孤儿排除用）、去重后的分类
-	// 计数、用户 facet 与无归属数量。不在 Go 侧保留全部记录，内存与行数无关。
+	// 流式扫描每个文件的最新下载记录，作者和去重规则与分页结果保持一致。
 	known := make(map[string]struct{})
 	pathVariants := make(map[string][]string)
-	seenEntries := make(map[string]struct{})
-	rows, err := s.db.QueryxContext(ctx, `SELECT id, file_path FROM downloads`)
+	rows, err := s.db.QueryxContext(ctx, libraryEntriesSQL(libraryQuery{}))
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var id int64
-		var filePath string
-		if err := rows.Scan(&id, &filePath); err != nil {
+		var item DownloadRecord
+		if err := rows.StructScan(&item); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		entryKey := filePath
-		if filePath == "" {
-			entryKey = "record:" + strconv.FormatInt(id, 10)
-		} else if abs, absErr := filepath.Abs(filePath); absErr == nil {
-			cleaned := filepath.Clean(abs)
-			if _, exists := known[cleaned]; !exists {
-				key := libraryMatchPath(cleaned)
-				pathVariants[key] = append(pathVariants[key], cleaned)
-				known[cleaned] = struct{}{}
+		filePath := item.FilePath
+		if filePath != "" {
+			if abs, absErr := filepath.Abs(filePath); absErr == nil {
+				cleaned := filepath.Clean(abs)
+				if _, exists := known[cleaned]; !exists {
+					key := libraryMatchPath(cleaned)
+					pathVariants[key] = append(pathVariants[key], cleaned)
+					known[cleaned] = struct{}{}
+				}
 			}
 		}
-		if _, seen := seenEntries[entryKey]; seen {
-			continue
-		}
-		seenEntries[entryKey] = struct{}{}
 		snap.counts.all++
 		switch libraryCategory(filePath) {
 		case libraryKindImages:
@@ -731,7 +733,9 @@ ORDER BY ue.id`); err != nil {
 		case libraryKindGifs:
 			snap.counts.gifs++
 		}
-		if prefix, ok := snap.matchUser(filePath); ok {
+		if item.UserScreenName != "" {
+			addUser(item.UserScreenName, item.UserName)
+		} else if prefix, ok := snap.matchUser(filePath); ok {
 			addUser(prefix.screen, prefix.name)
 		} else {
 			snap.unknownEntries++

@@ -132,6 +132,17 @@ it("dedupes one card per saved file (server 已按 filePath 去重，前端再�
   expect(screen.getByText("other.jpg")).toBeTruthy();
 });
 
+it("只有用户名时卡片和预览仍显示已识别的用户", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse([{ ...records[0], userName: "" }])));
+  renderGallery();
+
+  await screen.findByText("@alice");
+  expect(screen.queryByText("未识别用户")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "查看图片 shared.jpg" }));
+  expect(screen.getByRole("dialog", { name: "@alice" })).toBeTruthy();
+  expect(screen.queryByText("未识别用户")).toBeNull();
+});
+
 it("把搜索词交给服务端分页接口，而不是本地过滤", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const search = requestParams(input).get("search") ?? "";
