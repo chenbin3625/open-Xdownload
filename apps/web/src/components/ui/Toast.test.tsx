@@ -101,6 +101,9 @@ describe("toast", () => {
   it("通过 Semi alert 播报通知", () => {
     render(<Toaster />);
     act(() => { toast.info({ message: "已更新" }); });
-    expect(screen.getByRole("alert").textContent).toContain("已更新");
+    // 关闭动画依赖 animationend，jsdom 不会触发，前序用例的通知可能仍在 DOM 里。
+    // 这里只断言新通知以 alert 角色被播报，不要求页面上只有它一条。
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts.some(alert => alert.textContent?.includes("已更新"))).toBe(true);
   });
 });
