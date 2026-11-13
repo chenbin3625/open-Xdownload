@@ -362,6 +362,244 @@ func TestEnvXAccountProtection(t *testing.T) {
 	}
 }
 
+func TestSyncEnvXAccounts(t *testing.T) {
+	store := newXAccountTestStore(t)
+	ctx := context.Background()
+	dbAccount := mustCreateXAccount(t, store, XAccount{AuthToken: "db-token", CSRFToken: "db-ct0"})
+
+	if err := store.SyncEnvXAccounts(ctx, []EnvXAccount{
+		{AuthToken: "env-main", CSRFToken: "m1", Primary: true},
+		{AuthToken: "env-extra", CSRFToken: "e1"},
+		{AuthToken: "env-main", CSRFToken: "dup"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	byToken := func() map[string]XAccount {
+		t.Helper()
+		accounts, err := store.ListXAccounts(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make(map[string]XAccount, len(accounts))
+		for _, account := range accounts {
+			out[account.AuthToken] = account
+		}
+		return out
+	}
+	accounts := byToken()
+	if len(accounts) != 3 {
+		t.Fatalf("accounts = %d, want 3", len(accounts))
+	}
+	if main := accounts["env-main"]; main.Source != "env" || !main.IsPrimary || main.CSRFToken != "m1" {
+		t.Fatalf("env-main = %+v", main)
+	}
+	if extra := accounts["env-extra"]; extra.Source != "env" || extra.IsPrimary {
+		t.Fatalf("env-extra = %+v", extra)
+	}
+	if accounts["db-token"].IsPrimary {
+		t.Fatal("db account should lose primary to env-main")
+	}
+
+	// 重启时同一组 Cookie 不能把已停用的 env 账号重新启用；换了 ct0 才重新启用。
+	if err := store.DeactivateXAccount(ctx, accounts["env-extra"].ID, "Cookie 已失效"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SyncEnvXAccounts(ctx, []EnvXAccount{
+		{AuthToken: "env-main", CSRFToken: "m1", Primary: true},
+		{AuthToken: "env-extra", CSRFToken: "e1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if extra := byToken()["env-extra"]; extra.Active || extra.ErrorMsg == "" {
+		t.Fatalf("same cookie should stay deactivated: %+v", extra)
+	}
+	if err := store.SyncEnvXAccounts(ctx, []EnvXAccount{
+		{AuthToken: "env-main", CSRFToken: "m1", Primary: true},
+		{AuthToken: "env-extra", CSRFToken: "e2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if extra := byToken()["env-extra"]; !extra.Active || extra.ErrorMsg != "" || extra.CSRFToken != "e2" {
+		t.Fatalf("new ct0 should reactivate: %+v", extra)
+	}
+
+	// 移除环境变量后删除对应 env 账号，主账号回落到最小 id 的 active 账号。
+	if err := store.SyncEnvXAccounts(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	accounts = byToken()
+	if len(accounts) != 1 {
+		t.Fatalf("accounts after removing env = %d, want 1", len(accounts))
+	}
+	if remaining := accounts["db-token"]; remaining.ID != dbAccount.ID || !remaining.IsPrimary {
+		t.Fatalf("db account should be promoted: %+v", remaining)
+	}
+}
+
+func TestApplyXAccountCheck(t *testing.T) {
+	store := newXAccountTestStore(t)
+	ctx := context.Background()
+	account := mustCreateXAccount(t, store, XAccount{AuthToken: "at-1", CSRFToken: "c1"})
+	future := time.Now().UTC().Add(time.Hour)
+	if err := store.LockXAccount(ctx, account.ID, "*", future, "401"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LockXAccount(ctx, account.ID, "UserMedia", future, "429"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 无法判断：只记录错误，不停用。
+	got, err := store.ApplyXAccountCheck(ctx, account.ID, XAccountCheck{Err: "network"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Active || got.ErrorMsg != "network" {
+		t.Fatalf("inconclusive check = %+v", got)
+	}
+
+	// 确认失效：停用并记录原因。
+	got, err = store.ApplyXAccountCheck(ctx, account.ID, XAccountCheck{Unauthorized: true, Err: "code 32"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Active || got.ErrorMsg != "code 32" {
+		t.Fatalf("unauthorized check = %+v", got)
+	}
+
+	// 成功：被系统停用的账号重新启用，清 '*' 锁，保留 queue 锁。
+	got, err = store.ApplyXAccountCheck(ctx, account.ID, XAccountCheck{ScreenName: "alice"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Active || got.ErrorMsg != "" || got.ScreenName != "alice" || !got.VerifiedAt.Valid {
+		t.Fatalf("successful check = %+v", got)
+	}
+	locks, err := store.ListXAccountLocks(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 1 || locks[0].Queue != "UserMedia" {
+		t.Fatalf("locks after success = %+v, want only UserMedia", locks)
+	}
+
+	// 用户手动停用（PATCH active=false 会清空 error_msg）后，检测成功不能重新启用。
+	inactive := false
+	got, err = store.UpdateXAccount(ctx, account.ID, XAccountPatch{Active: &inactive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Active || got.ErrorMsg != "" {
+		t.Fatalf("manual deactivate = %+v", got)
+	}
+	got, err = store.ApplyXAccountCheck(ctx, account.ID, XAccountCheck{ScreenName: "alice"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Active {
+		t.Fatal("manually deactivated account must stay inactive after a successful check")
+	}
+	// 失败的检测也不能抹掉手动停用标记。
+	for _, check := range []XAccountCheck{{Err: "network"}, {Unauthorized: true, Err: "code 32"}, {ScreenName: "alice"}} {
+		got, err = store.ApplyXAccountCheck(ctx, account.ID, check, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got.Active || got.ErrorMsg != "" {
+		t.Fatalf("manual deactivation marker lost: %+v", got)
+	}
+
+	if _, err := store.ApplyXAccountCheck(ctx, 9999, XAccountCheck{}, time.Time{}); err == nil {
+		t.Fatal("missing account should return an error")
+	}
+}
+
+func TestUpdateXAccountCredentialsReactivatesSystemDisabled(t *testing.T) {
+	store := newXAccountTestStore(t)
+	ctx := context.Background()
+	account := mustCreateXAccount(t, store, XAccount{AuthToken: "at-1", CSRFToken: "c1"})
+	if _, err := store.ApplyXAccountCheck(ctx, account.ID, XAccountCheck{ScreenName: "alice"}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().UTC().Add(time.Hour)
+	for _, queue := range []string{"*", "UserMedia"} {
+		if err := store.LockXAccount(ctx, account.ID, queue, future, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.DeactivateXAccount(ctx, account.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	token, ct0 := "at-2", "c2"
+	got, err := store.UpdateXAccount(ctx, account.ID, XAccountPatch{AuthToken: &token, CSRFToken: &ct0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Active || got.ErrorMsg != "" || got.VerifiedAt.Valid || got.AuthToken != "at-2" {
+		t.Fatalf("system-disabled account after cookie replacement = %+v", got)
+	}
+	locks, err := store.ListXAccountLocks(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 1 || locks[0].Queue != "UserMedia" {
+		t.Fatalf("locks after cookie replacement = %+v, want only UserMedia", locks)
+	}
+
+	// 手动停用的账号换 Cookie 后保持停用。
+	inactive := false
+	if _, err := store.UpdateXAccount(ctx, account.ID, XAccountPatch{Active: &inactive}); err != nil {
+		t.Fatal(err)
+	}
+	ct0 = "c3"
+	got, err = store.UpdateXAccount(ctx, account.ID, XAccountPatch{CSRFToken: &ct0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Active {
+		t.Fatal("manually deactivated account must stay inactive after cookie replacement")
+	}
+}
+
+func TestMarkXAccountUsed(t *testing.T) {
+	store := newXAccountTestStore(t)
+	ctx := context.Background()
+	account := mustCreateXAccount(t, store, XAccount{AuthToken: "at-1", CSRFToken: "c1"})
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	if err := store.MarkXAccountUsed(ctx, account.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetXAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastUsed.Valid || !got.LastUsed.Time.Equal(at) {
+		t.Fatalf("last_used = %+v, want %v", got.LastUsed, at)
+	}
+	if err := store.MarkXAccountUsed(ctx, 9999, at); err == nil {
+		t.Fatal("missing account should return an error")
+	}
+}
+
+func TestXAccountExtraCookieMap(t *testing.T) {
+	for _, tc := range []struct {
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"{}", 0, false},
+		{`{"guest_id":"v1","lang":"en"}`, 2, false},
+		{"not-json", 0, true},
+	} {
+		extra, err := XAccount{ExtraCookies: tc.raw}.ExtraCookieMap()
+		if (err != nil) != tc.wantErr || len(extra) != tc.want {
+			t.Fatalf("ExtraCookieMap(%q) = %v, %v", tc.raw, extra, err)
+		}
+	}
+}
+
 func TestLockXAccountKeepsLaterUntil(t *testing.T) {
 	store := newXAccountTestStore(t)
 	ctx := context.Background()

@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"testing"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
@@ -13,18 +14,18 @@ type fakeXSource struct{ xapi.Source }
 func TestInvalidateXSourceRebuildsCachedSource(t *testing.T) {
 	manager := &Manager{}
 	calls := 0
-	factory := func(config.AppConfig) (xapi.Source, error) {
+	factory := func(context.Context, config.AppConfig) (xapi.Source, error) {
 		calls++
 		return &fakeXSource{}, nil
 	}
 	manager.SetXSourceFactory(factory)
 	cfg := config.AppConfig{AuthToken: "configured"}
 
-	first, err := manager.XSource(cfg)
+	first, err := manager.XSource(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := manager.XSource(cfg)
+	second, err := manager.XSource(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func TestInvalidateXSourceRebuildsCachedSource(t *testing.T) {
 	}
 
 	manager.InvalidateXSource()
-	third, err := manager.XSource(cfg)
+	third, err := manager.XSource(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestInvalidateXSourceRebuildsCachedSource(t *testing.T) {
 
 	// 替换工厂同样要丢弃当前缓存。
 	manager.SetXSourceFactory(factory)
-	fourth, err := manager.XSource(cfg)
+	fourth, err := manager.XSource(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

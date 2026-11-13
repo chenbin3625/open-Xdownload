@@ -204,7 +204,7 @@ interface XAccountView {
 }
 ```
 
-检测（check）用临时客户端访问 `/home`，不影响生产池：成功 -> `MarkXAccountVerified` + `ActivateXAccount`；确认 401 -> `DeactivateXAccount`；其他错误 -> `SetXAccountError`，不停用。
+检测（check）用注入的 `xapi.HomeProber` 临时探测，不影响生产池：成功 -> `MarkXAccountVerified` + `ActivateXAccount` + 解除 `*` 锁；确认失效（`Unauthorized`）-> `DeactivateXAccount`；其他错误 -> `SetXAccountError`，不停用。探测端点见文末「2026-11-13 修订」。
 
 `/api/config` 不再接受 `authToken`/`csrfToken`/`additionalCookies` 的写入（读取时也不再返回）；`/api/auth/check` 和"是否已配置 Cookie"改为看 x_accounts 是否有 active 账号。
 
@@ -291,3 +291,21 @@ type Source interface {
 
 legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewSource` 在凭据缺失时返回一个仅支持 `FetchTweet` 的 source，其余方法返回与 `xclient.NewPool` 相同的错误。
 
+
+## 2026-11-13 修订（实现前核对 x.com 现状）
+
+- **账号校验探测改用 `GET /i/api/1.1/account/settings.json`。** X 现在对失效 Cookie 的 `/home` 返回 307 跳回首页并清掉 `auth_token`，不再返回 401，无法据此确认失效。settings.json 对失效 Cookie 返回 HTTP 401 + 错误码 32，对有效 Cookie 返回带 `screen_name` 的 JSON。`xapi.HomeProber` 保留原名，判定规则写在 `internal/xapi/probe.go`。legacy 的 `/home` 自检不在本次范围内改动。
+- **请求中遇到 HTTP 401 的处置顺序**：先用探测确认（2 分钟内确认过有效的账号不重复探测）。探测成功说明是目标/接口级 401，原样返回 `HTTPError`（`IsUnauthorized` 为真）；确认失效则 `DeactivateXAccount` 并换号；无法判断则锁 `*` 5 分钟并换号。错误码 32/64/89/215/326 出现在非 401 响应里时直接停用。
+- **queryId 自动发现只是尽力而为。** 当前未登录首页已换成 x-web（Vite + Relay persisted query），不再引用 `responsive-web/client-web/main.*.js`，新 bundle 里也没有 `UserByScreenName`、`UserMedia` 等 operation 名。发现失败时使用内置表；内置 queryId 目前仍可用（2026-11-13 用 guest token 请求 `UserByScreenName` 返回 200）。优先级：环境变量覆盖 > 发现结果 > 内置表。
+- **环境变量账号用 `Store.SyncEnvXAccounts` 同步**：`OPEN_XDOWNLOAD_AUTH_TOKEN`/`OPEN_XDOWNLOAD_CT0` 是主账号，`OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` 按 `config.ParseCookiePairs` 逐条导入为非主账号。不再出现在环境变量里的 env 账号会被删除；同一组 Cookie 重启时保留 active/error_msg，换了 ct0 才重新启用。
+- **爬虫开关**由 `jobs.ScraperMode()` 解析（`jobs.EnvScraper`、`jobs.ScraperLegacy`、`jobs.ScraperXScrape`），未识别的值按 legacy 处理。
+- **legacy 账号池从 x_accounts 构建**：只使用 active=1 的账号，主账号（is_primary=1 且 active）排第一位。主账号停用或不存在时 legacy 池没有主账号（`HasPrimary()` 为 false，主账号专用操作返回错误），不会把备用账号当主账号用。账号级 proxy、user_agent、extra_cookies 在 legacy 里同样生效。没有任何 active 账号时退回 guest 推文抓取，且不再读取已废弃的 `cfg.AuthToken`。legacy 的禁用状态仍只在内存里，不写回 x_accounts。
+- **账号检测的重新启用规则**：`PATCH active=false` 同时清空 error_msg；检测成功时只有被系统停用的账号（active=0 且 error_msg 非空）才重新启用，用户手动停用的账号保持停用。检测成功只解除 `*` 锁，不解除按 queue 的限流锁。
+- **jobs 的 Source 缓存键只含全局代理**；账号变化统一通过 `InvalidateXSource` 触发重建。运行时不再读取 `AppConfig.AuthToken`/`CSRFToken`/`AdditionalCookies`，只有一次性迁移读取旧列。
+- **`/api/config`**：GET/PUT 响应不再包含这三个字段；PUT 时空值和打码占位符静默忽略，真实值返回 400 并提示到账号池导入。
+- **`/api/auth/check`** 保留为兼容接口：`configured` 表示存在 active 账号；对主账号（主账号不可用时取第一个 active 账号）做一次探测，不写库。
+- **请求统计**只在请求成功时 +1（`IncrementXAccountStat`）。
+- **xscrape 公共 API** 固定为 `internal/xscrape/engine.go` 里的 `Options`、`NewEngine(store, opts)`、`(*Engine).Source(ctx, cfg)`（签名与 `jobs.XSourceFactory` 一致）、`(*Engine).HomeProber()`。Engine 进程内只建一个，持有 xtid、queryId 表和每账号的内存执行槽；Source 重建时复用。cmd/server 无论哪种模式都创建 Engine，并把 `HomeProber()` 注入 httpapi；xscrape 模式下再把 `engine.Source` 设为 jobs 的工厂。
+- **jobs 的 Source 工厂签名**改为 `jobs.XSourceFactory func(ctx, cfg) (xapi.Source, error)`；`Manager.XSource`、`Manager.NewXSource` 同样增加 ctx 参数。
+- **`xapi.ViewerKey(authToken)`** 是 viewerKey 的唯一实现，两套实现共用。
+- **没有 active 账号时，xscrape 的 FetchTweet 用 guest token 请求**（`POST {APIBaseURL}/1.1/guest/activate.json`，请求带 `x-guest-token`，loggedIn=false）。2026-11-13 实测：只带 bearer 请求 `TweetResultByRestId` 返回 403，带 guest token 返回 200。

@@ -54,7 +54,7 @@ type Manager struct {
 	xSourceMu      sync.Mutex
 	xSourceKey     string
 	cachedSource   xapi.Source
-	xSourceFactory func(config.AppConfig) (xapi.Source, error)
+	xSourceFactory XSourceFactory
 	// autoRetryPausedUntil：用户取消自动重试任务后的暂停窗口，避免 rollOnce 每 2s
 	// 把它重建出来（尊重"取消"语义，直到下个调度周期/窗口结束）。
 	autoRetryPausedUntil time.Time
@@ -127,7 +127,9 @@ func NewManager(store *storage.Store, parserService *parser.Service, eventBus *E
 		mediaLocks: make(map[string]*keyLock),
 		metrics:    make(map[int64]jobMetrics),
 		// 唯一直接引用 legacy 实现的位置；新实现通过 SetXSourceFactory 注入。
-		xSourceFactory: xclient.NewSource,
+		xSourceFactory: func(_ context.Context, cfg config.AppConfig) (xapi.Source, error) {
+			return xclient.NewSource(cfg)
+		},
 	}
 }
 
@@ -550,7 +552,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		if job.ArchiveMode.IncludesTweets() {
 			options := parserOptionsFromConfig(cfg)
 			options.RequireRelated = true
-			if source, sourceErr := m.XSource(cfg); sourceErr != nil {
+			if source, sourceErr := m.XSource(ctx, cfg); sourceErr != nil {
 				err = sourceErr
 			} else {
 				tweet, err = source.FetchTweet(ctx, tweetID, options)
@@ -1368,13 +1370,16 @@ func (m *Manager) xPool(ctx context.Context) (config.AppConfig, xapi.Source, err
 	if err != nil {
 		return config.AppConfig{}, nil, err
 	}
-	source, err := m.XSource(cfg)
+	source, err := m.XSource(ctx, cfg)
 	return cfg, source, err
 }
 
-// SetXSourceFactory 替换 X 数据源实现。默认是 legacy 的 xclient.NewSource；
-// 切换 OPEN_XDOWNLOAD_SCRAPER 时由启动代码注入另一套实现。替换工厂会丢弃旧缓存。
-func (m *Manager) SetXSourceFactory(factory func(config.AppConfig) (xapi.Source, error)) {
+// XSourceFactory 构建 X 数据源。cfg 是当前生效配置（已套用环境变量覆盖）。
+type XSourceFactory func(ctx context.Context, cfg config.AppConfig) (xapi.Source, error)
+
+// SetXSourceFactory 替换 X 数据源实现。默认是 legacy 的 xclient；切换
+// OPEN_XDOWNLOAD_SCRAPER 时由启动代码注入另一套实现。替换工厂会丢弃旧缓存。
+func (m *Manager) SetXSourceFactory(factory XSourceFactory) {
 	m.xSourceMu.Lock()
 	defer m.xSourceMu.Unlock()
 	m.xSourceFactory = factory
@@ -1393,18 +1398,18 @@ func (m *Manager) InvalidateXSource() {
 
 // NewXSource 用当前工厂构建一个不进入缓存的新 source，供 /api/auth/check 等
 // 非破坏性探测使用（探测会 disable 账号，不能打在生产池上）。
-func (m *Manager) NewXSource(cfg config.AppConfig) (xapi.Source, error) {
+func (m *Manager) NewXSource(ctx context.Context, cfg config.AppConfig) (xapi.Source, error) {
 	m.xSourceMu.Lock()
 	factory := m.xSourceFactory
 	m.xSourceMu.Unlock()
 	if factory == nil {
 		return nil, errors.New("X 数据源还没有初始化")
 	}
-	return factory(cfg)
+	return factory(ctx, cfg)
 }
 
 // XSource shares credential cooldowns and successful checks with running jobs.
-func (m *Manager) XSource(cfg config.AppConfig) (xapi.Source, error) {
+func (m *Manager) XSource(ctx context.Context, cfg config.AppConfig) (xapi.Source, error) {
 	key := xPoolConfigKey(cfg)
 	m.xSourceMu.Lock()
 	defer m.xSourceMu.Unlock()
@@ -1414,7 +1419,7 @@ func (m *Manager) XSource(cfg config.AppConfig) (xapi.Source, error) {
 	if m.xSourceFactory == nil {
 		return nil, errors.New("X 数据源还没有初始化")
 	}
-	source, err := m.xSourceFactory(cfg)
+	source, err := m.xSourceFactory(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

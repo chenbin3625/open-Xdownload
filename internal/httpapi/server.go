@@ -24,6 +24,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
+	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -39,6 +40,8 @@ type Server struct {
 	loginAttempts []time.Time
 	// bcryptSem 限制并发 bcrypt 操作，避免 CPU DoS。
 	bcryptSem chan struct{}
+	// homeProber 是账号检测用的探测函数，由 cmd/server 注入；nil 表示未初始化。
+	homeProber xapi.HomeProber
 }
 
 const maxLoginAttempts = 10             // 窗口内最大尝试次数
@@ -51,6 +54,11 @@ func NewServer(store *storage.Store, parserService *parser.Service, manager *job
 		authChanged: make(chan struct{}),
 		bcryptSem:   make(chan struct{}, maxConcurrentBcrypt),
 	}
+}
+
+// SetHomeProber 注入账号检测用的探测函数（见 xapi.HomeProber）。须在开始处理请求前调用。
+func (s *Server) SetHomeProber(prober xapi.HomeProber) {
+	s.homeProber = prober
 }
 
 func (s *Server) publish(event jobs.Event) {
@@ -383,7 +391,7 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	probeSource, err := s.manager.NewXSource(cfg)
+	probeSource, err := s.manager.NewXSource(r.Context(), cfg)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": configured,
