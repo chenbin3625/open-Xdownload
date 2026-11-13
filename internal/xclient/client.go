@@ -558,6 +558,33 @@ func (p *Pool) Diagnostics() PoolDiagnostics {
 	return PoolDiagnostics{Total: len(items), Available: available, Clients: items}
 }
 
+// RecheckDisabledClients 立即对被禁用的 Cookie 做一次 /home 登录校验，通过即解除禁用，
+// 返回此后是否至少有一个 Cookie 可用。用于区分"某个目标/游标返回 401"与"Cookie 真失效"：
+// X 对深翻页的私密时间线也会回 401，不能因此把唯一 Cookie 锁 30 分钟。
+func (p *Pool) RecheckDisabledClients(ctx context.Context) bool {
+	if p == nil {
+		return false
+	}
+	available := false
+	for _, client := range p.clients {
+		if client.isDisabled() {
+			if _, err := client.GetSelfScreenName(ctx); err != nil {
+				client.recordError(err)
+			}
+		}
+		if !client.isDisabled() {
+			available = true
+		}
+	}
+	return available
+}
+
+// IsUnauthorized 报告错误是否为 X 返回的 HTTP 401。
+func IsUnauthorized(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnauthorized
+}
+
 func (p *Pool) CheckAll(ctx context.Context) PoolDiagnostics {
 	if p == nil {
 		return PoolDiagnostics{}

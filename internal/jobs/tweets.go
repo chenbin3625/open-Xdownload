@@ -108,7 +108,13 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		err = pool.WalkUserTweets(ctx, user, xclient.TweetTimelineOptions{Cursor: state.Cursor, StopID: state.LastID, HeadID: state.HeadID, Parse: parseOptions}, savePage)
-		if attempt != 0 || state.Cursor == "" || !xclient.IsInvalidTimelineCursor(err) {
+		if attempt != 0 || state.Cursor == "" {
+			break
+		}
+		// X 对失效的深翻页游标有时回 401 而非 400：Cookie 通过 /home 校验就当作游标失效。
+		staleCursor := xclient.IsInvalidTimelineCursor(err) ||
+			(xclient.IsUnauthorized(err) && pool.RecheckDisabledClients(ctx))
+		if !staleCursor {
 			break
 		}
 		state.Cursor, state.HeadID, state.Count = "", "", 0

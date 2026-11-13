@@ -1613,8 +1613,11 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		if err != nil {
 			var pathError *os.PathError
 			var linkError *os.LinkError
-			if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) ||
-				(!errors.As(err, &pathError) && !errors.As(err, &linkError)) {
+			// 单个用户的时间线 401（私密/深翻页）而 Cookie 仍通过 /home 校验：只算该用户失败。
+			userUnauthorized := !isCancellation(ctx, err) && xclient.IsUnauthorized(err) &&
+				pool.RecheckDisabledClients(ctx)
+			if !userUnauthorized && (isCancellation(ctx, err) || shouldAbortArchiveUsers(err) ||
+				(!errors.As(err, &pathError) && !errors.As(err, &linkError))) {
 				// 限流中止等：保存已完成用户，任务重新入队后从下一个用户继续。
 				_ = m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, index, stats)
 				return stats, err
