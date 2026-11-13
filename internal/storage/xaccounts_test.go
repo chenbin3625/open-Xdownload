@@ -600,6 +600,58 @@ func TestXAccountExtraCookieMap(t *testing.T) {
 	}
 }
 
+// 锁持久化在 SQLite：进程重启（重新 Open 同一个库）后仍然生效，选号继续跳过被锁账号；
+// 启动时清理过期锁只删除已到期的那一条。
+func TestXAccountLocksSurviveReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "reopen.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := mustCreateXAccount(t, store, XAccount{AuthToken: "at-locked", CSRFToken: "c1"})
+	free := mustCreateXAccount(t, store, XAccount{AuthToken: "at-free", CSRFToken: "c2"})
+	now := time.Now().UTC()
+	if err := store.LockXAccount(ctx, locked.ID, "UserMedia", now.Add(time.Hour), "429"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LockXAccount(ctx, free.ID, "UserMedia", now.Add(-time.Minute), "expired"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.PurgeExpiredXAccountLocks(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := reopened.db.Get(&remaining, `SELECT COUNT(*) FROM x_account_locks`); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("locks after reopen and purge = %d, want 1", remaining)
+	}
+	for range 3 {
+		picked, ok, err := reopened.PickXAccount(ctx, "UserMedia", nil, time.Now())
+		if err != nil || !ok {
+			t.Fatalf("pick after reopen: ok=%v err=%v", ok, err)
+		}
+		if picked.ID != free.ID {
+			t.Fatalf("picked locked account %d after reopen", picked.ID)
+		}
+	}
+	until, ok, err := reopened.EarliestXAccountUnlock(ctx, "UserMedia", []int64{free.ID}, time.Now())
+	if err != nil || !ok || until.Before(now.Add(59*time.Minute)) {
+		t.Fatalf("earliest unlock after reopen = %v ok=%v err=%v", until, ok, err)
+	}
+}
+
 func TestLockXAccountKeepsLaterUntil(t *testing.T) {
 	store := newXAccountTestStore(t)
 	ctx := context.Background()
