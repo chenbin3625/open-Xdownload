@@ -2,7 +2,6 @@ package xclient
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"sync"
@@ -48,8 +47,6 @@ func (rl *rateLimiter) prune() {
 	}
 	rl.lastPrune = now
 }
-
-var errRateLimitBusyWait = errors.New("rate limiter: 连续等待次数超限，放弃本次请求")
 
 // maxLocalRateLimitWait 是 before() 在直接使用单个 Client（不经过 Pool）时原地
 // 阻塞的上限。超过它说明本次限流窗口较长，继续占用任务执行槽只会空耗时间；
@@ -304,14 +301,6 @@ func (rl *rateLimiter) blockedReset(paths ...string) (time.Time, bool) {
 		return rl.accountUntil.Add(5 * time.Second), true
 	}
 	return earliest, found
-}
-
-type RateLimitSnapshot struct {
-	Path      string    `json:"path"`
-	Limit     int       `json:"limit"`
-	Remaining int       `json:"remaining"`
-	Reset     time.Time `json:"reset"`
-	Blocked   bool      `json:"blocked"`
 }
 
 func (rl *rateLimiter) snapshot() []RateLimitSnapshot {

@@ -31,7 +31,7 @@ func TestListMetadataViewerIsReusedForMembers(t *testing.T) {
 					}
 				}))
 				t.Cleanup(server.Close)
-				clients = append(clients, &Client{http: server.Client(), baseURL: server.URL, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }})
+				clients = append(clients, &Client{http: server.Client(), baseURL: server.URL, authToken: name, limiter: newRateLimiter(), retryBackoff: func(int) time.Duration { return 0 }})
 			}
 			pool := &Pool{clients: clients}
 			list, err := pool.GetListByID(context.Background(), "l1")
