@@ -221,6 +221,38 @@ interface XAccountView {
 
 全部账号被锁：调度器上下文立即返回 `RateLimitedError{RetryAt: EarliestXAccountUnlock}`；否则最多等 `15m10s`。
 
+## 账号管理 HTTP 层与 /home 探测（httpapi）
+
+httpapi 不直接依赖 xscrape/xclient 的内部类型。账号检测通过一个探测函数注入：
+
+```go
+package xapi
+
+// HomeProbeResult 是一次 /home 登录校验的结果。
+type HomeProbeResult struct {
+    ScreenName   string // 成功时为当前登录账号
+    Unauthorized bool   // /home 明确返回 401：Cookie 确认失效
+    Err          error  // 其他失败（网络、WAF、限流、页面改版）：不能证明失效
+}
+
+// AccountCredentials 是一次探测所需的凭据；Proxy 为空时使用全局代理。
+type AccountCredentials struct {
+    AuthToken, CSRFToken string
+    ExtraCookies         map[string]string
+    UserAgent, Proxy     string
+}
+
+type HomeProber func(ctx context.Context, creds AccountCredentials) HomeProbeResult
+```
+
+`Server.SetHomeProber(xapi.HomeProber)` 用于注入探测函数，由 `cmd/server` 负责接线；测试注入假函数。探测结果对应的存储操作见上面的「检测」说明。check-all 并发上限为 4，单个账号超时 20 秒。
+
+`GET /api/x-accounts` 里的 `scraper` 字段取自 `jobs.ScraperMode()`，返回 `"legacy"` 或 `"xscrape"`，由环境变量 `OPEN_XDOWNLOAD_SCRAPER` 决定，默认 `legacy`。
+
+改动账号的接口（POST/PATCH/DELETE/unlock，以及确认失效的 check）成功后，要调用 `manager.InvalidateXSource()`，让正在缓存的 Source 下次使用前重建或刷新。
+
+代理字段用 `config.RestoreURLUserinfo(submitted, stored)` 还原打码值，用法与全局 ProxyURL 一致。前端编辑时会把打码后的代理原样带回来。
+
 ## Source 方法集
 
 （由 xapi 抽取后登记）
