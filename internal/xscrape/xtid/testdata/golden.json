@@ -1,0 +1,32 @@
+{
+  "note": "由 testdata/gen_golden.py 调用 XClientTransaction 生成；不要手改。",
+  "reference": "iSarabjitDhiman/XClientTransaction@f33670478bf799c2c10b33894c97347ccb9904a1",
+  "timestamp": 1763000000,
+  "randomByte": 137,
+  "keyword": "obfiowerehiring",
+  "additionalRandomNumber": 3,
+  "verificationKey": "lh3+yBXUsBNBG1got0DLT6TlTW6SJh29frfIvZ3i88MEhWra2EZgqo9t7eVvSjyr",
+  "animationKey": "1797900f851eb851eb850428f5c28f5c290428f5c28f5c290f851eb851eb8500",
+  "cases": [
+    {
+      "method": "GET",
+      "path": "/i/api/graphql/abc123/UserByScreenName",
+      "transactionId": "iR+Ud0GcXTmayJLRoT7JQsYtbMTnG6+UNPc+QTQUa3pKjQzjU1HP6SMG5GRs5sO1ItlSTI0slnwlBWIPCz3odEPCekwPig"
+    },
+    {
+      "method": "GET",
+      "path": "/i/api/graphql/abc123/UserMedia",
+      "transactionId": "iR+Ud0GcXTmayJLRoT7JQsYtbMTnG6+UNPc+QTQUa3pKjQzjU1HP6SMG5GRs5sO1ItlSTI1tGZsdJHTeYvPfgzIofU/Yig"
+    },
+    {
+      "method": "POST",
+      "path": "/i/api/graphql/xyz789/CreateTweet",
+      "transactionId": "iR+Ud0GcXTmayJLRoT7JQsYtbMTnG6+UNPc+QTQUa3pKjQzjU1HP6SMG5GRs5sO1ItlSTI337XyRWvGk5Wc/feVDqRm+ig"
+    },
+    {
+      "method": "GET",
+      "path": "/2/timeline/profile/123.json",
+      "transactionId": "iR+Ud0GcXTmayJLRoT7JQsYtbMTnG6+UNPc+QTQUa3pKjQzjU1HP6SMG5GRs5sO1ItlSTI2Wu2OeEOw3z90K82U2rIcHig"
+    }
+  ]
+}
