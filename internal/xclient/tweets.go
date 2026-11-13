@@ -11,9 +11,10 @@ import (
 
 func tweetResultPath(queryID string) string { return xapi.GraphQLPath(queryID, "TweetResultByRestId") }
 
-// FetchTweet 抓取单条推文详情。为保持既有语义，直接使用 cfg 里的主 Cookie
-// 新建客户端发请求，不经过 Pool 轮换，也不受账号池选中逻辑影响。
-func FetchTweet(ctx context.Context, cfg config.AppConfig, id string, options parser.ParseOptions) (parser.TweetData, error) {
+// fetchGuestTweet 是 legacy 的 guest/public 回退：用 cfg 里的（可能为空的）Cookie
+// 新建一次性客户端直接请求，不经过 Pool。只有凭据缺失、NewSource 退化为 guestSource
+// 时才会走到这里；正常账号池路径使用 Pool.FetchTweet。
+func fetchGuestTweet(ctx context.Context, cfg config.AppConfig, id string, options parser.ParseOptions) (parser.TweetData, error) {
 	client, err := NewClient(Credentials{AuthToken: cfg.AuthToken, CSRFToken: cfg.CSRFToken}, cfg.ProxyURL)
 	if err != nil {
 		return parser.TweetData{}, err

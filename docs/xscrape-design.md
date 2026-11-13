@@ -279,7 +279,7 @@ type Source interface {
 - `GetListByID`：查询列表元信息；返回值的 `ViewerKey` 是读取该列表的账号 `hex(sha256(auth_token))`，供成员分页绑定视角。
 - `GetUserByIDAsPrimary`：用主账号查询用户，受保护账号的 `following`/`muting` 等关系字段必须由主账号视角读取。
 - `FollowUserAsPrimary`：用主账号关注用户，不经过账号轮换。
-- `FetchTweet`：用主 Cookie 直接抓取单条推文，不经过账号池轮换；未配置 Cookie 时 legacy 仍以 guest/public 身份请求。
+- `FetchTweet`：由账号池选中的账号抓取单条推文，受账号池限流与轮换约束；未配置 Cookie 时 legacy 仍以 guest/public 身份请求（无池可选的回退）。
 - `WalkUserMedia`：逐页抓取 `UserMedia` 媒体时间线，每页解析/早停后回调 `save`，由调用方持久化游标。
 - `WalkUserTweets`：逐页抓取全文时间线（独立 operation 与游标，不复用媒体时间线水位线）。
 - `GetListMembersPage`：抓取列表成员一页；`viewerKey` 非空时固定使用该账号，保证私有列表视角一致。

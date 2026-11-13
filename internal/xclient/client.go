@@ -141,11 +141,6 @@ type Pool struct {
 	clients []*Client
 	next    int
 	mu      sync.Mutex
-	// primaryCredentials/proxyURL 用于 FetchTweet：与包级 FetchTweet 一致，
-	// 每次用主 Cookie 新建客户端直接请求，不经过 Select 轮换、也不受主账号
-	// 临时禁用状态影响。
-	primaryCredentials *Credentials
-	proxyURL           string
 }
 
 func NewPool(cfg config.AppConfig) (*Pool, error) {
@@ -174,11 +169,7 @@ func NewPool(cfg config.AppConfig) (*Pool, error) {
 	if len(clients) == 0 {
 		return nil, errors.New("没有可用 Cookie")
 	}
-	return &Pool{
-		clients:            clients,
-		primaryCredentials: &Credentials{AuthToken: cfg.AuthToken, CSRFToken: cfg.CSRFToken},
-		proxyURL:           cfg.ProxyURL,
-	}, nil
+	return &Pool{clients: clients}, nil
 }
 
 // sameOrigin checks the scheme, hostname and effective port before forwarding credentials.
@@ -273,18 +264,14 @@ func (p *Pool) FollowUserAsPrimary(ctx context.Context, user User) error {
 	return client.FollowUser(ctx, user)
 }
 
-// FetchTweet 实现 xapi.Source：使用主 Cookie 直接发请求，不经过 Pool 轮换。
-// 为与包级 FetchTweet 的既有语义一致，这里每次新建客户端（共享同一账号的
-// 限流/节流状态），不受主账号临时 disabled 状态影响。
+// FetchTweet 实现 xapi.Source：经 Pool 选号后请求，遵守账号限流/轮换与临时禁用。
+// 池内客户端必然带 Cookie，因此 loggedIn 为 true。
 func (p *Pool) FetchTweet(ctx context.Context, id string, options parser.ParseOptions) (parser.TweetData, error) {
-	if p == nil || p.primaryCredentials == nil {
-		return parser.TweetData{}, errors.New("没有可用 X 客户端")
-	}
-	client, err := NewClient(*p.primaryCredentials, p.proxyURL)
+	client, err := p.Select(ctx, xapi.TweetResultPath())
 	if err != nil {
 		return parser.TweetData{}, err
 	}
-	return xapi.FetchTweet(ctx, client, id, p.primaryCredentials.AuthToken != "", options)
+	return xapi.FetchTweet(ctx, client, id, true, options)
 }
 
 // maxPoolSelectWait 限制 Select 因"所有客户端限流"而阻塞等待的总时长。X GraphQL

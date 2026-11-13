@@ -17,7 +17,8 @@ type Source interface {
 	GetUserByIDAsPrimary(ctx context.Context, id string) (User, error)
 	// FollowUserAsPrimary 用主账号关注用户。
 	FollowUserAsPrimary(ctx context.Context, user User) error
-	// FetchTweet 用主 Cookie 直接抓取单条推文，不经过账号池轮换。
+	// FetchTweet 抓取单条推文；由账号池选中的账号发起请求，受账号池限流与轮换约束。
+	// 未配置 Cookie 的 legacy 实现仍以 guest/public 身份请求（无池可选的回退）。
 	FetchTweet(ctx context.Context, id string, options parser.ParseOptions) (parser.TweetData, error)
 	// WalkUserMedia 逐页抓取用户媒体时间线，每页完成后调用 save。
 	WalkUserMedia(ctx context.Context, user User, options UserMediaTimelineOptions, save func(UserMediaTimelinePage) error) (MediaFetchStats, error)

@@ -1373,11 +1373,20 @@ func (m *Manager) xPool(ctx context.Context) (config.AppConfig, xapi.Source, err
 }
 
 // SetXSourceFactory 替换 X 数据源实现。默认是 legacy 的 xclient.NewSource；
-// 切换 OPEN_XDOWNLOAD_SCRAPER 时由启动代码注入另一套实现。
+// 切换 OPEN_XDOWNLOAD_SCRAPER 时由启动代码注入另一套实现。替换工厂会丢弃旧缓存。
 func (m *Manager) SetXSourceFactory(factory func(config.AppConfig) (xapi.Source, error)) {
 	m.xSourceMu.Lock()
 	defer m.xSourceMu.Unlock()
 	m.xSourceFactory = factory
+	m.cachedSource = nil
+	m.xSourceKey = ""
+}
+
+// InvalidateXSource 清除缓存的 X 数据源，使下一次 XSource(cfg) 用当前工厂重建。
+// 账号池配置（Cookie/附加账号）变更后由账号管理 HTTP 层调用。
+func (m *Manager) InvalidateXSource() {
+	m.xSourceMu.Lock()
+	defer m.xSourceMu.Unlock()
 	m.cachedSource = nil
 	m.xSourceKey = ""
 }

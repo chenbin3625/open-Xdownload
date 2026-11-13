@@ -55,6 +55,35 @@ func TestFetchTweetUsesAPIGraphQLPath(t *testing.T) {
 	}
 }
 
+// Pool.FetchTweet 必须经由账号池选号发出请求，而不是绕过 Pool 用主凭据新建客户端。
+func TestPoolFetchTweetUsesPoolSelectedClient(t *testing.T) {
+	var gotAuthToken, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if cookie, err := r.Cookie("auth_token"); err == nil {
+			gotAuthToken = cookie.Value
+		}
+		_, _ = w.Write([]byte(`{"data":{"tweet_result_by_rest_id":{"result":` + fullTweetFixture("123", "pooled-author") + `}}}`))
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	client.authToken = "pooled-token"
+	pool := &Pool{clients: []*Client{client}}
+	tweet, err := pool.FetchTweet(context.Background(), "123", parser.ParseOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tweet.ID != "123" {
+		t.Fatalf("tweet id = %q", tweet.ID)
+	}
+	if gotAuthToken != "pooled-token" {
+		t.Fatalf("request did not use pooled client credentials: auth_token = %q", gotAuthToken)
+	}
+	if !strings.HasSuffix(gotPath, "/TweetResultByRestId") {
+		t.Fatalf("request path = %q", gotPath)
+	}
+}
+
 func fullTweetFixture(id, author string) string {
 	return fmt.Sprintf(`{"__typename":"Tweet","rest_id":%q,"legacy":{"full_text":"pure text","created_at":"Tue Nov 10 12:00:00 +0000 2026"},"core":{"user_results":{"result":{"rest_id":%q,"core":{"screen_name":"author","name":"Author"}}}}}`, id, author)
 }

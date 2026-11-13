@@ -40,7 +40,7 @@ func (s *guestSource) GetUserByIDAsPrimary(context.Context, string) (xapi.User, 
 func (s *guestSource) FollowUserAsPrimary(context.Context, xapi.User) error { return s.err }
 
 func (s *guestSource) FetchTweet(ctx context.Context, id string, options parser.ParseOptions) (parser.TweetData, error) {
-	return FetchTweet(ctx, s.cfg, id, options)
+	return fetchGuestTweet(ctx, s.cfg, id, options)
 }
 
 func (s *guestSource) WalkUserMedia(context.Context, xapi.User, xapi.UserMediaTimelineOptions, func(xapi.UserMediaTimelinePage) error) (xapi.MediaFetchStats, error) {
