@@ -7,6 +7,13 @@ import (
 	"net/url"
 )
 
+// MaxConsecutiveEmptyMemberPages 供分段成员收集使用：X 翻到列表末尾后仍会持续返回
+// 新的 Bottom cursor，连续这么多页没有新增用户即视为已到末尾。
+const MaxConsecutiveEmptyMemberPages = maxConsecutiveEmptyPages
+
+// PaginationPageDelay 是成员分页之间的请求间隔，与其他时间线分页保持一致。
+const PaginationPageDelay = paginationPageDelay
+
 type UserPage struct {
 	Users     []User
 	Cursor    string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
@@ -16,7 +17,12 @@ type memberCheckpoint struct {
 	ViewerKey   string         `json:"viewerKey"`
 	SeenCursors []string       `json:"seenCursors"`
 	Complete    bool           `json:"complete"`
+	// EmptyPages 记录连续没有新增用户的页数，持久化后分段恢复仍能累计。
+	EmptyPages int `json:"emptyPages,omitempty"`
 }
+
+// memberPageDelay 是成员分页之间的间隔，测试中可置零。
+var memberPageDelay = xclient.PaginationPageDelay
 
 func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storage.Job, fetch func(string, string) (xclient.UserPage, error)) ([]xclient.User, error) {
 	cp, _, err := m.loadArchiveCheckpoint(saveCtx, job.ID)
@@ -35,7 +41,14 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 		seenCursors[cursor] = true
 	}
 	started := time.Now()
-	for !state.Complete {
+	for fetched := 0; !state.Complete; fetched++ {
+		if fetched > 0 && memberPageDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(memberPageDelay):
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -49,6 +62,7 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 		if page.Cursor != "" && (page.Cursor == state.Cursor || seenCursors[page.Cursor]) {
 			return nil, fmt.Errorf("成员列表游标未前进")
 		}
+		before := len(state.Users)
 		for _, user := range page.Users {
 			if user.ID != "" && !seenUsers[user.ID] {
 				state.Users = append(state.Users, user)
@@ -57,6 +71,17 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 		}
 		state.Cursor, state.ViewerKey = page.Cursor, page.ViewerKey
 		state.Complete = page.Cursor == ""
+		// X 翻到末尾后仍会返回不断前进的 Bottom cursor（如 "0|..."）但不再有用户；
+		// 不加判断会一直翻到安全页数上限并让整个任务失败。
+		if len(state.Users) > before {
+			state.EmptyPages = 0
+		} else if !state.Complete {
+			state.EmptyPages++
+			if state.EmptyPages >= xclient.MaxConsecutiveEmptyMemberPages {
+				log.Printf("jobs: 成员列表连续 %d 页没有新增用户，视为已到末尾 (job=%d, users=%d)", state.EmptyPages, job.ID, len(state.Users))
+				state.Complete = true
+			}
+		}
 		if page.Cursor != "" {
 			state.SeenCursors = append(state.SeenCursors, page.Cursor)
 			seenCursors[page.Cursor] = true

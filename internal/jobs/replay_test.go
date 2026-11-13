@@ -152,3 +152,90 @@ func TestArchiveMembersResumeSavedViewerAndDeduplicate(t *testing.T) {
 		t.Fatalf("resumed members = %+v, %v", members, err)
 	}
 }
+
+// emptyTailMemberPages 模拟 X 关注/成员分页翻到底后仍持续返回新的 Bottom cursor 但不再有用户。
+func emptyTailMemberPages(users int, calls *int) func(string, string) (xclient.UserPage, error) {
+	return func(cursor, viewer string) (xclient.UserPage, error) {
+		*calls++
+		page := xclient.UserPage{Cursor: fmt.Sprintf("0|%d", *calls), ViewerKey: "viewer"}
+		if *calls <= users {
+			page.Users = []xclient.User{{ID: fmt.Sprint(*calls)}}
+		}
+		return page, nil
+	}
+}
+
+func newMemberTestManager(t *testing.T) (*Manager, storage.Job) {
+	t.Helper()
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	job, err := store.CreateJob(context.Background(), storage.JobKindFollowing, "author", "following")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDelay := memberPageDelay
+	memberPageDelay = 0
+	t.Cleanup(func() { memberPageDelay = oldDelay })
+	return NewManager(store, parser.NewService(), NewEventBus()), job
+}
+
+func TestArchiveMembersStopsAfterConsecutiveEmptyPages(t *testing.T) {
+	manager, job := newMemberTestManager(t)
+	ctx := context.Background()
+	calls := 0
+	members, err := manager.collectArchiveMembers(ctx, ctx, job, emptyTailMemberPages(5, &calls))
+	if err != nil || len(members) != 5 {
+		t.Fatalf("members = %d, %v", len(members), err)
+	}
+	if want := 5 + xclient.MaxConsecutiveEmptyMemberPages; calls != want {
+		t.Fatalf("calls = %d, want %d", calls, want)
+	}
+}
+
+func TestArchiveMembersEmptyPageCountSurvivesYield(t *testing.T) {
+	manager, job := newMemberTestManager(t)
+	ctx := context.Background()
+	oldBudget := archiveSliceBudget
+	archiveSliceBudget = 0
+	defer func() { archiveSliceBudget = oldBudget }()
+	calls := 0
+	fetch := emptyTailMemberPages(1, &calls)
+	var members []xclient.User
+	var err error
+	for slice := 0; slice < 20; slice++ {
+		members, err = manager.collectArchiveMembers(ctx, ctx, job, fetch)
+		if !errors.Is(err, errYieldExecution) {
+			break
+		}
+	}
+	if err != nil || len(members) != 1 {
+		t.Fatalf("members = %d, %v", len(members), err)
+	}
+	if want := 1 + xclient.MaxConsecutiveEmptyMemberPages; calls != want {
+		t.Fatalf("calls = %d, want %d (empty page count reset across slices)", calls, want)
+	}
+}
+
+func TestArchiveMembersEmptyPageCountResetsOnNewUsers(t *testing.T) {
+	manager, job := newMemberTestManager(t)
+	ctx := context.Background()
+	calls := 0
+	gap := xclient.MaxConsecutiveEmptyMemberPages - 1
+	members, err := manager.collectArchiveMembers(ctx, ctx, job, func(cursor, viewer string) (xclient.UserPage, error) {
+		calls++
+		page := xclient.UserPage{Cursor: fmt.Sprint(calls)}
+		switch {
+		case calls == 1, calls == gap+2:
+			page.Users = []xclient.User{{ID: fmt.Sprint(calls)}}
+		case calls == gap+3:
+			page.Cursor = ""
+		}
+		return page, nil
+	})
+	if err != nil || len(members) != 2 {
+		t.Fatalf("members = %+v, %v", members, err)
+	}
+}
