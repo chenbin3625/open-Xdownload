@@ -456,14 +456,22 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 		return nil, errors.New("没有可用 X 客户端")
 	}
 	var waited time.Duration
+	excluded := excludedClients(ctx)
 	for {
 		var blocked int
 		var disabled int
+		var skipped int
 		p.mu.Lock()
 		start := p.next
 		for offset := 0; offset < len(p.clients); offset++ {
 			index := (start + offset) % len(p.clients)
 			client := p.clients[index]
+			if excluded[client] {
+				// 本次查询已确认该 Cookie 拿不到数据（如目标账号受年龄限制），
+				// 换下一个账号，而不是原样重试同一个。
+				skipped++
+				continue
+			}
 			if client.isDisabled() {
 				disabled++
 				continue
@@ -477,8 +485,11 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 			return client, nil
 		}
 		p.mu.Unlock()
-		if disabled == len(p.clients) {
-			return nil, errors.New("所有 X Cookie 都不可用")
+		if skipped+disabled == len(p.clients) {
+			if disabled == len(p.clients) {
+				return nil, errors.New("所有 X Cookie 都不可用")
+			}
+			return nil, errors.New("没有可用于本次请求的 X Cookie")
 		}
 		if blocked == 0 {
 			return nil, errors.New("没有可用 X 客户端")
@@ -697,7 +708,7 @@ func getUserByID(ctx context.Context, requester timelineRequester, id string) (U
 	values := url.Values{}
 	values.Set("variables", encodeVariables(map[string]any{"userId": id, "withSafetyModeUserFields": true}))
 	values.Set("features", `{"hidden_profile_likes_enabled":true,"hidden_profile_subscriptions_enabled":true,"rweb_tipjar_consumption_enabled":true,"responsive_web_graphql_exclude_directive_enabled":true,"verified_phone_label_enabled":false,"highlights_tweets_tab_ui_enabled":true,"responsive_web_twitter_article_notes_tab_enabled":true,"subscriptions_feature_can_gift_premium":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_skip_user_profile_image_extensions_enabled":false,"responsive_web_graphql_timeline_navigation_enabled":true}`)
-	payload, err := requester.graphQL(ctx, userByRestIDPath, values)
+	payload, err := lookupUserPayload(ctx, requester, userByRestIDPath, values)
 	if err != nil {
 		return User{}, err
 	}
@@ -717,7 +728,7 @@ func getUserByScreenName(ctx context.Context, requester timelineRequester, scree
 	values.Set("variables", encodeVariables(map[string]any{"screen_name": screenName, "withSafetyModeUserFields": true}))
 	values.Set("features", `{"hidden_profile_subscriptions_enabled":true,"rweb_tipjar_consumption_enabled":true,"responsive_web_graphql_exclude_directive_enabled":true,"verified_phone_label_enabled":false,"subscriptions_verification_info_is_identity_verified_enabled":true,"subscriptions_verification_info_verified_since_enabled":true,"highlights_tweets_tab_ui_enabled":true,"responsive_web_twitter_article_notes_tab_enabled":true,"subscriptions_feature_can_gift_premium":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_skip_user_profile_image_extensions_enabled":false,"responsive_web_graphql_timeline_navigation_enabled":true}`)
 	values.Set("fieldToggles", `{"withAuxiliaryUserLabels":false}`)
-	payload, err := requester.graphQL(ctx, userByScreenNamePath, values)
+	payload, err := lookupUserPayload(ctx, requester, userByScreenNamePath, values)
 	if err != nil {
 		return User{}, err
 	}
@@ -1303,6 +1314,23 @@ func yieldsOnRateLimit(ctx context.Context) bool {
 	return yield
 }
 
+// excludedClientsKey 标记本次查询中已确认拿不到数据的 Cookie，让 Pool.Select 跳过它们。
+// 目前用于"目标账号受年龄限制"：X 返回 HTTP 200，Pool 层面看不出失败，必须由调用方
+// 识别后重试别的账号（不同账号的年龄验证状态/地区不同）。
+type excludedClientsKey struct{}
+
+func withExcludedClients(ctx context.Context, excluded map[*Client]bool) context.Context {
+	if len(excluded) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, excludedClientsKey{}, excluded)
+}
+
+func excludedClients(ctx context.Context) map[*Client]bool {
+	excluded, _ := ctx.Value(excludedClientsKey{}).(map[*Client]bool)
+	return excluded
+}
+
 func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]byte, error) {
 	payload, _, err := p.graphQLWithClient(ctx, path, values)
 	return payload, err
@@ -1842,19 +1870,30 @@ func unavailableUserError(raw gjson.Result) error {
 	message := strings.TrimSpace(raw.Get("message").String())
 
 	label := "用户不可用"
-	switch strings.ToLower(reason) {
-	case "suspended":
-		label = "用户已被冻结（Suspended）"
-	case "deactivated", "deleted":
-		label = "用户已注销或被删除（" + reason + "）"
-	case "nsfwloggedout", "nsfw":
-		label = "用户被标记为敏感内容，当前 Cookie 未登录无法访问"
-	case "protected":
-		label = "用户已受保护，需要关注后才能查看"
-	case "unavailable", "":
-		// 保留默认措辞，下面用原因/消息补足信息。
-	default:
-		label = "用户不可用（" + reason + "）"
+	hint := "提示: 账号可能已冻结/注销/受限；若多个不同账号都报此错误，多半是当前 Cookie 已失效，请重新导入 AuthToken 与 CSRFToken"
+	// X 对受年龄限制的账号同样回 reason=Suspended，真实原因只写在 message 里
+	// （User is age-restricted）。必须优先按 message 判断，否则会把"当前账号看不到
+	// 成人内容"误报成"目标账号被冻结"，还会把用户引去重导 Cookie——而重导无效。
+	if isAgeRestrictedUnavailable(raw) {
+		label = "用户受年龄限制，当前账号无法访问（age-restricted）"
+		hint = "提示: Cookie 登录状态本身正常，重导 Cookie 无效；请在 X 中完成年龄验证并开启「显示可能含有敏感内容的媒体」，或改用已完成年龄验证的账号、更换代理出口地区"
+	} else {
+		switch strings.ToLower(reason) {
+		case "suspended":
+			label = "用户已被冻结（Suspended）"
+		case "deactivated", "deleted":
+			label = "用户已注销或被删除（" + reason + "）"
+		case "nsfwloggedout", "nsfw":
+			label = "用户被标记为敏感内容，当前 Cookie 未登录无法访问"
+			hint = "提示: 请确认该账号 Cookie 仍处于登录状态；若其他接口正常，多为 X 对该内容额外要求登录态，必要时重新导入 AuthToken 与 CSRFToken"
+		case "protected":
+			label = "用户已受保护，需要关注后才能查看"
+			hint = "提示: 请改用已关注该账号的 Cookie 重试"
+		case "unavailable", "":
+			// 保留默认措辞，下面用原因/消息补足信息。
+		default:
+			label = "用户不可用（" + reason + "）"
+		}
 	}
 
 	// 用单行分隔符拼接：任务中心按换行拆分聚合错误，换行会被误判成多条独立
@@ -1866,8 +1905,60 @@ func unavailableUserError(raw gjson.Result) error {
 	if reason != "" && !strings.Contains(label, reason) {
 		parts = append(parts, "原因: "+reason)
 	}
-	parts = append(parts, "提示: 账号可能已冻结/注销/受限；若多个不同账号都报此错误，多半是当前 Cookie 已失效，请重新导入 AuthToken 与 CSRFToken")
+	parts = append(parts, hint)
 	return errors.New(strings.Join(parts, "；"))
+}
+
+// isAgeRestrictedUnavailable 判断 UserUnavailable 响应是否属于"目标账号受年龄限制"。
+// raw 可以是 data.user（含 result 包装）或 data.user.result。X 对此类账号的 reason
+// 仍是 Suspended，因此以 reason/message 中的年龄限制标记为准。
+func isAgeRestrictedUnavailable(raw gjson.Result) bool {
+	if raw.Get("result").Exists() {
+		raw = raw.Get("result")
+	}
+	if raw.Get("__typename").String() != "UserUnavailable" {
+		return false
+	}
+	reported := strings.ToLower(raw.Get("reason").String() + " " + raw.Get("message").String())
+	for _, marker := range []string{"age-restricted", "age restricted", "agerestricted", "age_restricted"} {
+		if strings.Contains(reported, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// ageRestrictedPayload 在 GraphQL 响应体层面做同样的判断，供换 Cookie 重试使用。
+func ageRestrictedPayload(payload []byte) bool {
+	return isAgeRestrictedUnavailable(gjson.GetBytes(payload, "data.user"))
+}
+
+// lookupUserPayload 查询用户数据。Pool 下若某个 Cookie 因目标账号受年龄限制拿不到
+// 数据，会排除该 Cookie 并换下一个重试：请求本身是 HTTP 200，Pool 不会自动换号，
+// 而不同账号的年龄验证状态、登录地区不同，换号可能就成功。
+// 所有 Cookie 都被拒绝时返回最后一次响应，由 parseUser 生成带提示的错误。
+func lookupUserPayload(ctx context.Context, requester timelineRequester, path string, values url.Values) ([]byte, error) {
+	pool, ok := requester.(*Pool)
+	if !ok {
+		return requester.graphQL(ctx, path, values)
+	}
+	var excluded map[*Client]bool
+	for {
+		payload, client, err := pool.graphQLWithClient(withExcludedClients(ctx, excluded), path, values)
+		if err != nil {
+			return nil, err
+		}
+		if !ageRestrictedPayload(payload) {
+			return payload, nil
+		}
+		if excluded == nil {
+			excluded = make(map[*Client]bool, len(pool.clients))
+		}
+		excluded[client] = true
+		if len(excluded) >= len(pool.clients) {
+			return payload, nil
+		}
+	}
 }
 
 // firstBool 返回第一个存在的布尔字段的值；都不存在时为 false。

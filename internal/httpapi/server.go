@@ -413,10 +413,14 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"configured":  configured,
-		"ok":          true,
-		"screenName":  screenName,
-		"message":     "X 登录校验通过",
+		"configured": configured,
+		"ok":         true,
+		"screenName": screenName,
+		"message":    "X 登录校验通过",
+		// 检测只走 GET /home 并解析 screen name，证明的是"Cookie 能登录"，不代表
+		// 该账号能访问受保护或受年龄限制的内容。明确写出来，避免用户把检测通过
+		// 当成"所有归档都能成功"。
+		"note":        "仅验证登录状态，不代表可访问受保护或受年龄限制的内容",
 		"diagnostics": diagnostics,
 	})
 }
