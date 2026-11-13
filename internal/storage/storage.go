@@ -113,7 +113,8 @@ const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout
 // job_checkpoints 表（长任务分段执行的检查点）。
 // v9: jobs.deferred_seconds（限流累计推迟上限）、user_entities.last_full_scan_at
 // （定时任务每 7 天的全量扫描基线）、media_sync 表（媒体时间线逐页游标）。
-const schemaVersion = 9
+// v10: x_accounts / x_account_locks / x_account_stats（twscrape 风格账号池）。
+const schemaVersion = 10
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -523,6 +524,13 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return err
 	}
 	if err := s.migrateAssets(); err != nil {
+		return err
+	}
+	if err := s.migrateXAccounts(); err != nil {
+		return err
+	}
+	// 旧 app_config Cookie 列一次性导入账号池；旧列保留到下一个版本再删。
+	if err := s.runMigrationOnce("migrate_cookies_to_x_accounts", s.migrateCookiesToXAccounts); err != nil {
 		return err
 	}
 	return s.setSchemaVersion()

@@ -792,6 +792,12 @@ func init() {
 		"media_context(media_key,payload,position,tweet_id);",
 		"media_context(media_key,payload,position,tweet_id);media_sync(count,cursor,error,last_seen_tweet_id,status,stop_id,updated_at,user_id);", 1)
 	schemaColumnsForVersion[9] = v9
+
+	// v10 在 v9 基础上新增 twscrape 风格账号池的三张表。
+	v10 := v9 + ";x_account_locks(account_id,queue,reason,until);" +
+		"x_account_stats(account_id,day,queue,requests);" +
+		"x_accounts(active,auth_token,created_at,ct0,error_msg,extra_cookies,id,is_primary,last_used,proxy,screen_name,source,updated_at,user_agent,verified_at)"
+	schemaColumnsForVersion[10] = v10
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {
