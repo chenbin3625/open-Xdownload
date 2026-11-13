@@ -11,7 +11,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
-	"github.com/chenbin3625/open-Xdownload/internal/xclient"
+	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 )
 
 // Refresh only the media the endpoint returned. A partial public response must
@@ -39,7 +39,7 @@ func mergeRefreshedMedia(original, fresh []parser.Media) []parser.Media {
 	return result
 }
 
-func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, entity storage.UserEntity, dir string, update func(string), shouldYield func() bool) (archiveStats, error) {
+func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool xapi.Source, user xapi.User, entity storage.UserEntity, dir string, update func(string), shouldYield func() bool) (archiveStats, error) {
 	stats := archiveStats{Users: 1}
 	cp, _, err := m.loadArchiveCheckpoint(saveCtx, job.ID)
 	if err != nil {
@@ -67,7 +67,7 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 	parseOptions := parserOptionsFromConfig(cfg)
 	parseOptions.RequireRelated = true
 	collected := map[string]bool{}
-	savePage := func(page xclient.TweetTimelinePage) error {
+	savePage := func(page xapi.TweetTimelinePage) error {
 		if update != nil {
 			update(fmt.Sprintf("全文归档 @%s：%d", user.ScreenName, state.Count+len(page.Tweets)))
 		}
@@ -107,13 +107,13 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 		return nil
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		err = pool.WalkUserTweets(ctx, user, xclient.TweetTimelineOptions{Cursor: state.Cursor, StopID: state.LastID, HeadID: state.HeadID, Parse: parseOptions}, savePage)
+		err = pool.WalkUserTweets(ctx, user, xapi.TweetTimelineOptions{Cursor: state.Cursor, StopID: state.LastID, HeadID: state.HeadID, Parse: parseOptions}, savePage)
 		if attempt != 0 || state.Cursor == "" {
 			break
 		}
 		// X 对失效的深翻页游标有时回 401 而非 400：Cookie 通过 /home 校验就当作游标失效。
-		staleCursor := xclient.IsInvalidTimelineCursor(err) ||
-			(xclient.IsUnauthorized(err) && pool.RecheckDisabledClients(ctx))
+		staleCursor := xapi.IsInvalidTimelineCursor(err) ||
+			(xapi.IsUnauthorized(err) && pool.RecheckDisabledClients(ctx))
 		if !staleCursor {
 			break
 		}
@@ -147,7 +147,7 @@ type tweetMediaReplay struct {
 	Complete       bool      `json:"complete"`
 }
 
-func (m *Manager) replayArchivedTweetMedia(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, update func(string), shouldYield func() bool, cp archiveCheckpoint, stats archiveStats, collected map[string]bool) (archiveStats, error) {
+func (m *Manager) replayArchivedTweetMedia(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xapi.User, entity storage.UserEntity, dir string, update func(string), shouldYield func() bool, cp archiveCheckpoint, stats archiveStats, collected map[string]bool) (archiveStats, error) {
 	state := cp.Replay
 	for !state.Complete {
 		if err := ctx.Err(); err != nil {

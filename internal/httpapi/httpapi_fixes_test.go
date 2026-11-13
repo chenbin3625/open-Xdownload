@@ -521,7 +521,7 @@ func TestCheckAuthProbesWithIsolatedPool(t *testing.T) {
 
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
-	productionPool, err := manager.XClientPool(stored)
+	productionPool, err := manager.XSource(stored)
 	if err != nil {
 		t.Fatalf("production pool: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestCheckAuthProbesWithIsolatedPool(t *testing.T) {
 		t.Fatalf("probe against unreachable proxy reported ok, body = %s", response.Body.String())
 	}
 
-	afterPool, err := manager.XClientPool(stored)
+	afterPool, err := manager.XSource(stored)
 	if err != nil {
 		t.Fatalf("production pool after: %v", err)
 	}

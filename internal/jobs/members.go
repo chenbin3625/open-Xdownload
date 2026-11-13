@@ -8,23 +8,23 @@ import (
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
-	"github.com/chenbin3625/open-Xdownload/internal/xclient"
+	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 )
 
 type memberCheckpoint struct {
-	Users       []xclient.User `json:"users"`
-	Cursor      string         `json:"cursor"`
-	ViewerKey   string         `json:"viewerKey"`
-	SeenCursors []string       `json:"seenCursors"`
-	Complete    bool           `json:"complete"`
+	Users       []xapi.User `json:"users"`
+	Cursor      string      `json:"cursor"`
+	ViewerKey   string      `json:"viewerKey"`
+	SeenCursors []string    `json:"seenCursors"`
+	Complete    bool        `json:"complete"`
 	// EmptyPages 记录连续没有新增用户的页数，持久化后分段恢复仍能累计。
 	EmptyPages int `json:"emptyPages,omitempty"`
 }
 
 // memberPageDelay 是成员分页之间的间隔，测试中可置零。
-var memberPageDelay = xclient.PaginationPageDelay
+var memberPageDelay = xapi.PaginationPageDelay
 
-func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storage.Job, fetch func(string, string) (xclient.UserPage, error)) ([]xclient.User, error) {
+func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storage.Job, fetch func(string, string) (xapi.UserPage, error)) ([]xapi.User, error) {
 	cp, _, err := m.loadArchiveCheckpoint(saveCtx, job.ID)
 	if err != nil {
 		return nil, err
@@ -77,7 +77,7 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 			state.EmptyPages = 0
 		} else if !state.Complete {
 			state.EmptyPages++
-			if state.EmptyPages >= xclient.MaxConsecutiveEmptyMemberPages {
+			if state.EmptyPages >= xapi.MaxConsecutiveEmptyPages {
 				log.Printf("jobs: 成员列表连续 %d 页没有新增用户，视为已到末尾 (job=%d, users=%d)", state.EmptyPages, job.ID, len(state.Users))
 				state.Complete = true
 			}
