@@ -761,6 +761,55 @@ func TestParseUserReadsRelocatedFields(t *testing.T) {
 	}
 }
 
+func TestParseUserUnavailableKeepsReason(t *testing.T) {
+	// X 对不可用账号只回 __typename，原因放在 reason/message。丢掉它们会让
+	// 任务失败时只剩一句“用户不可用”，无法区分冻结、注销还是 Cookie 失效。
+	cases := []struct {
+		name    string
+		payload string
+		want    []string
+	}{
+		{
+			name:    "suspended with message",
+			payload: `{"result":{"__typename":"UserUnavailable","reason":"Suspended","message":"User has been suspended."}}`,
+			want:    []string{"冻结", "Suspended", "User has been suspended.", "提示:"},
+		},
+		{
+			name:    "deactivated",
+			payload: `{"result":{"__typename":"UserUnavailable","reason":"Deactivated","message":"Account deactivated."}}`,
+			want:    []string{"注销", "Deactivated"},
+		},
+		{
+			name:    "nsfw logged out",
+			payload: `{"result":{"__typename":"UserUnavailable","reason":"NsfwLoggedOut"}}`,
+			want:    []string{"敏感内容", "未登录"},
+		},
+		{
+			name:    "unknown reason",
+			payload: `{"result":{"__typename":"UserUnavailable","reason":"SomethingNew"}}`,
+			want:    []string{"用户不可用", "SomethingNew"},
+		},
+		{
+			name:    "no reason",
+			payload: `{"result":{"__typename":"UserUnavailable"}}`,
+			want:    []string{"用户不可用", "提示:"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseUser(gjson.Parse(tc.payload))
+			if err == nil {
+				t.Fatal("parseUser() = nil error, want unavailable error")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q should contain %q", err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
 // —— 以下是本次修复新增的回归测试 ——
 
 func newHeaderTestClient(server *httptest.Server) *Client {

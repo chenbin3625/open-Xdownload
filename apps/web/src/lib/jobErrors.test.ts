@@ -25,6 +25,19 @@ describe("jobErrors", () => {
       expect(groups[0].targets).toEqual([]);
     });
 
+    it("解析后端附加的上下文与提示（单行分号拼接）", () => {
+      // 后端 fail() 会把上下文和排查提示用全角分号拼在同一行；这里必须解析成
+      // 一条错误，而不是按换行拆成多条“部分失败”。
+      const groups = parseAggregatedErrors(
+        "查询用户 @alice 失败: 用户已被冻结（Suspended）；X 返回: User has been suspended.；提示: 账号可能已冻结/注销/受限",
+      );
+      expect(groups).toHaveLength(1);
+      expect(groups[0].targets).toEqual(["@alice"]);
+      expect(groups[0].count).toBe(1);
+      expect(groups[0].reason).toContain("用户已被冻结");
+      expect(groups[0].reason).toContain("提示:");
+    });
+
     it("解析单个账号的报错", () => {
       const groups = parseAggregatedErrors("读取 @alice 的媒体时间线失败: 连接超时");
       expect(groups).toHaveLength(1);

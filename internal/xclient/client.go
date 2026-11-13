@@ -701,7 +701,11 @@ func getUserByID(ctx context.Context, requester timelineRequester, id string) (U
 	if err != nil {
 		return User{}, err
 	}
-	return parseUser(gjson.GetBytes(payload, "data.user"))
+	user, err := parseUser(gjson.GetBytes(payload, "data.user"))
+	if err != nil {
+		return User{}, fmt.Errorf("查询用户 ID %s 失败: %w", id, err)
+	}
+	return user, nil
 }
 
 func (c *Client) GetUserByScreenName(ctx context.Context, screenName string) (User, error) {
@@ -717,7 +721,11 @@ func getUserByScreenName(ctx context.Context, requester timelineRequester, scree
 	if err != nil {
 		return User{}, err
 	}
-	return parseUser(gjson.GetBytes(payload, "data.user"))
+	user, err := parseUser(gjson.GetBytes(payload, "data.user"))
+	if err != nil {
+		return User{}, fmt.Errorf("查询用户 @%s 失败: %w", screenName, err)
+	}
+	return user, nil
 }
 
 func (c *Client) GetListByID(ctx context.Context, id string) (List, error) {
@@ -1800,7 +1808,7 @@ func parseUser(raw gjson.Result) (User, error) {
 		raw = raw.Get("result")
 	}
 	if raw.Get("__typename").String() == "UserUnavailable" {
-		return User{}, errors.New("用户不可用")
+		return User{}, unavailableUserError(raw)
 	}
 	legacy := raw.Get("legacy")
 	if !legacy.Exists() {
@@ -1823,6 +1831,45 @@ func parseUser(raw gjson.Result) (User, error) {
 	}, nil
 }
 
+// unavailableUserError 把 X 的 UserUnavailable 响应翻译成可排查的中文错误。
+//
+// X 在 data.user.result 里只回一个 __typename，具体原因放在 reason/message
+// （如 Suspended/Deactivated/NsfwLoggedOut）。旧实现直接返回"用户不可用"，
+// 用户无法判断是账号问题、权限问题还是 Cookie 失效，任务一失败就只剩一句
+// 无信息量的提示。这里保留原始原因，并针对已知原因给出下一步建议。
+func unavailableUserError(raw gjson.Result) error {
+	reason := strings.TrimSpace(raw.Get("reason").String())
+	message := strings.TrimSpace(raw.Get("message").String())
+
+	label := "用户不可用"
+	switch strings.ToLower(reason) {
+	case "suspended":
+		label = "用户已被冻结（Suspended）"
+	case "deactivated", "deleted":
+		label = "用户已注销或被删除（" + reason + "）"
+	case "nsfwloggedout", "nsfw":
+		label = "用户被标记为敏感内容，当前 Cookie 未登录无法访问"
+	case "protected":
+		label = "用户已受保护，需要关注后才能查看"
+	case "unavailable", "":
+		// 保留默认措辞，下面用原因/消息补足信息。
+	default:
+		label = "用户不可用（" + reason + "）"
+	}
+
+	// 用单行分隔符拼接：任务中心按换行拆分聚合错误，换行会被误判成多条独立
+	// 失败记录，导致一次失败被显示成"部分失败 (N 项)"。
+	parts := []string{label}
+	if message != "" && !strings.Contains(label, message) {
+		parts = append(parts, "X 返回: "+message)
+	}
+	if reason != "" && !strings.Contains(label, reason) {
+		parts = append(parts, "原因: "+reason)
+	}
+	parts = append(parts, "提示: 账号可能已冻结/注销/受限；若多个不同账号都报此错误，多半是当前 Cookie 已失效，请重新导入 AuthToken 与 CSRFToken")
+	return errors.New(strings.Join(parts, "；"))
+}
+
 // firstBool 返回第一个存在的布尔字段的值；都不存在时为 false。
 func firstBool(values ...gjson.Result) bool {
 	for _, value := range values {
@@ -1837,7 +1884,11 @@ func timelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 	instructions := gjson.GetBytes(payload, instructionsPath)
 	if !instructions.Exists() {
 		if strings.HasPrefix(instructionsPath, "data.user.") {
-			typeName := gjson.GetBytes(payload, "data.user.result.__typename").String()
+			result := gjson.GetBytes(payload, "data.user.result")
+			typeName := result.Get("__typename").String()
+			if typeName == "UserUnavailable" {
+				return nil, "", unavailableUserError(result)
+			}
 			if typeName != "" && typeName != "User" {
 				return nil, "", fmt.Errorf("用户不可用: %s", typeName)
 			}

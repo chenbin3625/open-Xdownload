@@ -2619,9 +2619,92 @@ func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, er
 	}
 	job.Status = storage.JobFailed
 	job.Progress = 1
-	job.Message = "任务失败"
-	job.Error = err.Error()
+	job.Message = failureMessage(job, err)
+	job.Error = enhanceErrorContext(job, mediaURL, err)
 	m.save(ctx, job)
+}
+
+// failureMessage 根据任务类型和错误类型生成用户友好的失败消息
+func failureMessage(job storage.Job, err error) string {
+	if err == nil {
+		return "任务失败"
+	}
+
+	// 根据任务类型提供更具体的消息
+	switch job.Kind {
+	case storage.JobKindTweetLink:
+		if job.ArchiveMode == storage.ArchiveMedia {
+			return "推文媒体下载失败"
+		}
+		return "推文归档失败"
+	case storage.JobKindMediaURL:
+		return "媒体下载失败"
+	case storage.JobKindUser:
+		return "用户归档失败"
+	case storage.JobKindList:
+		return "列表归档失败"
+	case storage.JobKindFollowing:
+		return "关注归档失败"
+	case storage.JobKindFailedRetry:
+		return "失败重试任务失败"
+	case storage.JobKindAssetMigration:
+		return "归档迁移失败"
+	default:
+		return "任务失败"
+	}
+}
+
+// enhanceErrorContext 为错误信息添加上下文，使其更易于排查
+func enhanceErrorContext(job storage.Job, mediaURL string, err error) string {
+	if err == nil {
+		return ""
+	}
+
+	errMsg := err.Error()
+	var contextParts []string
+
+	// 添加媒体 URL 上下文（如果有）；用户/列表任务则显示输入目标，
+	// 否则多条任务同时失败时无法判断是哪一条出的问题。
+	if mediaURL != "" {
+		// 只显示简短的 URL 标识，避免超长 URL 破坏界面
+		displayURL := mediaURL
+		if len(mediaURL) > 100 {
+			displayURL = mediaURL[:97] + "..."
+		}
+		contextParts = append(contextParts, fmt.Sprintf("媒体URL: %s", displayURL))
+	} else if job.Input != "" && job.Kind != storage.JobKindTweetLink && job.Kind != storage.JobKindMediaURL && !strings.Contains(errMsg, job.Input) {
+		contextParts = append(contextParts, fmt.Sprintf("目标: %s", job.Input))
+	}
+
+	// 添加常见错误的用户友好提示。底层错误已经带了可操作建议（含"提示:"）时
+	// 不再重复追加，避免同一条建议出现两次。
+	if !strings.Contains(errMsg, "提示:") {
+		if strings.Contains(errMsg, "用户不可用") || strings.Contains(errMsg, "UserUnavailable") {
+			contextParts = append(contextParts, "提示: 账号可能已冻结/注销/受限；若多个不同账号都报此错误，多半是 X Cookie 已失效，请重新导入 AuthToken 与 CSRFToken")
+		} else if strings.Contains(strings.ToLower(errMsg), "timeout") || strings.Contains(errMsg, "超时") {
+			contextParts = append(contextParts, "提示: 网络超时，请检查网络连接或代理设置")
+		} else if strings.Contains(errMsg, "403") || strings.Contains(strings.ToLower(errMsg), "forbidden") {
+			contextParts = append(contextParts, "提示: 访问被拒绝，可能需要刷新 X 账号凭据")
+		} else if strings.Contains(errMsg, "404") || strings.Contains(strings.ToLower(errMsg), "not found") {
+			contextParts = append(contextParts, "提示: 资源不存在，可能已被删除")
+		} else if strings.Contains(errMsg, "401") || strings.Contains(strings.ToLower(errMsg), "unauthorized") {
+			contextParts = append(contextParts, "提示: 认证失败，请检查 X 账号凭据（AuthToken 和 CSRFToken）")
+		} else if strings.Contains(strings.ToLower(errMsg), "proxy") || strings.Contains(errMsg, "代理") {
+			contextParts = append(contextParts, "提示: 代理连接问题，请检查代理设置")
+		} else if strings.Contains(strings.ToLower(errMsg), "no space") || strings.Contains(errMsg, "ENOSPC") {
+			contextParts = append(contextParts, "提示: 磁盘空间不足")
+		} else if strings.Contains(strings.ToLower(errMsg), "permission") || strings.Contains(errMsg, "EACCES") {
+			contextParts = append(contextParts, "提示: 权限不足，请检查下载目录权限")
+		}
+	}
+
+	if len(contextParts) > 0 {
+		// 单行拼接：任务中心按换行拆分错误做聚合，多行上下文会被当成多条
+		// 独立失败，用户看到的是"部分失败 (N 项)"而不是一次失败的原因。
+		return fmt.Sprintf("%s；%s", errMsg, strings.Join(contextParts, "；"))
+	}
+
+	return errMsg
 }
 
 // rateLimitDeferExceeded 判断本次限流等待是否会让任务累计推迟超过上限。
