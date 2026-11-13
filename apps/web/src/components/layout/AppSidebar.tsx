@@ -50,7 +50,7 @@ export function AppSidebar({
           <img src="/icon.svg" alt="" className="size-8 shrink-0" />
           <div className="min-w-0">
             <div className="truncate text-sm font-bold tracking-tight text-fg">open-Xdownload</div>
-            <p className="text-[11px] text-fg-muted font-medium truncate">{t("推文多媒体归档工作台")}</p>
+            <p className="text-xs text-fg-muted font-medium truncate">{t("推文多媒体归档工作台")}</p>
           </div>
         </div>
 

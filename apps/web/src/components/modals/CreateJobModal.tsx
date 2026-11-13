@@ -346,7 +346,7 @@ export function CreateJobModal({
               <p className="line-clamp-2 text-fg-body">
                 {parsedTweet.text || t("无正文")}
               </p>
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-subtle">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
                 <span>{t("推文 ID: ")}{parsedTweet.id}</span>
                 <span>·</span>
                 <span>{t("发布于: ")}{parsedTweet.createdAt || t("未知")}</span>

@@ -18,7 +18,7 @@ export function EnvOverrideNote({
   useTranslation();
   if (!show) return null;
   return (
-    <p className={cn("mt-1 flex items-center gap-1 text-[11px] text-fg-muted", className)}>
+    <p className={cn("mt-1 flex items-center gap-1 text-xs text-fg-muted", className)}>
       <Info className="size-3 shrink-0 text-info" aria-hidden="true" />
       {children}
     </p>

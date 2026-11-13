@@ -238,7 +238,7 @@ export function CookieHelpAlert() {
           </ol>
           <div className="space-y-1 text-fg-muted pt-1">
             {cookieHelpNotes().map((note) => (
-              <p key={note} className="text-[11px]">
+              <p key={note} className="text-xs">
                 · {note}
               </p>
             ))}
@@ -580,7 +580,7 @@ export function BackupCookieInputs({
                 </div>
               </div>
               {showIncompleteHint && (
-                <p className="flex items-center gap-1 text-[11px] text-warning-strong">
+                <p className="flex items-center gap-1 text-xs text-warning-strong">
                   <AlertTriangle className="size-3 shrink-0" aria-hidden="true" />
                   {t("缺少 ")}{missingField}{t("：只填一半的账号不会参与轮询，请补全或删除这一行。")}</p>
               )}

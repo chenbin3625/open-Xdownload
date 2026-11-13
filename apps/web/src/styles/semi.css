@@ -1,0 +1,178 @@
+/* =========================================================
+   Semi UI 主题变量映射与组件覆盖
+   这里只把 Semi 的语义变量指向本项目令牌；
+   业务样式一律引用 --surface / --fg / --accent 等自定义令牌。
+   ========================================================= */
+
+:root body {
+  --semi-color-bg-0: var(--canvas);
+  --semi-color-bg-1: var(--surface);
+  --semi-color-bg-2: var(--surface);
+  --semi-color-border: var(--line);
+  --semi-color-text-0: var(--fg);
+  --semi-color-text-1: var(--fg-body);
+  --semi-color-text-2: var(--fg-muted);
+  --semi-color-primary: var(--accent);
+  --semi-color-primary-hover: var(--accent-hover);
+  --semi-color-primary-active: var(--accent-active);
+  --semi-color-primary-disabled: var(--color-brand-300);
+  --semi-color-primary-light-default: var(--accent-soft);
+  --semi-color-primary-light-hover: var(--accent-soft-hover);
+  --semi-color-primary-light-active: var(--accent-soft-active);
+  --semi-color-focus-border: var(--accent);
+  --semi-border-radius-small: var(--radius-sm);
+  --semi-border-radius-medium: var(--radius-control);
+  --semi-border-radius-large: var(--radius-card);
+}
+
+/* ---------------- 按钮 ---------------- */
+
+.app-shell .semi-button {
+  border-radius: var(--radius-control);
+}
+
+.app-shell
+  :where(.page-heading, .page-toolbar, .app-header, .mobile-job-card, .gallery-card-actions)
+  .semi-button {
+  min-height: 36px;
+}
+
+.app-shell .semi-button-with-icon-only {
+  flex-shrink: 0;
+}
+
+/* ---------------- 输入框 / 选择器 ---------------- */
+
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-input-wrapper-default,
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-select-single {
+  height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+}
+
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-input-wrapper-default:hover,
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-select-single:hover {
+  border-color: var(--fg-subtle);
+}
+
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-input-wrapper-focus,
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-select-focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-input-prefix {
+  margin-inline: 10px 6px;
+  color: var(--fg-subtle);
+}
+
+:is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-input-wrapper-default .semi-input {
+  height: 100%;
+}
+
+.app-shell .semi-select-disabled {
+  border-color: var(--line);
+  background: var(--surface-muted);
+}
+
+.semi-input-wrapper,
+.semi-select {
+  min-width: 0;
+}
+
+/* 表单字段：标签在上、控件在下，统一 6px 间距。 */
+.semi-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.semi-field .semi-form-field-label {
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+}
+
+.semi-field .semi-select,
+.semi-field .semi-input-number {
+  width: 100%;
+}
+
+/* ---------------- 卡片 ---------------- */
+
+.app-shell .semi-card {
+  border-color: var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.app-shell .semi-card-shadows-hover:hover {
+  box-shadow: var(--shadow-raised);
+}
+
+/* ---------------- 分页 ---------------- */
+
+.semi-pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 16px 0;
+  font-size: 12px;
+}
+
+/* ---------------- 弹窗 / 侧边抽屉 ---------------- */
+
+body .semi-modal-wrap {
+  display: flex;
+  align-items: center;
+  padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
+}
+
+.semi-modal-wrap .semi-modal {
+  max-width: 100%;
+  flex-shrink: 0;
+  margin: 0 auto;
+}
+
+.semi-modal-content {
+  max-height: calc(
+    100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom))
+  );
+  display: flex;
+  flex-direction: column;
+}
+
+.semi-modal-header,
+.semi-modal-footer {
+  flex-shrink: 0;
+}
+
+.semi-modal-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.semi-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.semi-sidesheet-body:has(.app-sidebar) {
+  padding: 0;
+}
+
+/* ---------------- 描述列表 ---------------- */
+
+/* 列数通过自定义属性传入（见 components/semi/index.tsx），
+   窄屏覆盖时不需要 !important。 */
+.semi-description-grid {
+  display: grid;
+  grid-template-columns: var(--description-grid-columns, repeat(3, minmax(0, 1fr)));
+}

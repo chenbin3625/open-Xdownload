@@ -10,7 +10,21 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const css = readFileSync(path.join(here, "../../index.css"), "utf8");
+const root = path.join(here, "../..");
+
+// index.css 只保留 @import；校验前把本地样式文件展开成一份完整的 CSS。
+// 裸模块（tailwindcss）跳过，它不参与令牌断言。
+function readCss(source: string, baseDir: string, seen = new Set<string>()): string {
+  return source.replace(/@import\s+"([^"]+)";/g, (_match, spec: string) => {
+    if (!spec.startsWith(".")) return "";
+    const file = path.resolve(baseDir, spec);
+    if (seen.has(file)) return "";
+    seen.add(file);
+    return readCss(readFileSync(file, "utf8"), path.dirname(file), seen);
+  });
+}
+
+const css = readCss(readFileSync(path.join(root, "index.css"), "utf8"), root);
 
 // 从 "marker {" 开始截到下一条 "}"，够用于本项目这种扁平声明块。
 function blockBody(marker: string): string {
@@ -63,8 +77,40 @@ describe("主题对比度 token", () => {
   });
 
   it("固定品牌色与其前景色组成 AA 对比", () => {
-    const body = blockBody(":root {");
-    expect(contrast(decl(body, "--color-brand-500"), decl(body, "--brand-contrast"))).toBeGreaterThanOrEqual(AA);
+    const theme = blockBody("@theme static {");
+    const root = blockBody(":root {");
+    expect(contrast(decl(theme, "--color-brand-500"), decl(root, "--brand-contrast"))).toBeGreaterThanOrEqual(AA);
+  });
+
+  it("实心主色与其前景色组成 AA 对比", () => {
+    const theme = blockBody("@theme static {");
+    const root = blockBody(":root {");
+    expect(contrast(decl(theme, "--color-brand-600"), decl(root, "--accent-contrast"))).toBeGreaterThanOrEqual(AA);
+  });
+
+  it("品牌色阶与 Semi 主色同源，只有一套蓝", () => {
+    const root = blockBody(":root {");
+    for (const alias of ["--accent", "--accent-hover", "--accent-active"]) {
+      expect(decl(root, alias)).toMatch(/^var\(--color-brand-\d+\)$/);
+    }
+    expect(css).toContain("--semi-color-primary: var(--accent);");
+    expect(css).not.toMatch(/--semi-color-primary:\s*#[0-9a-f]{6}/i);
+  });
+
+  it("断点统一为约定值", () => {
+    const maxWidths = new Set([...css.matchAll(/\(max-width:\s*([\d.]+)px\)/g)].map((m) => m[1]));
+    expect([...maxWidths].sort()).toEqual(["1099.98", "359.98", "639.98", "767.98"]);
+    const minWidths = new Set([...css.matchAll(/\(min-width:\s*([\d.]+)px\)/g)].map((m) => m[1]));
+    expect([...minWidths].sort()).toEqual(["1280", "768"]);
+  });
+
+  it("业务样式只引用自有令牌，Semi 变量只出现在映射文件里", () => {
+    const dir = path.join(root, "styles");
+    for (const file of readdirSync(dir).filter((name) => name.endsWith(".css"))) {
+      if (file === "semi.css") continue;
+      const source = readFileSync(path.join(dir, file), "utf8");
+      expect(source.includes("var(--semi-color-"), `${file} 仍在直接引用 Semi 变量`).toBe(false);
+    }
   });
 
   it("固定浅色，不再根据系统偏好或旧主题属性切换配色", () => {

@@ -133,7 +133,9 @@ export function ListSkeleton({ rows = 4, avatar = true }: { rows?: number; avata
 export function Empty({ description, children, className }: { description: React.ReactNode; children?: React.ReactNode; className?: string }) { return <SEmpty description={description} className={cn("py-8", className)}>{children}</SEmpty>; }
 export function Progress({ percent, status, className }: { percent: number; status?: "normal" | "active" | "success" | "exception"; className?: string }) { return <SProgress percent={Math.max(0, Math.min(100, percent))} showInfo={false} stroke={status === "exception" ? "var(--semi-color-danger)" : status === "success" ? "var(--semi-color-success)" : undefined} className={className} />; }
 export function Divider({ className }: { className?: string }) { return <SDivider className={className} />; }
-export function Descriptions({ items, columns = 3, className }: { items: { key: string; label: React.ReactNode; children: React.ReactNode }[]; columns?: 1 | 2 | 3; className?: string }) { return <SDescriptions data={items.map(item => ({ key: item.label, value: item.children }))} row align="left" className={cn("semi-description-grid", className)} style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }} />; }
+// 列数通过自定义属性传给 CSS：窄屏只需覆盖 grid-template-columns，
+// 不必再用 !important 去压内联样式。
+export function Descriptions({ items, columns = 3, className }: { items: { key: string; label: React.ReactNode; children: React.ReactNode }[]; columns?: 1 | 2 | 3; className?: string }) { return <SDescriptions data={items.map(item => ({ key: item.label, value: item.children }))} row align="left" className={cn("semi-description-grid", className)} style={{ "--description-grid-columns": `repeat(${columns}, minmax(0, 1fr))` } as React.CSSProperties} />; }
 
 export type Tone = "default" | "neutral" | "brand" | "success" | "warning" | "danger" | "info";
 const colors = { default: "grey", neutral: "grey", brand: "blue", success: "green", warning: "amber", danger: "red", info: "cyan" } as const;

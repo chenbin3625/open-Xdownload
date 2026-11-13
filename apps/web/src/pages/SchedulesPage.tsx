@@ -144,7 +144,7 @@ export function SchedulesPage({
               }
               headerExtraContent={
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-fg-muted font-normal">
+                  <span className="text-xs text-fg-muted font-normal">
                     {schedule.enabled ? t("运行中") : t("已暂停")}
                   </span>
                   <Switch
@@ -162,13 +162,13 @@ export function SchedulesPage({
               {/* 核心参数 */}
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <div className="min-w-0">
-                  <span className="text-fg-subtle block text-[11px]">{t("执行周期")}</span>
+                  <span className="text-fg-subtle block text-xs">{t("执行周期")}</span>
                   <span className="font-medium text-fg mt-0.5 block">
                     {formatIntervalMinutes(schedule.intervalMinutes)}
                   </span>
                 </div>
                 <div className="min-w-0">
-                  <span className="text-fg-subtle block text-[11px]">{t("下次运行")}</span>
+                  <span className="text-fg-subtle block text-xs">{t("下次运行")}</span>
                   <span className="font-mono text-fg mt-0.5 block truncate" title={schedule.nextRunAt}>
                     {schedule.nextRunAt ? formatDateTime(schedule.nextRunAt) : t("计算中")}
                   </span>
@@ -177,7 +177,7 @@ export function SchedulesPage({
 
               {/* 目标列表标签 */}
               <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] text-fg-subtle">
+                <div className="flex items-center justify-between text-xs text-fg-subtle">
                   <span>{t("目标清单")}</span>
                   <span>{schedule.items.length} {t(" 个目标")}</span>
                 </div>
@@ -185,7 +185,7 @@ export function SchedulesPage({
                   {schedule.items.map((item, idx) => (
                     <span
                       key={idx}
-                      className="inline-flex items-center gap-1 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-[11px] text-fg-body border border-line/60 truncate max-w-[180px]"
+                      className="inline-flex items-center gap-1 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-xs text-fg-body border border-line/60 truncate max-w-[180px]"
                       title={item.input}
                     >
                       <Users className="size-3 text-fg-subtle shrink-0" />

@@ -385,7 +385,7 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("全部")}</span>
-                      <span className="font-mono text-[11px] opacity-70">{jobs.length}</span>
+                      <span className="font-mono text-xs opacity-70">{jobs.length}</span>
                     </span>
                   ) : (
                     t("全部 ({{value0}})", { value0: jobs.length })
@@ -397,7 +397,7 @@ export function TaskCenterPage({
                     <span className="flex items-center gap-1.5">
                       {bucketCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
                       <span>{t("下载中")}</span>
-                      <span className="font-mono text-[11px] opacity-70">{bucketCounts.active}</span>
+                      <span className="font-mono text-xs opacity-70">{bucketCounts.active}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
@@ -411,7 +411,7 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("已完成")}</span>
-                      <span className="font-mono text-[11px] opacity-70">{bucketCounts.completed}</span>
+                      <span className="font-mono text-xs opacity-70">{bucketCounts.completed}</span>
                     </span>
                   ) : (
                     t("已完成 ({{value0}})", { value0: bucketCounts.completed })
@@ -423,7 +423,7 @@ export function TaskCenterPage({
                     <span className="flex items-center gap-1.5">
                       {bucketCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
                       <span>{t("失败")}</span>
-                      <span className="font-mono text-[11px] opacity-70">{bucketCounts.failed}</span>
+                      <span className="font-mono text-xs opacity-70">{bucketCounts.failed}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
@@ -571,7 +571,7 @@ function MobileJobCard({
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
           <Tag>{kindLabel(job.kind)}</Tag>
           <span className="font-mono">#JOB-{job.id}</span>
-          <time className="ml-auto font-mono text-[11px]" dateTime={job.updatedAt}>{formatDateTime(job.updatedAt)}</time>
+          <time className="ml-auto font-mono text-xs" dateTime={job.updatedAt}>{formatDateTime(job.updatedAt)}</time>
         </div>
         <div className="flex items-center justify-between border-t border-line pt-2">
           <Button
@@ -701,14 +701,14 @@ function JobErrorAlert({ job }: { job: Job }) {
 
                     {group.targets.length > 0 && (
                       <div className="space-y-1.5 pt-1.5 border-t border-line/50">
-                        <div className="flex items-center justify-between text-[11px] text-fg-muted">
+                        <div className="flex items-center justify-between text-xs text-fg-muted">
                           <span>{t("受影响账号 (")}{group.targets.length}):</span>
                           {hasMoreTargets && (
                             <button
                               type="button"
                               aria-expanded={isExpanded}
                               onClick={() => toggleExpand(group.id)}
-                              className="text-[11px] text-brand-600 hover:underline cursor-pointer"
+                              className="text-xs text-brand-600 hover:underline cursor-pointer"
                             >
                               {isExpanded ? t("收起") : t("展开更多 (+{{value0}})", { value0: group.targets.length - 8 })}
                             </button>
@@ -798,7 +798,7 @@ function ExpandedJobDetails({
         return (
           <div className="flex items-center justify-between gap-3 text-xs">
             <div className="flex min-w-0 flex-1 items-start gap-2.5">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded bg-brand-500/10 font-mono text-[10px] font-bold text-brand-600">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded bg-brand-500/10 font-mono text-xs font-bold text-brand-600">
                 {ext}
               </span>
               <div className="min-w-0 flex-1 space-y-0.5">
@@ -807,12 +807,12 @@ function ExpandedJobDetails({
                     {fileName}
                   </span>
                   {item.bytes > 0 && (
-                    <span className="shrink-0 font-mono text-[11px] text-fg-subtle">
+                    <span className="shrink-0 font-mono text-xs text-fg-subtle">
                       {formatBytes(item.bytes)}
                     </span>
                   )}
                 </div>
-                <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-fg-muted">
+                <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-fg-muted">
                   <span
                     className="max-w-full truncate sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
                     title={item.filePath}
@@ -864,7 +864,7 @@ function ExpandedJobDetails({
               <div className="font-medium text-danger break-all">
                 {item.error || t("媒体下载失败")}
               </div>
-              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-fg-muted">
+              <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-fg-muted">
                 <span
                   className="max-w-full truncate sm:max-w-md md:max-w-lg lg:max-w-xl text-fg-subtle"
                   title={item.mediaUrl}
@@ -977,7 +977,7 @@ function ExpandedJobDetails({
                 label: (
                   <span className="flex items-center gap-1.5">
                     <span>{t("已下载文件")}</span>
-                    <Tag tone="success" className="font-mono text-[10px] px-1 py-0">
+                    <Tag tone="success" className="font-mono text-xs px-1 py-0">
                       {downloads.length}
                     </Tag>
                   </span>
@@ -989,7 +989,7 @@ function ExpandedJobDetails({
                 label: (
                   <span className="flex items-center gap-1.5">
                     <span className="text-danger">{t("失败媒体")}</span>
-                    <Tag tone="danger" className="font-mono text-[10px] px-1 py-0">
+                    <Tag tone="danger" className="font-mono text-xs px-1 py-0">
                       {failed.length}
                     </Tag>
                   </span>

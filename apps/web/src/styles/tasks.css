@@ -1,0 +1,258 @@
+/* =========================================================
+   任务中心：统计卡片、任务表、任务详情、错误分组、Cookie 字段
+   ========================================================= */
+
+.task-stats {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.task-failure-count {
+  display: none;
+}
+
+.task-stat-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.task-stat-label svg {
+  flex-shrink: 0;
+}
+
+.task-stat-value {
+  margin-top: 6px;
+  color: var(--fg);
+  font-size: 28px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 34px;
+}
+
+.task-stat-active .task-stat-value {
+  color: var(--accent-active);
+}
+
+.task-stat-completed .task-stat-value {
+  color: var(--success-strong);
+}
+
+.task-stat-failed .task-stat-value {
+  color: var(--danger-strong);
+}
+
+/* ---------------- 任务表 ---------------- */
+
+.task-table .semi-table-container {
+  background: var(--surface);
+}
+
+.task-table .semi-table-thead > .semi-table-row > .semi-table-row-head {
+  background: var(--surface-muted);
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.task-table table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.task-table .semi-table-row-cell {
+  padding-block: 14px;
+  overflow-wrap: anywhere;
+}
+
+.task-table .semi-table-footer {
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+
+.task-table .semi-table-expand-cell {
+  padding: 0 12px 14px;
+  background: var(--surface-muted);
+}
+
+.task-progress {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  cursor: help;
+}
+
+.task-progress .semi-tag {
+  white-space: nowrap;
+}
+
+.task-progress-tooltip {
+  max-width: min(360px, calc(100vw - 48px));
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------- 任务详情 ---------------- */
+
+.task-details {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.task-details-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+}
+
+.task-details-meta {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 360px;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  margin: 0;
+}
+
+.task-details-meta > div {
+  min-width: 0;
+}
+
+.task-details-meta dt {
+  margin-bottom: 6px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.task-details-meta dd {
+  margin: 0;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
+.task-details-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* ---------------- 错误提示 ---------------- */
+
+.task-error-alert {
+  width: 100%;
+  min-width: 0;
+}
+
+.task-error-alert .semi-banner-content-wrapper,
+.task-error-alert .semi-banner-content,
+.task-error-alert .semi-banner-content-body,
+.task-error-alert .semi-banner-title,
+.task-error-alert .semi-banner-description {
+  min-width: 0;
+}
+
+.task-error-alert .semi-banner-content {
+  align-items: flex-start;
+}
+
+.task-error-alert .semi-banner-content-body {
+  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.task-error-alert .semi-banner-title {
+  width: 100%;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.task-error-alert .semi-banner-title > div {
+  width: 100%;
+}
+
+.task-error-alert .semi-banner-description {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.task-error-group {
+  padding-block: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.task-error-group:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* ---------------- Cookie 字段 ---------------- */
+
+.cookie-token-field > div:first-child,
+.cookie-token-field .semi-form-field-label {
+  width: 100%;
+}
+
+.cookie-field-heading {
+  display: flex;
+  min-width: 0;
+  min-height: 20px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+.cookie-token-status {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  font-weight: 400;
+  cursor: help;
+}
+
+.cookie-token-status .semi-tag {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  padding-inline: 7px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.cookie-token-status .semi-tag-prefix-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.cookie-backup-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 32px;
+  align-items: end;
+  gap: 8px;
+}

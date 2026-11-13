@@ -104,11 +104,11 @@ function VideoPoster({
   return (
     <button
       type="button"
-      className="group relative h-full w-full cursor-pointer border-0 bg-slate-950 p-0 overflow-hidden"
+      className="group relative h-full w-full cursor-pointer border-0 bg-media-bg p-0 overflow-hidden"
       onClick={onOpen}
       aria-label={t("预览视频 {{value0}}", { value0: fileName })}
     >
-      <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 text-slate-400">
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 text-media-fg">
         <Video className="size-8 text-brand-400" />
         <span className="text-xs">{t("播放视频")}</span>
       </div>
@@ -166,7 +166,7 @@ const GalleryCard = React.memo(function GalleryCard({
             >
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-fg-subtle">
                 <ImageIcon className="size-8" />
-                <span className="text-[11px] font-mono">{ext}</span>
+                <span className="text-xs font-mono">{ext}</span>
               </div>
               <img
                 src={previewURL}
@@ -186,7 +186,7 @@ const GalleryCard = React.memo(function GalleryCard({
             </div>
           )}
 
-          <span className="pointer-events-none absolute top-2 right-2 z-20 rounded-md bg-black/75 px-1.5 py-0.5 text-[10px] font-mono text-white/90 backdrop-blur-md border border-white/10 shadow-xs">
+          <span className="pointer-events-none absolute top-2 right-2 z-20 rounded-md bg-black/75 px-1.5 py-0.5 text-xs font-mono text-white/90 backdrop-blur-md border border-white/10 shadow-xs">
             {ext} · {formatBytes(item.bytes)}
           </span>
         </div>
@@ -197,7 +197,7 @@ const GalleryCard = React.memo(function GalleryCard({
           {fileName}
         </div>
 
-        <div className="truncate font-mono text-[11px] text-fg-muted flex items-center gap-1">
+        <div className="truncate font-mono text-xs text-fg-muted flex items-center gap-1">
           {(item.userName || !item.userScreenName) && (
             <span className="min-w-0 truncate">{item.userName || t("未识别用户")}</span>
           )}
@@ -676,7 +676,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                   <div className="font-medium text-fg truncate" title={fileName}>
                     {fileName}
                   </div>
-                  <div className="font-mono text-fg-muted text-[11px] truncate">
+                  <div className="font-mono text-fg-muted text-xs truncate">
                     {formatBytes(item.bytes)} · {formatDateTime(item.createdAt)}
                   </div>
                 </div>

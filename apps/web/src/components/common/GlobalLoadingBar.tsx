@@ -25,7 +25,7 @@ export function GlobalLoadingBar() {
     <div
       aria-hidden
       className={cn(
-        "pointer-events-none fixed inset-x-0 top-0 z-[1200] h-[3px] overflow-hidden",
+        "global-loading-bar pointer-events-none fixed inset-x-0 top-0 overflow-hidden",
         "transition-opacity duration-200",
         visible ? "opacity-100" : "opacity-0",
       )}

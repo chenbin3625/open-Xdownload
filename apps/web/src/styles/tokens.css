@@ -1,0 +1,181 @@
+/* =========================================================
+   设计令牌
+   语义命名（surface / line / fg），不是色阶命名。
+   品牌色、语义色、圆角、阴影只在这里定义：
+   业务样式与 Semi 的主题变量都从这里取值。
+   ========================================================= */
+
+/* static：所有令牌都产出 CSS 变量，运行时 var() 引用不依赖 Tailwind
+   是否在别处恰好用到了同名工具类。 */
+@theme static {
+  /* 品牌色阶：唯一主色源。
+     brand-600 与 Semi 主色同值，按钮、链接、聚焦环因此是同一种蓝。 */
+  --color-brand-50: #f0f9ff;
+  --color-brand-100: #e0f2fe;
+  --color-brand-200: #bae6fd;
+  --color-brand-300: #7dd3fc;
+  --color-brand-400: #38bdf8;
+  --color-brand-500: #1d9bf0;
+  --color-brand-600: #087ac1;
+  --color-brand-700: #0369a1;
+  --color-brand-800: #075985;
+  --color-brand-900: #0c4a6e;
+  --color-brand-glow: var(--brand-glow);
+  --color-brand-contrast: var(--brand-contrast);
+
+  /* 语义表面色 */
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-hover: var(--surface-hover);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-body: var(--fg-body);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  /* 状态色 */
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+
+  /* 状态色前景配对色，保证实心底色上的文字对比度。 */
+  --color-success-contrast: var(--success-contrast);
+  --color-warning-contrast: var(--warning-contrast);
+  --color-danger-contrast: var(--danger-contrast);
+  --color-info-contrast: var(--info-contrast);
+
+  /* 状态色的"文本加深"版本：用于 soft 浅底或普通表面上的状态文字。
+     原始 --success/--warning/... 在 soft 底上只有 3.1–4.4:1，不满足正文 AA。 */
+  --color-success-strong: var(--success-strong);
+  --color-warning-strong: var(--warning-strong);
+  --color-danger-strong: var(--danger-strong);
+  --color-info-strong: var(--info-strong);
+
+  /* 媒体占位（视频封面、深色预览底） */
+  --color-media-bg: var(--media-bg);
+  --color-media-fg: var(--media-fg);
+
+  /* 字体：系统字体栈优先，含中文字体回退。
+     不引用外部字体服务，离线与内网部署不会因为拉不到字体而阻塞。 */
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "PingFang SC", "Microsoft YaHei", monospace;
+
+  /* 圆角：组件只用这四档 */
+  --radius-sm: 0.25rem;
+  --radius-control: 0.375rem;
+  --radius-card: 0.5rem;
+  --radius-pill: 9999px;
+
+  /* 阴影 */
+  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+  --shadow-raised: 0 10px 25px -5px rgb(0 0 0 / 0.06), 0 8px 10px -6px rgb(0 0 0 / 0.04);
+  --shadow-overlay: 0 25px 50px -12px rgb(0 0 0 / 0.15);
+}
+
+@layer base {
+  :root {
+    --brand-contrast: #09090b;
+    --brand-glow: rgba(29, 155, 240, 0.18);
+
+    /* 主色别名：Semi 主色与业务样式共用，避免两套蓝并存。
+       --accent 在白色与 canvas 上均达到 4.5:1，可作链接文字。 */
+    --accent: var(--color-brand-600);
+    --accent-hover: var(--color-brand-700);
+    --accent-active: var(--color-brand-800);
+    --accent-soft: var(--color-brand-50);
+    --accent-soft-hover: var(--color-brand-100);
+    --accent-soft-active: var(--color-brand-200);
+    /* 实心主色上的前景色：#087ac1 + 白字 = 4.6:1 */
+    --accent-contrast: #ffffff;
+
+    /* 媒体占位底：比任何表面色都深，用于视频封面等照片下方。 */
+    --media-bg: #020617;
+    --media-fg: #94a3b8;
+
+    --canvas: #f6f7f9;
+    --surface: #ffffff;
+    --surface-muted: #f0f2f5;
+    --surface-hover: #e8ecf0;
+    --line: #e1e6ec;
+    --line-strong: #cbd3dd;
+    --fg: #182230;
+    --fg-body: #344054;
+    /* subtle 比 muted 更次要；两者在三种浅色表面上均保持 AA 对比度。 */
+    --fg-muted: #55657a;
+    --fg-subtle: #5f6f84;
+
+    --success: #059669;
+    --success-soft: #ecfdf5;
+    --warning: #d97706;
+    --warning-soft: #fffbeb;
+    --danger: #dc2626;
+    --danger-soft: #fef2f2;
+    --info: #0284c7;
+    --info-soft: #f0f9ff;
+
+    /* 状态实心色的前景配对（按各自底色亮度选深字/白字，均 ≥4.5:1）
+       success #059669 → 深字 5.28 ｜ warning #d97706 → 深字 6.24
+       danger  #dc2626 → 白字 4.83 ｜ info    #0284c7 → 深字 4.86 */
+    --success-contrast: #09090b;
+    --warning-contrast: #09090b;
+    --danger-contrast: #ffffff;
+    --info-contrast: #09090b;
+
+    /* 文本用加深色（soft 底与白底都 ≥4.5）：
+       success 5.21/5.6 ｜ warning 4.84/5.2 ｜ danger 5.91/6.5 ｜ info 5.57/5.9 */
+    --success-strong: #047857;
+    --warning-strong: #b45309;
+    --danger-strong: #b91c1c;
+    --info-strong: #0369a1;
+
+    /* 层级：浮层数值交给 Semi，自己只用这三档。 */
+    --z-sticky: 10;
+    --z-mobile-nav: 20;
+    --z-loading: 1200;
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    background-color: var(--canvas);
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  code,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  svg {
+    vertical-align: middle;
+  }
+
+  /* 选中文字使用品牌色的配对前景色。 */
+  ::selection {
+    background-color: var(--color-brand-500);
+    color: var(--brand-contrast);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-control);
+  }
+}

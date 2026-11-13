@@ -1,0 +1,487 @@
+/* =========================================================
+   响应式覆盖
+   断点统一为 640 / 768 / 1100 / 1280（与 Tailwind 的 sm / md / xl 对齐）。
+   同断点的规则集中在这里，就近的组件文件只写默认态。
+   ========================================================= */
+
+/* ---------------- ≥1280px：设置页双栏 ---------------- */
+
+@media (min-width: 1280px) {
+  .settings-secondary-grid {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr);
+    gap: 32px;
+  }
+
+  .settings-secondary-grid > section:first-child {
+    padding-right: 32px;
+    border-right: 1px solid var(--line);
+  }
+}
+
+/* ---------------- ≤1099.98px：存储设置收窄为单栏 ---------------- */
+
+@media (max-width: 1099.98px) {
+  .storage-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .storage-media-heading {
+    display: none;
+  }
+
+  .storage-media-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 12px 0;
+  }
+
+  .storage-media-name {
+    grid-column: span 2;
+  }
+
+  .storage-media-mode {
+    justify-content: flex-end;
+  }
+
+  .storage-media-field > div:first-child {
+    display: flex;
+  }
+
+  .storage-rule-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---------------- ≤767.98px：平板与手机共用 ---------------- */
+
+@media (max-width: 767.98px) {
+  /* 任务详情 */
+  .task-details {
+    gap: 14px;
+    padding: 14px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: var(--surface-muted);
+  }
+
+  .task-details-meta {
+    flex-basis: 100%;
+    gap: 12px 20px;
+  }
+
+  /* 任务状态切换：四等分的等宽按钮组 */
+  .task-center .toolbar-status {
+    flex-basis: 100%;
+    overflow: visible;
+  }
+
+  .task-center .toolbar-status .semi-radioGroup {
+    display: grid;
+    grid-template-columns:
+      minmax(0, 0.8fr) minmax(0, 1.2fr) minmax(0, 1fr)
+      minmax(0, 0.85fr);
+    gap: 4px;
+    padding: 0;
+    background: transparent;
+    white-space: normal;
+  }
+
+  .task-center .toolbar-status .semi-radio {
+    min-width: 0;
+    margin: 0;
+  }
+
+  .task-center .toolbar-status .semi-radio-content,
+  .task-center .toolbar-status .semi-radio-addon-buttonRadio {
+    flex: 1;
+    width: 100%;
+  }
+
+  .task-center .toolbar-status .semi-radio-addon-buttonRadio {
+    display: flex;
+    min-height: 36px;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 4px;
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    font-size: 12px;
+  }
+
+  .task-center .toolbar-status .semi-radio-addon-buttonRadio > span {
+    gap: 4px;
+  }
+
+  .task-center .toolbar-status .semi-radio-checked .semi-radio-addon-buttonRadio {
+    background: var(--accent-soft);
+    color: var(--accent-active);
+  }
+
+  /* 媒体库工具栏与网格 */
+  .gallery-toolbar {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .gallery-toolbar .toolbar-filters {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .gallery-toolbar .toolbar-search {
+    flex: 1 1 160px;
+  }
+
+  .gallery-toolbar .gallery-sort {
+    flex: 1 1 140px;
+    width: auto;
+  }
+
+  .gallery-toolbar .toolbar-status {
+    flex-basis: 100%;
+  }
+
+  .gallery-toolbar .toolbar-status .semi-radioGroup {
+    display: flex;
+    width: 100%;
+  }
+
+  .gallery-toolbar .toolbar-status .semi-radio {
+    flex: 1;
+    min-width: 0;
+    text-align: center;
+  }
+
+  .gallery-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  /* 外壳与页面骨架 */
+  .header-inner {
+    min-height: 0;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 16px 12px;
+  }
+
+  .header-brand {
+    display: flex;
+    flex: 1;
+    order: 1;
+  }
+
+  .header-actions {
+    order: 2;
+  }
+
+  .header-quick-submit {
+    max-width: none;
+    flex-basis: 100%;
+    order: 3;
+  }
+
+  .header-actions .semi-tag {
+    display: none;
+  }
+
+  .page-content {
+    padding: 20px 16px;
+  }
+
+  .workspace-page {
+    gap: 16px;
+  }
+
+  .page-heading {
+    align-items: center;
+    gap: 10px;
+  }
+
+  .page-title {
+    font-size: 20px;
+    line-height: 28px;
+  }
+
+  /* 任务统计卡片 */
+  .task-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .task-stat .semi-card-body {
+    padding: 10px 12px;
+  }
+
+  .task-stat-value {
+    margin-top: 4px;
+    font-size: 24px;
+    line-height: 28px;
+  }
+
+  .task-failure-label {
+    display: none;
+  }
+
+  .task-failure-count {
+    display: inline;
+  }
+
+  /* 工具栏换行 */
+  .task-center .toolbar-search {
+    flex-basis: 100%;
+  }
+
+  .task-center .toolbar-select {
+    flex: 1;
+    width: auto;
+  }
+
+  .mobile-job-card > div:first-child {
+    padding: 14px;
+  }
+
+  .mobile-job-card .semi-button {
+    min-height: 40px;
+  }
+
+  .toolbar-status {
+    flex-basis: 100%;
+  }
+
+  .toolbar-filters {
+    flex-basis: 100%;
+  }
+
+  .toolbar-search {
+    flex-basis: 160px;
+  }
+
+  .toolbar-select,
+  .toolbar-user-select {
+    width: 140px;
+  }
+
+  /* 推文归档 */
+  .archive-filters .toolbar-field {
+    flex-basis: calc(50% - 6px);
+  }
+
+  .archive-filters .archive-search {
+    flex-basis: 100%;
+  }
+
+  .archive-result-count {
+    margin-left: auto;
+  }
+
+  .archive-layout {
+    margin-left: 0;
+  }
+
+  .tweet-archive-compact .tweet-has-media {
+    grid-template-columns: minmax(0, 1fr) 168px;
+    gap: 12px;
+  }
+
+  .tweet-entry {
+    padding-inline: 14px;
+  }
+
+  /* 设置页 */
+  .settings-page .semi-settings-section {
+    padding-block: 20px;
+  }
+
+  .settings-action-label {
+    display: none;
+  }
+
+  /* 触控目标放大 */
+  .app-shell
+    :where(.page-heading, .page-toolbar, .app-header, .gallery-card-actions)
+    .semi-button {
+    min-height: 40px;
+  }
+
+  .app-header .semi-button-with-icon-only {
+    width: 40px;
+  }
+
+  :is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-input-wrapper-default,
+  :is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-select-single {
+    height: 40px;
+  }
+
+  /* 16px 避免 iOS 聚焦输入框时自动放大页面 */
+  :is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page)
+    .semi-input-wrapper-default
+    .semi-input,
+  :is(.app-shell, .semi-modal, .semi-sidesheet, .auth-page) .semi-input-textarea {
+    font-size: 16px;
+  }
+
+  .auth-page .semi-button {
+    min-height: 44px;
+  }
+
+  .storage-filename-part .semi-button {
+    width: 32px;
+    height: 32px;
+  }
+
+  .gallery-download {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+/* ---------------- ≤359.98px：极窄屏 ---------------- */
+
+@media (max-width: 359.98px) {
+  .task-center .toolbar-status .semi-radioGroup {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---------------- ≤639.98px：手机 ---------------- */
+
+@media (max-width: 639.98px) {
+  /* Cookie 备份行收成两列 */
+  .cookie-backup-row {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
+  .cookie-backup-row > .cookie-token-field {
+    grid-column: 1;
+  }
+
+  .cookie-backup-row > div:last-child {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  /* 媒体库筛选 */
+  .gallery-toolbar .toolbar-search {
+    flex-basis: 100%;
+  }
+
+  .gallery-toolbar .toolbar-user-select,
+  .gallery-toolbar .gallery-sort {
+    flex: 1 1 calc(50% - 4px);
+    width: auto;
+  }
+
+  /* 设置页 */
+  .storage-policy-options,
+  .storage-directory-options.storage-has-targets {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .storage-media-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
+  }
+
+  .storage-media-name {
+    grid-column: auto;
+  }
+
+  .storage-media-field {
+    grid-column: 1 / -1;
+  }
+
+  .settings-page .settings-form {
+    gap: 0;
+  }
+
+  .storage-rule-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .archive-filters .archive-date {
+    flex-basis: 100%;
+  }
+
+  .archive-date-picker {
+    max-width: calc(100vw - 24px);
+    max-height: 70dvh;
+    overflow: auto;
+  }
+
+  .archive-date-picker .semi-datepicker-month-grid {
+    flex-direction: column;
+  }
+
+  /* 推文归档紧凑视图 */
+  .tweet-archive-compact .tweet-has-media {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .tweet-archive-compact .tweet-media {
+    width: min(100%, 176px);
+  }
+
+  .tweet-archive-compact .tweet-media-multiple {
+    width: min(100%, 358px);
+  }
+
+  .tweet-identity time {
+    flex-basis: 100%;
+  }
+
+  .archive-layout {
+    margin-left: auto;
+  }
+
+  .archive-result-count {
+    margin: 0;
+  }
+
+  .archive-retweets {
+    width: 100%;
+  }
+
+  .archive-retweets .semi-radioGroup {
+    display: flex;
+  }
+
+  .archive-retweets .semi-radio {
+    flex: 1;
+    text-align: center;
+  }
+
+  /* 推文媒体、描述列表、分页 */
+  .tweet-media {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-width: 488px;
+  }
+
+  .semi-description-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .semi-pagination-bar {
+    justify-content: center;
+    overflow: visible;
+  }
+
+  .semi-pagination-bar .semi-page-switch {
+    display: none;
+  }
+
+  .semi-pagination-bar .semi-page {
+    max-width: 100%;
+    flex-wrap: wrap;
+    justify-content: center;
+    row-gap: 6px;
+  }
+
+  .semi-pagination-item,
+  .semi-pagination-prev,
+  .semi-pagination-next {
+    min-width: 32px;
+  }
+}

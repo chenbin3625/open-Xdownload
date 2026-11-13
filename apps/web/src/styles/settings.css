@@ -1,0 +1,312 @@
+/* =========================================================
+   设置页：分区、存储策略、文件名策略、开关列表
+   ========================================================= */
+
+.settings-page,
+.settings-form {
+  gap: 0;
+}
+
+.settings-form > .page-heading {
+  position: sticky;
+  z-index: var(--z-sticky);
+  top: 0;
+  margin-bottom: 0;
+  padding-block: 8px 16px;
+  background: var(--canvas);
+}
+
+.settings-form .page-actions {
+  gap: 6px;
+}
+
+.settings-form .page-actions .semi-button {
+  padding-inline: 8px;
+}
+
+.semi-settings-section {
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+}
+
+.settings-page .semi-settings-section {
+  padding: 24px 0;
+}
+
+.settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.settings-page .settings-section-title {
+  margin-bottom: 18px;
+}
+
+.settings-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-section-heading .settings-section-title {
+  margin-bottom: 0;
+}
+
+.settings-subsection-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--fg-body);
+}
+
+.settings-secondary-grid {
+  display: grid;
+  min-width: 0;
+}
+
+.settings-secondary-grid > section {
+  min-width: 0;
+}
+
+/* ---------------- 存储设置 ---------------- */
+
+.storage-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px 24px;
+}
+
+.storage-settings > .settings-section-heading,
+.storage-media-rules,
+.storage-preview-row,
+.storage-migration-row {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.storage-policy-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.storage-directory-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.storage-directory-options.storage-has-targets {
+  grid-template-columns: minmax(100px, 0.6fr) minmax(0, 1fr);
+}
+
+.storage-location,
+.storage-default-rules {
+  min-width: 0;
+}
+
+.storage-location .semi-input-wrapper {
+  flex: 1;
+}
+
+.storage-media-heading,
+.storage-media-row {
+  display: grid;
+  grid-template-columns:
+    minmax(120px, 0.9fr) 88px minmax(0, 1fr) minmax(0, 1fr)
+    minmax(0, 1.1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.storage-media-heading {
+  padding: 8px 10px;
+  background: var(--surface-muted);
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.storage-media-row {
+  padding: 16px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.storage-media-name {
+  padding-top: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.storage-media-mode {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.storage-media-field > div:first-child {
+  display: none;
+}
+
+.storage-media-field .semi-select-disabled .semi-select-selection-text {
+  color: var(--fg-muted);
+}
+
+.storage-target-path {
+  font: 12px/1.5 var(--font-mono);
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.storage-preview-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.storage-preview-row .storage-path-preview {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.storage-media-row > .storage-preview-row {
+  grid-column: 1 / -1;
+}
+
+.storage-folder-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.storage-folder-toggle .semi-switch {
+  flex-shrink: 0;
+}
+
+.storage-filename-strategy,
+.storage-filename-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.storage-filename-part {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 2px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.storage-filename-part > span {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.storage-filename-part .semi-button {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+
+.storage-filename-limit {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.storage-migration-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.storage-migration-row .settings-subsection-title {
+  margin-bottom: 4px;
+}
+
+.storage-default,
+.storage-policy {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.storage-rule-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.4fr 1.6fr;
+  gap: 12px;
+  align-items: end;
+}
+
+.storage-path-preview {
+  display: block;
+  margin-top: 12px;
+  padding: 10px;
+  background: var(--surface-muted);
+  font: 12px/1.6 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.directory-tree-panel {
+  position: relative;
+  min-height: 96px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  padding: 4px;
+}
+
+/* ---------------- 开关列表 ---------------- */
+
+.settings-toggle-list {
+  margin-top: 8px;
+}
+
+.settings-toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-toggle-row > div:first-child {
+  min-width: 0;
+}
+
+.settings-toggle-row .semi-switch {
+  flex-shrink: 0;
+}
+
+.settings-toggle-row:last-child {
+  border-bottom: 0;
+}
