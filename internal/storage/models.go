@@ -181,6 +181,7 @@ type User struct {
 	ID           string    `json:"id" db:"id"`
 	ScreenName   string    `json:"screenName" db:"screen_name"`
 	Name         string    `json:"name" db:"name"`
+	AvatarURL    string    `json:"avatarUrl" db:"avatar_url"`
 	Protected    bool      `json:"protected" db:"protected"`
 	FriendsCount int       `json:"friendsCount" db:"friends_count"`
 	MediaCount   int       `json:"mediaCount" db:"media_count"`
@@ -270,4 +271,14 @@ type Dashboard struct {
 	ArchiveSchedules []ArchiveSchedule `json:"archiveSchedules,omitempty"`
 	Pagination       Pagination        `json:"pagination"`
 	Stats            JobStats          `json:"stats"`
+}
+
+// LibraryUserSummary 是归档库里一个账号的聚合统计，用于按用户浏览的卡片视图。
+type LibraryUserSummary struct {
+	ScreenName  string    `json:"screenName"`
+	DisplayName string    `json:"displayName"`
+	AvatarURL   string    `json:"avatarUrl"`
+	MediaCount  int       `json:"mediaCount"`
+	TotalBytes  int64     `json:"totalBytes"`
+	LatestAt    time.Time `json:"latestAt"`
 }

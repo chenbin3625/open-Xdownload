@@ -792,6 +792,12 @@ func init() {
 		"media_context(media_key,payload,position,tweet_id);",
 		"media_context(media_key,payload,position,tweet_id);media_sync(count,cursor,error,last_seen_tweet_id,status,stop_id,updated_at,user_id);", 1)
 	schemaColumnsForVersion[9] = v9
+
+	// v10 在 v9 基础上：users 增加 avatar_url（归档库按用户浏览时显示头像）。
+	v10 := strings.Replace(v9,
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
+		"users(avatar_url,friends_count,id,media_count,name,protected,screen_name,updated_at)", 1)
+	schemaColumnsForVersion[10] = v10
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {

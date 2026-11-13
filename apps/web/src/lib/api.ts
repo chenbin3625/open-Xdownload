@@ -273,6 +273,21 @@ export const archiveScheduleQueryRoot = ["archive-schedules"] as const;
 export const failedTweetQueryRoot = ["failed-tweets"] as const;
 export const libraryDownloadsQueryRoot = ["library-downloads"] as const;
 
+/** 归档库按账号聚合的统计（用户卡片视图）。 */
+export interface LibraryUserSummary {
+  screenName: string;
+  displayName: string;
+  avatarUrl: string;
+  mediaCount: number;
+  totalBytes: number;
+  latestAt: string;
+}
+
+export const libraryUsersQueryRoot = ["library-users"] as const;
+
+export const getLibraryUsers = () =>
+  api<{ items: LibraryUserSummary[] }>("/api/library/users");
+
 export interface FailedTweetPage {
   items: FailedTweet[];
   pagination: DashboardPagination;

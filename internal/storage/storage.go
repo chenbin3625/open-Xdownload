@@ -113,7 +113,8 @@ const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout
 // job_checkpoints 表（长任务分段执行的检查点）。
 // v9: jobs.deferred_seconds（限流累计推迟上限）、user_entities.last_full_scan_at
 // （定时任务每 7 天的全量扫描基线）、media_sync 表（媒体时间线逐页游标）。
-const schemaVersion = 9
+// v10: users.avatar_url（归档库按用户浏览时显示头像）。
+const schemaVersion = 10
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -611,20 +612,25 @@ func (s *Store) addMissingColumns() error {
 
 	// 使用有序切片而不是 map：ALTER 顺序固定，失败/日志可复现（功能上各列独立）。
 	columns := []struct {
+		table     string
 		name      string
 		statement string
 	}{
-		{"additional_cookies", `ALTER TABLE app_config ADD COLUMN additional_cookies TEXT NOT NULL DEFAULT ''`},
-		{"auto_follow_protected", `ALTER TABLE app_config ADD COLUMN auto_follow_protected BOOLEAN NOT NULL DEFAULT 0`},
-		{"include_nested_tweet_media", `ALTER TABLE app_config ADD COLUMN include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0`},
-		{"incremental_archive", `ALTER TABLE app_config ADD COLUMN incremental_archive BOOLEAN NOT NULL DEFAULT 0`},
-		{"file_naming_mode", `ALTER TABLE app_config ADD COLUMN file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text'`},
-		{"max_filename_length", `ALTER TABLE app_config ADD COLUMN max_filename_length INTEGER NOT NULL DEFAULT 120`},
-		{"storage_type", `ALTER TABLE app_config ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'local'`},
+		{"app_config", "additional_cookies", `ALTER TABLE app_config ADD COLUMN additional_cookies TEXT NOT NULL DEFAULT ''`},
+		{"app_config", "auto_follow_protected", `ALTER TABLE app_config ADD COLUMN auto_follow_protected BOOLEAN NOT NULL DEFAULT 0`},
+		{"app_config", "include_nested_tweet_media", `ALTER TABLE app_config ADD COLUMN include_nested_tweet_media BOOLEAN NOT NULL DEFAULT 0`},
+		{"app_config", "incremental_archive", `ALTER TABLE app_config ADD COLUMN incremental_archive BOOLEAN NOT NULL DEFAULT 0`},
+		{"app_config", "file_naming_mode", `ALTER TABLE app_config ADD COLUMN file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text'`},
+		{"app_config", "max_filename_length", `ALTER TABLE app_config ADD COLUMN max_filename_length INTEGER NOT NULL DEFAULT 120`},
+		{"app_config", "storage_type", `ALTER TABLE app_config ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'local'`},
+		// 归档库按用户分组展示时用来显示头像；旧库的历史用户为空，由前端回退成首字母。
+		{"users", "avatar_url", `ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, column := range columns {
 		var exists int
-		if err := tx.Get(&exists, `SELECT COUNT(*) FROM pragma_table_info('app_config') WHERE name = ?`, column.name); err != nil {
+		// pragma_table_info 不接受绑定参数作为表名，这里拼接的是上方的常量表名。
+		query := fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?`, column.table)
+		if err := tx.Get(&exists, query, column.name); err != nil {
 			return err
 		}
 		if exists == 0 {
@@ -2402,6 +2408,77 @@ func collectOrphanLibraryFiles(ctx context.Context, root string, known map[strin
 	return items, nil
 }
 
+// ListLibraryUsers 按归档账号聚合已下载媒体，供归档库的用户卡片视图使用。
+// 归属沿用媒体列表页的 attributeLibraryUsers（含按目录前缀推断的旧记录），
+// 保证卡片上的账号和筛选下拉里的一致。
+func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, error) {
+	items := []DownloadRecord{}
+	if err := s.db.SelectContext(ctx, &items, `
+SELECT d.*, COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
+FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id`); err != nil {
+		return nil, err
+	}
+	if err := s.attributeLibraryUsers(ctx, items); err != nil {
+		return nil, err
+	}
+
+	users := []User{}
+	if err := s.db.SelectContext(ctx, &users, `SELECT * FROM users`); err != nil {
+		return nil, err
+	}
+	byScreenName := make(map[string]User, len(users))
+	for _, user := range users {
+		byScreenName[user.ScreenName] = user
+	}
+
+	type aggregate struct {
+		mediaCount  int
+		totalBytes  int64
+		latestAt    time.Time
+		displayName string
+	}
+	aggregates := map[string]*aggregate{}
+	for _, item := range items {
+		if item.UserScreenName == "" {
+			continue
+		}
+		entry := aggregates[item.UserScreenName]
+		if entry == nil {
+			entry = &aggregate{}
+			aggregates[item.UserScreenName] = entry
+		}
+		entry.mediaCount++
+		entry.totalBytes += item.Bytes
+		if item.CreatedAt.After(entry.latestAt) {
+			entry.latestAt = item.CreatedAt
+		}
+		if entry.displayName == "" {
+			entry.displayName = item.UserName
+		}
+	}
+
+	summaries := make([]LibraryUserSummary, 0, len(aggregates))
+	for screenName, entry := range aggregates {
+		user := byScreenName[screenName]
+		displayName := user.Name
+		if displayName == "" {
+			displayName = entry.displayName
+		}
+		summaries = append(summaries, LibraryUserSummary{
+			ScreenName:  screenName,
+			DisplayName: displayName,
+			AvatarURL:   user.AvatarURL,
+			MediaCount:  entry.mediaCount,
+			TotalBytes:  entry.totalBytes,
+			LatestAt:    entry.latestAt,
+		})
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].LatestAt.After(summaries[j].LatestAt)
+	})
+	return summaries, nil
+}
+
 // attributeLibraryUsers 按 file_path 前缀为下载记录补充归属用户。
 // 多个实体同时命中时沿用原 SQL 行为：取 id 最小的实体。
 func (s *Store) attributeLibraryUsers(ctx context.Context, items []DownloadRecord) error {
@@ -2956,17 +3033,18 @@ ON CONFLICT(media_url) DO UPDATE SET
 func (s *Store) UpsertUser(ctx context.Context, user User) (User, error) {
 	now := time.Now().UTC()
 	err := s.db.GetContext(ctx, &user, `
-INSERT INTO users (id, screen_name, name, protected, friends_count, media_count, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO users (id, screen_name, name, avatar_url, protected, friends_count, media_count, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	screen_name = excluded.screen_name,
 	name = excluded.name,
+	avatar_url = CASE WHEN excluded.avatar_url <> '' THEN excluded.avatar_url ELSE users.avatar_url END,
 	protected = excluded.protected,
 	friends_count = excluded.friends_count,
 	media_count = excluded.media_count,
 	updated_at = excluded.updated_at
 RETURNING *`,
-		user.ID, user.ScreenName, user.Name, user.Protected, user.FriendsCount, user.MediaCount, now)
+		user.ID, user.ScreenName, user.Name, user.AvatarURL, user.Protected, user.FriendsCount, user.MediaCount, now)
 	if err != nil {
 		return User{}, err
 	}
