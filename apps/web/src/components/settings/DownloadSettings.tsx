@@ -7,18 +7,16 @@ import { EnvOverrideNote } from "./EnvOverrideNote";
 export function DownloadSettingsFields({
   draft,
   onChange,
-  onAuthChange,
   envOverridden = [],
 }: {
   draft: AppConfig;
   onChange: React.Dispatch<React.SetStateAction<AppConfig>>;
-  onAuthChange: React.Dispatch<React.SetStateAction<AppConfig>>;
   envOverridden?: string[];
 }) {
   useTranslation();
   return <div>
     <Field label={t("网络代理 (Proxy)")}>
-      <Input value={draft.proxyUrl} onChange={event => onAuthChange(current => ({ ...current, proxyUrl: event.target.value }))} placeholder={t("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080")} />
+      <Input value={draft.proxyUrl} onChange={event => onChange(current => ({ ...current, proxyUrl: event.target.value }))} placeholder={t("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080")} />
       <EnvOverrideNote show={envOverridden.includes("proxyUrl")} />
     </Field>
     <div className="settings-toggle-list">

@@ -11,7 +11,7 @@ import { TooltipProvider } from "../semi";
 vi.mock("../../lib/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../lib/api")>(),
   updateConfig: vi.fn(),
-  checkAuth: vi.fn().mockResolvedValue({ ok: true, message: "ok" }),
+  getXAccounts: vi.fn().mockResolvedValue({ scraper: "legacy", accounts: [] }),
 }));
 
 vi.mock("./StorageManagement", () => ({ StorageManagement: () => null }));
@@ -177,8 +177,8 @@ it("labels fields that are overridden by environment variables", () => {
     <QueryClientProvider client={new QueryClient()}><ConfigForm config={config} /></QueryClientProvider>,
   );
 
-  // 四处都应有标注（代理 + 两个主 Cookie 字段 + 备用 Cookie 池）；downloadDir 没被覆盖，不显示
-  expect(screen.getAllByText("由环境变量提供，保存不会覆盖")).toHaveLength(4);
+  // Cookie 字段已迁出配置表单，只剩代理仍会被 env 覆盖（StorageManagement 在测试里被 mock 掉）
+  expect(screen.getAllByText("由环境变量提供，保存不会覆盖")).toHaveLength(1);
 });
 
 it("does not label anything when envOverridden is absent", () => {

@@ -29,9 +29,6 @@ export interface AppConfig {
   downloadDir: string;
   maxConcurrency: number;
   proxyUrl: string;
-  authToken?: string;
-  csrfToken?: string;
-  additionalCookies?: string;
   autoRetryFailed: boolean;
   autoFollowProtected: boolean;
   includeNestedTweetMedia: boolean;
@@ -202,6 +199,96 @@ export interface AuthCheck {
   diagnostics?: PoolDiagnostics;
 }
 
+/** 当前生效的 X 爬虫实现，由后端 OPEN_XDOWNLOAD_SCRAPER 决定。 */
+export type XScraperImplementation = "legacy" | "xscrape";
+
+/** 账号来源：db = 数据库导入，env = 环境变量提供（只读）。 */
+export type XAccountSource = "db" | "env";
+
+export interface XAccountLock {
+  /** GraphQL operation 名；"*" 表示账号级冷却。 */
+  queue: string;
+  until: string;
+  reason: string;
+}
+
+export interface XAccountQueueRequests {
+  queue: string;
+  requests: number;
+}
+
+/** GET /api/x-accounts 返回的账号视图；authToken / proxy 已由后端打码。 */
+export interface XAccountView {
+  id: number;
+  screenName: string;
+  authToken: string;
+  csrfToken: string;
+  hasExtraCookies: boolean;
+  userAgent: string;
+  proxy: string;
+  isPrimary: boolean;
+  source: XAccountSource;
+  active: boolean;
+  errorMsg: string;
+  lastUsed: string | null;
+  verifiedAt: string | null;
+  createdAt: string;
+  locks: XAccountLock[];
+  requestsToday: number;
+  requestsByQueue: XAccountQueueRequests[];
+}
+
+export interface XAccountsResponse {
+  scraper: XScraperImplementation;
+  accounts: XAccountView[];
+}
+
+export interface XAccountCreateRequest {
+  cookie: string;
+  userAgent?: string;
+  proxy?: string;
+  isPrimary?: boolean;
+}
+
+export interface XAccountImportIssue {
+  /** 导入文本中的条目序号（0 起）。 */
+  index: number;
+  reason: string;
+}
+
+export interface XAccountImportResult {
+  created: XAccountView[];
+  issues: XAccountImportIssue[];
+}
+
+export interface XAccountPatch {
+  active?: boolean;
+  isPrimary?: boolean;
+  userAgent?: string;
+  proxy?: string;
+  /** 替换 Cookie；env 账号会被后端拒绝。 */
+  cookie?: string;
+}
+
+export interface XAccountCheckResult {
+  ok: boolean;
+  screenName?: string;
+  error?: string;
+  account: XAccountView;
+}
+
+export interface XAccountCheckAllItem {
+  id: number;
+  ok: boolean;
+  screenName?: string;
+  error?: string;
+}
+
+export interface XAccountCheckAllResult {
+  results: XAccountCheckAllItem[];
+  accounts: XAccountView[];
+}
+
 export interface LocalDirectoryEntry {
   name: string;
   path: string;
@@ -272,6 +359,7 @@ export const configQueryRoot = ["config"] as const;
 export const archiveScheduleQueryRoot = ["archive-schedules"] as const;
 export const failedTweetQueryRoot = ["failed-tweets"] as const;
 export const libraryDownloadsQueryRoot = ["library-downloads"] as const;
+export const xAccountsQueryRoot = ["x-accounts"] as const;
 
 export interface FailedTweetPage {
   items: FailedTweet[];
@@ -552,6 +640,47 @@ export const checkAuth = (config: AppConfig) =>
     method: "POST",
     body: JSON.stringify(config),
     // 后端自身有 20s 超时，这里必须留足余量。
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+
+// X 账号池。导入/检测可能逐个访问 X，使用与配置写入相同的长超时。
+export const getXAccounts = (signal?: AbortSignal) =>
+  api<XAccountsResponse>("/api/x-accounts", { signal });
+
+export const createXAccount = (request: XAccountCreateRequest) =>
+  api<XAccountView>("/api/x-accounts", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+
+export const importXAccounts = (text: string) =>
+  api<XAccountImportResult>("/api/x-accounts/import", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+
+export const updateXAccount = (id: number, patch: XAccountPatch) =>
+  api<XAccountView>(`/api/x-accounts/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const deleteXAccount = (id: number) =>
+  api<void>(`/api/x-accounts/${id}`, { method: "DELETE" });
+
+export const checkXAccount = (id: number) =>
+  api<XAccountCheckResult>(`/api/x-accounts/${id}/check`, {
+    method: "POST",
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+
+export const unlockXAccount = (id: number) =>
+  api<XAccountView>(`/api/x-accounts/${id}/unlock`, { method: "POST" });
+
+export const checkAllXAccounts = () =>
+  api<XAccountCheckAllResult>("/api/x-accounts/check-all", {
+    method: "POST",
     timeoutMs: LONG_TIMEOUT_MS,
   });
 

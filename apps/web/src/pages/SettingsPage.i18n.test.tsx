@@ -2,12 +2,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import React from "react";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { renderWithProviders, screen } from "../test/render";
 import { SettingsPage } from "./SettingsPage";
-import { act, fireEvent, waitFor } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 import i18n from "../lib/i18n";
 import type { AppConfig } from "../lib/api";
+
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/api")>(),
+  getXAccounts: vi.fn().mockResolvedValue({ scraper: "legacy", accounts: [] }),
+}));
 
 const config: AppConfig = {
   downloadDir: "/downloads", maxConcurrency: 1, proxyUrl: "",
@@ -32,15 +37,13 @@ it("switches settings to English without losing the unsaved configuration draft"
   expect(screen.getByRole("button", { name: "Save configuration" })).toBeTruthy();
 });
 
-it("updates cached cookie import diagnostics when the language changes", async () => {
-  const user = userEvent.setup();
+it("translates the X account pool section when the language changes", async () => {
   renderWithProviders(<QueryClientProvider client={new QueryClient()}>
     <SettingsPage config={config} />
   </QueryClientProvider>);
-  await user.click(screen.getByRole("button", { name: "批量粘贴" }));
-  await user.type(screen.getByRole("textbox", { name: "批量粘贴 Cookie 内容" }), "not-a-cookie");
-  expect(screen.getByText(/没有识别到账号/)).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "X 账号池" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "导入账号" })).toBeTruthy();
   await act(() => i18n.changeLanguage("en"));
-  expect(screen.getByText(/No accounts found/)).toBeTruthy();
-  expect((screen.getByRole("textbox", { name: "Paste cookie batch" }) as HTMLTextAreaElement).value).toBe("not-a-cookie");
+  expect(screen.getByRole("heading", { name: "X account pool" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Import account" })).toBeTruthy();
 });

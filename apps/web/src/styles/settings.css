@@ -68,15 +68,6 @@
   color: var(--fg-body);
 }
 
-.settings-secondary-grid {
-  display: grid;
-  min-width: 0;
-}
-
-.settings-secondary-grid > section {
-  min-width: 0;
-}
-
 /* ---------------- 存储设置 ---------------- */
 
 .storage-settings {
@@ -309,4 +300,217 @@
 
 .settings-toggle-row:last-child {
   border-bottom: 0;
+}
+
+/* ---------------- X 账号池 ---------------- */
+
+.settings-section-description {
+  margin: -6px 0 14px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.x-accounts-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.x-accounts-title .settings-section-title {
+  margin-bottom: 0;
+}
+
+.x-accounts-table .semi-table-container {
+  background: var(--surface);
+}
+
+.x-accounts-table .semi-table-thead > .semi-table-row > .semi-table-row-head {
+  background: var(--surface-muted);
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.x-accounts-table .semi-table-row-cell {
+  padding-block: 12px;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.x-accounts-table .semi-table-row-expand-icon-cell,
+.x-accounts-table .semi-table-expand-cell {
+  background: var(--surface-muted);
+}
+
+.x-account-identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.x-account-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.x-account-token {
+  font: 12px/1.5 var(--font-mono);
+  color: var(--fg-body);
+  overflow-wrap: anywhere;
+}
+
+.x-account-id {
+  font-size: 11px;
+  color: var(--fg-subtle);
+}
+
+.x-account-status {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.x-account-error {
+  margin: 0;
+  color: var(--danger-strong);
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.x-account-locks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.x-account-lock {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.x-account-lock .semi-tag {
+  max-width: 120px;
+}
+
+.x-account-lock .semi-tag-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.x-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+}
+
+.x-account-actions .semi-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.x-account-actions .semi-switch {
+  flex-shrink: 0;
+}
+
+.x-account-requests {
+  padding: 2px 0;
+}
+
+.x-account-request-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 4px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.x-account-request-list li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px dashed var(--line);
+}
+
+.x-accounts-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.x-accounts-empty p {
+  margin: 0;
+}
+
+.x-account-import {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.x-account-import-formats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+  list-style: none;
+  font-size: 12px;
+  color: var(--fg-body);
+}
+
+.x-account-import-formats li {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.x-account-import-formats code {
+  color: var(--fg-muted);
+  font: 11px/1.5 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.x-account-import-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.x-account-import-issues ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.x-account-import-issues li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--danger-strong);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }

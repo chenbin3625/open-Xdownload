@@ -4,17 +4,13 @@
    同断点的规则集中在这里，就近的组件文件只写默认态。
    ========================================================= */
 
-/* ---------------- ≥1280px：设置页双栏 ---------------- */
+/* ---------------- ≥1280px：导入格式说明双栏 ---------------- */
 
 @media (min-width: 1280px) {
-  .settings-secondary-grid {
-    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr);
-    gap: 32px;
-  }
-
-  .settings-secondary-grid > section:first-child {
-    padding-right: 32px;
-    border-right: 1px solid var(--line);
+  .x-account-import-formats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 16px;
   }
 }
 
@@ -294,10 +290,6 @@
     padding-block: 20px;
   }
 
-  .settings-action-label {
-    display: none;
-  }
-
   /* 触控目标放大 */
   .app-shell
     :where(.page-heading, .page-toolbar, .app-header, .gallery-card-actions)
@@ -348,20 +340,6 @@
 /* ---------------- ≤639.98px：手机 ---------------- */
 
 @media (max-width: 639.98px) {
-  /* Cookie 备份行收成两列 */
-  .cookie-backup-row {
-    grid-template-columns: minmax(0, 1fr) 32px;
-  }
-
-  .cookie-backup-row > .cookie-token-field {
-    grid-column: 1;
-  }
-
-  .cookie-backup-row > div:last-child {
-    grid-column: 2;
-    grid-row: 2;
-  }
-
   /* 媒体库筛选 */
   .gallery-toolbar .toolbar-search {
     flex-basis: 100%;
