@@ -27,6 +27,7 @@ import (
 )
 
 var assetTokens = regexp.MustCompile(`\{([^{}]+)\}`)
+var windowsReservedAssetName = regexp.MustCompile(`^(COM|LPT)[1-9]$`)
 var s3AssetWrites [64]sync.Mutex
 
 func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.TweetData, media parser.Media, index int, ext string) (string, error) {
@@ -104,7 +105,7 @@ func cleanAssetSegment(value string) string {
 		return "_"
 	}
 	base := strings.ToUpper(strings.SplitN(value, ".", 2)[0])
-	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || regexp.MustCompile(`^(COM|LPT)[1-9]$`).MatchString(base) {
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || windowsReservedAssetName.MatchString(base) {
 		value = "_" + value
 	}
 	return value
@@ -112,6 +113,23 @@ func cleanAssetSegment(value string) string {
 func validAssetKey(key string) bool {
 	return key != "" && !strings.HasPrefix(key, "/") && !strings.Contains(key, "\\") && path.Clean(key) == key && key != ".." && !strings.HasPrefix(key, "../")
 }
+
+// s3ClientKey 只包含影响 minio 客户端构造的字段。批量资产迁移会反复用同一 target
+// 调用 PutAsset/OpenAsset，缓存客户端可避免重复解析 endpoint/读取环境变量；底层
+// http.DefaultTransport 也因此在进程内共享连接池。
+type s3ClientKey struct {
+	endpoint     string
+	region       string
+	access       string
+	secret       string
+	sessionToken string
+	secure       bool
+}
+
+var s3Clients = struct {
+	sync.Mutex
+	byKey map[s3ClientKey]*minio.Client
+}{byKey: map[s3ClientKey]*minio.Client{}}
 
 func S3Client(target config.StorageTarget) (*minio.Client, error) {
 	u, err := url.Parse(target.Endpoint)
@@ -125,7 +143,18 @@ func S3Client(target config.StorageTarget) (*minio.Client, error) {
 	if target.SecretKeyEnv != "" {
 		secret = os.Getenv(target.SecretKeyEnv)
 	}
-	return minio.New(u.Host, &minio.Options{Creds: credentials.NewStaticV4(access, secret, target.SessionToken), Secure: u.Scheme == "https", Region: target.Region, Transport: http.DefaultTransport})
+	key := s3ClientKey{endpoint: u.Host, region: target.Region, access: access, secret: secret, sessionToken: target.SessionToken, secure: u.Scheme == "https"}
+	s3Clients.Lock()
+	defer s3Clients.Unlock()
+	if client, ok := s3Clients.byKey[key]; ok {
+		return client, nil
+	}
+	client, err := minio.New(u.Host, &minio.Options{Creds: credentials.NewStaticV4(access, secret, target.SessionToken), Secure: key.secure, Region: target.Region, Transport: http.DefaultTransport})
+	if err != nil {
+		return nil, err
+	}
+	s3Clients.byKey[key] = client
+	return client, nil
 }
 
 func PutAsset(ctx context.Context, target config.StorageTarget, key, source, contentType, assetID string) (string, error) {

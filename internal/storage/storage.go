@@ -2332,8 +2332,11 @@ ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
+	// 孤儿扫描只遍历当前下载根，根外的历史路径不可能命中；按前缀过滤后避免大型
+	// 归档把全部 downloads 行的 file_path 读进内存。LIKE 的 %/_ 必须转义。
+	pattern := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(root+string(filepath.Separator)) + "%"
 	var recordedPaths []string
-	if err := s.db.SelectContext(ctx, &recordedPaths, `SELECT file_path FROM downloads`); err != nil {
+	if err := s.db.SelectContext(ctx, &recordedPaths, `SELECT file_path FROM downloads WHERE file_path LIKE ? ESCAPE '\'`, pattern); err != nil {
 		return nil, false, err
 	}
 	known := make(map[string]struct{}, len(recordedPaths))

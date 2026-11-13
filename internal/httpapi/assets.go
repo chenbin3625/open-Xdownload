@@ -172,11 +172,19 @@ func (s *Server) serveDownloadAsset(w http.ResponseWriter, r *http.Request, id i
 	return false
 }
 func (s *Server) enrichAssetURLs(r *http.Request, records []storage.DownloadRecord) {
+	if len(records) == 0 {
+		return
+	}
+	ids := make([]int64, len(records))
 	for i := range records {
-		assets, err := s.store.DownloadAssets(r.Context(), records[i].ID)
-		if err != nil {
-			continue
-		}
+		ids[i] = records[i].ID
+	}
+	assetsByID, err := s.store.DownloadAssetsBatch(r.Context(), ids)
+	if err != nil {
+		return
+	}
+	for i := range records {
+		assets := assetsByID[records[i].ID]
 		records[i].AssetURLs = map[config.AssetKind]string{}
 		for kind := range assets {
 			// Download/preview endpoints retain the legacy FilePath fallback when

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
@@ -223,6 +224,46 @@ func (s *Store) DownloadAssets(ctx context.Context, id int64) (map[config.AssetK
 		result[kind] = value
 	}
 	return result, rows.Err()
+}
+
+// DownloadAssetsBatch 一次性加载多个下载记录的资产映射。列表接口一页可能包含上百条
+// 记录，逐条查询 download_assets 会产生 N+1 查询；这里按 500 个 id 分块，避开
+// SQLite 的单语句参数上限。
+func (s *Store) DownloadAssetsBatch(ctx context.Context, ids []int64) (map[int64]map[config.AssetKind]string, error) {
+	result := make(map[int64]map[config.AssetKind]string, len(ids))
+	const chunkSize = 500
+	for start := 0; start < len(ids); start += chunkSize {
+		end := min(start+chunkSize, len(ids))
+		chunk := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		rows, err := s.db.QueryxContext(ctx, `SELECT download_id,kind,asset_id FROM download_assets WHERE download_id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var downloadID int64
+			var kind config.AssetKind
+			var assetID string
+			if err := rows.Scan(&downloadID, &kind, &assetID); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if result[downloadID] == nil {
+				result[downloadID] = map[config.AssetKind]string{}
+			}
+			result[downloadID][kind] = assetID
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 func (s *Store) RememberMediaContext(ctx context.Context, tweet parser.TweetData) error {
 	data, err := json.Marshal(tweet)

@@ -1,8 +1,7 @@
 import { t, useTranslation } from "./lib/i18n";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Menu, RefreshCw, WifiOff } from "lucide-react";
 import React, { useCallback, useEffect, useState } from "react";
-import { Button, Layout } from "@douyinfe/semi-ui";
+import { Layout } from "@douyinfe/semi-ui";
 import {
   archiveScheduleQueryRoot,
   configQueryRoot,
@@ -28,7 +27,7 @@ import { useRouteState } from "./lib/useRouteState";
 import { Alert, ListSkeleton } from "./components/semi";
 import { Drawer } from "./components/semi";
 
-import { AppSidebar } from "./components/layout/AppSidebar";
+import { AppMobileNavigation, AppSidebar } from "./components/layout/AppSidebar";
 import { AppHeader } from "./components/layout/AppHeader";
 import { CreateJobModal } from "./components/modals/CreateJobModal";
 import { FailedTweetDrawer } from "./components/drawers/FailedTweetDrawer";
@@ -243,7 +242,7 @@ function Workbench() {
         />
 
         {/* 页面主内容滚动容器 */}
-        <main className="min-h-0 flex-1 overflow-y-auto">
+        <main className="app-main min-h-0 flex-1 overflow-y-auto">
           <div className="page-content mx-auto flex w-full min-w-0 max-w-[100rem] flex-col gap-4 p-3 sm:p-4 lg:p-6">
             {/* 异常状态提示 */}
             {isWorkbenchActive && jobs.isError && (
@@ -326,36 +325,7 @@ function Workbench() {
             )}
           </div>
         </main>
-        <div className="flex shrink-0 items-center gap-2 border-t border-line bg-surface px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:hidden">
-          <Button
-            theme="borderless"
-            type="tertiary"
-            icon={<Menu className="size-4" />}
-            onClick={() => setMobileMenuOpen(true)}
-            aria-label={t("打开导航菜单")}
-          />
-          <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg-muted">open-Xdownload</span>
-          {!sseConnected && (
-            <Button
-              theme="borderless"
-              type="tertiary"
-              icon={<WifiOff className="size-4 text-warning" />}
-              onClick={reconnectEvents}
-              aria-label={t("实时更新已断开，点击重连")}
-              title={t("实时更新已断开，点击重连")}
-            />
-          )}
-          <Button
-            theme="borderless"
-            type="tertiary"
-            icon={<RefreshCw className="size-4" />}
-            loading={manualRefreshPending}
-            disabled={manualRefreshPending}
-            aria-busy={manualRefreshPending}
-            onClick={handleManualRefresh}
-            aria-label={t("刷新数据")}
-          />
-        </div>
+        {isCompact && <AppMobileNavigation activeSection={activeSection} onSectionChange={handleSectionChange} />}
       </div>
 
       {/* 统一新建任务/归档模态框 */}

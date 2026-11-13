@@ -1,5 +1,6 @@
 import { t, useTranslation } from "../lib/i18n";
 import {
+  Activity,
   AlertCircle,
   AlertTriangle,
   Check,
@@ -55,7 +56,7 @@ import { Tooltip } from "../components/semi";
 import { Pagination } from "../components/semi";
 import { LoadingOverlay, Spinner } from "../components/semi";
 import { Table, type TableColumn } from "../components/semi";
-import { Avatar, StatusDot, Tag, type Tone } from "../components/semi";
+import { Avatar, Tag, type Tone } from "../components/semi";
 import { toast } from "../components/semi";
 import { cn } from "../lib/cn";
 
@@ -325,9 +326,12 @@ export function TaskCenterPage({
             <Button
               type="danger"
               icon={<AlertCircle className="size-4" />}
+              aria-label={`${t("失败记录 (")}${failedTweetCount})`}
+              title={`${t("失败记录 (")}${failedTweetCount})`}
               onClick={onOpenFailedDrawer}
             >
-              {t("失败记录 (")}{failedTweetCount})
+              <span className="task-failure-label">{t("失败记录 (")}{failedTweetCount})</span>
+              <span className="task-failure-count" aria-hidden="true">{failedTweetCount}</span>
             </Button>
           )}
           <Button
@@ -339,31 +343,31 @@ export function TaskCenterPage({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Card bodyStyle={{ padding: 16 }}>
-          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+      <div className="task-stats">
+        <Card className="task-stat task-stat-active" bodyStyle={{ padding: 16 }}>
+          <div className="task-stat-label">
             <span>{t("下载中任务")}</span>
-            <StatusDot tone={displayStats.active > 0 ? "brand" : "default"} pulse={displayStats.active > 0} />
+            <Activity size={16} className={displayStats.active > 0 ? "text-brand-700" : "text-fg-subtle"} />
           </div>
-          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.active}</div>
+          <div className="task-stat-value">{displayStats.active}</div>
         </Card>
-        <Card bodyStyle={{ padding: 16 }}>
-          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+        <Card className="task-stat task-stat-completed" bodyStyle={{ padding: 16 }}>
+          <div className="task-stat-label">
             <span>{t("已完成")}</span><CheckCircle2 size={16} className="text-success" />
           </div>
-          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.completed}</div>
+          <div className="task-stat-value">{displayStats.completed}</div>
         </Card>
-        <Card bodyStyle={{ padding: 16 }}>
-          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+        <Card className="task-stat task-stat-failed" bodyStyle={{ padding: 16 }}>
+          <div className="task-stat-label">
             <span>{t("异常 / 失败")}</span><AlertCircle size={16} className="text-danger" />
           </div>
-          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.failed}</div>
+          <div className="task-stat-value">{displayStats.failed}</div>
         </Card>
-        <Card bodyStyle={{ padding: 16 }}>
-          <div className="flex items-center justify-between gap-2 text-sm text-fg-muted">
+        <Card className="task-stat" bodyStyle={{ padding: 16 }}>
+          <div className="task-stat-label">
             <span>{t("任务总数")}</span><FolderCheck size={16} />
           </div>
-          <div className="mt-2 text-2xl font-semibold tabular-nums">{displayStats.total}</div>
+          <div className="task-stat-value">{displayStats.total}</div>
         </Card>
       </div>
 
@@ -555,7 +559,7 @@ function MobileJobCard({
   const [expanded, setExpanded] = useState(false);
   const panelId = React.useId();
   return (
-    <li className="min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
+    <li className="mobile-job-card min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
       <div className="space-y-3 p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">

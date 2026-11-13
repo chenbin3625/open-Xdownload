@@ -20,6 +20,7 @@ const (
 )
 
 var AssetKinds = []AssetKind{AssetImage, AssetVideo}
+var credentialEnvName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 var legacyAssetKinds = []AssetKind{AssetThumbnail, AssetVideoCover}
 
@@ -155,7 +156,7 @@ func (d StorageDocument) Validate() error {
 			return fmt.Errorf("不支持的存储类型: %s", t.Type)
 		}
 		for _, key := range []string{t.AccessKeyEnv, t.SecretKeyEnv} {
-			if key != "" && !regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`).MatchString(key) {
+			if key != "" && !credentialEnvName.MatchString(key) {
 				return fmt.Errorf("凭据环境变量名称无效")
 			}
 		}

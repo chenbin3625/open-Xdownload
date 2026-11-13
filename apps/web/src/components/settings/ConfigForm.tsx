@@ -242,9 +242,11 @@ export function ConfigForm({
             loading={authChecking}
             disabled={authChecking}
             aria-busy={authChecking}
+            aria-label={t("检测 Cookie")}
+            title={t("检测 Cookie")}
             onClick={() => void runAuthCheck(draft, true)}
           >
-            {t("检测 Cookie")}</Button>
+            <span className="settings-action-label">{t("检测 Cookie")}</span></Button>
           <Button
             theme="solid"
             icon={<Save className="size-4" />}

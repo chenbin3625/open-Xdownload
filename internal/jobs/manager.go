@@ -1721,13 +1721,17 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 	if _, err := m.store.UpsertUser(saveCtx, storageUser(user)); err != nil {
 		return stats, err
 	}
-	entity, dir, err := m.ensureUserEntity(saveCtx, cfg, user)
+	target, err := filestore.New(cfg)
+	if err != nil {
+		return stats, err
+	}
+	entity, dir, err := m.ensureUserEntityWithStore(saveCtx, target, user)
 	if err != nil {
 		return stats, err
 	}
 	stats.Users++
 	if listEntity != nil {
-		if err := m.ensureUserLink(saveCtx, cfg, *listEntity, user, dir); err != nil {
+		if err := m.ensureUserLinkWithStore(saveCtx, target, *listEntity, user, dir); err != nil {
 			var databaseError interface{ Code() int }
 			if errors.As(err, &databaseError) {
 				return stats, err
@@ -2428,6 +2432,12 @@ func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, us
 	if err != nil {
 		return storage.UserEntity{}, "", err
 	}
+	return m.ensureUserEntityWithStore(ctx, target, user)
+}
+
+// ensureUserEntityWithStore 复用调用方已创建的 Store：列表归档会为每个成员依次
+// 调用，Store 的构造（filepath.Abs + 代理校验）不必重复执行。
+func (m *Manager) ensureUserEntityWithStore(ctx context.Context, target filestore.Store, user xclient.User) (storage.UserEntity, string, error) {
 	parent := target.Join(target.Root(), "users")
 	name := userDirectoryName(user)
 	existing, err := m.store.LocateUserEntity(ctx, user.ID, parent)
@@ -2461,7 +2471,7 @@ func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, us
 	if err := target.MkdirAll(ctx, dir); err != nil {
 		return storage.UserEntity{}, "", err
 	}
-	if err := m.refreshUserLinks(ctx, cfg, user.ID, entity.Name, dir); err != nil {
+	if err := m.refreshUserLinks(ctx, target, user.ID, entity.Name, dir); err != nil {
 		return storage.UserEntity{}, "", err
 	}
 	return entity, dir, nil
@@ -2491,24 +2501,22 @@ func (m *Manager) renameEntityDir(ctx context.Context, target filestore.Store, p
 	}
 	if _, err := m.store.RewriteDownloadPathPrefix(ctx, oldPath, newPath); err != nil {
 		if rollbackErr := target.Rename(context.Background(), newPath, oldPath); rollbackErr != nil {
-			return "", fmt.Errorf("rewrite paths: %w; rollback directory: %v", err, rollbackErr)
+			return oldName, fmt.Errorf("rewrite paths: %w; rollback directory: %v", err, rollbackErr)
 		}
-		return "", err
+		// 回滚成功后磁盘仍是旧目录，返回旧名让调用方在错误被忽略的场景下也不会
+		// 拿空名字拼出父目录。
+		return oldName, err
 	}
 	return newName, nil
 }
 
-func (m *Manager) refreshUserLinks(ctx context.Context, cfg config.AppConfig, userID string, name string, targetDir string) error {
+func (m *Manager) refreshUserLinks(ctx context.Context, target filestore.Store, userID string, name string, targetDir string) error {
 	links, err := m.store.GetUserLinkTargets(ctx, userID)
 	if err != nil {
 		return err
 	}
 	if len(links) == 0 {
 		return nil
-	}
-	target, err := filestore.New(cfg)
-	if err != nil {
-		return err
 	}
 	for _, link := range links {
 		if strings.HasPrefix(link.ListID, "following:") {
@@ -2552,12 +2560,16 @@ func (m *Manager) ensureListEntity(ctx context.Context, cfg config.AppConfig, gr
 }
 
 func (m *Manager) ensureUserLink(ctx context.Context, cfg config.AppConfig, listEntity storage.ListEntity, user xclient.User, targetDir string) error {
-	name := filepath.Base(filepath.Clean(targetDir))
-	if _, err := m.store.EnsureUserLink(ctx, user.ID, listEntity.ID, name); err != nil {
-		return err
-	}
 	target, err := filestore.New(cfg)
 	if err != nil {
+		return err
+	}
+	return m.ensureUserLinkWithStore(ctx, target, listEntity, user, targetDir)
+}
+
+func (m *Manager) ensureUserLinkWithStore(ctx context.Context, target filestore.Store, listEntity storage.ListEntity, user xclient.User, targetDir string) error {
+	name := filepath.Base(filepath.Clean(targetDir))
+	if _, err := m.store.EnsureUserLink(ctx, user.ID, listEntity.ID, name); err != nil {
 		return err
 	}
 	linkPath := target.Join(listEntity.ParentDir, listEntity.Name, name)
@@ -3040,9 +3052,6 @@ func sanitizePathSegment(name string) string {
 		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
 		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
 		return "_" + name
-	}
-	if name == "" {
-		return "unknown"
 	}
 	return name
 }

@@ -1413,9 +1413,6 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 		return nil, err
 	}
 	endpoint = endpoint.JoinPath(path)
-	if strings.HasPrefix(path, "/graphql/") && c.requestBaseURL() == host {
-		endpoint.Host = "api.x.com"
-	}
 	if query != nil {
 		endpoint.RawQuery = query.Encode()
 	}
@@ -1432,7 +1429,9 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 	request.Header.Set("X-Csrf-Token", c.csrfToken)
 	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Accept", "application/json")
-	if strings.HasPrefix(path, "/graphql/") {
+	// 真实 GraphQL 路径由 graphQLPath 构造为 /i/api/graphql/...，只匹配
+	// "/graphql/" 前缀会让这里永远不生效。
+	if strings.Contains(path, "/graphql/") {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if form != nil {

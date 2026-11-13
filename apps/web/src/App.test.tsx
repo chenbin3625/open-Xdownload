@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -103,6 +103,28 @@ afterEach(() => {
 });
 
 describe("App 的 URL 状态", () => {
+  it("紧凑布局可以从底部导航直接切换页面并同步当前项", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await screen.findByText("成功任务");
+
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    for (const label of ["任务中心", "归档计划", "媒体归档", "推文归档", "系统配置"]) {
+      expect(within(navigation).getByRole("button", { name: label })).toBeTruthy();
+    }
+    expect(within(navigation).getByRole("button", { name: "任务中心" }).getAttribute("aria-current")).toBe("page");
+
+    await user.click(within(navigation).getByRole("button", { name: "媒体归档" }));
+    await screen.findByText("媒体归档库");
+    expect(window.location.pathname).toBe("/gallery");
+    expect(within(navigation).getByRole("button", { name: "媒体归档" }).getAttribute("aria-current")).toBe("page");
+    expect(within(navigation).getByRole("button", { name: "任务中心" }).hasAttribute("aria-current")).toBe(false);
+
+    await user.click(within(navigation).getByRole("button", { name: "归档计划" }));
+    await screen.findByRole("heading", { name: "自动归档计划" });
+    expect(window.location.pathname).toBe("/schedules");
+  });
+
   it("默认请求最近 10 条任务", async () => {
     renderApp();
     await screen.findByText("成功任务");

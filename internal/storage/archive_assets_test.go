@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -253,5 +254,59 @@ func TestStorageVersionsSecretsAndInterruptedJobSnapshot(t *testing.T) {
 	old, err := store.GetStorageVersion(ctx, frozen.Version)
 	if err != nil || old.Targets[1].SecretKey != "secret" {
 		t.Fatal("historical target credentials were changed")
+	}
+}
+
+func TestDownloadAssetsBatchGroupsByDownloadID(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "batch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	job, err := store.CreateArchiveJob(ctx, JobDraft{Kind: JobKindUser, Input: "batch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make([]DownloadRecord, 3)
+	for i := range records {
+		records[i], err = store.CreateDownload(ctx, DownloadRecord{
+			JobID: job.ID, TweetID: fmt.Sprintf("tweet-%d", i),
+			MediaURL: fmt.Sprintf("https://pbs.twimg.com/media/%d.jpg", i),
+			FilePath: fmt.Sprintf("/tmp/%d.jpg", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	document, err := store.SaveStorageDocument(ctx, config.DefaultStorage(filepath.Join(t.TempDir(), "downloads")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset, err := store.CreateAsset(ctx, Asset{
+		ID: "asset-image", Kind: config.AssetImage, PolicyVersion: document.Version,
+		TargetID: document.Default.TargetID, TargetVersion: document.Targets[0].Version,
+		Key: "image/1.jpg", ContentHash: "hash", Size: 1, ContentType: "image/jpeg",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []int{0, 2} {
+		if err := store.LinkDownloadAsset(ctx, records[index].ID, asset.Kind, asset.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.DownloadAssetsBatch(ctx, []int64{records[0].ID, records[1].ID, records[2].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[records[0].ID][config.AssetImage] != asset.ID || got[records[2].ID][config.AssetImage] != asset.ID {
+		t.Fatalf("batch result = %+v", got)
+	}
+	if _, ok := got[records[1].ID]; ok {
+		t.Fatalf("record without links must have no entry: %+v", got)
+	}
+	if empty, err := store.DownloadAssetsBatch(ctx, nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty batch = %+v %v", empty, err)
 	}
 }

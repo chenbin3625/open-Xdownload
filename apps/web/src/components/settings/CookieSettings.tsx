@@ -439,7 +439,7 @@ export function BackupCookieInputs({
           <span className="text-sm font-semibold text-fg">{t("备用 Cookie 多账号池")}</span>
           <TipIcon content={cookieSettingsTips().backupCookie} />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Button
             type="tertiary"
             icon={<ClipboardPaste className="size-3.5" />}

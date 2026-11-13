@@ -62,7 +62,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <main className="flex min-h-dvh items-center justify-center bg-canvas px-5 py-10">
+    <main className="auth-page flex min-h-dvh items-center justify-center bg-canvas px-5 py-10">
       <div className="w-full max-w-sm">
         <div className="mb-8 flex items-center gap-3">
           <img src="/icon.svg" alt="" className="size-10 shrink-0" />

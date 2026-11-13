@@ -151,10 +151,10 @@ const GalleryCard = React.memo(function GalleryCard({
   return (
     <Card
       shadows="hover"
-      className="group min-w-0"
+      className="gallery-card group min-w-0"
       bodyStyle={{ padding: 12 }}
       cover={
-        <div className="aspect-square relative flex items-center justify-center overflow-hidden bg-surface-muted border-b border-line">
+        <div className="gallery-card-cover relative flex items-center justify-center overflow-hidden bg-surface-muted border-b border-line">
           {isVideo ? (
             <VideoPoster key={`${item.id}:${item.previewUrl || ""}`} item={item} fileName={fileName} onOpen={() => onOpen(entryKey(item))} />
           ) : isPreviewableImage ? (
@@ -176,7 +176,7 @@ const GalleryCard = React.memo(function GalleryCard({
                 onError={(event) => {
                   event.currentTarget.style.display = "none";
                 }}
-                className="relative z-10 h-full w-full object-contain transition-transform duration-300 group-hover/img:scale-105"
+                className="relative z-10 h-full w-full object-contain"
               />
             </button>
           ) : (
@@ -206,10 +206,10 @@ const GalleryCard = React.memo(function GalleryCard({
           )}
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-1 pt-2 border-t border-line/70 text-[11px] text-fg-subtle">
+        <div className="gallery-card-meta">
           {item.tweetId && <a className="text-brand-600" href={`/tweets?id=${item.tweetId}`}>{t("archive.title")}</a>}
-          <span className="font-mono tabular-nums text-[10px]">{formatDateTime(item.createdAt)}</span>
-          <div className="flex items-center gap-1">
+          <time dateTime={item.createdAt} title={formatDateTime(item.createdAt)}>{formatDateTime(item.createdAt)}</time>
+          <div className="gallery-card-actions">
             <Tooltip title={t("下载原文件")}>
               <a
                 className="gallery-download"
@@ -436,7 +436,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   );
 
   return (
-    <div className="workspace-page">
+    <div className="workspace-page gallery-page">
       <div className="page-heading">
         <h1 className="page-title">{t("媒体归档库")}</h1>
       </div>
@@ -544,7 +544,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
       {/* 媒体内容流展示 */}
       {libraryQuery.isLoading ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+        <div className="gallery-grid">
           {Array.from({ length: 12 }, (_, index) => (
             <Card key={index} bodyStyle={{ padding: 12 }}>
               <div className="space-y-2">
@@ -584,8 +584,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         <div
           className={
             libraryQuery.isFetching
-              ? "grid grid-cols-2 gap-3 opacity-60 transition-opacity sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
-              : "grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
+              ? "gallery-grid opacity-60 transition-opacity"
+              : "gallery-grid"
           }
         >
           {visibleEntries.map(({ item, isVideo, isImage, isGif }) => (

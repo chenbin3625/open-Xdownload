@@ -1,5 +1,5 @@
 import { t, useTranslation } from "../../lib/i18n";
-import { Bell, Menu, RefreshCw, Search, TriangleAlert, WifiOff } from "lucide-react";
+import { ArrowRight, Bell, Menu, RefreshCw, Search, TriangleAlert, WifiOff } from "lucide-react";
 import React, { useState } from "react";
 import { Badge, Button, Input, Popover, Tag, Tooltip } from "@douyinfe/semi-ui";
 
@@ -40,9 +40,13 @@ export function AppHeader({
 
   return (
     <header className="app-header sticky top-0 z-20 shrink-0 border-b border-line bg-surface">
-      <div className="flex min-h-14 items-center gap-2 px-3 py-3 sm:gap-3 sm:px-4 md:px-6">
+      <div className="header-inner">
+        <div className="header-brand">
+          <img src="/icon.svg" alt="" className="size-6" />
+          <span>open-Xdownload</span>
+        </div>
         {showMenuButton && (
-          <span className="hidden sm:inline-flex">
+          <span className="hidden md:inline-flex">
             <Button
               theme="borderless"
               type="tertiary"
@@ -53,42 +57,44 @@ export function AppHeader({
           </span>
         )}
 
-        <div className="min-w-0 flex-1 md:max-w-140">
-          <div className="flex items-center gap-2">
-            <Input
-              value={quickInput}
-              onChange={setQuickInput}
-              onEnterPress={(event) => { if (!event.nativeEvent.isComposing) handleSubmit(); }}
-              placeholder={t("粘贴链接、@用户名或列表 ID")}
-              aria-label={t("快速解析输入")}
-              enterKeyHint="go"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              className="min-w-0 flex-1"
-              prefix={<Search size={16} />}
-            />
-                  <Button
-                    theme="solid"
-                    disabled={!quickInput.trim()}
-                    onClick={handleSubmit}
-                  >
-                    {t("解析")}</Button>
-          </div>
+        <div className="header-quick-submit">
+          <Input
+            value={quickInput}
+            onChange={setQuickInput}
+            onEnterPress={(event) => { if (!event.nativeEvent.isComposing) handleSubmit(); }}
+            placeholder={t("粘贴链接、@用户名或列表 ID")}
+            aria-label={t("快速解析输入")}
+            enterKeyHint="go"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            className="min-w-0 flex-1"
+            prefix={<Search size={16} />}
+          />
+          <Button
+            theme="solid"
+            icon={<ArrowRight size={16} />}
+            iconPosition="right"
+            disabled={!quickInput.trim()}
+            onClick={handleSubmit}
+          >
+            {t("解析")}
+          </Button>
         </div>
 
         {/* 右侧运行状态与操作 */}
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          <div className="hidden items-center gap-2 sm:flex">
+        <div className="header-actions">
+          <div className="flex items-center gap-1 sm:gap-2">
             {realtimeDisconnected && (
               <Button
                 theme="light"
                 type="warning"
                 onClick={onReconnectRealtime}
                 title={t("实时更新已断开，点击重连")}
+                aria-label={t("实时更新已断开，点击重连")}
                 icon={<WifiOff size={16} />}
               >
-                <span className="hidden sm:inline">{t("实时更新已断开")}</span>
+                <span className="hidden lg:inline">{t("实时更新已断开")}</span>
               </Button>
             )}
 
