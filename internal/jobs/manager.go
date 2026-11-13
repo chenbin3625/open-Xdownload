@@ -29,30 +29,32 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
+	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
 )
 
 type Manager struct {
-	store      *storage.Store
-	parser     *parser.Service
-	eventBus   *EventBus
-	downloader *downloader.Downloader
-	wake       chan struct{}
-	once       sync.Once
-	mu         sync.Mutex
-	active     map[int64]context.CancelFunc
-	stopCancel context.CancelFunc
-	wg         sync.WaitGroup
-	retryMu    sync.Mutex
-	userMu     sync.Mutex
-	userLocks  map[string]*keyLock
-	mediaMu    sync.Mutex
-	mediaLocks map[string]*keyLock
-	metricsMu  sync.Mutex
-	metrics    map[int64]jobMetrics
-	xPoolMu    sync.Mutex
-	xPoolKey   string
-	cachedPool *xclient.Pool
+	store          *storage.Store
+	parser         *parser.Service
+	eventBus       *EventBus
+	downloader     *downloader.Downloader
+	wake           chan struct{}
+	once           sync.Once
+	mu             sync.Mutex
+	active         map[int64]context.CancelFunc
+	stopCancel     context.CancelFunc
+	wg             sync.WaitGroup
+	retryMu        sync.Mutex
+	userMu         sync.Mutex
+	userLocks      map[string]*keyLock
+	mediaMu        sync.Mutex
+	mediaLocks     map[string]*keyLock
+	metricsMu      sync.Mutex
+	metrics        map[int64]jobMetrics
+	xSourceMu      sync.Mutex
+	xSourceKey     string
+	cachedSource   xapi.Source
+	xSourceFactory func(config.AppConfig) (xapi.Source, error)
 	// autoRetryPausedUntil：用户取消自动重试任务后的暂停窗口，避免 rollOnce 每 2s
 	// 把它重建出来（尊重"取消"语义，直到下个调度周期/窗口结束）。
 	autoRetryPausedUntil time.Time
@@ -124,6 +126,8 @@ func NewManager(store *storage.Store, parserService *parser.Service, eventBus *E
 		userLocks:  make(map[string]*keyLock),
 		mediaLocks: make(map[string]*keyLock),
 		metrics:    make(map[int64]jobMetrics),
+		// 唯一直接引用 legacy 实现的位置；新实现通过 SetXSourceFactory 注入。
+		xSourceFactory: xclient.NewSource,
 	}
 }
 
@@ -451,9 +455,9 @@ func (m *Manager) maybeMaintain(ctx context.Context) {
 }
 
 func (m *Manager) startJob(parent context.Context, job storage.Job) {
-	// 账号池全部限流时立即把任务交还调度器（见 xclient.RateLimitedError），
+	// 账号池全部限流时立即把任务交还调度器（见 xapi.RateLimitedError），
 	// 避免唯一执行槽在限流窗口里空等约 15 分钟。
-	parent = xclient.WithYieldToScheduler(parent)
+	parent = xapi.WithYieldToScheduler(parent)
 	jobCtx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
 	if _, exists := m.active[job.ID]; exists {
@@ -546,7 +550,11 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		if job.ArchiveMode.IncludesTweets() {
 			options := parserOptionsFromConfig(cfg)
 			options.RequireRelated = true
-			tweet, err = xclient.FetchTweet(ctx, cfg, tweetID, options)
+			if source, sourceErr := m.XSource(cfg); sourceErr != nil {
+				err = sourceErr
+			} else {
+				tweet, err = source.FetchTweet(ctx, tweetID, options)
+			}
 		} else {
 			tweet, err = m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
 		}
@@ -731,7 +739,7 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, []xclient.User{user}, nil, 0.12, 0.94)
+	stats, err := m.archiveUsers(ctx, saveCtx, job, cfg, pool, []xapi.User{user}, nil, 0.12, 0.94)
 	if err != nil {
 		if errors.Is(err, errYieldExecution) {
 			m.yieldJob(saveCtx, job, "分段执行中，稍后继续")
@@ -756,7 +764,7 @@ func (m *Manager) processUser(ctx context.Context, saveCtx context.Context, job 
 func (m *Manager) failRetryJob(ctx context.Context, job storage.Job, err error) {
 	// 限流有明确的恢复时间，交给 fail() 重新入队即可，不应再叠加 10 分钟的
 	// “自动重试失败”暂停窗口（那会让已经可恢复的任务多等一轮）。
-	if retryAt, ok := xclient.RateLimitRetryAt(err); ok {
+	if retryAt, ok := xapi.RateLimitRetryAt(err); ok {
 		if !m.rateLimitDeferExceeded(job, retryAt) && m.requeueForRateLimit(ctx, job, retryAt) {
 			return
 		}
@@ -836,7 +844,7 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	var members []xclient.User
+	var members []xapi.User
 	if cp, ok, checkpointErr := m.loadArchiveCheckpoint(saveCtx, job.ID); checkpointErr != nil {
 		m.fail(saveCtx, job, "", checkpointErr)
 		return
@@ -849,7 +857,7 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 		job.Message = "正在获取列表成员"
 		job.Progress = 0.12
 		m.save(saveCtx, job)
-		members, err = m.collectArchiveMembers(ctx, saveCtx, job, func(cursor, viewer string) (xclient.UserPage, error) {
+		members, err = m.collectArchiveMembers(ctx, saveCtx, job, func(cursor, viewer string) (xapi.UserPage, error) {
 			return pool.GetListMembersPage(ctx, list, cursor, viewer)
 		})
 		if err != nil {
@@ -904,7 +912,7 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 		m.fail(saveCtx, job, "", err)
 		return
 	}
-	var members []xclient.User
+	var members []xapi.User
 	if cp, ok, checkpointErr := m.loadArchiveCheckpoint(saveCtx, job.ID); checkpointErr != nil {
 		m.fail(saveCtx, job, "", checkpointErr)
 		return
@@ -917,7 +925,7 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 		job.Message = "正在获取关注用户"
 		job.Progress = 0.12
 		m.save(saveCtx, job)
-		members, err = m.collectArchiveMembers(ctx, saveCtx, job, func(cursor, viewer string) (xclient.UserPage, error) {
+		members, err = m.collectArchiveMembers(ctx, saveCtx, job, func(cursor, viewer string) (xapi.UserPage, error) {
 			return pool.GetFollowingPage(ctx, owner, cursor, viewer)
 		})
 		if err != nil {
@@ -1352,33 +1360,67 @@ type archiveUserTask struct {
 	order        int
 	missingMedia int
 	primaryOnly  bool
-	user         xclient.User
+	user         xapi.User
 }
 
-func (m *Manager) xPool(ctx context.Context) (config.AppConfig, *xclient.Pool, error) {
+func (m *Manager) xPool(ctx context.Context) (config.AppConfig, xapi.Source, error) {
 	cfg, err := m.store.GetConfig(ctx)
 	if err != nil {
 		return config.AppConfig{}, nil, err
 	}
-	pool, err := m.XClientPool(cfg)
-	return cfg, pool, err
+	source, err := m.XSource(cfg)
+	return cfg, source, err
 }
 
-// XClientPool shares credential cooldowns and successful checks with running jobs.
-func (m *Manager) XClientPool(cfg config.AppConfig) (*xclient.Pool, error) {
-	key := xPoolConfigKey(cfg)
-	m.xPoolMu.Lock()
-	defer m.xPoolMu.Unlock()
-	if m.cachedPool != nil && m.xPoolKey == key {
-		return m.cachedPool, nil
+// SetXSourceFactory 替换 X 数据源实现。默认是 legacy 的 xclient.NewSource；
+// 切换 OPEN_XDOWNLOAD_SCRAPER 时由启动代码注入另一套实现。替换工厂会丢弃旧缓存。
+func (m *Manager) SetXSourceFactory(factory func(config.AppConfig) (xapi.Source, error)) {
+	m.xSourceMu.Lock()
+	defer m.xSourceMu.Unlock()
+	m.xSourceFactory = factory
+	m.cachedSource = nil
+	m.xSourceKey = ""
+}
+
+// InvalidateXSource 清除缓存的 X 数据源，使下一次 XSource(cfg) 用当前工厂重建。
+// 账号池配置（Cookie/附加账号）变更后由账号管理 HTTP 层调用。
+func (m *Manager) InvalidateXSource() {
+	m.xSourceMu.Lock()
+	defer m.xSourceMu.Unlock()
+	m.cachedSource = nil
+	m.xSourceKey = ""
+}
+
+// NewXSource 用当前工厂构建一个不进入缓存的新 source，供 /api/auth/check 等
+// 非破坏性探测使用（探测会 disable 账号，不能打在生产池上）。
+func (m *Manager) NewXSource(cfg config.AppConfig) (xapi.Source, error) {
+	m.xSourceMu.Lock()
+	factory := m.xSourceFactory
+	m.xSourceMu.Unlock()
+	if factory == nil {
+		return nil, errors.New("X 数据源还没有初始化")
 	}
-	pool, err := xclient.NewPool(cfg)
+	return factory(cfg)
+}
+
+// XSource shares credential cooldowns and successful checks with running jobs.
+func (m *Manager) XSource(cfg config.AppConfig) (xapi.Source, error) {
+	key := xPoolConfigKey(cfg)
+	m.xSourceMu.Lock()
+	defer m.xSourceMu.Unlock()
+	if m.cachedSource != nil && m.xSourceKey == key {
+		return m.cachedSource, nil
+	}
+	if m.xSourceFactory == nil {
+		return nil, errors.New("X 数据源还没有初始化")
+	}
+	source, err := m.xSourceFactory(cfg)
 	if err != nil {
 		return nil, err
 	}
-	m.cachedPool = pool
-	m.xPoolKey = key
-	return pool, nil
+	m.cachedSource = source
+	m.xSourceKey = key
+	return source, nil
 }
 
 func xPoolConfigKey(cfg config.AppConfig) string {
@@ -1392,11 +1434,11 @@ func xPoolConfigKey(cfg config.AppConfig) string {
 
 // archiveCheckpointTask 是 archiveUserTask 的可序列化形式（检查点需要跨进程恢复）。
 type archiveCheckpointTask struct {
-	Index        int          `json:"index"`
-	Order        int          `json:"order"`
-	MissingMedia int          `json:"missingMedia"`
-	PrimaryOnly  bool         `json:"primaryOnly"`
-	User         xclient.User `json:"user"`
+	Index        int       `json:"index"`
+	Order        int       `json:"order"`
+	MissingMedia int       `json:"missingMedia"`
+	PrimaryOnly  bool      `json:"primaryOnly"`
+	User         xapi.User `json:"user"`
 }
 
 // archiveCheckpoint 保存列表/关注归档的分段进度。Tasks 只在首次建立时排序一次，
@@ -1489,7 +1531,7 @@ func (m *Manager) yieldJob(ctx context.Context, job storage.Job, message string)
 	}
 }
 
-func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, users []xclient.User, listEntity *storage.ListEntity, start float64, end float64) (archiveStats, error) {
+func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool xapi.Source, users []xapi.User, listEntity *storage.ListEntity, start float64, end float64) (archiveStats, error) {
 	stats := archiveStats{}
 	var tasks []archiveUserTask
 	completed := 0
@@ -1513,13 +1555,13 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 			return stats, nil
 		}
 		// 私密时间线固定使用主账号；过滤和自动关注也必须使用相同账号的关系信息。
-		resolvedUsers := make([]xclient.User, 0, len(users))
+		resolvedUsers := make([]xapi.User, 0, len(users))
 		for _, user := range users {
 			if err := ctx.Err(); err != nil {
 				return stats, err
 			}
-			if user.Protected && user.ID != "" && pool != nil && pool.Primary() != nil {
-				refreshed, err := pool.Primary().GetUserByID(ctx, user.ID)
+			if user.Protected && user.ID != "" && pool != nil && pool.HasPrimary() {
+				refreshed, err := pool.GetUserByIDAsPrimary(ctx, user.ID)
 				if err != nil {
 					if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) {
 						return stats, err
@@ -1614,7 +1656,7 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 			var pathError *os.PathError
 			var linkError *os.LinkError
 			// 单个用户的时间线 401（私密/深翻页）而 Cookie 仍通过 /home 校验：只算该用户失败。
-			userUnauthorized := !isCancellation(ctx, err) && xclient.IsUnauthorized(err) &&
+			userUnauthorized := !isCancellation(ctx, err) && xapi.IsUnauthorized(err) &&
 				pool.RecheckDisabledClients(ctx)
 			if !userUnauthorized && (isCancellation(ctx, err) || shouldAbortArchiveUsers(err) ||
 				(!errors.As(err, &pathError) && !errors.As(err, &linkError))) {
@@ -1644,7 +1686,7 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 
 // archiveUserTasks 过滤/去重待归档用户，返回任务列表、被跳过的用户数以及跳过的原因
 // 条目（blocked/muted 以前被静默丢弃，现在计入 SkippedUsers + Issues，便于排障）。
-func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, users []xclient.User) ([]archiveUserTask, int, []string, error) {
+func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, users []xapi.User) ([]archiveUserTask, int, []string, error) {
 	target, err := filestore.New(cfg)
 	if err != nil {
 		return nil, 0, nil, err
@@ -1706,14 +1748,14 @@ func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, us
 	return tasks, skipped, issues, nil
 }
 
-func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, listEntity *storage.ListEntity, updateDownloading func(message string)) (archiveStats, error) {
+func (m *Manager) archiveUser(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool xapi.Source, user xapi.User, listEntity *storage.ListEntity, updateDownloading func(message string)) (archiveStats, error) {
 	return m.archiveUserWithBudget(ctx, saveCtx, job, cfg, pool, user, listEntity, updateDownloading, nil)
 }
 
 // archiveUserWithBudget 是 archiveUser 的带时间预算版本。shouldYield 非空时，媒体
 // 时间线每处理完一页就检查一次；到预算后在页边界保存游标并返回 errYieldExecution，
 // 让大账号不必一次占满唯一执行槽。
-func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, listEntity *storage.ListEntity, updateDownloading func(message string), shouldYield func() bool) (archiveStats, error) {
+func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool xapi.Source, user xapi.User, listEntity *storage.ListEntity, updateDownloading func(message string), shouldYield func() bool) (archiveStats, error) {
 	stats := archiveStats{}
 	release, waited, err := m.lockUser(ctx, user.ID)
 	if err != nil {
@@ -1748,8 +1790,8 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 		return stats, nil
 	}
 	if user.Protected && !user.Following {
-		if cfg.AutoFollowProtected && !user.Requested && pool != nil && pool.Primary() != nil {
-			_ = pool.Primary().FollowUser(ctx, user)
+		if cfg.AutoFollowProtected && !user.Requested && pool != nil && pool.HasPrimary() {
+			_ = pool.FollowUserAsPrimary(ctx, user)
 		}
 		return stats, nil
 	}
@@ -1788,7 +1830,7 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 		}
 		// 单个用户的时间线错误（解析失败/游标异常等）不拖垮整个批次；分页游标已按
 		// 已处理页保存，下一轮从这里继续。
-		if _, limited := xclient.RateLimitRetryAt(err); limited {
+		if _, limited := xapi.RateLimitRetryAt(err); limited {
 			return stats, err
 		}
 		stats.Failed++
@@ -1838,7 +1880,7 @@ func mediaFullScanStagger(userID string) time.Duration {
 // archiveMediaTimeline 按页抓取 UserMedia 时间线：每页媒体处理完（可重试失败已写入
 // 失败队列）才保存下一页游标；整轮成功结束后才推进 user_entities.last_seen_tweet_id。
 // 限流/分段让出最多丢掉尚未处理的那一页，恢复时从保存的页继续。
-func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, entity storage.UserEntity, dir string, opts parser.ParseOptions, update func(string), shouldYield func() bool) (archiveStats, error) {
+func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool xapi.Source, user xapi.User, entity storage.UserEntity, dir string, opts parser.ParseOptions, update func(string), shouldYield func() bool) (archiveStats, error) {
 	stats := archiveStats{}
 	state, err := m.store.GetMediaSync(saveCtx, user.ID)
 	if err != nil {
@@ -1862,11 +1904,11 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 		runStats := archiveStats{}
 		var attemptDownloads time.Duration
 		pageNewest := ""
-		walkStats, walkErr := pool.WalkUserMedia(ctx, user, xclient.UserMediaTimelineOptions{
+		walkStats, walkErr := pool.WalkUserMedia(ctx, user, xapi.UserMediaTimelineOptions{
 			Cursor: state.Cursor,
 			StopID: stopID,
 			Parse:  opts,
-		}, func(page xclient.UserMediaTimelinePage) error {
+		}, func(page xapi.UserMediaTimelinePage) error {
 			if update != nil {
 				update(fmt.Sprintf("媒体归档 @%s：%d", fallbackUserName(user), state.Count+len(page.Tweets)))
 			}
@@ -1945,7 +1987,7 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 			_ = m.store.SaveMediaSync(saveCtx, state)
 			return stats, walkErr
 		}
-		if attempt == 0 && startCursor != "" && xclient.IsInvalidTimelineCursor(walkErr) {
+		if attempt == 0 && startCursor != "" && xapi.IsInvalidTimelineCursor(walkErr) {
 			// 保存的游标已失效：清空后从第 0 页重翻。已下载的媒体会被去重跳过。
 			state.Cursor = ""
 			state.StopID = stopID
@@ -1972,14 +2014,14 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 // 永久失效的媒体再怎么重扫也拿不回来。若要求零失败，一条长期失败的推文会让游标永远
 // 停在旧位置，开了增量归档也等于每次全量扫描。只有失败未能入队时才不推进游标，
 // 让下次归档重新扫到它。
-func (m *Manager) archiveTweets(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string)) (archiveStats, error) {
+func (m *Manager) archiveTweets(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xapi.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string)) (archiveStats, error) {
 	return m.archiveTweetsWithSeen(ctx, saveCtx, job, cfg, user, entity, dir, tweets, updateDownloading, "")
 }
 
 // archiveTweetsWithSeen 与 archiveTweets 相同，但额外接收"本轮 timeline 见到的最新推文 ID"
 // （含被 xclient 跳过的解析失败推文）。游标取它与成功解析推文 ID 的较大者，保证毒丸不会
 // 让增量归档退化为全量重扫。
-func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string), seenLastID string) (archiveStats, error) {
+func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xapi.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string), seenLastID string) (archiveStats, error) {
 	stats, err := m.archiveTweetsBatch(ctx, saveCtx, job, cfg, user, entity, dir, tweets, updateDownloading)
 	if err != nil {
 		return stats, err
@@ -2004,7 +2046,7 @@ func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Con
 
 // archiveTweetsBatch 处理一批时间线推文的正文/媒体，但不推进增量游标。媒体时间线
 // 按页调用它：每页的失败已写入失败队列后再保存分页游标，整轮结束后才统一前移游标。
-func (m *Manager) archiveTweetsBatch(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string)) (archiveStats, error) {
+func (m *Manager) archiveTweetsBatch(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xapi.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string)) (archiveStats, error) {
 	stats := archiveStats{Tweets: len(tweets)}
 	for _, tweet := range tweets {
 		if err := m.store.RememberMediaContext(saveCtx, tweet); err != nil {
@@ -2382,15 +2424,15 @@ func shouldAbortArchiveUsers(err error) bool {
 	}
 	// X 轮换 queryId 后，逐个用户重试只会把同一个 404 重复 N 次并刷满 Issues；
 	// 这是"需要升级程序"的配置级错误，直接中止整个任务并由 fail() 给出明确文案。
-	if errors.Is(err, xclient.ErrQueryIDStale) {
+	if errors.Is(err, xapi.ErrQueryIDStale) {
 		return true
 	}
-	return xclient.IsAllClientsRateLimited(err)
+	return xapi.IsAllClientsRateLimited(err)
 }
 
 // queryIDStaleHint 给 ErrQueryIDStale 加上面向运维的明确提示，避免用户看到裸 404。
 func queryIDStaleHint(err error) error {
-	if !errors.Is(err, xclient.ErrQueryIDStale) {
+	if !errors.Is(err, xapi.ErrQueryIDStale) {
 		return err
 	}
 	return fmt.Errorf("X 接口 queryId 可能已失效，请升级程序后重试: %w", err)
@@ -2430,7 +2472,7 @@ func isDiskFatalError(err error) bool {
 	return errors.Is(err, os.ErrPermission)
 }
 
-func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, user xclient.User) (storage.UserEntity, string, error) {
+func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, user xapi.User) (storage.UserEntity, string, error) {
 	target, err := filestore.New(cfg)
 	if err != nil {
 		return storage.UserEntity{}, "", err
@@ -2440,7 +2482,7 @@ func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, us
 
 // ensureUserEntityWithStore 复用调用方已创建的 Store：列表归档会为每个成员依次
 // 调用，Store 的构造（filepath.Abs + 代理校验）不必重复执行。
-func (m *Manager) ensureUserEntityWithStore(ctx context.Context, target filestore.Store, user xclient.User) (storage.UserEntity, string, error) {
+func (m *Manager) ensureUserEntityWithStore(ctx context.Context, target filestore.Store, user xapi.User) (storage.UserEntity, string, error) {
 	parent := target.Join(target.Root(), "users")
 	name := userDirectoryName(user)
 	existing, err := m.store.LocateUserEntity(ctx, user.ID, parent)
@@ -2562,7 +2604,7 @@ func (m *Manager) ensureListEntity(ctx context.Context, cfg config.AppConfig, gr
 	return entity, target.MkdirAll(ctx, target.Join(entity.ParentDir, entity.Name))
 }
 
-func (m *Manager) ensureUserLink(ctx context.Context, cfg config.AppConfig, listEntity storage.ListEntity, user xclient.User, targetDir string) error {
+func (m *Manager) ensureUserLink(ctx context.Context, cfg config.AppConfig, listEntity storage.ListEntity, user xapi.User, targetDir string) error {
 	target, err := filestore.New(cfg)
 	if err != nil {
 		return err
@@ -2570,7 +2612,7 @@ func (m *Manager) ensureUserLink(ctx context.Context, cfg config.AppConfig, list
 	return m.ensureUserLinkWithStore(ctx, target, listEntity, user, targetDir)
 }
 
-func (m *Manager) ensureUserLinkWithStore(ctx context.Context, target filestore.Store, listEntity storage.ListEntity, user xclient.User, targetDir string) error {
+func (m *Manager) ensureUserLinkWithStore(ctx context.Context, target filestore.Store, listEntity storage.ListEntity, user xapi.User, targetDir string) error {
 	name := filepath.Base(filepath.Clean(targetDir))
 	if _, err := m.store.EnsureUserLink(ctx, user.ID, listEntity.ID, name); err != nil {
 		return err
@@ -2606,7 +2648,7 @@ func (m *Manager) completeArchive(ctx context.Context, job storage.Job, stats ar
 func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, err error) {
 	// 账号池全部限流不是任务失败：把任务放回队列并设置冷却时间，立即释放执行槽。
 	// 限额恢复后同一任务会从已提交的进度/检查点继续。
-	if retryAt, ok := xclient.RateLimitRetryAt(err); ok {
+	if retryAt, ok := xapi.RateLimitRetryAt(err); ok {
 		if !m.rateLimitDeferExceeded(job, retryAt) {
 			if m.requeueForRateLimit(ctx, job, retryAt) {
 				return
@@ -2900,7 +2942,7 @@ func isPhotoURL(raw string) bool {
 	return (host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")) && !strings.EqualFold(path.Ext(parsed.Path), ".mp4")
 }
 
-func storageUser(user xclient.User) storage.User {
+func storageUser(user xapi.User) storage.User {
 	return storage.User{
 		ID:           user.ID,
 		ScreenName:   user.ScreenName,
@@ -2911,7 +2953,7 @@ func storageUser(user xclient.User) storage.User {
 	}
 }
 
-func fallbackUserName(user xclient.User) string {
+func fallbackUserName(user xapi.User) string {
 	if user.ScreenName != "" {
 		return user.ScreenName
 	}
@@ -3067,7 +3109,7 @@ func archiveIssueSummary(issues []string) string {
 
 var unsupportedPathChars = regexp.MustCompile(`[/\\:*?"<>\|]`)
 
-func userDirectoryName(user xclient.User) string {
+func userDirectoryName(user xapi.User) string {
 	name := safeName(user.Title())
 	if user.Name == "" || user.ScreenName == "" {
 		return name

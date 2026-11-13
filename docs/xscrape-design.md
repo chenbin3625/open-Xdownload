@@ -255,4 +255,39 @@ type HomeProber func(ctx context.Context, creds AccountCredentials) HomeProbeRes
 
 ## Source 方法集
 
-（由 xapi 抽取后登记）
+```go
+type Source interface {
+    GetUserByInput(ctx context.Context, input string) (User, error)
+    GetListByID(ctx context.Context, id string) (List, error)
+    GetUserByIDAsPrimary(ctx context.Context, id string) (User, error)
+    FollowUserAsPrimary(ctx context.Context, user User) error
+    FetchTweet(ctx context.Context, id string, options parser.ParseOptions) (parser.TweetData, error)
+    WalkUserMedia(ctx context.Context, user User, options UserMediaTimelineOptions, save func(UserMediaTimelinePage) error) (MediaFetchStats, error)
+    WalkUserTweets(ctx context.Context, user User, options TweetTimelineOptions, save func(TweetTimelinePage) error) error
+    GetListMembersPage(ctx context.Context, list List, cursor, viewerKey string) (UserPage, error)
+    GetFollowingPage(ctx context.Context, user User, cursor, viewerKey string) (UserPage, error)
+    RecheckDisabledClients(ctx context.Context) bool
+    CheckAll(ctx context.Context) PoolDiagnostics
+    Diagnostics() PoolDiagnostics
+    HasPrimary() bool
+}
+```
+
+语义：
+
+- `GetUserByInput`：按数字 ID 或 `@screen_name` 查询用户（对应 `UserByRestId` / `UserByScreenName`）。
+- `GetListByID`：查询列表元信息；返回值的 `ViewerKey` 是读取该列表的账号 `hex(sha256(auth_token))`，供成员分页绑定视角。
+- `GetUserByIDAsPrimary`：用主账号查询用户，受保护账号的 `following`/`muting` 等关系字段必须由主账号视角读取。
+- `FollowUserAsPrimary`：用主账号关注用户，不经过账号轮换。
+- `FetchTweet`：由账号池选中的账号抓取单条推文，受账号池限流与轮换约束；未配置 Cookie 时 legacy 仍以 guest/public 身份请求（无池可选的回退）。
+- `WalkUserMedia`：逐页抓取 `UserMedia` 媒体时间线，每页解析/早停后回调 `save`，由调用方持久化游标。
+- `WalkUserTweets`：逐页抓取全文时间线（独立 operation 与游标，不复用媒体时间线水位线）。
+- `GetListMembersPage`：抓取列表成员一页；`viewerKey` 非空时固定使用该账号，保证私有列表视角一致。
+- `GetFollowingPage`：抓取关注列表一页；受保护用户固定使用主账号视角。
+- `RecheckDisabledClients`：立即对被禁用的 Cookie 做 `/home` 校验，返回此后是否至少有一个可用账号。
+- `CheckAll`：并发校验全部账号并返回诊断快照（会 disable 失效账号）。
+- `Diagnostics`：只读返回当前账号池诊断快照，不发起校验请求。
+- `HasPrimary`：报告是否存在主账号，替代调用方直接访问 `Primary()`。
+
+legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewSource` 在凭据缺失时返回一个仅支持 `FetchTweet` 的 source，其余方法返回与 `xclient.NewPool` 相同的错误。
+

@@ -24,7 +24,6 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
-	"github.com/chenbin3625/open-Xdownload/internal/xclient"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -371,12 +370,20 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 用临时池做"非破坏性探测"，不复用 jobs 的生产池：
+	// 用临时 Source 做"非破坏性探测"，不复用 jobs 的生产池：
 	// CheckAll/GetSelfScreenName 在 401（及非 WAF 的 403）时会调用 disable（主账号
 	// 30 分钟、备用 5 分钟）。如果探测打到正在归档的生产池上，用户点一次"检测 Cookie"
-	// 就可能让归档任务半小时内用不了主账号。临时池与生产池共享底层
+	// 就可能让归档任务半小时内用不了主账号。临时 Source 与生产池共享底层
 	// httpx.Transport（按代理缓存），连接仍复用，探测本身只在手动点击时发生。
-	probePool, err := xclient.NewPool(cfg)
+	if s.manager == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": configured,
+			"ok":         false,
+			"message":    "X 数据源还没有初始化",
+		})
+		return
+	}
+	probeSource, err := s.manager.NewXSource(cfg)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": configured,
@@ -387,7 +394,7 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	diagnostics := probePool.CheckAll(ctx)
+	diagnostics := probeSource.CheckAll(ctx)
 	// "校验通过"必须以真正拿到 screen name 为准：Diagnostics().Available 只表示
 	// "客户端没有被 disable"，网络不通/代理错误时它仍然是 1，会被误报成通过。
 	screenName := ""
