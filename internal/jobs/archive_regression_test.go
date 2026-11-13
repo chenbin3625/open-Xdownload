@@ -239,7 +239,7 @@ func TestFullTimelineBackfillAndCheckpointReplay(t *testing.T) {
 			if err := store.ArchiveTweet(ctx, job.ID, parser.TweetData{ID: "90", Text: "historical pure text", Author: parser.Author{ID: "42", ScreenName: "author"}}, "skipped"); err != nil {
 				t.Fatal(err)
 			}
-			stats, err := manager.archiveFullTimeline(ctx, ctx, job, cfg, pool, user, entity, dir, nil)
+			stats, err := manager.archiveFullTimeline(ctx, ctx, job, cfg, pool, user, entity, dir, nil, nil)
 			if err != nil || stats.Tweets != 1 {
 				t.Fatalf("historical scan: %+v %v", stats, err)
 			}

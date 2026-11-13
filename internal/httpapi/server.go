@@ -1611,7 +1611,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 		return storage.ErrValidation("请求格式无效")
 	}
 	// 拒绝尾随 JSON（如 `{"a":1}{"b":2}`）：只接受单个顶层值。
-	if dec.More() {
+	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return storage.ErrValidation("请求体包含多余数据")
 	}
 	return nil

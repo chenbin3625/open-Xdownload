@@ -36,6 +36,7 @@ export function ConfigForm({
   useTranslation();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(() => normalizeConfig(config));
+  const draftBase = useRef(draft);
   const [draftDirty, setDraftDirty] = useState(false);
   // GET/PUT 响应可能带 envOverridden: string[]（camelCase 字段名），
   // 用于在对应输入框下标注"由环境变量提供"。字段缺失时按空数组处理。
@@ -62,11 +63,13 @@ export function ConfigForm({
           clearTimeout(pendingSavedTimer.current);
           pendingSavedTimer.current = null;
         }
+        draftBase.current = normalized;
         setDraft(normalized);
       }
       return;
     }
     if (!draftDirty) {
+      draftBase.current = normalized;
       setDraft(normalized);
     }
   }, [config, draftDirty, pendingSavedConfigKey]);
@@ -96,10 +99,11 @@ export function ConfigForm({
 
   const mutation = useMutation({
     mutationFn: updateConfig,
-    onMutate: () => draftRevision.current,
-    onSuccess: (updated, _submitted, submittedRevision) => {
+    onMutate: () => ({ revision: draftRevision.current, draft }),
+    onSuccess: (updated, _submitted, submitted) => {
       const normalized = normalizeConfig(updated);
-      if (submittedRevision === draftRevision.current) {
+      draftBase.current = normalized;
+      if (submitted?.revision === draftRevision.current) {
         setPendingSavedConfigKey(configSyncKey(normalized));
         // 超时保护：env override 等情况下 GET 值可能永远不匹配 PUT 响应，
         // 3 秒后放弃等待，重新同步最近一次 GET 配置。
@@ -110,6 +114,8 @@ export function ConfigForm({
         }, 3_000);
         setDraft(normalized);
         setDraftDirty(false);
+      } else if (submitted) {
+        setDraft(current => ({ ...normalized, ...configDiff(submitted.draft, current) }));
       }
       void queryClient.invalidateQueries({ queryKey: configQueryRoot });
       onRefresh?.();
@@ -184,7 +190,8 @@ export function ConfigForm({
       pendingSavedTimer.current = null;
     }
     setDraftDirty(false);
-    setDraft(normalizeConfig(config));
+    draftBase.current = normalizeConfig(config);
+    setDraft(draftBase.current);
     onRefresh?.();
   }
 
@@ -244,7 +251,7 @@ export function ConfigForm({
             loading={mutation.isPending}
             disabled={mutation.isPending}
             aria-busy={mutation.isPending}
-            onClick={() => mutation.mutate(configDiff(normalizeConfig(config), draft))}
+            onClick={() => mutation.mutate(configDiff(draftBase.current, draft))}
           >
             {t("保存配置")}</Button>
         </div>
@@ -317,7 +324,5 @@ function configDiff(base: AppConfig, draft: AppConfig): Partial<AppConfig> {
       diff[key] = draft[key];
     }
   }
-  // 后端要求至少有一个字段，空 diff 说明无变化，仍发全量避免 400。
-  if (Object.keys(diff).length === 0) return draft;
   return diff as Partial<AppConfig>;
 }

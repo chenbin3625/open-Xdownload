@@ -3,9 +3,14 @@ import { test, expect, type Locator, type Page } from "@playwright/test";
 const tweetURL = process.env.OPEN_XDOWNLOAD_PREVIEW_TWEET ?? "https://x.com/Starlink/status/2120206875581186293";
 
 async function navigate(page: Page, label: string) {
-  const menu = page.getByRole("button", { name: /打开导航菜单|Open navigation menu/ });
-  if (await menu.isVisible()) await menu.click();
-  await page.getByRole("menuitem", { name: label, exact: true }).click();
+  const mobile = page.locator(".app-mobile-nav").getByRole("button", { name: label, exact: true });
+  if (await mobile.isVisible()) {
+    await mobile.click();
+  } else {
+    const menu = page.getByRole("button", { name: /打开导航菜单|Open navigation menu/ });
+    if (await menu.isVisible()) await menu.click();
+    await page.getByRole("menuitem", { name: label, exact: true }).click();
+  }
   await expect(page.getByRole("dialog")).toHaveCount(0);
 }
 

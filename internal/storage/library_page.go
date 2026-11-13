@@ -279,11 +279,11 @@ func buildLibraryQuery(filter LibraryFilter, snap *librarySnapshot) libraryQuery
 		}
 	}
 	if !filter.From.IsZero() {
-		entryConds = append(entryConds, "julianday(created_at) >= julianday(?)")
+		entryConds = append(entryConds, "julianday(replace(created_at, ' +0000 UTC', 'Z')) >= julianday(?)")
 		result.args = append(result.args, filter.From.UTC().Format(time.RFC3339Nano))
 	}
 	if !filter.To.IsZero() {
-		entryConds = append(entryConds, "julianday(created_at) < julianday(?)")
+		entryConds = append(entryConds, "julianday(replace(created_at, ' +0000 UTC', 'Z')) < julianday(?)")
 		result.args = append(result.args, filter.To.UTC().Format(time.RFC3339Nano))
 	}
 	if filter.MinBytes != nil {

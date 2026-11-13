@@ -2,7 +2,10 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
@@ -36,8 +39,15 @@ func mergeRefreshedMedia(original, fresh []parser.Media) []parser.Media {
 	return result
 }
 
-func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, entity storage.UserEntity, dir string, update func(string)) (archiveStats, error) {
+func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool *xclient.Pool, user xclient.User, entity storage.UserEntity, dir string, update func(string), shouldYield func() bool) (archiveStats, error) {
 	stats := archiveStats{Users: 1}
+	cp, _, err := m.loadArchiveCheckpoint(saveCtx, job.ID)
+	if err != nil {
+		return stats, err
+	}
+	if job.ArchiveMode == storage.ArchiveBoth && cp.Replay != nil && cp.Replay.UserID == user.ID {
+		return m.replayArchivedTweetMedia(ctx, saveCtx, job, cfg, user, entity, dir, update, shouldYield, cp, stats, nil)
+	}
 	state, err := m.store.GetTweetSync(saveCtx, user.ID)
 	if err != nil {
 		return stats, err
@@ -57,11 +67,17 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 	parseOptions := parserOptionsFromConfig(cfg)
 	parseOptions.RequireRelated = true
 	collected := map[string]bool{}
-	err = pool.WalkUserTweets(ctx, user, xclient.TweetTimelineOptions{Cursor: state.Cursor, StopID: state.LastID, HeadID: state.HeadID, Parse: parseOptions}, func(page xclient.TweetTimelinePage) error {
+	savePage := func(page xclient.TweetTimelinePage) error {
 		if update != nil {
 			update(fmt.Sprintf("全文归档 @%s：%d", user.ScreenName, state.Count+len(page.Tweets)))
 		}
-		part, err := m.archiveTweetsWithSeen(ctx, saveCtx, job, cfg, user, entity, dir, page.Tweets, update, "")
+		tweets := make([]parser.TweetData, 0, len(page.Tweets))
+		for _, tweet := range page.Tweets {
+			if !collected[tweet.ID] {
+				tweets = append(tweets, tweet)
+			}
+		}
+		part, err := m.archiveTweetsWithSeen(ctx, saveCtx, job, cfg, user, entity, dir, tweets, update, "")
 		if err != nil {
 			return err
 		}
@@ -82,11 +98,27 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 			state.HeadID = ""
 			state.Status = "completed"
 		}
-		return m.store.SaveTweetSync(saveCtx, state)
-	})
+		if err := m.store.SaveTweetSync(saveCtx, state); err != nil {
+			return err
+		}
+		if !page.Complete && shouldYield != nil && shouldYield() {
+			return errYieldExecution
+		}
+		return nil
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		err = pool.WalkUserTweets(ctx, user, xclient.TweetTimelineOptions{Cursor: state.Cursor, StopID: state.LastID, HeadID: state.HeadID, Parse: parseOptions}, savePage)
+		if attempt != 0 || state.Cursor == "" || !xclient.IsInvalidTimelineCursor(err) {
+			break
+		}
+		state.Cursor, state.HeadID, state.Count = "", "", 0
+		if err := m.store.SaveTweetSync(saveCtx, state); err != nil {
+			return stats, err
+		}
+	}
 	if err != nil {
 		state.Status = "failed"
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(err, errYieldExecution) {
 			state.Status = "interrupted"
 		}
 		state.Error = err.Error()
@@ -96,27 +128,55 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 		return stats, err
 	}
 	if job.ArchiveMode == storage.ArchiveBoth {
-		for page := 1; ; page++ {
-			local, err := m.store.ListTweets(saveCtx, storage.TweetFilter{Author: user.ID, Page: page, PageSize: 100})
+		cp.Replay = &tweetMediaReplay{UserID: user.ID, ArchivedBefore: time.Now().UTC()}
+		return m.replayArchivedTweetMedia(ctx, saveCtx, job, cfg, user, entity, dir, update, shouldYield, cp, stats, collected)
+	}
+	return stats, nil
+}
+
+type tweetMediaReplay struct {
+	UserID         string    `json:"userId"`
+	AfterID        string    `json:"afterId"`
+	ArchivedBefore time.Time `json:"archivedBefore"`
+	Complete       bool      `json:"complete"`
+}
+
+func (m *Manager) replayArchivedTweetMedia(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xclient.User, entity storage.UserEntity, dir string, update func(string), shouldYield func() bool, cp archiveCheckpoint, stats archiveStats, collected map[string]bool) (archiveStats, error) {
+	state := cp.Replay
+	for !state.Complete {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		local, err := m.store.ListTweetReplay(saveCtx, user.ID, state.AfterID, state.ArchivedBefore, 100)
+		if err != nil {
+			return stats, err
+		}
+		for _, archived := range local {
+			if len(archived.Media) == 0 || collected[archived.ID] {
+				continue
+			}
+			part, err := m.archiveTweetsWithSeen(ctx, saveCtx, job, cfg, user, entity, dir, []parser.TweetData{archived}, update, "")
 			if err != nil {
 				return stats, err
 			}
-			for _, archived := range local.Items {
-				if len(archived.Media) == 0 || collected[archived.ID] {
-					continue
-				}
-				part, err := m.archiveTweetsWithSeen(ctx, saveCtx, job, cfg, user, entity, dir, []parser.TweetData{archived.TweetData}, update, "")
-				if err != nil {
-					return stats, err
-				}
-				stats.Downloaded += part.Downloaded
-				stats.SkippedMedia += part.SkippedMedia
-				stats.Failed += part.Failed
-				stats.Issues = append(stats.Issues, part.Issues...)
-			}
-			if page >= local.Pagination.TotalPages {
-				break
-			}
+			stats.Downloaded += part.Downloaded
+			stats.SkippedMedia += part.SkippedMedia
+			stats.Failed += part.Failed
+			stats.Issues = append(stats.Issues, part.Issues...)
+		}
+		if len(local) > 0 {
+			state.AfterID = local[len(local)-1].ID
+		}
+		state.Complete = len(local) < 100
+		payload, err := json.Marshal(cp)
+		if err != nil {
+			return stats, err
+		}
+		if err := m.store.SaveJobCheckpoint(saveCtx, job.ID, payload); err != nil {
+			return stats, err
+		}
+		if !state.Complete && shouldYield != nil && shouldYield() {
+			return stats, errYieldExecution
 		}
 	}
 	return stats, nil

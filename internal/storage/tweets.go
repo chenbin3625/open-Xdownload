@@ -436,6 +436,27 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	return result, nil
 }
 
+// Replay uses immutable IDs and the original archive time so updates and newly
+// archived tweets cannot shift a saved page boundary.
+func (s *Store) ListTweetReplay(ctx context.Context, authorID, afterID string, archivedBefore time.Time, limit int) ([]parser.TweetData, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	var payloads []string
+	if err := s.db.SelectContext(ctx, &payloads, `SELECT payload FROM tweets WHERE author_id=? AND archived_at<=? AND id>? ORDER BY id LIMIT ?`, authorID, archivedBefore.UTC(), afterID, limit); err != nil {
+		return nil, err
+	}
+	items := make([]parser.TweetData, 0, len(payloads))
+	for _, payload := range payloads {
+		var tweet parser.TweetData
+		if err := json.Unmarshal([]byte(payload), &tweet); err != nil {
+			return nil, err
+		}
+		items = append(items, tweet)
+	}
+	return items, nil
+}
+
 func (s *Store) GetTweetSync(ctx context.Context, userID string) (TweetSync, error) {
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO tweet_sync(user_id,updated_at) VALUES(?,?) ON CONFLICT(user_id) DO NOTHING`, userID, time.Now().UTC()); err != nil {
 		return TweetSync{}, err

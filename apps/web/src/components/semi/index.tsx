@@ -178,6 +178,8 @@ export function buildPageItems(current: number, total: number): (number | "gap")
 export interface TreeNode { key: string; title: React.ReactNode; isLeaf?: boolean; children?: TreeNode[] }
 export function Tree({ nodes, expandedKeys, selectedKey, onExpandedChange, onSelect, loadChildren, onLoadError, className }: { nodes: TreeNode[]; expandedKeys: string[]; selectedKey?: string; onExpandedChange: (keys: string[]) => void; onSelect: (node: TreeNode) => void; loadChildren?: (node: TreeNode) => void | Promise<void>; onLoadError?: (node: TreeNode, e: unknown) => void; className?: string }) {
   const root = useRef<HTMLDivElement>(null); const [focused, setFocused] = useState<string>();
+  const expanded = useRef(expandedKeys);
+  expanded.current = expandedKeys;
   const [loading, setLoading] = useState<string[]>([]);
   const visible: TreeNode[] = []; const parents = new Map<string, string>();
   function visit(items: TreeNode[], parent?: string) { for (const item of items) { visible.push(item); if (parent) parents.set(item.key, parent); if (expandedKeys.includes(item.key)) visit(item.children ?? [], item.key); } }
@@ -197,7 +199,8 @@ export function Tree({ nodes, expandedKeys, selectedKey, onExpandedChange, onSel
       try { await loadChildren(node); } catch (error) { onLoadError?.(node, error); return; }
       finally { setLoading(current => current.filter(key => key !== node.key)); }
     }
-    onExpandedChange(open ? [...new Set([...expandedKeys, node.key])] : expandedKeys.filter(key => key !== node.key));
+    expanded.current = open ? [...new Set([...expanded.current, node.key])] : expanded.current.filter(key => key !== node.key);
+    onExpandedChange(expanded.current);
   }
   function treeData(items: TreeNode[]): TreeNode[] { return items.map(node => ({ ...node, isLeaf: node.isLeaf ?? (node.children ? node.children.length === 0 : !loadChildren), children: node.children ? treeData(node.children) : undefined })); }
   return <div ref={root} onFocus={e => { const item = (e.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]'); if (item) setFocused(item.dataset.key); }} onKeyDown={e => {

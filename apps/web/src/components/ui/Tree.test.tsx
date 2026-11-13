@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -79,6 +79,19 @@ describe("Tree", () => {
     await user.dblClick(screen.getByText("a"));
     await user.dblClick(screen.getByText("a"));
     expect(loadChildren).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps both siblings expanded when lazy loads finish out of order", async () => {
+    const user = userEvent.setup();
+    const resolve: Record<string, () => void> = {};
+    render(<Harness initial={[{ key: "a", title: "a" }, { key: "b", title: "b" }]}
+      loadChildren={node => new Promise<void>(done => { resolve[node.key] = done; })} />);
+    await user.dblClick(screen.getByText("a"));
+    await user.dblClick(screen.getByText("b"));
+    await act(async () => resolve.b());
+    await waitFor(() => expect(screen.getAllByText("child")).toHaveLength(1));
+    await act(async () => resolve.a());
+    await waitFor(() => expect(screen.getAllByText("child")).toHaveLength(2));
   });
 
   it("叶子节点不暴露 aria-expanded", () => {

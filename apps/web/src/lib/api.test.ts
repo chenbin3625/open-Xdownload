@@ -111,4 +111,34 @@ describe("api error handling", () => {
       if (originalAny) Object.defineProperty(AbortSignal, "any", originalAny);
     }
   });
+
+  it("preserves an already aborted signal without AbortSignal.any", async () => {
+    stubResponse("{}", { status: 200 });
+    const originalAny = Object.getOwnPropertyDescriptor(AbortSignal, "any")!;
+    Object.defineProperty(AbortSignal, "any", { value: undefined, configurable: true });
+    const external = new AbortController();
+    external.abort("cancelled");
+    try {
+      await api("/api/jobs", { signal: external.signal });
+      const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+      expect(init.signal?.aborted).toBe(true);
+      expect(init.signal?.reason).toBe("cancelled");
+    } finally {
+      Object.defineProperty(AbortSignal, "any", originalAny);
+    }
+  });
+
+  it("removes fallback abort listeners after a request completes", async () => {
+    stubResponse("{}", { status: 200 });
+    const originalAny = Object.getOwnPropertyDescriptor(AbortSignal, "any")!;
+    Object.defineProperty(AbortSignal, "any", { value: undefined, configurable: true });
+    const external = new AbortController();
+    const remove = vi.spyOn(external.signal, "removeEventListener");
+    try {
+      await api("/api/jobs", { signal: external.signal });
+      expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    } finally {
+      Object.defineProperty(AbortSignal, "any", originalAny);
+    }
+  });
 });

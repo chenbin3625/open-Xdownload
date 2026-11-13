@@ -133,6 +133,10 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		return Result{}, err
 	}
 	defer response.Body.Close()
+	const maxMediaBytes = 4 << 30
+	if response.ContentLength > maxMediaBytes {
+		return Result{}, fmt.Errorf("媒体文件过大: %w", httpx.ErrBodyTooLarge)
+	}
 
 	filename := Filename(rawURL, filenameHint, response.Header.Get("Content-Type"), maxFilenameLength)
 	if filename == "" {
@@ -177,7 +181,7 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		return Result{}, err
 	}
 	hasher := sha256.New()
-	bytes, copyErr := io.Copy(io.MultiWriter(tempFile, hasher), response.Body)
+	bytes, copyErr := httpx.CopyLimited(io.MultiWriter(tempFile, hasher), response.Body, maxMediaBytes)
 	syncErr := tempFile.Sync()
 	closeErr := tempFile.Close()
 	if copyErr != nil {
@@ -197,13 +201,6 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 	if bytes == 0 {
 		_ = os.Remove(tempPath)
 		return Result{}, fmt.Errorf("下载得到 0 字节媒体: %s", rawURL)
-	}
-	// 大小上限：单个媒体超过 4 GiB 几乎不可能是正常推文内容（即使是 4K 长视频也在
-	// 1–2 GiB 内），更可能是 CDN 错误返回了无穷流。
-	const maxMediaBytes = 4 << 30 // 4 GiB
-	if bytes > maxMediaBytes {
-		_ = os.Remove(tempPath)
-		return Result{}, fmt.Errorf("媒体文件过大 (%d bytes > %d): %s", bytes, maxMediaBytes, rawURL)
 	}
 	contentHash := hex.EncodeToString(hasher.Sum(nil))
 	result, skipped, err := publishTempFile(tempPath, basePath, bytes, response.ContentLength, maxFilenameLength, replaceExisting)

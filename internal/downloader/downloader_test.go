@@ -32,6 +32,24 @@ func TestFilenameHonorsMaxLengthAndExtension(t *testing.T) {
 	}
 }
 
+func TestDownloadRejectsOversizedContentLengthBeforeReading(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Length", strconv.FormatInt((4<<30)+1, 10))
+		_, _ = w.Write([]byte("incomplete"))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	_, err := newTestDownloader().Download(context.Background(), server.URL+"/movie.mp4", dir, "movie")
+	if !errors.Is(err, httpx.ErrBodyTooLarge) {
+		t.Fatalf("oversized response error = %v, want ErrBodyTooLarge", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("oversized download left files: %v, %v", entries, err)
+	}
+}
+
 func TestOpenRejectsResponsesWithoutCompleteMedia(t *testing.T) {
 	for _, status := range []int{209, http.StatusNotModified, http.StatusNoContent, http.StatusPartialContent} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {

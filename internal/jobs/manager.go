@@ -849,8 +849,14 @@ func (m *Manager) processList(ctx context.Context, saveCtx context.Context, job 
 		job.Message = "正在获取列表成员"
 		job.Progress = 0.12
 		m.save(saveCtx, job)
-		members, err = pool.GetListMembers(ctx, list)
+		members, err = m.collectArchiveMembers(ctx, saveCtx, job, func(cursor, viewer string) (xclient.UserPage, error) {
+			return pool.GetListMembersPage(ctx, list, cursor, viewer)
+		})
 		if err != nil {
+			if errors.Is(err, errYieldExecution) {
+				m.yieldJob(saveCtx, job, "成员列表分段获取中，稍后继续")
+				return
+			}
 			if isCancellation(ctx, err) {
 				m.handleInterrupt(ctx, saveCtx, job)
 				return
@@ -911,8 +917,14 @@ func (m *Manager) processFollowing(ctx context.Context, saveCtx context.Context,
 		job.Message = "正在获取关注用户"
 		job.Progress = 0.12
 		m.save(saveCtx, job)
-		members, err = pool.GetFollowing(ctx, owner)
+		members, err = m.collectArchiveMembers(ctx, saveCtx, job, func(cursor, viewer string) (xclient.UserPage, error) {
+			return pool.GetFollowingPage(ctx, owner, cursor, viewer)
+		})
 		if err != nil {
+			if errors.Is(err, errYieldExecution) {
+				m.yieldJob(saveCtx, job, "关注列表分段获取中，稍后继续")
+				return
+			}
 			if isCancellation(ctx, err) {
 				m.handleInterrupt(ctx, saveCtx, job)
 				return
@@ -1390,9 +1402,11 @@ type archiveCheckpointTask struct {
 // archiveCheckpoint 保存列表/关注归档的分段进度。Tasks 只在首次建立时排序一次，
 // 后续切片按同一顺序继续，避免每次重新排序导致已处理用户被重排/重复。
 type archiveCheckpoint struct {
-	Tasks []archiveCheckpointTask `json:"tasks"`
-	Next  int                     `json:"next"`
-	Stats archiveStats            `json:"stats"`
+	Tasks   []archiveCheckpointTask `json:"tasks"`
+	Next    int                     `json:"next"`
+	Stats   archiveStats            `json:"stats"`
+	Members *memberCheckpoint       `json:"members,omitempty"`
+	Replay  *tweetMediaReplay       `json:"replay,omitempty"`
 }
 
 func checkpointTasks(tasks []archiveUserTask) []archiveCheckpointTask {
@@ -1445,11 +1459,16 @@ func (m *Manager) saveArchiveCheckpoint(ctx context.Context, jobID int64, tasks 
 	if next > len(tasks) {
 		next = len(tasks)
 	}
-	payload, err := json.Marshal(archiveCheckpoint{
-		Tasks: checkpointTasks(tasks),
-		Next:  next,
-		Stats: stats,
-	})
+	cp, _, err := m.loadArchiveCheckpoint(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	cp.Tasks, cp.Next, cp.Stats = checkpointTasks(tasks), next, stats
+	cp.Members = nil
+	if cp.Replay != nil && (next == len(tasks) || cp.Replay.UserID != tasks[next].user.ID) {
+		cp.Replay = nil
+	}
+	payload, err := json.Marshal(cp)
 	if err != nil {
 		return err
 	}
@@ -1530,7 +1549,6 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 	progressJob := job
 
 	addStats := func(delta archiveStats) {
-		stats.Users += delta.Users
 		stats.Tweets += delta.Tweets
 		stats.Downloaded += delta.Downloaded
 		stats.SkippedUsers += delta.SkippedUsers
@@ -1556,13 +1574,15 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 	}
 	// finishTask 每完成一个用户即时写入：写放大主要来自"每个媒体"的进度保存；
 	// 每用户的完成事件频率低，即时写入可让进度条保持准确。
-	finishTask := func(done int) {
+	finishTask := func(done int) error {
 		completed = done
+		stats.Users++
 		progressJob.Status = storage.JobResolving
 		progressJob.Progress = start + (end-start)*float64(completed)/float64(len(tasks))
 		progressJob.Message = fmt.Sprintf("已同步用户 %d/%d", completed, len(tasks))
 		progressJob.Error = ""
 		m.save(saveCtx, progressJob)
+		return m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, done, stats)
 	}
 
 	sliceStart := time.Now()
@@ -1603,10 +1623,14 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 			stats.Failed++
 			stats.Issues = append(stats.Issues, fmt.Sprintf("归档 @%s 失败: %v", fallbackUserName(task.user), err))
 			log.Printf("archiveUser @%s: %v", fallbackUserName(task.user), err)
-			finishTask(index + 1)
+			if err := finishTask(index + 1); err != nil {
+				return stats, err
+			}
 			continue
 		}
-		finishTask(index + 1)
+		if err := finishTask(index + 1); err != nil {
+			return stats, err
+		}
 	}
 	// 全部用户完成：删除检查点，下一次运行重新获取/排序。
 	if err := m.store.DeleteJobCheckpoint(saveCtx, job.ID); err != nil {
@@ -1728,7 +1752,7 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 		return stats, nil
 	}
 	if job.ArchiveMode.IncludesTweets() {
-		return m.archiveFullTimeline(ctx, saveCtx, job, cfg, pool, user, entity, dir, updateDownloading)
+		return m.archiveFullTimeline(ctx, saveCtx, job, cfg, pool, user, entity, dir, updateDownloading, shouldYield)
 	}
 
 	opts := parserOptionsFromConfig(cfg)
@@ -2133,6 +2157,12 @@ func (m *Manager) rememberFailedTweet(ctx context.Context, job storage.Job, enti
 	return createErr
 }
 
+type retryCheckpoint struct {
+	AfterID int64 `json:"afterId"`
+	UpperID int64 `json:"upperId"`
+	Retried int   `json:"retried"`
+}
+
 func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, force bool) (int, error) {
 	if !force && !cfg.AutoRetryFailed {
 		return 0, nil
@@ -2143,21 +2173,75 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 		return 0, nil
 	}
 	defer m.retryMu.Unlock()
-	items, err := m.store.ListFailedTweetsForRetry(saveCtx, retryBatchLimit, force)
+	var state retryCheckpoint
+	var items []storage.FailedTweet
+	var err error
+	if force {
+		payload, ok, loadErr := m.store.LoadJobCheckpoint(saveCtx, job.ID)
+		if loadErr != nil {
+			return 0, loadErr
+		}
+		if ok {
+			if err := json.Unmarshal(payload, &state); err != nil {
+				return 0, err
+			}
+		}
+		items, state.UpperID, err = m.store.ListFailedTweetsRetryRange(saveCtx, retryBatchLimit, state.AfterID, state.UpperID)
+	} else {
+		items, err = m.store.ListFailedTweetsForRetry(saveCtx, retryBatchLimit, false)
+	}
 	if err != nil {
 		return 0, err
 	}
-	retried := 0
+	retried := state.Retried
+	if force && len(items) == 0 {
+		return retried, m.store.DeleteJobCheckpoint(saveCtx, job.ID)
+	}
+	saveProgress := func(afterID int64) error {
+		state.AfterID, state.Retried = afterID, retried
+		payload, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		return m.store.SaveJobCheckpoint(saveCtx, job.ID, payload)
+	}
+	if force {
+		if err := saveProgress(state.AfterID); err != nil {
+			return retried, err
+		}
+	}
 	sliceStart := time.Now()
-	for index, item := range items {
+	processed := 0
+	for index := 0; ; index++ {
+		// Persist only the previous completed item; an interrupted item is replayed.
+		if force && index > 0 {
+			if err := saveProgress(items[index-1].ID); err != nil {
+				return retried, err
+			}
+		}
+		if index == len(items) {
+			if !force {
+				break
+			}
+			items, _, err = m.store.ListFailedTweetsRetryRange(saveCtx, retryBatchLimit, state.AfterID, state.UpperID)
+			if err != nil {
+				return retried, err
+			}
+			if len(items) == 0 {
+				return retried, m.store.DeleteJobCheckpoint(saveCtx, job.ID)
+			}
+			index = 0
+		}
+		item := items[index]
 		if ctx.Err() != nil {
 			return retried, ctx.Err()
 		}
 		// 时间预算到点在条目边界让出。每条目的状态在处理结束时已写入/删除，
 		// 重新入队后继续剩余条目，"全部重试"的语义不变（只是分成多个切片）。
-		if index > 0 && time.Since(sliceStart) >= retrySliceBudget {
+		if processed > 0 && time.Since(sliceStart) >= retrySliceBudget {
 			return retried, errYieldExecution
 		}
+		processed++
 		entity, err := m.store.GetUserEntity(saveCtx, item.EntityID)
 		if err != nil {
 			if touchErr := m.store.TouchFailedTweet(saveCtx, item.ID, err.Error()); touchErr != nil {
@@ -2286,6 +2370,9 @@ func parserOptionsFromConfig(cfg config.AppConfig) parser.ParseOptions {
 }
 
 func shouldAbortArchiveUsers(err error) bool {
+	if isDiskFatalError(err) {
+		return true
+	}
 	// X 轮换 queryId 后，逐个用户重试只会把同一个 404 重复 N 次并刷满 Issues；
 	// 这是"需要升级程序"的配置级错误，直接中止整个任务并由 fail() 给出明确文案。
 	if errors.Is(err, xclient.ErrQueryIDStale) {

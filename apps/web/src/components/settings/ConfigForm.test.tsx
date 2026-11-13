@@ -62,6 +62,38 @@ it("associates settings controls with their visible labels", () => {
   expect(screen.queryByRole("group", { name: "主题强调色" })).toBeNull();
 });
 
+it("saves only local edits when fresh config arrives during editing", async () => {
+  const config: api.AppConfig = {
+    downloadDir: "/downloads", maxConcurrency: 1, proxyUrl: "",
+    autoRetryFailed: true, autoFollowProtected: false, includeNestedTweetMedia: false,
+    incrementalArchive: false, fileNamingMode: "tweet_text", maxFilenameLength: 120,
+    storageType: "local",
+  };
+  vi.mocked(api.updateConfig).mockResolvedValue({ ...config, autoFollowProtected: true, proxyUrl: "http://edited:7890" });
+  const client = new QueryClient();
+  const form = (value: api.AppConfig) => <QueryClientProvider client={client}><ConfigForm config={value} /></QueryClientProvider>;
+  const view = renderWithProviders(form(config));
+  const user = userEvent.setup();
+  await user.type(screen.getByRole("textbox", { name: "网络代理 (Proxy)" }), "http://edited:7890");
+  view.rerender(<TooltipProvider>{form({ ...config, autoFollowProtected: true })}</TooltipProvider>);
+  await user.click(screen.getByRole("button", { name: "保存配置" }));
+  await waitFor(() => expect(api.updateConfig).toHaveBeenCalledWith({ proxyUrl: "http://edited:7890" }, expect.anything()));
+});
+
+it("sends an empty patch when there are no local edits", async () => {
+  const config: api.AppConfig = {
+    downloadDir: "/downloads", maxConcurrency: 1, proxyUrl: "",
+    autoRetryFailed: true, autoFollowProtected: false, includeNestedTweetMedia: false,
+    incrementalArchive: false, fileNamingMode: "tweet_text", maxFilenameLength: 120,
+    storageType: "local",
+  };
+  vi.mocked(api.updateConfig).mockResolvedValue(config);
+  renderWithProviders(<QueryClientProvider client={new QueryClient()}><ConfigForm config={config} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "保存配置" }));
+  await waitFor(() => expect(api.updateConfig).toHaveBeenCalledWith({}, expect.anything()));
+});
+
 it("syncs the latest GET config when a saved response cannot be confirmed", async () => {
   const config: api.AppConfig = {
     downloadDir: "/downloads", maxConcurrency: 1, proxyUrl: "",

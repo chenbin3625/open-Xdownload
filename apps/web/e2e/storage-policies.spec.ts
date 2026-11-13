@@ -5,7 +5,7 @@ import chinese from "../src/locales/zh-CN.json" with { type: "json" };
 test("media folders, ordered filenames and per-kind previews persist with the real backend", async ({ page }, info) => {
   const en = info.project.name.endsWith("-en");
   const text = (key: string) => ((en ? english : chinese) as Record<string, string>)[key] ?? key;
-  const labels = en ? ["image", "video", "thumbnail", "video_cover"].map(kind => text(`storage.kind.${kind}`)) : ["图片原文件", "视频及 GIF 原文件", "缩略图", "视频封面"];
+  const labels = ["image", "video"].map(kind => text(`storage.kind.${kind}`));
   const current = await page.request.get("/api/storage").then(response => response.json());
   const setup = await page.request.put("/api/storage", { data: {
     ...current, enabled: true,
@@ -36,7 +36,7 @@ test("media folders, ordered filenames and per-kind previews persist with the re
 
   await page.reload();
   await expect(image.getByRole("combobox", { name: `${labels[0]} ${text("命名策略")}`, exact: true })).toContainText(text("自定义组合"));
-  for (const [index, kind] of ["image", "video", "thumbnail", "video_cover"].entries()) {
+  for (const [index, kind] of ["image", "video"].entries()) {
     const row = page.getByRole("group", { name: labels[index], exact: true });
     const response = page.waitForResponse(response => response.url().endsWith("/api/storage/preview") && response.request().method() === "POST");
     await row.getByRole("button", { name: `${labels[index]} ${text("storage.preview")}`, exact: true }).click();
@@ -47,7 +47,7 @@ test("media folders, ordered filenames and per-kind previews persist with the re
     const preview = row.locator("output");
     await expect(preview).not.toBeEmpty();
     await expect(preview).toContainText(index === 0 ? "/image/" : `/${input.tweet.author.screenName}/`);
-    await expect(preview).toContainText(kind === "video" ? ".mp4" : kind === "thumbnail" ? ".png" : ".jpg");
+    await expect(preview).toContainText(kind === "video" ? ".mp4" : ".jpg");
   }
   const longPreview = await page.request.post("/api/storage/preview", { data: {
     document: saved, kind: "image", index: 0, extension: "jpg",

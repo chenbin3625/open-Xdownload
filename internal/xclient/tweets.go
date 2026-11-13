@@ -101,6 +101,9 @@ func walkUserTweets(ctx context.Context, requester timelineRequester, user User,
 		}
 		payload, err := requester.graphQL(ctx, endpoint, url.Values{"variables": {encodeVariables(variables)}})
 		if err != nil {
+			if cursor != "" && isInvalidCursorError(err) {
+				return fmt.Errorf("%w: %v", ErrInvalidTimelineCursor, err)
+			}
 			return err
 		}
 		items, next, err := fullTimelineItems(payload)
@@ -180,9 +183,17 @@ func fullTimelineItems(payload []byte) ([]fullTimelineTweet, string, error) {
 				return nil, "", err
 			}
 			results := []fullTimelineTweet{}
+			pinned := map[string]bool{}
+			for _, instruction := range instructions.Array() {
+				if instruction.Get("type").String() == "TimelinePinEntry" {
+					if id := tweetResultID(instruction.Get("entry.content.itemContent.tweet_results.result")); id != "" {
+						pinned[id] = true
+					}
+				}
+			}
 			for _, item := range items {
 				if r := item.Get("tweet_results.result"); r.Exists() {
-					results = append(results, fullTimelineTweet{Result: r})
+					results = append(results, fullTimelineTweet{Result: r, Pinned: pinned[tweetResultID(r)]})
 				}
 			}
 			return results, next, nil

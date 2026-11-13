@@ -314,6 +314,7 @@ function createRequestSignal(
 
   let timeoutSignal: AbortSignal | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let removeAbortListeners: (() => void) | undefined;
 
   if (hasTimeout) {
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -332,9 +333,16 @@ function createRequestSignal(
     } else if (canCreateController) {
       // 手写组合：任一方中止都触发同一个 controller。
       const controller = new AbortController();
-      const abort = () => controller.abort();
-      external.addEventListener("abort", abort);
-      timeoutSignal.addEventListener("abort", abort);
+      const onExternalAbort = () => controller.abort(external.reason);
+      const onTimeoutAbort = () => controller.abort(timeoutSignal?.reason);
+      external.addEventListener("abort", onExternalAbort);
+      timeoutSignal.addEventListener("abort", onTimeoutAbort);
+      removeAbortListeners = () => {
+        external.removeEventListener("abort", onExternalAbort);
+        timeoutSignal?.removeEventListener("abort", onTimeoutAbort);
+      };
+      if (external.aborted) onExternalAbort();
+      else if (timeoutSignal.aborted) onTimeoutAbort();
       signal = controller.signal;
     } else {
       signal = external; // 无法组合时不牺牲"调用方取消"
@@ -346,6 +354,7 @@ function createRequestSignal(
   return {
     signal,
     dispose: () => {
+      removeAbortListeners?.();
       if (timer) {
         clearTimeout(timer);
         timer = null;

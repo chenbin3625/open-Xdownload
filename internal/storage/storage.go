@@ -315,9 +315,6 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs (created_at DESC, id DESC);
--- 领取查询：status + available_ns 过滤，再按 enqueue_ns/id 排序。
-CREATE INDEX IF NOT EXISTS idx_jobs_pending_queue ON jobs (status, available_ns, enqueue_ns, id);
-
 -- job_checkpoints 保存长任务的分段进度（用户边界等）。payload 为 JSON，随任务删除。
 CREATE TABLE IF NOT EXISTS job_checkpoints (
 	job_id INTEGER PRIMARY KEY,
@@ -1069,6 +1066,8 @@ DROP TABLE IF EXISTS user_previous_names;`)
 
 func (s *Store) addMissingIndexes() error {
 	_, err := s.db.Exec(`
+	CREATE INDEX IF NOT EXISTS idx_jobs_pending_queue
+	ON jobs (status, available_ns, enqueue_ns, id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_tweet_media_unique
 	ON downloads (tweet_id, media_url)
 	WHERE tweet_id <> '';
@@ -3346,7 +3345,7 @@ RETURNING *`, JobKindFailedRetry, JobPending, AutomaticFailedRetryInput, now, no
 	// 新建手动任务前面（P0 的核心问题）。
 	if err := tx.GetContext(ctx, &reset, `
 UPDATE jobs SET status = ?, progress = 0, message = ?, error = '', available_at = NULL,
-	available_ns = 0, enqueued_at = ?, enqueue_ns = ?, source = ?, updated_at = ?
+	available_ns = 0, deferred_seconds = 0, enqueued_at = ?, enqueue_ns = ?, source = ?, updated_at = ?
 WHERE id = ? AND status NOT IN (`+activeJobStatusesSQL+`)
 RETURNING *`, JobPending, "排队中", now, now.UnixNano(), JobSourceAutoRetry, now, current.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -3367,7 +3366,8 @@ func (s *Store) PruneAutomaticRetryJobs(ctx context.Context, olderThan time.Time
 	result, err := s.db.ExecContext(ctx, `
 DELETE FROM jobs
 WHERE kind = ? AND input = ? AND updated_at < ? AND status NOT IN (`+activeJobStatusesSQL+`)
-AND NOT EXISTS (SELECT 1 FROM downloads WHERE downloads.job_id = jobs.id)`,
+AND NOT EXISTS (SELECT 1 FROM downloads WHERE downloads.job_id = jobs.id)
+AND NOT EXISTS (SELECT 1 FROM media_assets WHERE media_assets.job_id = jobs.id)`,
 		JobKindFailedRetry, AutomaticFailedRetryInput, olderThan.UTC())
 	if err != nil {
 		return 0, err
@@ -3387,6 +3387,20 @@ func (s *Store) ListFailedTweetsForRetry(ctx context.Context, limit int, force b
 	now := time.Now().UTC()
 	err := s.db.SelectContext(ctx, &items, `SELECT * FROM failed_tweets WHERE (? OR next_retry_at IS NULL OR next_retry_at <= ?) ORDER BY updated_at ASC LIMIT ?`, force, now, limit)
 	return items, err
+}
+
+func (s *Store) ListFailedTweetsRetryRange(ctx context.Context, limit int, afterID, upperID int64) ([]FailedTweet, int64, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	if upperID == 0 {
+		if err := s.db.GetContext(ctx, &upperID, `SELECT COALESCE(MAX(id), 0) FROM failed_tweets`); err != nil {
+			return nil, 0, err
+		}
+	}
+	items := []FailedTweet{}
+	err := s.db.SelectContext(ctx, &items, `SELECT * FROM failed_tweets WHERE id > ? AND id <= ? ORDER BY id LIMIT ?`, afterID, upperID, limit)
+	return items, upperID, err
 }
 
 func (s *Store) ListFailedTweetViews(ctx context.Context, limit int) ([]FailedTweetView, error) {

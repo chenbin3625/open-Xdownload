@@ -2,6 +2,7 @@ package xclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,52 @@ func TestFullTweetTimelinePinsTextAndIndependentCheckpoint(t *testing.T) {
 	}
 	if len(pages[0].Tweets[0].Media) != 0 || pages[0].Tweets[0].Text != "pure text" {
 		t.Fatal("text-only tweet was omitted")
+	}
+}
+
+func TestFullTweetLegacyTimelinePreservesPinnedBoundary(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapped=%t", wrapped), func(t *testing.T) {
+			testFullTweetLegacyPinnedBoundary(t, wrapped)
+		})
+	}
+}
+
+func testFullTweetLegacyPinnedBoundary(t *testing.T, wrapped bool) {
+	entry := func(id string) string {
+		result := fullTweetFixture(id, "42")
+		if wrapped {
+			result = `{"__typename":"TweetWithVisibilityResults","tweet":` + result + `}`
+		}
+		return `{"content":{"entryType":"TimelineTimelineItem","itemContent":{"tweet_results":{"result":` + result + `}}}}`
+	}
+	wrap := func(instructions string) string {
+		return `{"data":{"user":{"result":{"timeline_v2":{"timeline":{"instructions":` + instructions + `}}}}}}`
+	}
+	requester := &fakeTimelineRequester{pages: []string{
+		wrap(`[{"type":"TimelineAddEntries","entries":[` + entry("105") + `,` + entry("104") + `,{"content":{"entryType":"TimelineTimelineCursor","cursorType":"Bottom","value":"page-2"}}]},{"type":"TimelinePinEntry","entry":` + entry("20") + `}]`),
+		wrap(`[{"type":"TimelineAddEntries","entries":[` + entry("103") + `,` + entry("100") + `]}]`),
+	}}
+	var pages []TweetTimelinePage
+	err := walkUserTweets(context.Background(), requester, User{ID: "42", ScreenName: "author"}, TweetTimelineOptions{StopID: "100"}, func(page TweetTimelinePage) error {
+		pages = append(pages, page)
+		return nil
+	})
+	if err != nil || len(pages) != 2 || pages[0].Complete || pages[1].HeadID != "105" {
+		t.Fatalf("legacy pinned timeline = %+v, %v", pages, err)
+	}
+}
+
+type invalidFullCursorRequester struct{}
+
+func (invalidFullCursorRequester) graphQL(context.Context, string, url.Values) ([]byte, error) {
+	return nil, &HTTPError{StatusCode: http.StatusBadRequest, Payload: "Invalid cursor"}
+}
+
+func TestFullTweetTimelineClassifiesInvalidCursor(t *testing.T) {
+	err := walkUserTweets(context.Background(), invalidFullCursorRequester{}, User{ID: "42", ScreenName: "author"}, TweetTimelineOptions{Cursor: "expired"}, func(TweetTimelinePage) error { return nil })
+	if !errors.Is(err, ErrInvalidTimelineCursor) {
+		t.Fatalf("invalid cursor error = %v", err)
 	}
 }
 
