@@ -121,6 +121,7 @@ func (s *Server) Routes() http.Handler {
 	read("/api/jobs/{id}/files", s.getJobFiles)
 	r.Post("/api/jobs/{id}/cancel", s.cancelJob)
 	r.Post("/api/jobs/{id}/retry", s.retryJob)
+	r.Delete("/api/jobs/{id}", s.deleteJob)
 	read("/api/events", s.events)
 	read("/api/library/downloads", s.listDownloads)
 	read("/api/archive/tweets", s.listTweets)
@@ -803,6 +804,29 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+// deleteJob 删除一条已结束的任务及其关联记录。活动中的任务返回 409，
+// 需要先取消，避免删掉 worker 正在写入的行。
+func (s *Server) deleteJob(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.DeleteJob(r.Context(), id); err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, storage.ErrNotFound("任务不存在", err))
+		case errors.Is(err, storage.ErrJobActive):
+			writeError(w, http.StatusConflict, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "job.deleted", Payload: map[string]any{"id": id}}))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {

@@ -507,6 +507,10 @@ export const runArchiveSchedule = (id: number) =>
 export const retryJob = (id: number) =>
   api<Job>(`/api/jobs/${id}/retry`, { method: "POST" });
 
+// 删除已结束的任务及其关联记录；活动中的任务由后端返回 409。
+export const deleteJob = (id: number) =>
+  api<{ ok: boolean }>(`/api/jobs/${id}`, { method: "DELETE" });
+
 export const cancelJob = (id: number) =>
   api<Job>(`/api/jobs/${id}/cancel`, { method: "POST" });
 

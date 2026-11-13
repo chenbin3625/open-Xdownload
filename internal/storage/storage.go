@@ -1731,6 +1731,57 @@ UPDATE jobs SET status = ?, message = ?, progress = 1, error = '', updated_at = 
 // ErrJobRetryBusy 表示原任务或同一目标的任务仍在运行或排队中。
 var ErrJobRetryBusy = errors.New("任务仍在运行或排队中，不能重试")
 
+// ErrJobActive 表示任务仍在排队或运行中，不能直接删除。
+var ErrJobActive = errors.New("任务仍在排队或运行中，请先取消")
+
+// DeleteJob 删除一条已结束的任务及其关联记录（下载索引、失败媒体、检查点、推文任务、
+// 存储策略与媒体资产）。磁盘上的文件不会被删除。
+//
+// 活动状态的任务必须先取消：直接删除会让 worker 正在写入的行消失，任务结束时再保存
+// 终态就会失败。SQLite 连接默认不开启 foreign_keys，ON DELETE CASCADE 不生效，
+// 因此这里显式清理所有以 job_id 关联的表。
+func (s *Store) DeleteJob(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // Commit 后为 no-op
+
+	var status JobStatus
+	if err := tx.GetContext(ctx, &status, `SELECT status FROM jobs WHERE id = ?`, id); err != nil {
+		return err
+	}
+	if !isTerminalJobStatus(status) {
+		return ErrJobActive
+	}
+	for _, stmt := range []string{
+		`DELETE FROM downloads WHERE job_id = ?`,
+		`DELETE FROM failed_media WHERE job_id = ?`,
+		`DELETE FROM job_checkpoints WHERE job_id = ?`,
+		`DELETE FROM tweet_jobs WHERE job_id = ?`,
+		`DELETE FROM job_storage WHERE job_id = ?`,
+		`DELETE FROM media_assets WHERE job_id = ?`,
+		`DELETE FROM asset_migration_progress WHERE job_id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt, id); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func isTerminalJobStatus(status JobStatus) bool {
+	switch status {
+	case JobCompleted, JobCompletedWithErrors, JobFailed, JobCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
 // RetryJob 为已结束的任务创建一个同目标的新任务。检查与插入放在同一个写事务里：先读后
 // 写时，双击"重试"或两个标签页同时点会各自看到终态、各插入一条，同一目标被重复归档。
 // 同一目标已有排队/运行中的任务时同样拒绝。
