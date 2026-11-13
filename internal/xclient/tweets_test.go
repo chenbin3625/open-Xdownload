@@ -31,6 +31,30 @@ func TestPublicTweetRequestOmitsEmptyCookies(t *testing.T) {
 	}
 }
 
+// X 已不再接受裸 /graphql/ 前缀（返回 401），全文时间线必须走 /i/api/graphql/。
+func TestUserTweetsUsesAPIGraphQLPath(t *testing.T) {
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_, _ = w.Write([]byte(fullTweetPage(`[]`)))
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	err := walkUserTweets(context.Background(), client, User{ID: "42", ScreenName: "author"}, TweetTimelineOptions{}, func(TweetTimelinePage) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(path, "/i/api/graphql/") || !strings.HasSuffix(path, "/UserTweets") {
+		t.Fatalf("UserTweets path = %q", path)
+	}
+}
+
+func TestFetchTweetUsesAPIGraphQLPath(t *testing.T) {
+	if !strings.HasPrefix(tweetResultPath("abc"), "/i/api/graphql/abc/") {
+		t.Fatalf("TweetResultByRestId path = %q", tweetResultPath("abc"))
+	}
+}
+
 func fullTweetFixture(id, author string) string {
 	return fmt.Sprintf(`{"__typename":"Tweet","rest_id":%q,"legacy":{"full_text":"pure text","created_at":"Tue Nov 10 12:00:00 +0000 2026"},"core":{"user_results":{"result":{"rest_id":%q,"core":{"screen_name":"author","name":"Author"}}}}}`, id, author)
 }

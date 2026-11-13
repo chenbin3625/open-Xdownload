@@ -1091,23 +1091,6 @@ func TestForbiddenNonWAFFailsWithShortCooldown(t *testing.T) {
 	}
 }
 
-func TestUnauthorizedDisablesClientForLongCooldown(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer server.Close()
-	client := newHeaderTestClient(server)
-	if _, err := getUserByInput(context.Background(), client, "alice"); err == nil {
-		t.Fatal("expected 401 error")
-	}
-	client.mu.Lock()
-	remaining := time.Until(client.disabledUntil)
-	client.mu.Unlock()
-	if remaining < 25*time.Minute || remaining > 31*time.Minute {
-		t.Fatalf("401 cooldown = %s, want about 30m", remaining)
-	}
-}
-
 func TestSelfCheckWAF403DoesNotDisableClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -1156,6 +1139,10 @@ func TestAPIPartialErrorsAreToleratedOnlyWhenNonFatal(t *testing.T) {
 		{"rate limit without kind", `{"data":{"user":null},"errors":[{"code":88,"message":"rate limited"}]}`, true},
 		{"account locked with data", `{"data":{"user":{"result":{"rest_id":"u1"}}},"errors":[{"code":326,"message":"locked"}]}`, true},
 		{"errors object not array", `{"errors":{"code":88}}`, true},
+		// X 线上 ListByRestId：横幅子字段解码失败，列表数据本身完整（2026-11 实测）。
+		{"field-level validation error with data", `{"data":{"list":{"id_str":"1","name":"L"}},"errors":[{"code":214,"kind":"Validation","name":"BadRequestError","path":["list","default_banner_media_results","result"],"message":"BadRequest: com.twitter.strato.serialization.DecodeException"}]}`, false},
+		{"top-level validation error without path", `{"data":{"list":{"id_str":"1"}},"errors":[{"code":214,"kind":"Validation","message":"BadRequest"}]}`, true},
+		{"validation error without data", `{"data":{},"errors":[{"code":214,"kind":"Validation","path":["list"],"message":"BadRequest"}]}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -32,6 +32,8 @@ func tweetVariables(loggedIn bool) map[string]any {
 	return variables
 }
 
+func tweetResultPath(queryID string) string { return graphQLPath(queryID, "TweetResultByRestId") }
+
 func FetchTweet(ctx context.Context, cfg config.AppConfig, id string, options parser.ParseOptions) (parser.TweetData, error) {
 	client, err := NewClient(Credentials{AuthToken: cfg.AuthToken, CSRFToken: cfg.CSRFToken}, cfg.ProxyURL)
 	if err != nil {
@@ -44,7 +46,7 @@ func FetchTweet(ctx context.Context, cfg config.AppConfig, id string, options pa
 	if queryID == "" {
 		queryID = "m6saLeawhcvnYmZi1Zzgmw"
 	}
-	payload, err := client.graphQL(ctx, "/graphql/"+queryID+"/TweetResultByRestId", url.Values{"variables": {encodeVariables(variables)}})
+	payload, err := client.graphQL(ctx, tweetResultPath(queryID), url.Values{"variables": {encodeVariables(variables)}})
 	if err != nil {
 		return parser.TweetData{}, err
 	}
@@ -73,7 +75,8 @@ func walkUserTweets(ctx context.Context, requester timelineRequester, user User,
 	if queryID == "" {
 		queryID = "jiF1DduqwzFSPmvRffg82g"
 	}
-	endpoint := "/graphql/" + queryID + "/UserTweets"
+	// X 已不再接受裸 /graphql/ 前缀（一律 401），必须与其他接口一样走 /i/api/graphql/。
+	endpoint := graphQLPath(queryID, "UserTweets")
 	cursor, head := options.Cursor, options.HeadID
 	seen := map[string]bool{}
 	seenCursors := map[string]bool{}

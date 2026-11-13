@@ -210,8 +210,16 @@ var ErrQueryIDStale = errors.New("X GraphQL queryId 可能已失效（X 接口�
 // 不能据此判定 Cookie 失效：只做短退避，不 disable 客户端。
 var ErrWAFChallenge = errors.New("X 返回 WAF/挑战页（HTTP 403），已短退避且未禁用 Cookie")
 
-// clientDisableCooldown 是认证失败（401/账号锁定）后客户端被禁用的时长。
-var clientDisableCooldown = 30 * time.Minute
+// clientDisableCooldown 是认证失败（/home 也确认 401、账号锁定）后客户端被禁用的时长。
+// 冷却到期后下一次请求会重新探测，真正失效的 Cookie 会再次被禁用，因此不需要锁太久。
+var clientDisableCooldown = 10 * time.Minute
+
+// clientUnverifiedDisableCooldown 用于接口 401 但 /home 校验无法给出结论（网络错误、
+// 挑战页、限流）的情况：既不能确认失效，也不能放任继续撞接口。
+var clientUnverifiedDisableCooldown = 5 * time.Minute
+
+// homeVerifiedTTL 内 /home 校验通过过，接口 401 直接视为接口/目标级问题，不重复探测。
+const homeVerifiedTTL = 2 * time.Minute
 
 // clientForbiddenDisableCooldown 是非 WAF 的 403 被禁用时的较短冷却，避免一次误封把
 // 唯一 Cookie 锁 30 分钟。
@@ -256,7 +264,9 @@ type Client struct {
 	// 来自 WAF 等瞬时拦截，Pool 按配置长期缓存，永久禁用会让主 Cookie 直到重启都不可用。
 	disabledUntil time.Time
 	lastError     string
-	requestCount  atomic.Int64
+	// homeVerifiedAt 是最近一次 /home 登录校验成功的时间。
+	homeVerifiedAt time.Time
+	requestCount   atomic.Int64
 }
 
 type Pool struct {
@@ -700,6 +710,7 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	screenName := string(matches[1])
 	c.mu.Lock()
 	c.screen = screenName
+	c.homeVerifiedAt = time.Now()
 	c.mu.Unlock()
 	c.enable()
 	if c.limiter != nil {
@@ -1441,8 +1452,10 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 			switch {
 			case errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden:
 				// 非 WAF 的 403：可能是凭证失效，也可能是服务端风控；用较短冷却，
-				// 避免把唯一有效 Cookie 锁 30 分钟。
+				// 避免把唯一有效 Cookie 锁太久。
 				c.disableFor(err, clientForbiddenDisableCooldown)
+			case errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusUnauthorized:
+				c.handleUnauthorized(ctx, err)
 			default:
 				c.disable(err)
 			}
@@ -1669,7 +1682,12 @@ func isTolerablePartialError(entry gjson.Result, err *APIError) bool {
 		return false
 	}
 	kind := entry.Get("kind").String()
-	return kind == "" || kind == "NonFatal" || err.Code == -1
+	if kind == "" || kind == "NonFatal" || err.Code == -1 {
+		return true
+	}
+	// 子字段级别的校验错误（path 深于根字段，如 list.default_banner_media_results.result）
+	// 只影响那个字段，主体数据仍完整；X 线上 ListByRestId 就会这样返回。
+	return kind == "Validation" && len(entry.Get("path").Array()) > 1
 }
 
 // isRateLimitError 报告该错误是否代表"账号/路径被限流"。API-88 与 HTTP 429 都算；
@@ -1754,8 +1772,8 @@ func (c *Client) disable(err error) {
 	c.disableFor(err, clientDisableCooldown)
 }
 
-// disableFor 按指定冷却期禁用客户端：401/账号锁定用 30 分钟，非 WAF 的 403 用较短
-// 冷却（5 分钟），避免一次误封把唯一 Cookie 锁死。
+// disableFor 按指定冷却期禁用客户端：确认失效/账号锁定用 10 分钟，非 WAF 的 403 与
+// 无法确认的 401 用 5 分钟，避免一次误封把唯一 Cookie 锁死。
 func (c *Client) disableFor(err error, cooldown time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1763,6 +1781,23 @@ func (c *Client) disableFor(err error, cooldown time.Duration) {
 	if err != nil {
 		c.lastError = err.Error()
 	}
+}
+
+// handleUnauthorized 区分"接口/目标 401"与"Cookie 失效"：X 停用旧接口路径、目标账号
+// 不可见等都会返回 401，单凭接口响应禁用 Cookie 会让所有任务误报"Cookie 不可用"。
+// 只有 /home 也返回 401 才按失效禁用（GetSelfScreenName 内部完成）。
+func (c *Client) handleUnauthorized(ctx context.Context, err error) {
+	c.mu.Lock()
+	recentlyVerified := !c.homeVerifiedAt.IsZero() && time.Since(c.homeVerifiedAt) < homeVerifiedTTL
+	c.mu.Unlock()
+	if recentlyVerified || ctx.Err() != nil {
+		return
+	}
+	if _, checkErr := c.GetSelfScreenName(ctx); checkErr == nil || c.isDisabled() || ctx.Err() != nil {
+		// 成功：Cookie 有效，不禁用；/home 401：已按失效禁用；取消：不做判断。
+		return
+	}
+	c.disableFor(err, clientUnverifiedDisableCooldown)
 }
 
 // enable 在登录校验成功后解除禁用，让用户在设置页重新检测即可恢复被误禁的 Cookie。
