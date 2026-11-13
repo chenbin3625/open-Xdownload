@@ -207,9 +207,14 @@ describe("TaskCenterPage", () => {
     expect(await screen.findByText("用户不存在或已被封禁 (404 Not Found)")).toBeTruthy();
     expect(screen.getByText("10%")).toBeTruthy();
     await user.unhover(status);
-    await waitFor(() => expect(screen.queryByText("用户不存在或已被封禁 (404 Not Found)")).toBeNull());
+    // Semi 的 Tooltip 在鼠标移出后还有延迟与过渡动画，CI 负载高时会超过 waitFor
+    // 默认的 1s，导致文本已消失但元素尚未卸载的中间态被判为失败。
+    await waitFor(
+      () => expect(screen.queryByText("用户不存在或已被封禁 (404 Not Found)")).toBeNull(),
+      { timeout: 5000 },
+    );
     act(() => status.focus());
-    expect(await screen.findByText("用户不存在或已被封禁 (404 Not Found)")).toBeTruthy();
+    expect(await screen.findByText("用户不存在或已被封禁 (404 Not Found)", {}, { timeout: 5000 })).toBeTruthy();
   });
 
   it("展开错误任务时，在详情顶部显示错误 Alert 和重试按钮", async () => {
