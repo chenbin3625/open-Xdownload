@@ -123,6 +123,7 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/jobs/{id}/retry", s.retryJob)
 	read("/api/events", s.events)
 	read("/api/library/downloads", s.listDownloads)
+	read("/api/library/users", s.listLibraryUsers)
 	read("/api/archive/tweets", s.listTweets)
 	read("/api/archive/tweets/{tweetID}", s.getTweet)
 	read("/api/archive/progress", s.tweetProgress)
@@ -894,6 +895,16 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// listLibraryUsers 返回归档库按账号聚合的统计，用于用户卡片视图。
+func (s *Server) listLibraryUsers(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListLibraryUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {

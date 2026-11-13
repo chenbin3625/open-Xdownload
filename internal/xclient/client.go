@@ -269,6 +269,7 @@ type User struct {
 	ID           string
 	Name         string
 	ScreenName   string
+	AvatarURL    string
 	Protected    bool
 	FriendsCount int
 	MediaCount   int
@@ -1821,6 +1822,7 @@ func parseUser(raw gjson.Result) (User, error) {
 		ID:           raw.Get("rest_id").String(),
 		Name:         firstString(raw.Get("core.name"), legacy.Get("name")),
 		ScreenName:   firstString(raw.Get("core.screen_name"), legacy.Get("screen_name")),
+		AvatarURL:    normalizeAvatarURL(firstString(raw.Get("avatar.image_url"), legacy.Get("profile_image_url_https"))),
 		Protected:    firstBool(raw.Get("privacy.protected"), legacy.Get("protected")),
 		FriendsCount: int(legacy.Get("friends_count").Int()),
 		MediaCount:   int(legacy.Get("media_count").Int()),
@@ -1868,6 +1870,21 @@ func unavailableUserError(raw gjson.Result) error {
 	}
 	parts = append(parts, "提示: 账号可能已冻结/注销/受限；若多个不同账号都报此错误，多半是当前 Cookie 已失效，请重新导入 AuthToken 与 CSRFToken")
 	return errors.New(strings.Join(parts, "；"))
+}
+
+// normalizeAvatarURL 把 X 返回的 48px 缩略头像地址换成 400px 版本；两个接口给的
+// 尺寸后缀不同（_normal / _bigger / _mini），这里统一成 _400x400，列表里更清晰。
+func normalizeAvatarURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	for _, suffix := range []string{"_normal.", "_bigger.", "_mini."} {
+		if strings.Contains(value, suffix) {
+			return strings.Replace(value, suffix, "_400x400.", 1)
+		}
+	}
+	return value
 }
 
 // firstBool 返回第一个存在的布尔字段的值；都不存在时为 false。
