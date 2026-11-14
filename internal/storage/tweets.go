@@ -466,6 +466,33 @@ func (s *Store) GetTweetSync(ctx context.Context, userID string) (TweetSync, err
 	return state, err
 }
 
+// TouchTweetSync 只推进 updated_at，不清空全文归档的进度字段。用于让没有产生
+// tweet_sync 的受保护用户也能按“最久未处理”轮转到队尾。
+func (s *Store) TouchTweetSync(ctx context.Context, userID string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO tweet_sync(user_id, updated_at) VALUES(?, ?)
+ON CONFLICT(user_id) DO UPDATE SET updated_at=excluded.updated_at`,
+		userID, time.Now().UTC())
+	return err
+}
+
+// ListTweetSyncUpdatedAt 返回每个用户最近一次全文归档时间。只读，不像
+// GetTweetSync 那样为不存在的用户插入空行。
+func (s *Store) ListTweetSyncUpdatedAt(ctx context.Context) (map[string]time.Time, error) {
+	rows := []struct {
+		UserID    string    `db:"user_id"`
+		UpdatedAt time.Time `db:"updated_at"`
+	}{}
+	if err := s.db.SelectContext(ctx, &rows, `SELECT user_id, updated_at FROM tweet_sync`); err != nil {
+		return nil, err
+	}
+	result := make(map[string]time.Time, len(rows))
+	for _, row := range rows {
+		result[row.UserID] = row.UpdatedAt
+	}
+	return result, nil
+}
+
 func (s *Store) SaveTweetSync(ctx context.Context, state TweetSync) error {
 	state.UpdatedAt = time.Now().UTC()
 	_, err := s.db.NamedExecContext(ctx, `UPDATE tweet_sync SET last_id=:last_id,cursor=:cursor,head_id=:head_id,status=:status,error=:error,count=:count,updated_at=:updated_at WHERE user_id=:user_id`, state)
