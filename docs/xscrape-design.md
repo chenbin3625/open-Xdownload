@@ -365,3 +365,21 @@ legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewS
 | 兼容接口 `/api/auth/check` | 只探测主账号，不写库（不影响账号池状态） |
 
 Playwright：`x-accounts.spec.ts` 12/12 通过（6 个项目 × 导入编辑检测删除 / 解锁）。`tweets.spec.ts` 与 `upgrade.spec.ts` 依赖预览库里预置的长推文与媒体，空库下必然失败，需按既有预览数据准备流程运行。
+
+### 分模块验收（2026-11-14）
+
+四个模块独立验收，全部通过；除下面「已知观察」外没有契约级缺陷。
+
+| 模块 | 方法 | 结果 |
+|---|---|---|
+| 账号池并发与错误处置 | 假 X 上游 + 临时 SQLite + 假时钟，未打 x.com | 12 项全 PASS：LRU/exclude/queue 与 `*` 锁/过期锁；同账号并发峰值恒为 1、账号间并行；全锁时非调度器等约 15m 预算后 `RateLimitedError`（RetryAt=最早解锁），调度器 ctx 立即返回；3 秒间隔只在同账号第二次请求出现；429/API 88 锁到 reset、403 WAF 60s、非 WAF 5m、401 三分支、32/64/89/215/326 在 200/400/403 共 15 组组合全部停用、404 刷新 queryId 后重试一次返回 `ErrQueryIDStale`；统计只在 HTTP 200 且无 API 错误时 +1；锁跨 Store 重开仍生效；nil-map 回归 `-race` 通过 |
+| 只读时间线 | 真实 Cookie，flock 串行，10 次 GraphQL 请求，未触发 429 | 8 个接口全 PASS：UserByScreenName / UserByRestId 结果一致、UserMedia 首页 12 条含 cursor、UserTweets 首页 15 条正文非空且 HeadID=页内最大 ID、Following 50 人、ListByRestId + ListMembers（公开列表 461 成员，首页 100 人）、TweetResultByRestId 正文/媒体/时间齐全；404 路径只刷新 queryId，不加锁、不计数；账号池前后快照完全一致 |
+| 账号池 HTTP API | 真实后端 + 真实 Cookie | 11 组全 PASS：CRUD、三种 Cookie 格式导入、多行 issues 行号、primary 接替、env 账号只读、打码、代理 userinfo 脱敏与回填、检测停用与 errorMsg、check-all 并发 4、解锁、`/api/auth/check` 不写库（调用前后账号 JSON 逐字节一致） |
+| 前端账号池页面 | Playwright 6 个项目 + 独立脚本复核 | `x-accounts.spec.ts` 12/12；导入 issues 行号、列表 DOM 无完整 token、编辑代理回传打码值不丢密码、启停、检测失败 toast（zh/en）、删除二次确认、解锁后 `locks=[]`；i18n zh/en 各 604 key、双向缺失 0、en 无中文残留；pageerror/console.error/4xx/5xx 均为 0；Vitest 332/332、tsc 0 |
+| legacy 对照 | 真实请求 10 次认证 GraphQL/探测 + 8 次未认证发现，flock | 8 项全 PASS：四种 `OPEN_XDOWNLOAD_SCRAPER` 取值启动日志正确（未识别回落 legacy）；legacy 模式下 `/api/auth/check` 同样走 xscrape 探测且账号行不变；legacy 工厂的 inactive 过滤/primary 排首/停用 primary 后 `HasPrimary=false`/无 active 退化为 guest；同一推文两实现逐字段一致（含 bestURL 逐字符相同）；`GetUserByInput` 结构体完全相等；不存在的推文两实现同样报「推文详情接口没有返回正文」；账号 active/error_msg/锁状态与统计只增不减 |
+
+已知观察（均未构成失败，未在本次修改）：
+
+- `nextAccount` 先 `PickXAccount` 再 `acquire`，只有等过执行槽才重读锁；若 Pick 后、acquire 前账号被 HTTP 层停用或加锁，会多发一次请求。窗口很窄，未复现。
+- 执行槽只在内存，多进程共库时同账号可并发（设计上按单进程部署）。
+- 后端错误文案是中文直出（如「X 拒绝了该账号（code 32: …）」「缺少 ct0」），en-US 界面下会显示中文。要本地化需要给后端错误码做前端映射，留到后续版本。
