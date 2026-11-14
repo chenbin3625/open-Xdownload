@@ -266,7 +266,7 @@ export function XAccountsSettings() {
     {
       key: "account",
       title: t("账号"),
-      width: 180,
+      width: 170,
       render: (account) => (
         <div className="x-account-identity">
           {account.screenName ? (
@@ -295,7 +295,7 @@ export function XAccountsSettings() {
     {
       key: "source",
       title: t("来源"),
-      width: 124,
+      width: 110,
       render: (account) =>
         account.source === "env" ? (
           <Tooltip content={t("环境变量账号为只读，不能删除或替换 Cookie")}>
@@ -314,7 +314,7 @@ export function XAccountsSettings() {
     {
       key: "status",
       title: t("状态"),
-      width: 130,
+      width: 120,
       render: (account) => (
         <div className="x-account-status">
           <Tag tone={account.active ? "success" : "danger"} size="sm">
@@ -327,7 +327,7 @@ export function XAccountsSettings() {
     {
       key: "locks",
       title: t("当前锁"),
-      width: 190,
+      width: 170,
       render: (account) => {
         const locks = activeLocks(account.locks, now);
         if (locks.length === 0) {
@@ -367,7 +367,7 @@ export function XAccountsSettings() {
     {
       key: "lastUsed",
       title: t("最后使用时间"),
-      width: 150,
+      width: 130,
       render: (account) =>
         account.lastUsed ? (
           <span className="text-xs">{formatDateTime(account.lastUsed)}</span>
@@ -378,7 +378,7 @@ export function XAccountsSettings() {
     {
       key: "actions",
       title: t("操作"),
-      width: 244,
+      width: 200,
       render: (account) => {
         const label = accountLabel(account);
         const isEnv = account.source === "env";
@@ -537,7 +537,7 @@ export function XAccountsSettings() {
           data={accounts}
           rowKey={(account) => account.id}
           loading={query.isLoading}
-          minWidth={1120}
+          minWidth={1040}
           className="x-accounts-table"
           emptyText={
             <Empty
