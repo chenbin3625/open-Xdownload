@@ -1602,6 +1602,16 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		if len(users) == 0 {
 			return stats, nil
 		}
+		if job.BatchSize > 0 && job.ArchiveMode.IncludesTweets() {
+			syncedAt, err := m.store.ListTweetSyncUpdatedAt(saveCtx)
+			if err != nil {
+				return stats, err
+			}
+			users = selectArchiveBatch(users, syncedAt, job.BatchSize)
+			if len(users) == 0 {
+				return stats, nil
+			}
+		}
 		// 私密时间线固定使用主账号；过滤和自动关注也必须使用相同账号的关系信息。
 		resolvedUsers := make([]xapi.User, 0, len(users))
 		for _, user := range users {
@@ -1840,6 +1850,11 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 	if user.Protected && !user.Following {
 		if cfg.AutoFollowProtected && !user.Requested && pool != nil && pool.HasPrimary() {
 			_ = pool.FollowUserAsPrimary(ctx, user)
+		}
+		if job.ArchiveMode.IncludesTweets() {
+			if err := m.store.TouchTweetSync(saveCtx, user.ID); err != nil {
+				log.Printf("touch tweet sync for @%s: %v", fallbackUserName(user), err)
+			}
 		}
 		return stats, nil
 	}
