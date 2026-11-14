@@ -5,13 +5,16 @@ import "context"
 // HomeProbeResult 是一次账号登录校验的结果。
 //
 // 名字沿用早期设计里的"/home 校验"。X 现在对失效 Cookie 的 /home 返回 307 跳回
-// 首页并清掉 auth_token，而不是 401，无法据此确认失效；xscrape 的实现改为请求
-// /i/api/1.1/account/settings.json：失效 Cookie 返回 HTTP 401 + 错误码 32，有效
-// Cookie 返回带 screen_name 的 JSON。
+// 首页并清掉 auth_token，而不是 401，无法据此确认失效；account/settings.json 与
+// verify_credentials.json 对有效 Cookie 也返回 404。xscrape 的实现改为请求
+// /i/api/1.1/account/multi/list.json：有效 Cookie 返回 HTTP 200 和 users 列表（取
+// is_auth_valid 为 true、优先与 twid Cookie 一致的条目的 screen_name）；失效 Cookie
+// 返回 HTTP 401 + 错误码 32；ct0 与 auth_token 不匹配返回 HTTP 403 + 错误码 353。
 //
 // 调用方按以下顺序判断：
-//   - Unauthorized 为 true：X 明确拒绝这个账号（HTTP 401，或错误码 32/64/89/215/326：
-//     Cookie 失效、账号被封禁或锁定），Err 说明原因（可直接写入 error_msg）；
+//   - Unauthorized 为 true：X 明确拒绝这个账号（HTTP 401，错误码 32/64/89/215/326：
+//     Cookie 失效、账号被封禁或锁定；错误码 353：ct0 失配；或账号条目标记为封禁），
+//     Err 说明原因（可直接写入 error_msg）；
 //   - 否则 Err 非 nil：无法判断（网络、WAF、限流、响应格式变化），不能据此停用账号；
 //   - 否则校验成功，ScreenName 为当前登录账号。
 type HomeProbeResult struct {
