@@ -294,7 +294,11 @@ legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewS
 
 ## 2026-11-13 修订（实现前核对 x.com 现状）
 
-- **账号校验探测改用 `GET /i/api/1.1/account/settings.json`。** X 现在对失效 Cookie 的 `/home` 返回 307 跳回首页并清掉 `auth_token`，不再返回 401，无法据此确认失效。settings.json 对失效 Cookie 返回 HTTP 401 + 错误码 32，对有效 Cookie 返回带 `screen_name` 的 JSON。`xapi.HomeProber` 保留原名，判定规则写在 `internal/xapi/probe.go`。legacy 的 `/home` 自检不在本次范围内改动。
+- **账号校验探测改用 `GET /i/api/1.1/account/multi/list.json`。** X 现在对失效 Cookie 的 `/home` 返回 307 跳回首页并清掉 `auth_token`，不再返回 401，无法据此确认失效。2026-11-14 用真实 Cookie 实测：
+  - `account/settings.json` 和 `account/verify_credentials.json`（x.com 与 api.x.com）即使 Cookie 有效也返回 404 + 错误码 34，不能用。
+  - `multi/list.json`：有效 Cookie 返回 200 `{"users":[{"user_id","screen_name","name","is_auth_valid","is_suspended","is_protected",...}]}`；失效 Cookie 返回 401 + 错误码 32；ct0 与 auth_token 不匹配返回 403 `{"code":353,...}`（顶层对象，不是 errors 数组）。
+  - 判定：200 时取 `is_auth_valid=true` 的条目（优先 `user_id` 与 `twid` Cookie 一致的那条），`is_suspended=true` 视为确认失效；401、错误码 32/64/89/215/326、403+353 视为确认失效；其余无法判断。
+  - `xapi.HomeProber` 保留原名，判定规则写在 `internal/xapi/probe.go`。legacy 的 `/home` 自检不在本次范围内改动。
 - **请求中遇到 HTTP 401 的处置顺序**：先用探测确认（2 分钟内确认过有效的账号不重复探测）。探测成功说明是目标/接口级 401，原样返回 `HTTPError`（`IsUnauthorized` 为真）；确认失效则 `DeactivateXAccount` 并换号；无法判断则锁 `*` 5 分钟并换号。错误码 32/64/89/215/326 出现在非 401 响应里时直接停用。
 - **queryId 自动发现只是尽力而为。** 当前未登录首页已换成 x-web（Vite + Relay persisted query），不再引用 `responsive-web/client-web/main.*.js`，新 bundle 里也没有 `UserByScreenName`、`UserMedia` 等 operation 名。发现失败时使用内置表；内置 queryId 目前仍可用（2026-11-13 用 guest token 请求 `UserByScreenName` 返回 200）。优先级：环境变量覆盖 > 发现结果 > 内置表。
 - **环境变量账号用 `Store.SyncEnvXAccounts` 同步**：`OPEN_XDOWNLOAD_AUTH_TOKEN`/`OPEN_XDOWNLOAD_CT0` 是主账号，`OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` 按 `config.ParseCookiePairs` 逐条导入为非主账号。不再出现在环境变量里的 env 账号会被删除；同一组 Cookie 重启时保留 active/error_msg，换了 ct0 才重新启用。
@@ -309,3 +313,20 @@ legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewS
 - **jobs 的 Source 工厂签名**改为 `jobs.XSourceFactory func(ctx, cfg) (xapi.Source, error)`；`Manager.XSource`、`Manager.NewXSource` 同样增加 ctx 参数。
 - **`xapi.ViewerKey(authToken)`** 是 viewerKey 的唯一实现，两套实现共用。
 - **没有 active 账号时，xscrape 的 FetchTweet 用 guest token 请求**（`POST {APIBaseURL}/1.1/guest/activate.json`，请求带 `x-guest-token`，loggedIn=false）。2026-11-13 实测：只带 bearer 请求 `TweetResultByRestId` 返回 403，带 guest token 返回 200。
+
+## 2026-11-14 真实 Cookie 只读验收（xapi 层）
+
+用户提供的账号（未写入仓库）对 x.com 的只读请求结果；请求参数由 `internal/xapi` 生成，响应交给 xapi/parser 的解析代码：
+
+| 接口 | 结果 |
+|---|---|
+| UserByScreenName / UserByRestId（内置 queryId） | 200，`ParseUser` 正常 |
+| UserMedia | 200，第一页 12 条媒体推文，Bottom 游标存在 |
+| UserTweets | 200，`WalkUserTweets` 第一页 15 条本人推文 |
+| Following | 200，第一页 50 个用户，有下一页游标 |
+| ListByRestId / ListMembers（公开列表） | 200，元信息与成员正常；横幅子字段 code 214 部分错误按设计被容忍 |
+| TweetResultByRestId（登录态） | 200，正文正常 |
+| 不存在的列表 | 200，`data.list` 只有 `id`/`id_str`（没有 name），GetListByID 不报错 |
+| legacy 未配置 Cookie 时的推文抓取 | 403（只带 bearer，没有 guest token） |
+
+内置 queryId 目前全部有效。限流头 `x-rate-limit-limit/remaining/reset` 在 200 和 404 上都有，`reset` 为 unix 秒。
