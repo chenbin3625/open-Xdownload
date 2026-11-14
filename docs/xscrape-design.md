@@ -340,10 +340,10 @@ legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewS
 | `POST /api/x-accounts` 导入 Cookie | 主账号入库，响应里 auth_token/ct0 打码、代理去掉 userinfo |
 | `POST /api/x-accounts/{id}/check` | `ok=true`，`screenName` 正确，写 `verified_at`；探测走 `account/multi/list.json` |
 | `tweet_link` 任务（`archiveMode=both`） | 完成，正文落库（tweet 20 "just setting up my twttr"） |
-| `user` 任务 @jack（`archiveMode=tweets`） | `UserTweets` 连续翻页 35 次、522+ 条推文，手动取消后状态 `canceled` |
+| `user` 任务 @jack（`archiveMode=tweets`） | `UserTweets` 连续翻页 35 次，取消前进度到 522 条推文；任务被手动取消（`canceled`），取消后的数据完整性未校验 |
 | `user` 任务 @NASA（`archiveMode=media`） | 下载 80 个媒体文件后手动取消；磁盘占用是本机限制，不是代码问题 |
-| 账号统计 | `requestsByQueue` 按 operation 累加（TweetResultByRestId / UserByScreenId / UserByScreenName / UserMedia / UserTweets）；全程无锁、无 error_msg |
-| queryId 发现 | 真实 bundle 里没有 operation 名，日志只打一次 `首页/脚本中未发现 queryId，继续使用内置表`，请求全部成功 |
+| 账号统计 | `requestsByQueue` 按 operation 累加（TweetResultByRestId / UserByRestId / UserByScreenName / UserMedia / UserTweets），口径是 HTTP 200 请求数；全程无锁、无 error_msg |
+| queryId 发现 | 本次观察：当前未登录首页与其引用的 bundle 里没有 operation 名，日志只打一次 `首页/脚本中未发现 queryId，继续使用内置表`，全部请求用内置表成功。这只是一次观察，不是保证；发现成功时仍优先于内置表 |
 | 兼容接口 `/api/auth/check` | 只探测主账号，不写库（不影响账号池状态） |
 
 Playwright：`x-accounts.spec.ts` 12/12 通过（6 个项目 × 导入编辑检测删除 / 解锁）。`tweets.spec.ts` 与 `upgrade.spec.ts` 依赖预览库里预置的长推文与媒体，空库下必然失败，需按既有预览数据准备流程运行。
