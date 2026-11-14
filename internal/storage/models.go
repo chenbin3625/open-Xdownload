@@ -81,6 +81,8 @@ type Job struct {
 	DeferredSeconds int64       `json:"-" db:"deferred_seconds"`
 	ArchiveMode     ArchiveMode `json:"archiveMode" db:"archive_mode"`
 	Backfill        bool        `json:"backfill" db:"backfill"`
+	// BatchSize 是全文归档每轮最多处理的用户数；0 表示不限制。
+	BatchSize int `json:"batchSize,omitempty" db:"batch_size"`
 }
 
 type JobDraft struct {
@@ -89,6 +91,8 @@ type JobDraft struct {
 	Title       string
 	ArchiveMode ArchiveMode
 	Backfill    bool
+	// BatchSize 是全文归档每轮最多处理的用户数；0 表示不限制。
+	BatchSize int
 	// Source 为空时按 manual 处理；定时计划由调度器显式设为 schedule。
 	Source JobSource
 }
@@ -99,6 +103,7 @@ type ArchiveScheduleItem struct {
 	Title       string      `json:"title"`
 	ArchiveMode ArchiveMode `json:"archiveMode,omitempty"`
 	Backfill    bool        `json:"backfill,omitempty"`
+	BatchSize   int         `json:"batchSize,omitempty"`
 }
 
 type ArchiveSchedule struct {

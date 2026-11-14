@@ -69,7 +69,7 @@ func (s *Store) migrateArchive() error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, col := range []struct{ name, definition string }{{"archive_mode", "TEXT NOT NULL DEFAULT 'media'"}, {"backfill", "BOOLEAN NOT NULL DEFAULT 0"}} {
+	for _, col := range []struct{ name, definition string }{{"archive_mode", "TEXT NOT NULL DEFAULT 'media'"}, {"backfill", "BOOLEAN NOT NULL DEFAULT 0"}, {"batch_size", "INTEGER NOT NULL DEFAULT 0"}} {
 		var count int
 		if err := tx.Get(&count, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name=?`, col.name); err != nil {
 			return err

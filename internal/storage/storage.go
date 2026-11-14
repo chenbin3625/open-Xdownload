@@ -114,7 +114,8 @@ const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout
 // v9: jobs.deferred_seconds（限流累计推迟上限）、user_entities.last_full_scan_at
 // （定时任务每 7 天的全量扫描基线）、media_sync 表（媒体时间线逐页游标）。
 // v10: x_accounts / x_account_locks / x_account_stats（twscrape 风格账号池）。
-const schemaVersion = 10
+// v11: jobs.batch_size（定时全文归档每轮最多用户数）。
+const schemaVersion = 11
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -123,6 +124,7 @@ const (
 	MinArchiveScheduleIntervalMinutes = 5
 	MaxArchiveScheduleIntervalMinutes = 60 * 24 * 30
 	MaxArchiveScheduleItems           = 200
+	MaxArchiveBatchSize               = 1000
 )
 
 var ErrArchiveScheduleAlreadyClaimed = errors.New("定时归档计划已被其他运行领取")
@@ -1776,10 +1778,10 @@ VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
 RETURNING *`, job.Kind, JobPending, job.Input, job.Title, "排队中", now, now, now, now.UnixNano(), JobSourceManual); err != nil {
 		return Job{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET archive_mode=?, backfill=? WHERE id=?`, job.ArchiveMode, job.Backfill, retried.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET archive_mode=?, backfill=?, batch_size=? WHERE id=?`, job.ArchiveMode, job.Backfill, job.BatchSize, retried.ID); err != nil {
 		return Job{}, err
 	}
-	retried.ArchiveMode, retried.Backfill = job.ArchiveMode, job.Backfill
+	retried.ArchiveMode, retried.Backfill, retried.BatchSize = job.ArchiveMode, job.Backfill, job.BatchSize
 	if err := tx.Commit(); err != nil {
 		return Job{}, err
 	}
@@ -1955,9 +1957,9 @@ SELECT kind, input FROM jobs WHERE status IN (`+activeJobStatusesSQL+`)`); err !
 
 	var query strings.Builder
 	query.WriteString(`
-INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source, archive_mode, backfill)
+INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source, archive_mode, backfill, batch_size)
 VALUES `)
-	args := make([]any, 0, len(drafts)*10)
+	args := make([]any, 0, len(drafts)*11)
 	for index, draft := range drafts {
 		if index > 0 {
 			query.WriteString(",")
@@ -1965,8 +1967,11 @@ VALUES `)
 		if !draft.ArchiveMode.Valid() {
 			return nil, ErrValidation("无效的归档模式")
 		}
-		query.WriteString("(?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)")
-		args = append(args, draft.Kind, JobPending, draft.Input, draft.Title, message, now, now, now, now.UnixNano(), draft.Source.Normalized(), draft.ArchiveMode.Normalized(), draft.Backfill)
+		if draft.BatchSize < 0 || draft.BatchSize > MaxArchiveBatchSize {
+			return nil, ErrValidation(fmt.Sprintf("每轮用户数必须在 0 到 %d 之间", MaxArchiveBatchSize))
+		}
+		query.WriteString("(?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, draft.Kind, JobPending, draft.Input, draft.Title, message, now, now, now, now.UnixNano(), draft.Source.Normalized(), draft.ArchiveMode.Normalized(), draft.Backfill, draft.BatchSize)
 	}
 	query.WriteString(" RETURNING *")
 
@@ -2192,7 +2197,7 @@ WHERE id = ?`,
 	}
 	drafts := make([]JobDraft, 0, len(schedule.Items))
 	for _, item := range schedule.Items {
-		drafts = append(drafts, JobDraft{Kind: item.Kind, Input: item.Input, Title: item.Title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, Source: source})
+		drafts = append(drafts, JobDraft{Kind: item.Kind, Input: item.Input, Title: item.Title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, BatchSize: item.BatchSize, Source: source})
 	}
 	jobs, err := s.insertJobs(ctx, tx, drafts, "定时归档排队中", runAt, true)
 	if err != nil {
@@ -3544,6 +3549,9 @@ func prepareArchiveScheduleForSave(schedule ArchiveSchedule) (ArchiveSchedule, e
 	for _, item := range schedule.Items {
 		if !item.ArchiveMode.Valid() {
 			return ArchiveSchedule{}, ErrValidation("无效的归档模式")
+		}
+		if item.BatchSize < 0 || item.BatchSize > MaxArchiveBatchSize {
+			return ArchiveSchedule{}, ErrValidation(fmt.Sprintf("每轮用户数必须在 0 到 %d 之间", MaxArchiveBatchSize))
 		}
 		item.Input = strings.TrimSpace(item.Input)
 		item.Title = strings.TrimSpace(item.Title)

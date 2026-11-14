@@ -798,6 +798,12 @@ func init() {
 		"x_account_stats(account_id,day,queue,requests);" +
 		"x_accounts(active,auth_token,created_at,ct0,error_msg,extra_cookies,id,is_primary,last_used,proxy,screen_name,source,updated_at,user_agent,verified_at)"
 	schemaColumnsForVersion[10] = v10
+
+	// v11 在 v10 基础上给 jobs 增加 batch_size（定时全文归档每轮用户上限）。
+	v11 := strings.Replace(v10,
+		"jobs(archive_mode,available_at,available_ns,backfill,created_at,",
+		"jobs(archive_mode,available_at,available_ns,backfill,batch_size,created_at,", 1)
+	schemaColumnsForVersion[11] = v11
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {
