@@ -11,15 +11,16 @@ import (
 
 func tweetResultPath(queryID string) string { return xapi.GraphQLPath(queryID, "TweetResultByRestId") }
 
-// fetchGuestTweet 是 legacy 的 guest/public 回退：用 cfg 里的（可能为空的）Cookie
-// 新建一次性客户端直接请求，不经过 Pool。只有凭据缺失、NewSource 退化为 guestSource
-// 时才会走到这里；正常账号池路径使用 Pool.FetchTweet。
-func fetchGuestTweet(ctx context.Context, cfg config.AppConfig, id string, options parser.ParseOptions) (parser.TweetData, error) {
-	client, err := NewClient(Credentials{AuthToken: cfg.AuthToken, CSRFToken: cfg.CSRFToken}, cfg.ProxyURL)
+// fetchGuestTweet 是 legacy 的 guest/public 回退：新建一个不带 Cookie 的一次性客户端，
+// 以未登录身份（loggedIn=false）直接请求，不经过 Pool。只有没有可用账号、
+// NewSourceFromAccounts 退化为 guestSource 时才会走到这里；正常账号池路径使用
+// Pool.FetchTweet。cfg 只提供全局代理，不读取已废弃的 Cookie 字段。
+func fetchGuestTweet(ctx context.Context, cfg config.AppConfig, opts Options, id string, options parser.ParseOptions) (parser.TweetData, error) {
+	client, err := newAccountClient(Account{}, cfg.ProxyURL, opts)
 	if err != nil {
 		return parser.TweetData{}, err
 	}
-	return xapi.FetchTweet(ctx, client, id, cfg.AuthToken != "", options)
+	return xapi.FetchTweet(ctx, client, id, false, options)
 }
 
 // WalkUserTweets 逐页抓取全文时间线。全文有独立的 operation 和持久化页边界，

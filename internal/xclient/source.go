@@ -2,27 +2,23 @@ package xclient
 
 import (
 	"context"
+	"errors"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 )
 
-// NewSource 是 legacy 的 xapi.Source 工厂。与 NewPool 的差别只有一处：凭据缺失
-// 时不返回错误，而是返回一个只支持 FetchTweet 的 source。jobs 的"推文链接"任务
-// 历史上在未配置 Cookie 时仍会用 guest/public 身份请求单条推文，这个回退行为必须
-// 保持；需要账号池的方法会返回与 NewPool 完全相同的错误。
-func NewSource(cfg config.AppConfig) (xapi.Source, error) {
-	pool, err := NewPool(cfg)
-	if err != nil {
-		return &guestSource{cfg: cfg, err: err}, nil
-	}
-	return pool, nil
-}
+// errNoAccounts 是没有任何可用账号时，需要账号池的方法返回的错误。
+var errNoAccounts = errors.New("没有可用的 X 账号，请先在「设置 → X 账号池」导入 Cookie")
 
+// guestSource 是没有可用账号时的回退数据源。jobs 的"推文链接"任务历史上在未配置
+// Cookie 时仍会以 guest/public 身份请求单条推文，这个行为保留；其余方法都需要账号池，
+// 统一返回 err。
 type guestSource struct {
-	cfg config.AppConfig
-	err error
+	cfg  config.AppConfig
+	opts Options
+	err  error
 }
 
 func (s *guestSource) GetUserByInput(context.Context, string) (xapi.User, error) {
@@ -40,7 +36,7 @@ func (s *guestSource) GetUserByIDAsPrimary(context.Context, string) (xapi.User, 
 func (s *guestSource) FollowUserAsPrimary(context.Context, xapi.User) error { return s.err }
 
 func (s *guestSource) FetchTweet(ctx context.Context, id string, options parser.ParseOptions) (parser.TweetData, error) {
-	return fetchGuestTweet(ctx, s.cfg, id, options)
+	return fetchGuestTweet(ctx, s.cfg, s.opts, id, options)
 }
 
 func (s *guestSource) WalkUserMedia(context.Context, xapi.User, xapi.UserMediaTimelineOptions, func(xapi.UserMediaTimelinePage) error) (xapi.MediaFetchStats, error) {
