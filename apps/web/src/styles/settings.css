@@ -210,6 +210,14 @@
   border-radius: var(--radius-sm);
 }
 
+.storage-filename-parts { flex-direction: row; flex-wrap: wrap; }
+.storage-filename-parts > .semi-select { flex-basis: 100%; }
+.account-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-block: 1px solid var(--line); padding: 16px 0; margin: 0 0 20px; }
+.account-overview > div { min-width: 0; padding-inline: 16px; border-right: 1px solid var(--line); }
+.account-overview > div:last-child { border: 0; }
+.account-overview dt { font-size: 12px; color: var(--fg-muted); }
+.account-overview dd { margin: 6px 0 0; color: var(--fg); font-size: 22px; font-weight: 600; }
+
 .storage-filename-part > span {
   flex: 1;
   min-width: 0;
@@ -514,3 +522,16 @@
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.settings-form [hidden] { display: none !important; }
+.settings-navigation { display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; border-bottom: 1px solid var(--line); padding: 0; }
+.settings-navigation button { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; flex: 0 0 auto; padding: 8px 16px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--fg-muted); font-size: 14px; white-space: nowrap; cursor: pointer; }
+.settings-navigation button:hover { background: var(--surface-muted); color: var(--fg); }
+.settings-navigation button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
+.settings-dirty-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warning); }
+.settings-account-shortcut { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 16px; border-bottom: 1px solid var(--line); }
+.settings-account-shortcut .settings-section-title { margin: 0; }
+.settings-account-shortcut > div { flex: 1; }
+.storage-inherited-summary { grid-column: 3 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; color: var(--fg-muted); font-size: 13px; overflow-wrap: anywhere; }
+.storage-inherited-summary code { font-size: 12px; }
+@media (max-width: 1099.98px) { .storage-inherited-summary { grid-column: 1 / -1; } }
+@media (max-width: 767.98px) { .settings-navigation { gap: 0; margin-inline: -12px; padding-inline: 12px; } .settings-navigation button { justify-content: center; padding-inline: 12px; font-size: 13px; } }

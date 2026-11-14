@@ -556,6 +556,64 @@ func TestListJobsPageOmitsStats(t *testing.T) {
 	}
 }
 
+func TestListJobsFiltersBeforePagination(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	var ids []int64
+	for _, title := range []string{"Alice first", "Bob", "Alice second", "Alice third"} {
+		job, err := db.CreateJob(ctx, storage.JobKindUser, title, title)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, job.ID)
+	}
+	failed, err := db.GetJob(ctx, ids[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed.Status = storage.JobFailed
+	failed.Error = "X access denied"
+	if err := db.UpdateJob(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	handler := authenticatedRoutes(t, NewServer(db, nil, nil, nil))
+	for _, tc := range []struct {
+		url       string
+		total     int
+		firstID   int64
+		countAll  int
+		countFail int
+	}{
+		{url: "/api/jobs?page=2&pageSize=1&kind=user&q=Alice", total: 3, firstID: ids[2], countAll: 3, countFail: 1},
+		{url: "/api/jobs?status=failed&kind=user&q=Alice", total: 1, firstID: ids[2], countAll: 3, countFail: 1},
+		{url: "/api/jobs?status=failed&q=access%20denied", total: 1, firstID: ids[2], countAll: 1, countFail: 1},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, newLoopbackRequest(http.MethodGet, tc.url, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status %d: %s", tc.url, response.Code, response.Body.String())
+		}
+		var result jobListPage
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Total != tc.total || len(result.Items) != 1 || result.Items[0].ID != tc.firstID || result.Counts.All != tc.countAll || result.Counts.Failed != tc.countFail {
+			t.Fatalf("%s result = %+v", tc.url, result)
+		}
+	}
+	for _, value := range []string{"status=bogus", "kind=bogus"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, newLoopbackRequest(http.MethodGet, "/api/jobs?"+value, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d", value, response.Code)
+		}
+	}
+}
+
 func TestGetJobFilesReturnsDownloadsAndFailedMedia(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

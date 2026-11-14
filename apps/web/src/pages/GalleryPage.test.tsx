@@ -132,6 +132,21 @@ it("dedupes one card per saved file (server 已按 filePath 去重，前端再�
   expect(screen.getByText("other.jpg")).toBeTruthy();
 });
 
+it("selects deduplicated files on this page and preserves selection when changing views", async () => {
+  const user = userEvent.setup();
+  const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(records)));
+  renderGallery();
+  await screen.findByText("shared.jpg");
+  await user.click(screen.getByRole("checkbox", { name: "选择本页" }));
+  expect(screen.getAllByRole("checkbox", { name: /选择文件/ })).toHaveLength(2);
+  await user.click(screen.getByRole("radio", { name: "列表视图" }));
+  expect(document.querySelector(".gallery-list")).toBeTruthy();
+  expect((screen.getByRole("checkbox", { name: "选择文件 shared.jpg" }) as HTMLInputElement).checked).toBe(true);
+  await user.click(screen.getByRole("button", { name: "复制路径" }));
+  expect(copy).toHaveBeenCalledWith("/downloads/shared.jpg\n/downloads/other.jpg");
+});
+
 it("只有用户名时卡片和预览仍显示已识别的用户", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => pagedResponse([{ ...records[0], userName: "" }])));
   renderGallery();
@@ -213,11 +228,14 @@ it("翻页时保留上一页内容（placeholderData），不闪骨架屏", asyn
   renderControlled();
 
   await waitFor(() => expect(screen.getByText("shared.jpg")).toBeTruthy());
+  await userEvent.click(screen.getByRole("checkbox", { name: "选择本页" }));
   await userEvent.click(screen.getByRole("button", { name: "第 2 页" }));
 
   // 第 2 页还在飞：上一页内容仍在，骨架屏不出现
   expect(screen.getByText("shared.jpg")).toBeTruthy();
   expect(document.querySelectorAll(".animate-pulse").length).toBe(0);
+  expect((screen.getByRole("checkbox", { name: "选择本页" }) as HTMLInputElement).disabled).toBe(true);
+  expect(screen.queryByRole("button", { name: "复制路径" })).toBeNull();
   gate.release?.();
   await waitFor(() => expect(screen.getByText("page-2.jpg")).toBeTruthy());
 });
@@ -235,6 +253,24 @@ it("切换分类/用户时同步把页码重置为 1（一次更新，不发两�
 
   const kinds = onFilterChange.mock.calls.map(([patch]) => patch);
   expect(kinds).toContainEqual({ kind: "videos", page: 1 });
+});
+
+it("切换缩略图完整/填充模式，并导出当前页所选清单", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(records)));
+  const createURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:manifest");
+  const revokeURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  renderControlled();
+  await screen.findByText("shared.jpg");
+  await userEvent.click(screen.getByRole("radio", { name: "网格视图" }));
+  await userEvent.click(screen.getByRole("combobox", { name: "缩略图显示方式" }));
+  await userEvent.click(screen.getByRole("option", { name: /填充裁剪/ }));
+  expect(screen.getByRole("img", { name: "shared.jpg" }).className).toContain("object-cover");
+  await userEvent.click(screen.getByRole("checkbox", { name: "选择本页" }));
+  await userEvent.click(screen.getByRole("button", { name: "导出清单" }));
+  expect(createURL).toHaveBeenCalledTimes(1);
+  expect(click).toHaveBeenCalledTimes(1);
+  click.mockRestore(); createURL.mockRestore(); revokeURL.mockRestore();
 });
 
 it("还原排序和区间筛选并发送到服务端", async () => {

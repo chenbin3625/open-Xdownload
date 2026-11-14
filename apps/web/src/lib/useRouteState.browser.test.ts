@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
-import { defaultGalleryFilter, readRouteState, updateBrowserRoute } from "./useRouteState";
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultGalleryFilter, readRouteState, updateBrowserRoute, useRouteState } from "./useRouteState";
 
 function setUrl(path: string) {
   window.history.replaceState(null, "", path);
@@ -23,12 +24,14 @@ describe("URL 路由状态往返", () => {
   });
 
   it("从 URL 还原任务中心的 status / page / pageSize", () => {
-    setUrl("/tasks?page=2&pageSize=50&status=failed");
+    setUrl("/tasks?page=2&pageSize=50&status=failed&kind=user&q=alice");
     expect(readRouteState()).toMatchObject({
       section: "tasks",
       jobPage: 2,
       jobPageSize: 50,
       jobStatus: "failed",
+      jobKind: "user",
+      jobSearch: "alice",
       shouldReplace: false,
     });
   });
@@ -70,5 +73,24 @@ describe("URL 路由状态往返", () => {
     updateBrowserRoute({ section: "gallery", gallery: { search: "ab" } }, true);
     expect(window.location.search).toBe("?q=ab");
     expect(window.history.length).toBe(before);
+  });
+
+  it("未保存设置阻止后退离开，也允许确认后前进/后退", () => {
+    setUrl("/settings");
+    const { result } = renderHook(() => useRouteState());
+    const protect = (event: Event) => event.preventDefault();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    window.addEventListener("settings:before-navigate", protect);
+    act(() => { setUrl("/tasks"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    expect(result.current.activeSection).toBe("settings");
+    expect(window.location.pathname).toBe("/settings");
+    expect(confirm).toHaveBeenCalledTimes(1);
+    confirm.mockReturnValue(true);
+    act(() => { setUrl("/tasks"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    expect(result.current.activeSection).toBe("tasks");
+    window.removeEventListener("settings:before-navigate", protect);
+    act(() => { setUrl("/settings"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    expect(result.current.activeSection).toBe("settings");
+    confirm.mockRestore();
   });
 });

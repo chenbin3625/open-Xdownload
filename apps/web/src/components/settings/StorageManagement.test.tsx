@@ -35,6 +35,7 @@ it("preserves edits made during a save and uses the returned policy version on t
   vi.mocked(saveStorage).mockImplementationOnce(() => new Promise(resolve => { resolveSave = resolve; }));
   vi.mocked(saveStorage).mockImplementationOnce(async submitted => ({ ...submitted, version: 3 }));
   const user = userEvent.setup(); renderStorage();
+  await user.click(await screen.findByRole("button", { name: "展开默认规则" }));
   await user.click(await screen.findByRole("combobox", { name: "分类存储策略" }));
   await user.click(screen.getByRole("option", { name: "按用户 / 年 / 月" }));
   await user.click(screen.getByRole("button", { name: "保存存储设置" }));
@@ -56,7 +57,7 @@ it("preserves edits made during a save and uses the returned policy version on t
 
 it("uses readable policies without exposing template variables and exposes preview failures", async () => {
   const user = userEvent.setup(); renderStorage();
-  await screen.findByRole("combobox", { name: "分类存储策略" });
+  await screen.findByRole("button", { name: "展开默认规则" });
   expect(screen.queryByRole("textbox", { name: "目录模板" })).toBeNull();
   expect(screen.queryByRole("textbox", { name: "命名模板" })).toBeNull();
   expect(screen.queryByText(/\{author_id\}/)).toBeNull();
@@ -90,7 +91,7 @@ it("saves folder separation independently and composes filename fields in user o
   await user.click(add);
   await user.click(screen.getByRole("option", { name: "正文" }));
   await user.click(add);
-  await user.click(screen.getByRole("option", { name: "正文编号" }));
+  await user.click(screen.getByRole("option", { name: "推文编号" }));
   await user.click(screen.getByRole("button", { name: "图片原文件 正文 上移" }));
   await user.click(screen.getByRole("button", { name: "保存存储设置" }));
   await waitFor(() => expect(saveStorage).toHaveBeenCalledTimes(1));
@@ -101,6 +102,7 @@ it("can turn off separation from an existing media-kind directory template", asy
   vi.mocked(getStorage).mockResolvedValue({ ...structuredClone(document), default: { ...document.default, directoryTemplate: "{kind}/{username}" } });
   vi.mocked(saveStorage).mockImplementation(async submitted => submitted);
   const user = userEvent.setup(); renderStorage();
+  await user.click(await screen.findByRole("button", { name: "展开默认规则" }));
   const separate = await screen.findByRole("switch", { name: "按媒体类型分文件夹" });
   expect(separate.getAttribute("aria-checked")).toBe("true");
   await user.click(separate);
@@ -114,6 +116,7 @@ it("does not show a stale preview after a rule changes", async () => {
   vi.mocked(api).mockImplementationOnce(() => new Promise(resolve => { resolvePreview = resolve; }));
   const user = userEvent.setup(); renderStorage();
   await user.click(await screen.findByRole("button", { name: "图片原文件 预览实际路径" }));
+  await user.click(screen.getByRole("button", { name: "展开默认规则" }));
   await user.click(screen.getByRole("switch", { name: "按媒体类型分文件夹" }));
   await act(async () => resolvePreview({ location: "/stale/image.jpg" }));
   expect(screen.queryByText("/stale/image.jpg")).toBeNull();
@@ -128,6 +131,7 @@ it("shows inherited default folder separation in an existing category override",
 it("supports text alone and tweet ID alone without allowing an empty filename", async () => {
   vi.mocked(saveStorage).mockImplementation(async submitted => ({ ...submitted, version: submitted.version + 1 }));
   const user = userEvent.setup(); renderStorage();
+  await user.click(await screen.findByRole("button", { name: "展开默认规则" }));
   await user.click(await screen.findByRole("combobox", { name: "命名策略" }));
   await user.click(screen.getByRole("option", { name: "自定义组合" }));
   await user.click(screen.getByRole("combobox", { name: "添加命名字段" }));
@@ -138,24 +142,37 @@ it("supports text alone and tweet ID alone without allowing an empty filename", 
   await waitFor(() => expect(saveStorage).toHaveBeenCalledTimes(1));
   expect(vi.mocked(saveStorage).mock.calls[0][0].default.filenameTemplate).toBe("{text}.{ext}");
   await user.click(screen.getByRole("combobox", { name: "添加命名字段" }));
-  await user.click(screen.getByRole("option", { name: "正文编号" }));
+  await user.click(screen.getByRole("option", { name: "推文编号" }));
   await user.click(screen.getByRole("button", { name: "正文 移除" }));
   await user.click(screen.getByRole("button", { name: "保存存储设置" }));
   await waitFor(() => expect(saveStorage).toHaveBeenCalledTimes(2));
   expect(vi.mocked(saveStorage).mock.calls[1][0].default.filenameTemplate).toBe("{tweet_id}.{ext}");
 });
 
-it("shows every media rule and historical migration without expanding a section", async () => {
+it("summarizes inherited rules and keeps custom rules editable", async () => {
   renderStorage();
-  await screen.findByRole("combobox", { name: "分类存储策略" });
+  await screen.findByRole("button", { name: "展开默认规则" });
+  expect(screen.queryByRole("combobox", { name: "分类存储策略" })).toBeNull();
   expect(globalThis.document.querySelector("details")).toBeNull();
   expect(screen.getByRole("button", { name: "迁移历史资源" })).toBeTruthy();
-  for (const kind of ["图片原文件", "视频及 GIF 原文件"]) {
-    expect(screen.getByRole("combobox", { name: `${kind} 分类存储策略` })).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: `${kind} 命名策略` })).toBeTruthy();
-  }
-  expect(screen.getByRole("combobox", { name: "图片原文件 命名策略" }).getAttribute("aria-disabled")).toBe("true");
+  const inherited = screen.getByRole("group", { name: "图片原文件" });
+  expect(within(inherited).getAllByText("使用默认").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("combobox", { name: "图片原文件 命名策略" })).toBeNull();
+  expect(screen.getByRole("combobox", { name: "视频及 GIF 原文件 命名策略" })).toBeTruthy();
   expect(screen.getByRole("combobox", { name: "视频及 GIF 原文件 存储目标" }).textContent).toContain("NAS");
+});
+
+it("折叠默认规则时仍保留草稿，并在离开前触发保护", async () => {
+  const user = userEvent.setup(); renderStorage();
+  await screen.findByRole("button", { name: "展开默认规则" });
+  expect(screen.queryByRole("combobox", { name: "分类存储策略" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "展开默认规则" }));
+  await user.click(screen.getByRole("switch", { name: "按媒体类型分文件夹" }));
+  await user.click(screen.getByRole("button", { name: "收起默认规则" }));
+  await user.click(screen.getByRole("button", { name: "展开默认规则" }));
+  expect(screen.getByRole("switch", { name: "按媒体类型分文件夹" }).getAttribute("aria-checked")).toBe("true");
+  await waitFor(() => expect(window.dispatchEvent(new Event("settings:before-navigate", { cancelable: true }))).toBe(false));
+  expect(window.dispatchEvent(new Event("beforeunload", { cancelable: true }))).toBe(false);
 });
 
 it("copies the default rule when customizing a media type and restores inheritance", async () => {
@@ -174,5 +191,6 @@ it("copies the default rule when customizing a media type and restores inheritan
   await user.click(screen.getByRole("button", { name: "保存存储设置" }));
   await waitFor(() => expect(saveStorage).toHaveBeenCalledTimes(2));
   expect(vi.mocked(saveStorage).mock.calls[1][0].rules.image).toBeUndefined();
-  expect(screen.getByRole("combobox", { name: "图片原文件 命名策略" }).textContent).toContain("媒体编号");
+  expect(screen.queryByRole("combobox", { name: "图片原文件 命名策略" })).toBeNull();
+  expect(within(screen.getByRole("group", { name: "图片原文件" })).getByText(/命名策略: 媒体编号/)).toBeTruthy();
 });

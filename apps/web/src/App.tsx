@@ -21,8 +21,9 @@ import {
   useDashboardEvents,
 } from "./lib/useDashboardEvents";
 import { jobStatusBucket } from "./lib/jobStatus";
+import { useDebouncedValue } from "./lib/useDebouncedValue";
 import { useBreakpointUp } from "./lib/useMediaQuery";
-import { useRouteState } from "./lib/useRouteState";
+import { useRouteState, type SectionKey } from "./lib/useRouteState";
 
 import { Alert, ListSkeleton } from "./components/semi";
 import { Drawer } from "./components/semi";
@@ -59,14 +60,24 @@ function Workbench() {
     jobPage,
     jobPageSize,
     jobStatus,
+    jobKind,
+    jobSearch,
     gallery,
-    handleSectionChange,
+    handleSectionChange: navigateSection,
     handleJobPageChange,
     handleJobPageSizeChange,
     handleJobStatusChange,
+    handleJobKindChange,
+    handleJobSearchChange,
     handleGalleryChange,
     syncServerPage,
   } = useRouteState();
+  const debouncedJobSearch = useDebouncedValue(jobSearch, 300);
+
+  const handleSectionChange = (section: SectionKey) => {
+    if (section !== activeSection && !window.dispatchEvent(new Event("settings:before-navigate", { cancelable: true })) && !window.confirm(t("放弃未保存的修改？"))) return;
+    navigateSection(section);
+  };
 
   // 模态框与抽屉状态
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -97,11 +108,14 @@ function Workbench() {
 
   // 任务分页 Query
   const jobs = useQuery({
-    queryKey: [...jobsQueryRoot, jobPage, jobPageSize],
+    queryKey: [...jobsQueryRoot, jobPage, jobPageSize, jobStatus, jobKind, debouncedJobSearch],
     queryFn: async ({ queryKey, signal }) => {
-      const page = await getJobsPage({ page: jobPage, pageSize: jobPageSize, signal });
+      const page = await getJobsPage({ page: jobPage, pageSize: jobPageSize, status: jobStatus, kind: jobKind, search: debouncedJobSearch, signal });
       // 请求期间可能已有更新的 SSE 补丁落库，逐条比较 updatedAt，别把进度写回旧值。
-      return mergeNewerJobs(queryClient.getQueryData<JobsPage>(queryKey), page);
+      // 已筛选页必须以服务端成员集合为准，避免状态变更后把不匹配的旧任务插回来。
+      return jobStatus === "all" && jobKind === "all" && !debouncedJobSearch
+        ? mergeNewerJobs(queryClient.getQueryData<JobsPage>(queryKey), page)
+        : page;
     },
     placeholderData: (previousData) => previousData,
     staleTime: 15_000,
@@ -147,15 +161,15 @@ function Workbench() {
 
   // 分页边界校验
   useEffect(() => {
-    if (jobs.isPlaceholderData || !meta.data) return;
-    const totalPages =
-      meta.data.stats.total > 0
-        ? Math.ceil(meta.data.stats.total / jobPageSize)
-        : 1;
+    if (jobs.isPlaceholderData || !jobs.data || debouncedJobSearch !== jobSearch) return;
+    const total = jobs.data.total ?? (jobStatus === "all" && jobKind === "all" && !jobSearch ? meta.data?.stats.total ?? 0 : 0);
+    const totalPages = total
+      ? Math.ceil(total / jobPageSize)
+      : 1;
     if (jobPage > totalPages) {
       syncServerPage(totalPages);
     }
-  }, [jobPage, jobPageSize, jobs.isPlaceholderData, meta.data, syncServerPage]);
+  }, [jobPage, jobPageSize, jobStatus, jobKind, jobSearch, debouncedJobSearch, jobs.data, jobs.isPlaceholderData, meta.data, syncServerPage]);
 
   function handleManualRefresh() {
     setManualRefreshPending(true);
@@ -173,12 +187,13 @@ function Workbench() {
   }
 
   const jobsData = jobs.data?.items ?? [];
+  const filteredTotal = jobs.data?.total ?? (jobStatus === "all" && jobKind === "all" && !jobSearch ? meta.data?.stats.total ?? 0 : 0);
   const currentPagination = {
     page: jobs.data?.page ?? jobPage,
     pageSize: jobs.data?.pageSize ?? jobPageSize,
-    total: meta.data?.stats.total ?? 0,
-    totalPages: meta.data?.stats.total
-      ? Math.ceil(meta.data.stats.total / (jobs.data?.pageSize ?? jobPageSize))
+    total: filteredTotal,
+    totalPages: filteredTotal
+      ? Math.ceil(filteredTotal / (jobs.data?.pageSize ?? jobPageSize))
       : 0,
   };
 
@@ -287,11 +302,16 @@ function Workbench() {
                 stats={currentStats}
                 failedTweetCount={failedTweetCount}
                 pagination={currentPagination}
-                tableLoading={jobs.isPlaceholderData}
+                tableLoading={jobs.isPlaceholderData || debouncedJobSearch !== jobSearch}
                 onPageChange={handleJobPageChange}
                 onPageSizeChange={handleJobPageSizeChange}
                 statusFilter={jobStatus}
                 onStatusFilterChange={handleJobStatusChange}
+                kindFilter={jobKind}
+                onKindFilterChange={handleJobKindChange}
+                searchKeyword={jobSearch}
+                onSearchKeywordChange={handleJobSearchChange}
+                filterCounts={jobs.data?.counts}
                 onOpenCreateModal={() => openCreateModal()}
                 onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
               />

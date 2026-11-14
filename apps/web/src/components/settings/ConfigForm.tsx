@@ -13,13 +13,14 @@ import {
 } from "../../lib/api";
 import { notifyError } from "../common/CommonUI";
 import { Button } from "@douyinfe/semi-ui";
-import { Popconfirm, Tooltip } from "../semi";
+import { Popconfirm, Tag, Tooltip } from "../semi";
 import { toast } from "../semi";
 import { XAccountsSettings } from "./XAccountsSettings";
 import { readEnvOverridden } from "./EnvOverrideNote";
 import { DownloadSettingsFields } from "./DownloadSettings";
 import { StorageManagement } from "./StorageManagement";
 import { LanguageSettings } from "./LanguageSettings";
+import { AccountSecurity } from "./AccountSecurity";
 
 export function ConfigForm({
   config,
@@ -35,12 +36,20 @@ export function ConfigForm({
   const [draft, setDraft] = useState(() => normalizeConfig(config));
   const draftBase = useRef(draft);
   const [draftDirty, setDraftDirty] = useState(false);
+  const [section, setSection] = useState("storage");
   // GET/PUT 响应可能带 envOverridden: string[]（camelCase 字段名），
   // 用于在对应输入框下标注"由环境变量提供"。字段缺失时按空数组处理。
   const envOverridden = readEnvOverridden(config);
   const [pendingSavedConfigKey, setPendingSavedConfigKey] = useState("");
   const pendingSavedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftRevision = useRef(0);
+  const sectionKeys = ["storage", "download", "accounts", "interface", "security"] as const;
+
+  function changeSection(nextSection: string) {
+    if (nextSection === section) return true;
+    setSection(nextSection);
+    return true;
+  }
 
   useEffect(() => {
     const normalized = normalizeConfig(config);
@@ -66,6 +75,15 @@ export function ConfigForm({
   useEffect(() => () => {
     if (pendingSavedTimer.current) clearTimeout(pendingSavedTimer.current);
   }, []);
+
+  useEffect(() => {
+    if (!draftDirty) return;
+    const protectDraft = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const protectNavigation = (event: Event) => event.preventDefault();
+    window.addEventListener("beforeunload", protectDraft);
+    window.addEventListener("settings:before-navigate", protectNavigation);
+    return () => { window.removeEventListener("beforeunload", protectDraft); window.removeEventListener("settings:before-navigate", protectNavigation); };
+  }, [draftDirty]);
 
   function updateDraft(action: React.SetStateAction<AppConfig>) {
     draftRevision.current += 1;
@@ -134,9 +152,10 @@ export function ConfigForm({
   return (
     <div className="workspace-page settings-form">
       <div className="page-heading">
-        <h1 className="page-title">{t("设置")}</h1>
+        <h1 className="page-title">{t("系统配置")}</h1>
 
-        <div className="page-actions">
+        <div className="page-actions" hidden={section !== "download"}>
+          {draftDirty && <Tag tone="warning">{t("未保存")}</Tag>}
           {draftDirty ? (
             // 有未保存修改：二次确认后再丢弃
             <Popconfirm
@@ -169,13 +188,25 @@ export function ConfigForm({
             aria-busy={mutation.isPending}
             onClick={() => mutation.mutate(configDiff(draftBase.current, draft))}
           >
-            {t("保存配置")}</Button>
+            {t("保存下载设置")}</Button>
         </div>
       </div>
 
-      <StorageManagement />
+      <div className="settings-navigation" role="tablist" aria-label={t("设置分类")}>
+        {[["storage", "存储"], ["download", "下载与归档"], ["accounts", "X 账号"], ["interface", "界面"], ["security", "账号安全"]].map(([key, label]) => <button key={key} type="button" id={`settings-tab-${key}`} role="tab" aria-selected={section === key} aria-controls={`settings-panel-${key}`} tabIndex={section === key ? 0 : -1} onClick={() => changeSection(key)} onKeyDown={event => {
+          let index = sectionKeys.indexOf(key as (typeof sectionKeys)[number]);
+          if (event.key === "ArrowRight") index = (index + 1) % sectionKeys.length;
+          else if (event.key === "ArrowLeft") index = (index + sectionKeys.length - 1) % sectionKeys.length;
+          else if (event.key === "Home") index = 0;
+          else if (event.key === "End") index = sectionKeys.length - 1;
+          else return;
+          event.preventDefault();
+          if (changeSection(sectionKeys[index])) document.getElementById(`settings-tab-${sectionKeys[index]}`)?.focus();
+        }}>{t(label)}{key === "download" && draftDirty && <span className="settings-dirty-dot" aria-hidden="true" />}</button>)}
+      </div>
+      <div role="tabpanel" id="settings-panel-storage" aria-labelledby="settings-tab-storage" hidden={section !== "storage"}><StorageManagement /></div>
 
-      <section className="semi-settings-section settings-download">
+      <section role="tabpanel" id="settings-panel-download" aria-labelledby="settings-tab-download" hidden={section !== "download"} className="semi-settings-section settings-download">
         <h2 className="settings-section-title"><Download size={16} />{t("下载与归档")}</h2>
         <DownloadSettingsFields
           draft={draft}
@@ -184,9 +215,11 @@ export function ConfigForm({
         />
       </section>
 
-      <XAccountsSettings />
+      <div role="tabpanel" id="settings-panel-accounts" aria-labelledby="settings-tab-accounts" hidden={section !== "accounts"}><XAccountsSettings /></div>
 
-      <section className="semi-settings-section"><LanguageSettings /></section>
+      <section role="tabpanel" id="settings-panel-interface" aria-labelledby="settings-tab-interface" hidden={section !== "interface"} className="semi-settings-section"><LanguageSettings /></section>
+      <div role="tabpanel" id="settings-panel-security" aria-labelledby="settings-tab-security" hidden={section !== "security"}><AccountSecurity /></div>
+      {section === "storage" && <AccountSecurity compact />}
     </div>
   );
 }

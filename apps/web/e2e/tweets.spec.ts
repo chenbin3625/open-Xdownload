@@ -54,11 +54,13 @@ test("tweet density, long text and repost filters work with archived data", asyn
   await expect.poll(() => modal.locator("img").evaluate((node: HTMLImageElement) => node.complete && node.naturalWidth > 0)).toBe(true);
   await page.keyboard.press("Escape");
   await expect(modal).toHaveCount(0);
-  const video = page.locator(".tweet-media video").first();
+  await page.getByRole("button", { name: new RegExp(en ? "^Play video" : "^播放视频") }).first().click();
+  const video = page.getByRole("dialog").locator("video");
   await video.evaluate((node: HTMLVideoElement) => node.play());
   await expect.poll(() => video.evaluate((node: HTMLVideoElement) => node.currentTime)).toBeGreaterThan(0);
   expect(await video.evaluate((node: HTMLVideoElement) => node.videoWidth)).toBeGreaterThan(0);
   await video.evaluate((node: HTMLVideoElement) => node.pause());
+  await page.keyboard.press("Escape");
 
   await page.getByText(en ? "Comfortable" : "舒适", { exact: true }).click();
   await expect(page).toHaveURL(/view=comfortable/);

@@ -84,6 +84,6 @@ export function hydrateAppQueries(
     client.setQueryData(archiveScheduleQueryRoot, bootstrap.schedules);
   }
   if (bootstrap.jobs && bootstrap.jobs.page === page && bootstrap.jobs.pageSize === pageSize) {
-    client.setQueryData([...jobsQueryRoot, page, pageSize], bootstrap.jobs);
+    client.setQueryData([...jobsQueryRoot, page, pageSize, "all", "all", ""], bootstrap.jobs);
   }
 }

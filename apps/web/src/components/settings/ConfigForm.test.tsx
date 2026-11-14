@@ -4,7 +4,8 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { expect, it, vi } from "vitest";
 import * as api from "../../lib/api";
-import { act, renderWithProviders, screen, waitFor } from "../../test/render";
+import { act, renderWithProviders as renderSettings, screen, waitFor } from "../../test/render";
+import { fireEvent } from "@testing-library/react";
 import { ConfigForm } from "./ConfigForm";
 import { TooltipProvider } from "../semi";
 
@@ -15,6 +16,12 @@ vi.mock("../../lib/api", async (importOriginal) => ({
 }));
 
 vi.mock("./StorageManagement", () => ({ StorageManagement: () => null }));
+
+function renderWithProviders(ui: React.ReactElement) {
+  const result = renderSettings(ui);
+  fireEvent.click(screen.getByRole("tab", { name: "下载与归档" }));
+  return result;
+}
 
 it("keeps edits made while a configuration save is pending", async () => {
   const config: api.AppConfig = {
@@ -31,7 +38,7 @@ it("keeps edits made while a configuration save is pending", async () => {
   );
   const input = screen.getByPlaceholderText("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080");
   await user.type(input, "http://first:7890");
-  await user.click(screen.getByRole("button", { name: "保存配置" }));
+  await user.click(screen.getByRole("button", { name: "保存下载设置" }));
   await waitFor(() => expect(api.updateConfig).toHaveBeenCalled());
   await user.clear(input);
   await user.type(input, "http://second:7890");
@@ -76,7 +83,7 @@ it("saves only local edits when fresh config arrives during editing", async () =
   const user = userEvent.setup();
   await user.type(screen.getByRole("textbox", { name: "网络代理 (Proxy)" }), "http://edited:7890");
   view.rerender(<TooltipProvider>{form({ ...config, autoFollowProtected: true })}</TooltipProvider>);
-  await user.click(screen.getByRole("button", { name: "保存配置" }));
+  await user.click(screen.getByRole("button", { name: "保存下载设置" }));
   await waitFor(() => expect(api.updateConfig).toHaveBeenCalledWith({ proxyUrl: "http://edited:7890" }, expect.anything()));
 });
 
@@ -90,7 +97,7 @@ it("sends an empty patch when there are no local edits", async () => {
   vi.mocked(api.updateConfig).mockResolvedValue(config);
   renderWithProviders(<QueryClientProvider client={new QueryClient()}><ConfigForm config={config} /></QueryClientProvider>);
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "保存配置" }));
+  await user.click(screen.getByRole("button", { name: "保存下载设置" }));
   await waitFor(() => expect(api.updateConfig).toHaveBeenCalledWith({}, expect.anything()));
 });
 
@@ -106,7 +113,7 @@ it("syncs the latest GET config when a saved response cannot be confirmed", asyn
   const form = (value: api.AppConfig) => <QueryClientProvider client={client}><ConfigForm config={value} /></QueryClientProvider>;
   const view = renderWithProviders(form(config));
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "保存配置" }));
+  await user.click(screen.getByRole("button", { name: "保存下载设置" }));
   const input = screen.getByRole("textbox", { name: "网络代理 (Proxy)" }) as HTMLInputElement;
   await waitFor(() => expect(input.value).toBe("http://saved:7890"));
 

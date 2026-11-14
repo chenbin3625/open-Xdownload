@@ -53,6 +53,7 @@ async function deleteIfPresent(request: APIRequestContext, authToken: string) {
 async function openAccountsPage(page: Page, en: boolean) {
   await page.addInitScript(language => localStorage.setItem("open-xdownload-language", language), en ? "en" : "zh-CN");
   await page.goto("/settings");
+  await page.getByRole("tab", { name: en ? "X accounts" : "X 账号", exact: true }).click();
   await expect(page.locator(".x-accounts-table")).toBeVisible();
 }
 

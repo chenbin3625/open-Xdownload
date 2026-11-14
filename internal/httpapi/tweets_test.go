@@ -61,6 +61,15 @@ func TestTweetRetweetFiltersApplyBeforePagination(t *testing.T) {
 			}
 		})
 	}
+	authorsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(authorsResponse, newLoopbackRequest(http.MethodGet, "/api/archive/authors", nil))
+	var authors []storage.TweetAuthor
+	if authorsResponse.Code != http.StatusOK || json.Unmarshal(authorsResponse.Body.Bytes(), &authors) != nil {
+		t.Fatalf("list authors: %d %s", authorsResponse.Code, authorsResponse.Body.String())
+	}
+	if len(authors) != 2 || authors[0].Value != "owner" || authors[1].Value != "source" {
+		t.Fatalf("authors should include records outside the current page: %+v", authors)
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, newLoopbackRequest(http.MethodGet, "/api/archive/tweets?retweets=invalid", nil))
 	if response.Code != http.StatusBadRequest {

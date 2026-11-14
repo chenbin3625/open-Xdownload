@@ -276,3 +276,7 @@
 .toolbar-field .semi-input-wrapper {
   width: 100%;
 }
+.active-filter-tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.filter-chip { display: inline-flex; max-width: 100%; align-items: center; gap: 8px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--fg-body); font-size: 12px; overflow-wrap: anywhere; cursor: pointer; }
+.filter-chip:hover { border-color: var(--accent); color: var(--accent); }
+.filter-chip svg { flex-shrink: 0; }

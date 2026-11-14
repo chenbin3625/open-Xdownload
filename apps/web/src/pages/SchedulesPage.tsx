@@ -1,14 +1,8 @@
 import { t, useTranslation } from "../lib/i18n";
-import {
-  Clock,
-  Play,
-  Plus,
-  Trash2,
-  Users,
-} from "lucide-react";
+import { Clock, Pencil, Play, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import React from "react";
-import { Button, Card, Switch } from "@douyinfe/semi-ui";
+import React, { useMemo, useState } from "react";
+import { Button, Input, InputNumber, Select, Switch } from "@douyinfe/semi-ui";
 import {
   deleteArchiveSchedule,
   runArchiveSchedule,
@@ -18,13 +12,34 @@ import {
 import {
   formatDateTime,
   formatIntervalMinutes,
+  kindLabel,
   notifyError,
 } from "../components/common/CommonUI";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
-import { Alert, Empty, Skeleton } from "../components/semi";
-import { Popconfirm } from "../components/semi";
-import { Tag } from "../components/semi";
-import { toast } from "../components/semi";
+import {
+  Alert,
+  Drawer,
+  Empty,
+  Field,
+  ListSkeleton,
+  Modal,
+  Popconfirm,
+  Tag,
+  Tooltip,
+  toast,
+} from "../components/semi";
+
+function localTimeZone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }
+}
+
+function runStatusLabel(status: ArchiveSchedule["lastRunStatus"]) {
+  if (status === "running") return { label: t("执行中"), tone: "brand" as const };
+  if (status === "success") return { label: t("上轮成功"), tone: "success" as const };
+  if (status === "failed") return { label: t("上轮失败"), tone: "danger" as const };
+  if (status === "canceled") return { label: t("上轮已取消"), tone: "default" as const };
+  return null;
+}
 
 export interface SchedulesPageProps {
   schedules: ArchiveSchedule[];
@@ -41,8 +56,23 @@ export function SchedulesPage({
 }: SchedulesPageProps) {
   useTranslation();
   const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("all");
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const [editing, setEditing] = useState<ArchiveSchedule | null>(null);
+  const [lastRun, setLastRun] = useState<number[] | null>(null);
+  const timeZone = useMemo(() => localTimeZone(), []);
+  const detail = schedules.find((schedule) => schedule.id === detailId);
+  const detailRunStatus = runStatusLabel(detail?.lastRunStatus);
+  const filtered = schedules.filter(
+    (schedule) =>
+      (status === "all" || schedule.enabled === (status === "enabled")) &&
+      `${schedule.name} ${schedule.items.map((item) => item.input).join(" ")}`
+        .toLowerCase()
+        .includes(search.trim().toLowerCase()),
+  );
 
-  const toggleEnabled = useMutation({
+  const toggle = useMutation({
     mutationFn: (schedule: ArchiveSchedule) =>
       updateArchiveSchedule(schedule.id, {
         name: schedule.name,
@@ -50,198 +80,435 @@ export function SchedulesPage({
         items: schedule.items,
         enabled: !schedule.enabled,
       }),
-    onSuccess: (updated) => {
+    onSuccess: () => {
       void invalidateWorkbenchQueries(queryClient);
-      toast.success({
-        message: updated.enabled ? t("定时计划已启用") : t("定时计划已暂停"),
-        description: t("计划 “{{value0}}” 状态更新成功", { value0: updated.name }),
-      });
     },
     onError: notifyError(t("更新失败")),
   });
-
-  const runSchedule = useMutation({
-    mutationFn: (id: number) => runArchiveSchedule(id),
-    onSuccess: (jobs) => {
+  const save = useMutation({
+    mutationFn: (schedule: ArchiveSchedule) =>
+      updateArchiveSchedule(schedule.id, {
+        name: schedule.name.trim(),
+        intervalMinutes: schedule.intervalMinutes,
+        enabled: schedule.enabled,
+        items: schedule.items,
+      }),
+    onSuccess: () => {
+      setEditing(null);
       void invalidateWorkbenchQueries(queryClient);
-      toast.success({
-        message: t("计划运行已触发"),
-        description: t("已生成并排入 {{value0}} 个下载任务", { value0: jobs.length }),
-      });
+      toast.success({ message: t("计划已更新") });
+    },
+    onError: notifyError(t("更新失败")),
+  });
+  const run = useMutation({
+    mutationFn: runArchiveSchedule,
+    onSuccess: (jobs) => {
+      setLastRun(jobs.map((job) => job.id));
+      void invalidateWorkbenchQueries(queryClient);
+      toast.success({ message: t("计划运行已触发") });
     },
     onError: notifyError(t("执行失败")),
   });
-
-  const removeSchedule = useMutation({
-    mutationFn: (id: number) => deleteArchiveSchedule(id),
+  const remove = useMutation({
+    mutationFn: deleteArchiveSchedule,
     onSuccess: () => {
       void invalidateWorkbenchQueries(queryClient);
-      toast.success({
-        message: t("计划已删除"),
-      });
+      toast.success({ message: t("计划已删除") });
     },
     onError: notifyError(t("删除失败")),
   });
 
   return (
-    <div className="workspace-page">
+    <div className="workspace-page schedules-page">
       <div className="page-heading">
         <h1 className="page-title">{t("自动归档计划")}</h1>
         <Button
           theme="solid"
-          icon={<Plus className="size-4" />}
+          icon={<Plus size={16} />}
           onClick={onOpenCreateModal}
         >
-          {t("新建归档计划")}</Button>
+          {t("新建归档计划")}
+        </Button>
       </div>
-
+      <div className="schedule-summary">
+        <span>
+          <Clock size={16} />
+          {t("全部计划")} <strong>{schedules.length}</strong>
+        </span>
+        <span>
+          {t("已启用")}{" "}
+          <strong>
+            {schedules.filter((schedule) => schedule.enabled).length}
+          </strong>
+        </span>
+        <span>
+          {t("已暂停")}{" "}
+          <strong>
+            {schedules.filter((schedule) => !schedule.enabled).length}
+          </strong>
+        </span>
+        <span className="text-xs text-fg-muted">{t("时区")}: {timeZone}</span>
+      </div>
+      <div className="page-toolbar">
+        <Input
+          className="toolbar-search"
+          prefix={<Search size={16} />}
+          value={search}
+          onChange={setSearch}
+          placeholder={t("搜索计划名称或目标...")}
+          aria-label={t("搜索计划")}
+          showClear
+        />
+        <Select
+          className="toolbar-select"
+          aria-label={t("计划状态")}
+          value={status}
+          onChange={(value) => setStatus(String(value))}
+          optionList={[
+            { value: "all", label: t("全部状态") },
+            { value: "enabled", label: t("已启用") },
+            { value: "paused", label: t("已暂停") },
+          ]}
+        />
+        <span className="text-xs text-fg-muted">
+          {t("匹配计划")} {filtered.length}
+        </span>
+      </div>
+      {lastRun && (
+        <Alert
+          type="success"
+          message={
+            <span>
+              {t("计划运行已触发")} · {lastRun.map((id) => `#${id}`).join(", ")}{" "}
+              <a className="text-brand-600" href="/tasks">
+                {t("查看任务")}
+              </a>
+            </span>
+          }
+        />
+      )}
       {error ? (
-        <Alert type="error" showIcon message={t("定时计划加载失败")} description={error} />
-      ) : loading && schedules.length === 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {Array.from({ length: 3 }, (_, index) => (
-            <Card key={index} bodyStyle={{ padding: 16 }}>
-              <div className="space-y-3 p-1">
-                <Skeleton className="h-5 w-3/5" />
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-4/5" />
-                <Skeleton className="h-8 w-full mt-4" />
-              </div>
-            </Card>
-          ))}
-        </div>
-      ) : schedules.length === 0 ? (
-          <Empty
-            description={
-              <div className="space-y-1.5">
-                <div className="font-semibold text-sm text-fg">{t("暂无定时归档计划")}</div>
-                <p className="text-xs text-fg-muted max-w-md mx-auto">
-                  {t("您可以把常用关注的 X 博主、列表或推文账号加入自动计划，系统将按设置的频率自动同步最新媒体，免去手动重复输入的繁琐。")}</p>
-              </div>
-            }
+        <Alert
+          type="error"
+          message={t("定时计划加载失败")}
+          description={error}
+        />
+      ) : loading && !schedules.length ? (
+        <ListSkeleton />
+      ) : !filtered.length ? (
+        <Empty
+          description={
+            schedules.length ? t("没有匹配的计划") : t("暂无定时归档计划")
+          }
+        >
+          <Button
+            onClick={() => {
+              if (schedules.length) {
+                setSearch("");
+                setStatus("all");
+              } else onOpenCreateModal();
+            }}
           >
-            <Button
-              theme="solid"
-              icon={<Plus className="size-3.5" />}
-              onClick={onOpenCreateModal}
-              className="mt-2"
-            >
-              {t("立即创建第一个计划")}</Button>
-          </Empty>
+            {schedules.length ? t("清除筛选") : t("新建归档计划")}
+          </Button>
+        </Empty>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {schedules.map((schedule) => {
-            const batchSize = Math.max(0, ...schedule.items.map(item => item.batchSize ?? 0));
-            return (
-            <Card
-              key={schedule.id}
-              shadows="hover"
-              title={
-                <div className="flex min-w-0 items-center gap-2">
-                  <Clock className="size-4 shrink-0 text-brand-500" />
-                  <span className="truncate font-semibold text-sm text-fg" title={schedule.name}>
-                    {schedule.name}
-                  </span>
+        <div className="schedule-list">
+          <div className="schedule-list-heading">
+            <span>{t("计划 / 目标")}</span>
+            <span>{t("执行频率")}</span>
+            <span>{t("下次运行")}</span>
+            <span>{t("计划状态")}</span>
+            <span>{t("操作")}</span>
+          </div>
+          {filtered.map((schedule) => {
+            const runStatus = runStatusLabel(schedule.lastRunStatus);
+            return <article className="schedule-row" key={schedule.id}>
+              <div className="schedule-identity">
+                <button
+                  className="task-title-link"
+                  type="button"
+                  onClick={() => setDetailId(schedule.id)}
+                >
+                  {schedule.name}
+                </button>
+                <div className="text-xs text-fg-muted">
+                  {schedule.items.length} {t("个目标")} ·{" "}
+                  {schedule.items
+                    .slice(0, 2)
+                    .map((item) => item.input)
+                    .join(", ")}
+                  {schedule.items.length > 2 &&
+                    ` +${schedule.items.length - 2}`}
                 </div>
-              }
-              headerExtraContent={
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-fg-muted font-normal">
-                    {schedule.enabled ? t("运行中") : t("已暂停")}
-                  </span>
-                  <Switch
-                    checked={schedule.enabled}
-                    loading={toggleEnabled.isPending && toggleEnabled.variables?.id === schedule.id}
-                    onChange={() => toggleEnabled.mutate(schedule)}
-                    disabled={toggleEnabled.isPending && toggleEnabled.variables?.id === schedule.id}
-                    aria-label={t("切换计划 {{value0}} 状态", { value0: schedule.name })}
-                  />
-                </div>
-              }
-              bodyStyle={{ padding: 16 }}
-            >
-              <div className="space-y-4">
-              {/* 核心参数 */}
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="min-w-0">
-                  <span className="text-fg-subtle block text-xs">{t("执行周期")}</span>
-                  <span className="font-medium text-fg mt-0.5 block">
-                    {formatIntervalMinutes(schedule.intervalMinutes)}
-                  </span>
-                </div>
-                <div className="min-w-0">
-                  <span className="text-fg-subtle block text-xs">{t("下次运行")}</span>
-                  <span className="font-mono text-fg mt-0.5 block truncate" title={schedule.nextRunAt}>
-                    {schedule.nextRunAt ? formatDateTime(schedule.nextRunAt) : t("计算中")}
-                  </span>
-                </div>
-              </div>
-
-              {/* 目标列表标签 */}
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-xs text-fg-subtle">
-                  <span>{t("目标清单")}</span>
-                  <span>
-                    {schedule.items.length} {t(" 个目标")}
-                    {batchSize > 0 ? ` · ${t("每轮 {{value0}} 人", { value0: batchSize })}` : ""}
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
-                  {schedule.items.map((item, idx) => (
-                    <span
-                      key={idx}
-                      className="inline-flex items-center gap-1 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-xs text-fg-body border border-line/60 truncate max-w-[180px]"
-                      title={item.input}
-                    >
-                      <Users className="size-3 text-fg-subtle shrink-0" />
-                      <span className="truncate">{item.input}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              {/* 上次运行与操作栏 */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-line text-xs">
-                <span className="min-w-0 text-xs text-fg-subtle font-mono">
-                  {t("上次: ")}{schedule.lastRunAt ? formatDateTime(schedule.lastRunAt) : t("从未")}
+                <span className="text-xs text-fg-muted">
+                  {t("上次: ")}
+                  {schedule.lastRunAt
+                    ? formatDateTime(schedule.lastRunAt)
+                    : t("从未")}
                 </span>
-
-                <div className="flex items-center gap-1.5">
-                  <Popconfirm
-                    title={t("删除定时计划")}
-                    description={t("确定删除计划 “{{value0}}”？已下载的媒体文件不受影响。", { value0: schedule.name })}
-                    okText={t("删除")}
-                    cancelText={t("取消")}
-                    onConfirm={() => removeSchedule.mutate(schedule.id)}
-                  >
-                    <Button
-                      theme="borderless"
-                      type="danger"
-                      icon={<Trash2 className="size-3.5 text-danger" />}
-                      loading={removeSchedule.isPending && removeSchedule.variables === schedule.id}
-                      disabled={removeSchedule.isPending && removeSchedule.variables === schedule.id}
-                      aria-busy={removeSchedule.isPending && removeSchedule.variables === schedule.id}
-                      aria-label={t("删除计划")}
-                    />
-                  </Popconfirm>
-
+                {runStatus && <Tag tone={runStatus.tone}>{runStatus.label}</Tag>}
+                {schedule.lastRunStatus === "failed" && schedule.lastRunMessage && <span className="text-xs text-danger break-words">{schedule.lastRunMessage}</span>}
+              </div>
+              <span className="text-sm">
+                {formatIntervalMinutes(schedule.intervalMinutes)}
+              </span>
+              <time
+                className="text-xs text-fg-muted"
+                dateTime={schedule.nextRunAt}
+              >
+                {schedule.enabled
+                  ? schedule.nextRunAt
+                    ? formatDateTime(schedule.nextRunAt)
+                    : t("计算中")
+                  : "—"}
+              </time>
+              <div className="flex items-center gap-2">
+                <Switch
+                  size="small"
+                  checked={schedule.enabled}
+                  disabled={toggle.isPending || save.isPending}
+                  loading={
+                    toggle.isPending && toggle.variables?.id === schedule.id
+                  }
+                  onChange={() => toggle.mutate(schedule)}
+                  aria-label={t("切换计划 {{value0}} 状态", {
+                    value0: schedule.name,
+                  })}
+                />
+                <span className="text-xs">
+                  {schedule.enabled ? t("已启用") : t("已暂停")}
+                </span>
+              </div>
+              <div className="schedule-actions">
+                <Tooltip content={t("编辑计划")}>
                   <Button
-                    type="tertiary"
-                    icon={<Play className="size-3.5" />}
-                    loading={runSchedule.isPending && runSchedule.variables === schedule.id}
-                    disabled={runSchedule.isPending && runSchedule.variables === schedule.id}
-                    aria-busy={runSchedule.isPending && runSchedule.variables === schedule.id}
-                    onClick={() => runSchedule.mutate(schedule.id)}
-                  >
-                    {t("立即执行")}</Button>
-                </div>
+                    theme="borderless"
+                    icon={<Pencil size={16} />}
+                    aria-label={`${t("编辑计划")} ${schedule.name}`}
+                    disabled={toggle.isPending || save.isPending}
+                    onClick={() =>
+                      setEditing({
+                        ...schedule,
+                        items: schedule.items.map((item) => ({ ...item })),
+                      })
+                    }
+                  />
+                </Tooltip>
+                <button
+                  type="button"
+                  className="schedule-run-button"
+                  title={t("立即执行")}
+                  aria-label={`${t("立即执行")} ${schedule.name}`}
+                  disabled={run.isPending}
+                  aria-busy={run.isPending && run.variables === schedule.id}
+                  onClick={() => run.mutate(schedule.id)}
+                >
+                  {run.isPending && run.variables === schedule.id ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />}
+                </button>
+                <Popconfirm
+                  title={t("删除定时计划")}
+                  description={t(
+                    "确定删除计划 “{{value0}}”？已下载的媒体文件不受影响。",
+                    { value0: schedule.name },
+                  )}
+                  onConfirm={() => { if (!remove.isPending) remove.mutate(schedule.id); }}
+                >
+                  <Button
+                    theme="borderless"
+                    type="danger"
+                    icon={<Trash2 size={16} />}
+                    aria-label={t("删除计划")}
+                    disabled={remove.isPending}
+                    loading={
+                      remove.isPending && remove.variables === schedule.id
+                    }
+                  />
+                </Popconfirm>
               </div>
-              </div>
-            </Card>
-            );
+            </article>;
           })}
         </div>
       )}
+      <Drawer
+        open={Boolean(detail)}
+        onClose={() => setDetailId(null)}
+        title={detail?.name}
+        width="36rem"
+      >
+        {detail && (
+          <div className="space-y-5">
+            <div className="flex flex-wrap gap-2">
+              <Tag tone={detail.enabled ? "success" : "default"}>
+                {detail.enabled ? t("已启用") : t("已暂停")}
+              </Tag>
+              <Tag>{formatIntervalMinutes(detail.intervalMinutes)}</Tag>
+              {detailRunStatus && <Tag tone={detailRunStatus.tone}>{detailRunStatus.label}</Tag>}
+            </div>
+            <dl className="schedule-detail-meta">
+              <dt>{t("下次运行")}</dt>
+              <dd>{detail.enabled ? formatDateTime(detail.nextRunAt) : "—"}</dd>
+              <dt>{t("上次运行")}</dt>
+              <dd>
+                {detail.lastRunAt
+                  ? formatDateTime(detail.lastRunAt)
+                  : t("从未")}
+              </dd>
+              <dt>{t("时区")}</dt>
+              <dd>{timeZone}</dd>
+              {detail.lastRunMessage && <><dt>{t("执行摘要")}</dt><dd className={detail.lastRunStatus === "failed" ? "text-danger" : undefined}>{detail.lastRunMessage}</dd></>}
+            </dl>
+            <h2 className="text-sm font-semibold">
+              {t("目标清单")} ({detail.items.length})
+            </h2>
+            {detail.items.map((item, index) => (
+              <div key={index} className="border-b border-line pb-3">
+                <div className="text-sm font-medium break-all">
+                  {item.input}
+                </div>
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <Tag>{kindLabel(item.kind)}</Tag>
+                  <Tag>
+                    {item.archiveMode === "media"
+                      ? t("archive.mediaOnly")
+                      : item.archiveMode === "tweets"
+                        ? t("archive.textOnly")
+                        : t("archive.both")}
+                  </Tag>
+                  {item.backfill && <Tag>{t("archive.backfill")}</Tag>}
+                </div>
+              </div>
+            ))}
+            {detail.lastJobIds?.length > 0 && (
+              <div>
+                <h2 className="text-sm font-semibold mb-2">
+                  {t("最近执行任务")}
+                </h2>
+                <a href="/tasks" className="text-sm text-brand-600">
+                  {detail.lastJobIds.map((id) => `#${id}`).join(", ")} →
+                </a>
+              </div>
+            )}
+            <Button
+              icon={<Pencil size={16} />}
+              onClick={() => {
+                setEditing({
+                  ...detail,
+                  items: detail.items.map((item) => ({ ...item })),
+                });
+                setDetailId(null);
+              }}
+            >
+              {t("编辑计划")}
+            </Button>
+          </div>
+        )}
+      </Drawer>
+      <Modal
+        open={Boolean(editing)}
+        onClose={() => {
+          if (!save.isPending) setEditing(null);
+        }}
+        title={t("编辑计划")}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button disabled={save.isPending} onClick={() => setEditing(null)}>
+              {t("取消")}
+            </Button>
+            <Button
+              theme="solid"
+              loading={save.isPending}
+              disabled={
+                !editing?.name.trim() ||
+                !editing.items.length ||
+                editing.items.some((item) => !item.input.trim()) ||
+                save.isPending ||
+                !Number.isInteger(editing.intervalMinutes) ||
+                editing.intervalMinutes < 5 ||
+                editing.intervalMinutes > 43200
+              }
+              onClick={() => editing && save.mutate(editing)}
+            >
+              {t("保存计划")}
+            </Button>
+          </div>
+        }
+      >
+        {editing && (
+          <div className="space-y-4">
+            <Field label={t("计划名称")}>
+              <Input
+                aria-label={t("计划名称")}
+                value={editing.name}
+                onChange={(name) => setEditing({ ...editing, name })}
+              />
+            </Field>
+            <Field label={t("调度频率 (分钟)")}>
+              <InputNumber
+                min={5}
+                precision={0}
+                aria-label={t("调度频率 (分钟)")}
+                max={43200}
+                value={editing.intervalMinutes}
+                onChange={(value) =>
+                  setEditing({ ...editing, intervalMinutes: Number(value) })
+                }
+              />
+              <span className="text-xs text-fg-muted">
+                {formatIntervalMinutes(editing.intervalMinutes)}
+              </span>
+            </Field>
+            <h3 className="text-sm font-semibold">{t("目标清单")}</h3>
+            {editing.items.map((item, index) => (
+              <div className="schedule-edit-target" key={index}>
+                <Tag>{kindLabel(item.kind)}</Tag>
+                <Input
+                  aria-label={`${t("目标")} ${index + 1}`}
+                  value={item.input}
+                  onChange={(input) =>
+                    setEditing({
+                      ...editing,
+                      items: editing.items.map((current, position) =>
+                        position === index ? { ...current, input, title: undefined } : current,
+                      ),
+                    })
+                  }
+                />
+                <Tooltip content={t("移除目标")}>
+                  <Button
+                    theme="borderless"
+                    type="danger"
+                    icon={<Trash2 size={16} />}
+                    aria-label={`${t("移除目标")} ${index + 1}`}
+                    onClick={() =>
+                      setEditing({
+                        ...editing,
+                        items: editing.items.filter(
+                          (_, position) => position !== index,
+                        ),
+                      })
+                    }
+                  />
+                </Tooltip>
+              </div>
+            ))}
+            <Button
+              icon={<Plus size={16} />}
+              onClick={() =>
+                setEditing({
+                  ...editing,
+                  items: [
+                    ...editing.items,
+                    { kind: "user", input: "", archiveMode: "both" },
+                  ],
+                })
+              }
+            >
+              {t("添加用户目标")}
+            </Button>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

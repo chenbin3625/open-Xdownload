@@ -116,6 +116,8 @@ type ArchiveSchedule struct {
 	LastRunAt       *time.Time            `json:"lastRunAt,omitempty" db:"last_run_at"`
 	NextRunAt       time.Time             `json:"nextRunAt" db:"next_run_at"`
 	LastJobIDs      []int64               `json:"lastJobIds" db:"-"`
+	LastRunStatus   string                `json:"lastRunStatus,omitempty" db:"-"`
+	LastRunMessage  string                `json:"lastRunMessage,omitempty" db:"-"`
 	LastJobIDsJSON  string                `json:"-" db:"last_job_ids"`
 	CreatedAt       time.Time             `json:"createdAt" db:"created_at"`
 	UpdatedAt       time.Time             `json:"updatedAt" db:"updated_at"`
@@ -166,6 +168,30 @@ type JobStats struct {
 	Active    int `json:"active" db:"active"`
 	Completed int `json:"completed" db:"completed"`
 	Failed    int `json:"failed" db:"failed"`
+}
+
+// JobListFilter 是任务中心的服务端筛选条件。Status 为空表示不限制状态。
+type JobListFilter struct {
+	Status  string
+	Kind    JobKind
+	Keyword string
+}
+
+// JobListCounts 是在 Kind/Keyword 条件下、忽略 Status 的全量分组计数。
+// 这样前端切换状态标签时不需要只依赖当前页的数量。
+type JobListCounts struct {
+	All       int `json:"all"`
+	Active    int `json:"active"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+}
+
+type JobListPage struct {
+	Items    []Job         `json:"items"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"pageSize"`
+	Total    int           `json:"total"`
+	Counts   JobListCounts `json:"counts"`
 }
 
 // DashboardMetaView is the compact stats payload piggybacked on SSE and

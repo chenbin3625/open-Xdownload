@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@douyinfe/semi-ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, FolderOpen, HardDrive, RefreshCw, Save } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Eye, FolderOpen, HardDrive, RefreshCw, Save } from "lucide-react";
 import { api, type AssetKind, type TweetData } from "../../lib/api";
 import { getStorage, getTweets, migrateStorage, saveStorage, storageQueryKey, type AssetRule, type StorageDocument } from "../../lib/archive";
 import { t, useTranslation } from "../../lib/i18n";
 import { Alert, Field, Input, ListSkeleton, Modal, Popconfirm, Select, Switch, Tag, Tooltip, toast } from "../semi";
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
 import { FilenameStrategy } from "./FilenameStrategy";
+import { copyToClipboard } from "../common/CommonUI";
 
 const kinds: AssetKind[] = ["image", "video"];
 
@@ -33,8 +34,8 @@ function StoragePathPreview({ document, kind, tweet: sample }: { document: Stora
     const media = tweet.media[index] ?? { id: video ? "video-1" : "image-1", type: video ? "video" : "photo" };
     const extension = kind === "video" ? "mp4" : "jpg";
     return api<{ location: string }>("/api/storage/preview", { method: "POST", body: JSON.stringify({ document: submitted, kind, tweet, media, index: Math.max(0, index), extension }) });
-  }, onSuccess: (value, submitted) => { if (current.current === submitted) setLocation(value.location); }, onError: error => toast.error({ message: error.message }) });
-  return <div className="storage-preview-row"><Button type="tertiary" icon={<Eye size={16} />} aria-label={`${t(`storage.kind.${kind}`)} ${t("storage.preview")}`} loading={preview.isPending} disabled={preview.isPending} onClick={() => preview.mutate(document)}>{t("storage.preview")}</Button>{location && <output className="storage-path-preview">{location}</output>}</div>;
+  }, onSuccess: (value, submitted) => { if (current.current === submitted) setLocation(value.location); } });
+  return <div className="storage-preview-row"><Button type="tertiary" icon={<Eye size={16} />} aria-label={`${t(`storage.kind.${kind}`)} ${t("storage.preview")}`} loading={preview.isPending} disabled={preview.isPending} onClick={() => preview.mutate(document)}>{t("storage.preview")}</Button>{location && <><output className="storage-path-preview">{location}</output><Tooltip content={t("复制本地路径")}><Button theme="borderless" icon={<Copy size={16} />} aria-label={t("复制本地路径")} onClick={() => void copyToClipboard(location, t("本地路径"))} /></Tooltip></>}{preview.isError && preview.variables === document && <span className="text-xs text-danger">{preview.error.message}</span>}</div>;
 }
 
 export function StorageManagement() {
@@ -44,9 +45,19 @@ export function StorageManagement() {
   const [draft, setDraft] = useState<StorageDocument | null>(null);
   const currentDraft = useRef(draft); currentDraft.current = draft;
   const [dirty, setDirty] = useState(false);
+  const [migrationId, setMigrationId] = useState<number | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState(false);
+  const [defaultRulesCollapsed, setDefaultRulesCollapsed] = useState(true);
   const tweets = useQuery({ queryKey: ["storage-preview-tweets"], queryFn: ({ signal }) => getTweets(new URLSearchParams({ pageSize: "1" }), signal) });
   useEffect(() => { if (query.data && !dirty) setDraft(query.data); }, [query.data, dirty]);
+  useEffect(() => {
+    if (!dirty) return;
+    const protectDraft = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const protectNavigation = (event: Event) => event.preventDefault();
+    window.addEventListener("beforeunload", protectDraft);
+    window.addEventListener("settings:before-navigate", protectNavigation);
+    return () => { window.removeEventListener("beforeunload", protectDraft); window.removeEventListener("settings:before-navigate", protectNavigation); };
+  }, [dirty]);
   function update(next: StorageDocument) { setDraft({ ...next, enabled: true }); setDirty(true); }
   const save = useMutation({ mutationFn: saveStorage, onSuccess: (document, submitted) => {
     client.setQueryData(storageQueryKey, document);
@@ -54,7 +65,7 @@ export function StorageManagement() {
     setDraft(current => edited && current ? { ...current, version: document.version, targets: current.targets.map(target => ({ ...target, version: document.targets.find(saved => saved.id === target.id)?.version ?? target.version })) } : document);
     setDirty(edited); toast.success({ message: t("storage.saved") });
   }, onError: error => toast.error({ message: error.message }) });
-  const migration = useMutation({ mutationFn: migrateStorage, onSuccess: () => { void client.invalidateQueries({ queryKey: ["jobs"] }); toast.success({ message: t("storage.migrationQueued") }); }, onError: error => toast.error({ message: error.message }) });
+  const migration = useMutation({ mutationFn: migrateStorage, onSuccess: job => { setMigrationId(job.id); void client.invalidateQueries({ queryKey: ["jobs"] }); toast.success({ message: t("storage.migrationQueued") }); }, onError: error => toast.error({ message: error.message }) });
   if (!draft) return query.isError ? <Alert type="error" message={query.error.message} action={<Button onClick={() => void query.refetch()}>{t("重试")}</Button>} /> : <ListSkeleton rows={3} />;
   const target = draft.targets.find(item => item.id === draft.default.targetId);
   function changeRoot(root: string) {
@@ -88,21 +99,22 @@ export function StorageManagement() {
       </div>
     </div>
     <div className="storage-default-rules">
-      <h3 className="settings-subsection-title">{t("storage.default")}</h3>
-      <div className="storage-policy-options">{ruleFields("default", draft.default)}</div>
-      <div className="storage-filename-limit">{t("文件名上限：240 字节（含扩展名）")}</div>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="settings-subsection-title">{t("storage.default")}</h3>
+        <Button type="tertiary" size="small" icon={defaultRulesCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />} aria-expanded={!defaultRulesCollapsed} onClick={() => setDefaultRulesCollapsed(collapsed => !collapsed)}>{defaultRulesCollapsed ? t("展开默认规则") : t("收起默认规则")}</Button>
+      </div>
+      {!defaultRulesCollapsed && <><div className="storage-policy-options">{ruleFields("default", draft.default)}</div><div className="storage-filename-limit">{t("文件名上限：240 字节（含扩展名）")}</div></>}
     </div>
     <div className="storage-media-rules">
       <h3 className="settings-subsection-title">{t("按媒体类型单独设置")}</h3>
-      <div className="storage-media-heading" aria-hidden="true"><span>{t("媒体类型")}</span><span>{t("单独设置")}</span><span>{t("storage.target")}</span><span>{t("分类存储策略")}</span><span>{t("命名策略")}</span></div>
       {kinds.map(kind => <div className="storage-media-row" role="group" aria-label={t(`storage.kind.${kind}`)} key={kind}>
         <span className="storage-media-name">{t(`storage.kind.${kind}`)}</span>
         <div className="storage-media-mode"><Switch checked={Boolean(draft.rules[kind])} ariaLabel={`${t(`storage.kind.${kind}`)} ${t("单独设置")}`} onChange={custom => { const rules = { ...draft.rules }; if (custom) rules[kind] = { ...draft.default }; else delete rules[kind]; update({ ...draft, rules }); }} /><span>{t(draft.rules[kind] ? "单独设置" : "使用默认")}</span></div>
-        {ruleFields(kind, { ...(draft.rules[kind] ?? draft.default), separateFolder: draft.rules[kind]?.separateFolder ?? draft.default.separateFolder }, !draft.rules[kind])}
+        {draft.rules[kind] ? ruleFields(kind, { ...draft.rules[kind]!, separateFolder: draft.rules[kind]?.separateFolder ?? draft.default.separateFolder }) : <div className="storage-inherited-summary"><Tag>{t("使用默认")}</Tag><span>{target?.name || target?.id} · {target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root}</span><span>{directoryOptions().find(option => option.value === draft.default.directoryTemplate)?.label || t("保留现有分类方式")}</span><span>{t("命名策略")}: {draft.default.filenameTemplate.replace(/\{(text|tweet_id|media_id|username|index|ext)\}/g, (_token, field: string) => t(({ text: "正文", tweet_id: "推文编号", media_id: "媒体编号", username: "用户名", index: "媒体序号", ext: "扩展名" } as Record<string, string>)[field]))}</span></div>}
         <StoragePathPreview document={draft} kind={kind} tweet={tweets.data?.items[0]} />
       </div>)}
     </div>
-    <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{t("storage.sourceRetained")}</p></div><Popconfirm title={t("storage.migrateConfirm")} onConfirm={() => migration.mutate()}><Button disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
+    <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{dirty ? t("请先保存存储设置") : t("storage.sourceRetained")}</p>{migrationId && <a className="text-sm text-brand-600" href="/tasks">{t("查看整理任务")} #{migrationId}</a>}</div><Popconfirm title={t("storage.migrateConfirm")} onConfirm={() => migration.mutate()}><Button disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
     <Modal open={pickingDirectory} onClose={() => setPickingDirectory(false)} title={t("选择目录")} footer={null}><LocalDirectoryPicker path={target?.root ?? ""} onSelect={root => { changeRoot(root); setPickingDirectory(false); }} /></Modal>
   </section>;
 }

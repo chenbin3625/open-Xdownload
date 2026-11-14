@@ -140,6 +140,7 @@ func (s *Server) Routes() http.Handler {
 	read("/api/events", s.events)
 	read("/api/library/downloads", s.listDownloads)
 	read("/api/archive/tweets", s.listTweets)
+	read("/api/archive/authors", s.listTweetAuthors)
 	read("/api/archive/tweets/{tweetID}", s.getTweet)
 	read("/api/archive/progress", s.tweetProgress)
 	r.Post("/api/archive/tweets/{tweetID}/retry-media", s.retryTweetMedia)
@@ -793,27 +794,58 @@ func parserOptionsFromConfig(cfg config.AppConfig) parser.ParseOptions {
 }
 
 type jobListPage struct {
-	Items    []storage.Job `json:"items"`
-	Page     int           `json:"page"`
-	PageSize int           `json:"pageSize"`
+	Items    []storage.Job         `json:"items"`
+	Page     int                   `json:"page"`
+	PageSize int                   `json:"pageSize"`
+	Total    int                   `json:"total"`
+	Counts   storage.JobListCounts `json:"counts"`
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	page := parsePositiveInt(r, "page", 1, 1, 1000000)
 	pageSize := parsePositiveInt(r, "pageSize", 10, 1, 100)
-	offset := (page - 1) * pageSize
-	items, err := s.store.ListJobsPage(r.Context(), pageSize, offset)
+	status := r.URL.Query().Get("status")
+	if status != "" && status != "all" && status != "active" && status != "completed" && status != "failed" {
+		writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的任务状态筛选"))
+		return
+	}
+	kindValue := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kindValue == "all" {
+		kindValue = ""
+	}
+	if kindValue != "" {
+		switch storage.JobKind(kindValue) {
+		case storage.JobKindTweetLink, storage.JobKindMediaURL, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing, storage.JobKindFailedRetry, storage.JobKindAssetMigration:
+		default:
+			writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的任务类型筛选"))
+			return
+		}
+	}
+	keyword := strings.TrimSpace(r.URL.Query().Get("q"))
+	if keyword == "" {
+		keyword = strings.TrimSpace(r.URL.Query().Get("search"))
+	}
+	if characters := []rune(keyword); len(characters) > 120 {
+		keyword = string(characters[:120])
+	}
+	result, err := s.store.ListJobsPageFiltered(r.Context(), pageSize, page, storage.JobListFilter{
+		Status:  status,
+		Kind:    storage.JobKind(kindValue),
+		Keyword: keyword,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if items == nil {
-		items = []storage.Job{}
+	if result.Items == nil {
+		result.Items = []storage.Job{}
 	}
 	writeJSON(w, http.StatusOK, jobListPage{
-		Items:    items,
-		Page:     page,
-		PageSize: pageSize,
+		Items:    result.Items,
+		Page:     result.Page,
+		PageSize: result.PageSize,
+		Total:    result.Total,
+		Counts:   result.Counts,
 	})
 }
 

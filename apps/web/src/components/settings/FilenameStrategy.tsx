@@ -18,7 +18,7 @@ export function FilenameStrategy({ value, onChange, disabled, labelPrefix }: {
   ];
   const fields = [
     { value: "{text}", label: t("正文") },
-    { value: "{tweet_id}", label: t("正文编号") },
+    { value: "{tweet_id}", label: t("推文编号") },
     { value: "{media_id}", label: t("媒体编号") },
     { value: "{username}", label: t("用户名") },
     { value: "{index}", label: t("媒体序号") },

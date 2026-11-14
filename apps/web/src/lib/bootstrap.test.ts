@@ -50,7 +50,7 @@ describe("hydrateAppQueries", () => {
   it("seeds matching page caches and config", () => {
     const client = new QueryClient();
     hydrateAppQueries(client, { jobs, meta, schedules: [], config }, 1, 20);
-    expect(client.getQueryData([...jobsQueryRoot, 1, 20])).toEqual(jobs);
+    expect(client.getQueryData([...jobsQueryRoot, 1, 20, "all", "all", ""])).toEqual(jobs);
     expect(client.getQueryData(dashboardMetaQueryRoot)).toEqual(meta);
     expect(client.getQueryData(archiveScheduleQueryRoot)).toEqual([]);
     expect(client.getQueryData(configQueryRoot)).toEqual(config);
@@ -59,7 +59,7 @@ describe("hydrateAppQueries", () => {
   it("hydrates config and meta even when jobs page mismatches", () => {
     const client = new QueryClient();
     hydrateAppQueries(client, { jobs, meta, config }, 2, 20);
-    expect(client.getQueryData([...jobsQueryRoot, 2, 20])).toBeUndefined();
+    expect(client.getQueryData([...jobsQueryRoot, 2, 20, "all", "all", ""])).toBeUndefined();
     expect(client.getQueryData(dashboardMetaQueryRoot)).toEqual(meta);
     expect(client.getQueryData(configQueryRoot)).toEqual(config);
   });

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -151,15 +151,15 @@ describe("TaskCenterPage 移动端", () => {
 
     expect(screen.queryByRole("table")).toBeNull();
     expect(screen.getByRole("list", { name: "任务列表" })).toBeTruthy();
-    expect(screen.queryByText("部分媒体链接已过期")).toBeNull();
-    expect(screen.getByRole("button", { name: "部分失败 · 80%" })).toBeTruthy();
+    expect(screen.getByText("部分媒体链接已过期")).toBeTruthy();
+    expect(screen.getByLabelText("部分失败 · 80%")).toBeTruthy();
     expect(api.getJobFiles).not.toHaveBeenCalled();
 
-    await user.click(screen.getAllByRole("button", { name: "展开详情" })[0]);
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[0]);
     await waitFor(() => expect(screen.getByText("pic1.jpg")).toBeTruthy());
     expect(api.getJobFiles).toHaveBeenCalledWith(1, expect.any(AbortSignal));
-    await user.click(screen.getByRole("button", { name: "收起详情" }));
-    expect(screen.queryByText("pic1.jpg")).toBeNull();
+    await user.click(screen.getByRole("dialog").querySelector<HTMLButtonElement>(".semi-sidesheet-close")!);
+    await waitFor(() => expect(screen.queryByText("pic1.jpg")).toBeNull());
   });
 
   it("保留取消、重试与搜索操作", async () => {
@@ -173,7 +173,7 @@ describe("TaskCenterPage 移动端", () => {
     await waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith(4, expect.anything()));
     await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(api.retryJob).toHaveBeenCalledWith(2, expect.anything()));
-    await user.type(screen.getByPlaceholderText("按标题、用户名、错误信息或 ID 搜索..."), "failed_user");
+    await user.type(screen.getByPlaceholderText("搜索本页任务、用户名或错误..."), "failed_user");
     expect(screen.queryByText("推文 123")).toBeNull();
     expect(screen.getByText("用户 failed_user")).toBeTruthy();
   });
@@ -185,11 +185,10 @@ describe("TaskCenterPage", () => {
     vi.mocked(api.retryJob).mockReset();
   });
 
-  it("列表只展示紧凑状态，悬停或聚焦后展示执行详情", async () => {
-    const user = userEvent.setup();
+  it("直接展示进度和错误摘要，详情仍按需加载", async () => {
     renderWithClient(
       <TaskCenterPage
-        jobs={mockJobs}
+        jobs={[...mockJobs, { ...mockJobs[0], id: 4, status: "downloading", progress: 0.4, message: "正在下载媒体" }]}
         failedTweetCount={0}
         pagination={{ page: 1, pageSize: 20, total: 3, totalPages: 1 }}
         onPageChange={vi.fn()}
@@ -199,22 +198,11 @@ describe("TaskCenterPage", () => {
       />,
     );
 
-    expect(screen.queryByText("用户不存在或已被封禁 (404 Not Found)")).toBeNull();
-    expect(screen.queryByText("下载完成")).toBeNull();
-    expect(screen.queryByRole("progressbar")).toBeNull();
-    const status = screen.getByRole("button", { name: "失败 · 10%" });
-    await user.hover(status);
-    expect(await screen.findByText("用户不存在或已被封禁 (404 Not Found)")).toBeTruthy();
-    expect(screen.getByText("10%")).toBeTruthy();
-    await user.unhover(status);
-    // Semi 的 Tooltip 在鼠标移出后还有延迟与过渡动画，CI 负载高时会超过 waitFor
-    // 默认的 1s，导致文本已消失但元素尚未卸载的中间态被判为失败。
-    await waitFor(
-      () => expect(screen.queryByText("用户不存在或已被封禁 (404 Not Found)")).toBeNull(),
-      { timeout: 5000 },
-    );
-    act(() => status.focus());
-    expect(await screen.findByText("用户不存在或已被封禁 (404 Not Found)", {}, { timeout: 5000 })).toBeTruthy();
+    expect(screen.getByText("用户不存在或已被封禁 (404 Not Found)")).toBeTruthy();
+    expect(screen.getByText("下载完成")).toBeTruthy();
+    expect(screen.getByRole("progressbar").getAttribute("value")).toBe("40");
+    expect(screen.getByText("正在下载媒体")).toBeTruthy();
+    expect(api.getJobFiles).not.toHaveBeenCalled();
   });
 
   it("展开错误任务时，在详情顶部显示错误 Alert 和重试按钮", async () => {
@@ -237,13 +225,14 @@ describe("TaskCenterPage", () => {
     );
 
     // 点击第二个任务（失败任务）的展开按钮
-    const expandButtons = screen.getAllByLabelText("展开详情");
+    const expandButtons = screen.getAllByLabelText("查看任务详情");
     await user.click(expandButtons[1]);
 
     // 验证展示了错误横幅以及具体错误信息
     await waitFor(() => {
       expect(screen.getByText("任务执行失败")).not.toBeNull();
     });
+    await user.click(screen.getByRole("tab", { name: /文件/ }));
     expect(screen.getByText("任务未生成已下载文件记录")).not.toBeNull();
     // 应当展示重试按钮
     expect(screen.getByRole("button", { name: "重试此任务" })).not.toBeNull();
@@ -270,7 +259,7 @@ describe("TaskCenterPage", () => {
         onOpenFailedDrawer={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "展开详情" }));
+    await user.click(screen.getByRole("button", { name: "查看任务详情" }));
     const button = screen.getByRole("button", { name: "重试此任务" }) as HTMLButtonElement;
     await user.click(button);
     await waitFor(() => expect(button.disabled).toBe(true));
@@ -301,21 +290,18 @@ describe("TaskCenterPage", () => {
         onOpenFailedDrawer={vi.fn()}
       />,
     );
-    const expand = screen.getAllByRole("button", { name: "展开详情" });
-    await user.click(expand[0]);
-    await user.click(expand[1]);
-    const details = screen.getAllByRole("button", { name: "重试此任务" }) as HTMLButtonElement[];
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[0]);
+    await user.click(screen.getByRole("button", { name: "重试此任务" }));
+    await user.keyboard("{Escape}");
     const actions = screen.getAllByRole("button", { name: /^重试$/ }) as HTMLButtonElement[];
-    await user.click(details[0]);
-    await waitFor(() => {
-      expect(details.every((button) => button.disabled)).toBe(true);
-      expect(actions.every((button) => button.disabled)).toBe(true);
-    });
-    await user.click(actions[1]);
-    await user.click(details[1]);
+    expect(actions.every(button => button.disabled)).toBe(true);
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[1]);
+    const detail = screen.getByRole("button", { name: "重试此任务" }) as HTMLButtonElement;
+    expect(detail.disabled).toBe(true);
+    await user.click(detail);
     expect(api.retryJob).toHaveBeenCalledTimes(1);
     await act(async () => finishRetry({ ...mockJobs[1], id: 99, status: "pending" }));
-    await waitFor(() => expect(details.every((button) => !button.disabled)).toBe(true));
+    await waitFor(() => expect(detail.disabled).toBe(false));
   });
 
   it("展开成功任务时，列表形式展示已下载文件及其大小和完整路径", async () => {
@@ -337,7 +323,7 @@ describe("TaskCenterPage", () => {
       />,
     );
 
-    const expandButtons = screen.getAllByLabelText("展开详情");
+    const expandButtons = screen.getAllByLabelText("查看任务详情");
     await user.click(expandButtons[0]);
 
     await waitFor(() => {
@@ -369,7 +355,7 @@ describe("TaskCenterPage", () => {
       />,
     );
 
-    const expandButtons = screen.getAllByLabelText("展开详情");
+    const expandButtons = screen.getAllByLabelText("查看任务详情");
     await user.click(expandButtons[2]);
 
     await waitFor(() => {
@@ -402,7 +388,7 @@ describe("TaskCenterPage", () => {
     expect(screen.queryByText("推文 123")).toBeNull();
 
     // 搜索特定错误关键词
-    const searchInput = screen.getByPlaceholderText(/按标题、用户名、错误信息/);
+    const searchInput = screen.getByPlaceholderText(/搜索本页任务、用户名或错误/);
     await user.type(searchInput, "封禁");
     expect(screen.getByText("用户 failed_user")).not.toBeNull();
     expect(screen.queryByText("推文 456")).toBeNull();
@@ -435,6 +421,65 @@ describe("TaskCenterPage", () => {
     expect(onStatusFilterChange).toHaveBeenCalledWith("completed");
     // 页码在 URL 里，切筛选必须同时回第 1 页（否则会停在空页）
     expect(onPageChange).toHaveBeenCalledWith(1);
+  });
+
+  it("受控筛选显示服务端总数，并在当前页批量重试", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.retryJob).mockResolvedValue({ ...mockJobs[1], id: 99, status: "pending" });
+    renderWithClient(
+      <TaskCenterPage
+        jobs={[mockJobs[1]]}
+        failedTweetCount={0}
+        pagination={{ page: 2, pageSize: 1, total: 15, totalPages: 15 }}
+        filterCounts={{ all: 20, active: 2, completed: 3, failed: 15 }}
+        statusFilter="failed"
+        kindFilter="user"
+        searchKeyword="failed"
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onStatusFilterChange={vi.fn()}
+        onKindFilterChange={vi.fn()}
+        onSearchKeywordChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("匹配 15 条任务")).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /失败\/异常.*15/ })).toBeTruthy();
+    await user.click(screen.getByRole("checkbox", { name: "选择任务 #2" }));
+    await user.click(screen.getByRole("button", { name: "批量重试" }));
+    await waitFor(() => expect(api.retryJob).toHaveBeenCalledWith(2));
+  });
+
+  it("重试任务成功后提供新任务入口", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getJobFiles).mockResolvedValue({ downloads: [], failed: [] });
+    vi.mocked(api.retryJob).mockResolvedValue({ ...mockJobs[1], id: 99, status: "pending" });
+    renderTaskCenter(0);
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[1]);
+    await user.click(screen.getByRole("button", { name: "重试此任务" }));
+    expect((await within(screen.getByRole("dialog")).findByRole("link", { name: "查看新任务" })).getAttribute("href")).toBe("/tasks?q=99");
+  });
+
+  it("翻页时清除上一页的批量选择", async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [page, setPage] = React.useState(1);
+      return <TaskCenterPage
+        jobs={page === 1 ? [mockJobs[1]] : [mockJobs[0]]}
+        failedTweetCount={0}
+        pagination={{ page, pageSize: 1, total: 2, totalPages: 2 }}
+        onPageChange={setPage}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />;
+    }
+    renderWithClient(<Harness />);
+    await user.click(screen.getByRole("checkbox", { name: "选择任务 #2" }));
+    expect(screen.getByRole("toolbar", { name: "批量操作" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "第 2 页" }));
+    await waitFor(() => expect(screen.queryByRole("toolbar", { name: "批量操作" })).toBeNull());
   });
 
   it("聚合展示多账号相同报错，提供账号标签云与诊断信息复制能力", async () => {
@@ -472,12 +517,10 @@ describe("TaskCenterPage", () => {
       />,
     );
 
-    expect(screen.queryByText("X 客户端暂时全部限流，请稍后重试 (31项)")).toBeNull();
-    await user.hover(screen.getByRole("button", { name: "部分失败 · 100%" }));
-    expect(await screen.findByText("X 客户端暂时全部限流，请稍后重试 (31项)")).toBeTruthy();
+    expect(screen.getByText("X 客户端暂时全部限流，请稍后重试 (31项)")).toBeTruthy();
 
-    // 展开详情
-    const expandBtn = screen.getByLabelText("展开详情");
+    // 查看任务详情
+    const expandBtn = screen.getByLabelText("查看任务详情");
     await user.click(expandBtn);
 
     await waitFor(() => {
@@ -545,7 +588,7 @@ describe("TaskCenterPage 复制错误信息", () => {
   async function openFailedJob() {
     const user = userEvent.setup();
     renderTaskCenter(0);
-    await user.click(screen.getAllByLabelText("展开详情")[1]);
+    await user.click(screen.getAllByLabelText("查看任务详情")[1]);
     await waitFor(() => expect(screen.getByText("任务执行失败")).not.toBeNull());
     return user;
   }

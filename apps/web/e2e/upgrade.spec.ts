@@ -83,7 +83,8 @@ test("archive, storage and task workflows use the real backend", async ({ page }
     await page.keyboard.press("Escape"); await expect(preview).toHaveCount(0);
     await expect(image.locator("..")).toBeFocused();
   }
-  const video = page.locator(".tweet-media video").first();
+  await page.getByRole("button", { name: new RegExp(en ? "^Play video" : "^播放视频") }).first().click();
+  const video = page.getByRole("dialog").locator("video");
   await expect(video).toBeVisible();
   {
     await video.scrollIntoViewIfNeeded();
@@ -100,6 +101,7 @@ test("archive, storage and task workflows use the real backend", async ({ page }
     await video.screenshot({ path: info.outputPath("video-playback.png") });
     await video.evaluate((node: HTMLVideoElement) => node.pause());
   }
+  await page.keyboard.press("Escape");
   await expect(page.locator(".tweet-entry footer")).toHaveCount(0);
   const sort = page.getByRole("combobox", { name: en ? "Sort order" : "排序顺序", exact: true });
   await sort.click();
@@ -127,6 +129,7 @@ test("archive, storage and task workflows use the real backend", async ({ page }
   const pathPreview = page.getByRole("button", { name: en ? "Original images Preview path" : "图片原文件 预览实际路径", exact: true });
   await pathPreview.scrollIntoViewIfNeeded(); await pathPreview.click();
   await expect(page.locator(".storage-path-preview").first()).not.toBeEmpty();
+  await page.getByRole("button", { name: en ? "Expand default rules" : "展开默认规则", exact: true }).click();
   await expect(page.getByRole("combobox", { name: en ? "Folder organization" : "分类存储策略", exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: en ? "File naming" : "命名策略", exact: true })).toBeVisible();
   const selectDirectory = page.getByRole("button", { name: en ? "Select directory" : "选择目录", exact: true });
@@ -141,8 +144,8 @@ test("archive, storage and task workflows use the real backend", async ({ page }
   await page.keyboard.press("Escape"); await expect(targetModal).toHaveCount(0);
   await expect(selectDirectory).toBeFocused();
   await page.screenshot({ path: info.outputPath("settings.png"), fullPage: true });
-  await page.locator(".semi-settings-section").last().evaluate(node => node.scrollIntoView({ block: "end" }));
-  await assertWithinViewport(page.locator(".semi-settings-section").last().getByRole("button").last());
+  await page.getByRole("tab", { name: en ? "Account security" : "账号安全", exact: true }).click();
+  await assertWithinViewport(page.locator("#settings-panel-security").getByRole("button").last());
   await assertLayout(page);
   await page.screenshot({ path: info.outputPath("settings-bottom.png"), fullPage: true });
   await navigate(page, en ? "Tasks" : "任务中心");

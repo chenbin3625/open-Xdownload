@@ -5,11 +5,11 @@ import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { renderWithProviders, screen } from "../test/render";
-import { getTweetProgress, getTweets, retryTweetMedia, type ArchivedTweet } from "../lib/archive";
+import { getTweetAuthors, getTweetProgress, getTweets, retryTweetMedia, type ArchivedTweet } from "../lib/archive";
 import { api, type Job } from "../lib/api";
 import { TweetsPage } from "./TweetsPage";
 
-vi.mock("../lib/archive", async original => ({ ...await original<typeof import("../lib/archive")>(), getTweets: vi.fn(), getTweetProgress: vi.fn(), retryTweetMedia: vi.fn() }));
+vi.mock("../lib/archive", async original => ({ ...await original<typeof import("../lib/archive")>(), getTweetAuthors: vi.fn(), getTweets: vi.fn(), getTweetProgress: vi.fn(), retryTweetMedia: vi.fn() }));
 vi.mock("../lib/api", async original => ({ ...await original<typeof import("../lib/api")>(), api: vi.fn() }));
 
 const tweet: ArchivedTweet = {
@@ -31,6 +31,7 @@ function renderArchive() {
 beforeEach(() => {
   vi.clearAllMocks(); window.history.replaceState(null, "", "/tweets");
   vi.mocked(getTweets).mockImplementation(async query => ({ items: [tweet], pagination: { page: Number(query.get("page") ?? 1), pageSize: 20, total: 40, totalPages: 2 } }));
+  vi.mocked(getTweetAuthors).mockResolvedValue([{ value: "alice", label: "Alice" }, { value: "bob", label: "Bob" }]);
   vi.mocked(getTweetProgress).mockResolvedValue({ items: [{ userId: "42", lastId: "123", headId: "123", cursor: "resume", status: "interrupted", error: "", count: 12, updatedAt: "2026-11-11T00:00:00Z" }] });
   vi.mocked(retryTweetMedia).mockResolvedValue(job);
   vi.mocked(api).mockResolvedValue(job);
@@ -67,6 +68,23 @@ it("defaults to all authors with newest first and supports reversing the timelin
   expect(screen.queryByText("同步进度")).toBeNull();
 });
 
+it("显示全量作者候选，搜索正文时高亮命中并切换预览媒体", async () => {
+  const second = { ...tweet.downloads[0], id: 8, filePath: "asset:photo/second.jpg", fileUrl: "/api/assets/second" };
+  vi.mocked(getTweets).mockResolvedValue({
+    items: [{ ...tweet, text: "Offline note and offline update", downloads: [tweet.downloads[0], second] }],
+    pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+  });
+  const user = userEvent.setup(); renderArchive();
+  await screen.findByText("Offline note and offline update");
+  expect(document.querySelector('#archive-author-options option[value="bob"]')).not.toBeNull();
+  await user.type(screen.getByRole("textbox", { name: "搜索正文" }), "offline");
+  await waitFor(() => expect(document.querySelectorAll(".tweet-body mark").length).toBe(3));
+  await user.click(screen.getByRole("button", { name: /查看图片.*alice.*123.*7/ }));
+  await user.click(screen.getByRole("button", { name: "下一个媒体" }));
+  expect(within(screen.getByRole("dialog")).getByRole("img", { name: "@alice · 123" }).getAttribute("src")).toBe("/api/assets/second");
+  expect(screen.getByRole("link", { name: "定位媒体库" }).getAttribute("href")).toContain("second.jpg");
+});
+
 it("persists search, author and pagination in the URL and restores browser navigation", async () => {
   window.history.replaceState(null, "", "/tweets?author=alice&from=2026-11-01&mediaType=text");
   const user = userEvent.setup(); renderArchive();
@@ -79,7 +97,7 @@ it("persists search, author and pagination in the URL and restores browser navig
   await waitFor(() => expect(new URLSearchParams(window.location.search).get("page")).toBe("2"));
   act(() => { window.history.replaceState(null, "", "/tweets?author=bob&search=restored"); window.dispatchEvent(new PopStateEvent("popstate")); });
   await waitFor(() => expect((screen.getByRole("textbox", { name: "搜索正文" }) as HTMLInputElement).value).toBe("restored"));
-  expect((screen.getByRole("textbox", { name: "作者" }) as HTMLInputElement).value).toBe("bob");
+  expect((screen.getByRole("combobox", { name: "作者" }) as HTMLInputElement).value).toBe("bob");
   await waitFor(() => expect(vi.mocked(getTweets).mock.calls.at(-1)?.[0].get("author")).toBe("bob"));
 });
 
@@ -175,10 +193,11 @@ it("does not label pure-text archives as missing media", async () => {
 
 it.each(["m4v", "ogv"])("plays archived .%s media as video with a remote poster fallback", async extension => {
   vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, downloads: [{ ...tweet.downloads[0], filePath: `asset:video/clip.${extension}`, fileUrl: "/api/assets/video", assetUrls: {} }] }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
-  const { container } = renderArchive();
+  renderArchive();
   await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });
-  const video = container.querySelector("video");
+  await userEvent.setup().click(screen.getByRole("button", { name: /播放视频/ }));
+  const video = document.querySelector("video");
   expect(video?.getAttribute("src")).toBe("/api/assets/video");
   expect(video?.getAttribute("poster")).toBe("/api/library/downloads/7/preview");
-  expect(screen.queryByRole("img", { name: "alice · 123" })).toBeNull();
+  expect(screen.getByRole("img", { name: "alice · 123" }).getAttribute("src")).toBe("/api/library/downloads/7/preview");
 });

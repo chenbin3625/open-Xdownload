@@ -5,7 +5,6 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
-  ChevronDown,
   Clock,
   Copy,
   FolderCheck,
@@ -50,7 +49,7 @@ import {
 } from "../lib/jobStatus";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 import { useBreakpointUp } from "../lib/useMediaQuery";
-import { Tabs } from "../components/semi";
+import { Drawer, Tabs } from "../components/semi";
 import { Alert, Empty } from "../components/semi";
 import { Tooltip } from "../components/semi";
 import { Pagination } from "../components/semi";
@@ -77,6 +76,13 @@ export interface TaskCenterPageProps {
   /** 受控的状态筛选（App 从 URL 还原）；不传则内部自管。 */
   statusFilter?: StatusFilterType;
   onStatusFilterChange?: (status: StatusFilterType) => void;
+  /** 受控的类型筛选；传入后由服务端分页筛选。 */
+  kindFilter?: string;
+  onKindFilterChange?: (kind: string) => void;
+  /** 受控的关键词筛选；传入后由服务端分页筛选。 */
+  searchKeyword?: string;
+  onSearchKeywordChange?: (keyword: string) => void;
+  filterCounts?: { all: number; active: number; completed: number; failed: number };
 }
 
 function getJobStatusPresentation(status: Job["status"]) {
@@ -118,20 +124,52 @@ export function TaskCenterPage({
   onOpenFailedDrawer,
   statusFilter: controlledStatusFilter,
   onStatusFilterChange,
+  kindFilter: controlledKindFilter,
+  onKindFilterChange,
+  searchKeyword: controlledSearchKeyword,
+  onSearchKeywordChange,
+  filterCounts,
 }: TaskCenterPageProps) {
   useTranslation();
   const queryClient = useQueryClient();
   const isMobile = !useBreakpointUp("md");
   const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilterType>("all");
   const statusFilter = controlledStatusFilter ?? localStatusFilter;
-  // 筛选是当前页的客户端过滤，切筛选后回到第 1 页更符合直觉（页码也要写回 URL）。
+  // 受控时筛选条件由 App 交给服务端；未受控时保留本地筛选，便于独立使用和测试。
   const changeStatusFilter = (status: StatusFilterType) => {
     if (controlledStatusFilter === undefined) setLocalStatusFilter(status);
     onStatusFilterChange?.(status);
     if (pagination.page > 1) onPageChange(1);
   };
-  const [kindFilter, setKindFilter] = useState<string>("all");
-  const [searchKeyword, setSearchKeyword] = useState<string>("");
+  const [localKindFilter, setLocalKindFilter] = useState<string>("all");
+  const [localSearchKeyword, setLocalSearchKeyword] = useState<string>("");
+  const kindFilter = controlledKindFilter ?? localKindFilter;
+  const searchKeyword = controlledSearchKeyword ?? localSearchKeyword;
+  const serverFiltering = controlledKindFilter !== undefined || controlledSearchKeyword !== undefined;
+  const changeKindFilter = (kind: string) => {
+    if (controlledKindFilter === undefined) setLocalKindFilter(kind);
+    onKindFilterChange?.(kind);
+    if (pagination.page > 1) onPageChange(1);
+  };
+  const changeSearchKeyword = (keyword: string) => {
+    if (controlledSearchKeyword === undefined) setLocalSearchKeyword(keyword);
+    onSearchKeywordChange?.(keyword);
+    if (pagination.page > 1) onPageChange(1);
+  };
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const [retryCreatedJobId, setRetryCreatedJobId] = useState<number | null>(null);
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<number>>(new Set());
+  const detailJob = jobs.find(job => job.id === detailId);
+  const openJobDetails = (id: number) => { setRetryCreatedJobId(null); setDetailId(id); };
+
+  useEffect(() => { setSelectedJobIds(new Set()); }, [pagination.page, pagination.pageSize, statusFilter, kindFilter, searchKeyword]);
+  useEffect(() => {
+    setSelectedJobIds(current => {
+      const visible = new Set(jobs.map(job => job.id));
+      const next = new Set([...current].filter(id => visible.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [jobs]);
 
   const isJobFailed = (job: Job) =>
     job.status === "failed" ||
@@ -149,11 +187,40 @@ export function TaskCenterPage({
 
   const retry = useMutation({
     mutationFn: retryJob,
-    onSuccess: (job) => {
+    onSuccess: (job, retriedId) => {
+      if (detailId === retriedId) setRetryCreatedJobId(job.id);
       void invalidateWorkbenchQueries(queryClient);
-      toast.success({ message: t("已创建重试任务 #{{value0}}", { value0: job.id }) });
+      toast.success({ message: t("已创建重试任务 #{{value0}}", { value0: job.id }), description: <a href={`/tasks?q=${job.id}`} className="text-brand-600">{t("查看新任务")}</a> });
     },
     onError: notifyError(t("重试失败")),
+  });
+
+  const bulkCancel = useMutation({
+    mutationFn: (ids: number[]) => Promise.all(ids.map(id => cancelJob(id))),
+    onSuccess: (_jobs, ids) => {
+      setSelectedJobIds(current => {
+        const next = new Set(current);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
+      toast.success({ message: t("已取消 {{value0}} 个任务", { value0: ids.length }) });
+    },
+    onError: notifyError(t("批量取消失败")),
+    onSettled: () => { void invalidateWorkbenchQueries(queryClient); },
+  });
+
+  const bulkRetry = useMutation({
+    mutationFn: (ids: number[]) => Promise.all(ids.map(id => retryJob(id))),
+    onSuccess: (created, ids) => {
+      setSelectedJobIds(current => {
+        const next = new Set(current);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
+      toast.success({ message: t("已创建 {{value0}} 个重试任务", { value0: created.length }) });
+    },
+    onError: notifyError(t("批量重试失败")),
+    onSettled: () => { void invalidateWorkbenchQueries(queryClient); },
   });
 
   const retryAllFailed = useMutation({
@@ -170,6 +237,7 @@ export function TaskCenterPage({
 
   const filteredJobs = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase();
+    if (serverFiltering) return jobs;
     return jobs.filter((job) => {
       if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
         return false;
@@ -194,7 +262,7 @@ export function TaskCenterPage({
         (job.message || "").toLowerCase().includes(keyword)
       );
     });
-  }, [jobs, statusFilter, kindFilter, searchKeyword]);
+  }, [jobs, statusFilter, kindFilter, searchKeyword, serverFiltering]);
 
   const hasActiveFilter =
     statusFilter !== "all" || kindFilter !== "all" || searchKeyword.trim() !== "";
@@ -213,6 +281,32 @@ export function TaskCenterPage({
     return counts;
   }, [jobs]);
 
+  const globalFilterCounts = filterCounts ?? {
+    all: jobs.length,
+    active: bucketCounts.active,
+    completed: bucketCounts.completed,
+    failed: bucketCounts.failed,
+  };
+
+  const selectedJobs = jobs.filter(job => selectedJobIds.has(job.id));
+  const cancelableSelectedIds = selectedJobs.filter(job => cancelableStatuses.includes(job.status)).map(job => job.id);
+  const retryableSelectedIds = selectedJobs.filter(job => retryableStatuses.includes(job.status)).map(job => job.id);
+  const allVisibleSelected = filteredJobs.length > 0 && filteredJobs.every(job => selectedJobIds.has(job.id));
+  const toggleSelected = (id: number, checked: boolean) => {
+    setSelectedJobIds(current => {
+      const next = new Set(current);
+      if (checked) next.add(id); else next.delete(id);
+      return next;
+    });
+  };
+  const toggleAllVisible = (checked: boolean) => {
+    setSelectedJobIds(current => {
+      const next = new Set(current);
+      filteredJobs.forEach(job => checked ? next.add(job.id) : next.delete(job.id));
+      return next;
+    });
+  };
+
   const displayStats = {
     active: stats ? stats.active : bucketCounts.active,
     completed: stats ? stats.completed : bucketCounts.completed,
@@ -220,8 +314,19 @@ export function TaskCenterPage({
     total: stats ? stats.total : pagination.total,
   };
 
-  const renderJobActions = (record: Job) => (
+  const renderJobActions = (record: Job, includeDetails = false) => (
     <div className="flex items-center justify-end gap-1.5">
+      {includeDetails && (
+        <Button
+          theme="borderless"
+          type="tertiary"
+          icon={<FolderCheck className="size-3.5" />}
+          aria-label={t("查看任务详情")}
+          onClick={() => openJobDetails(record.id)}
+        >
+          {t("详情")}
+        </Button>
+      )}
       {cancelableStatuses.includes(record.status) && (
         <Button
           type="danger"
@@ -247,6 +352,27 @@ export function TaskCenterPage({
 
   const columns: TableColumn<Job>[] = [
     {
+      key: "select",
+      title: (
+        <input
+          type="checkbox"
+          aria-label={t("选择当前页任务")}
+          checked={allVisibleSelected}
+          ref={input => { if (input) input.indeterminate = selectedJobIds.size > 0 && !allVisibleSelected; }}
+          onChange={event => toggleAllVisible(event.target.checked)}
+        />
+      ),
+      width: 42,
+      render: record => (
+        <input
+          type="checkbox"
+          aria-label={t("选择任务 #{{value0}}", { value0: record.id })}
+          checked={selectedJobIds.has(record.id)}
+          onChange={event => toggleSelected(record.id, event.target.checked)}
+        />
+      ),
+    },
+    {
       key: "title",
       title: t("任务目标 / 描述"),
       render: (record) => (
@@ -255,9 +381,9 @@ export function TaskCenterPage({
             {record.kind === "user" ? "@" : "𝕏"}
           </Avatar>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium text-fg" title={record.title || kindLabel(record.kind)}>
+            <button type="button" className="task-title-link" onClick={() => openJobDetails(record.id)} title={record.title || kindLabel(record.kind)}>
               {record.title || kindLabel(record.kind)}
-            </div>
+            </button>
             <div className="truncate font-mono text-xs text-fg-muted" title={record.input}>
               {t("目标: ")}{record.input} · #JOB-{record.id}
             </div>
@@ -278,7 +404,7 @@ export function TaskCenterPage({
     {
       key: "status",
       title: t("当前状态"),
-      width: 116,
+      width: 260,
       render: (record) => <JobProgress job={record} />,
     },
     {
@@ -294,9 +420,9 @@ export function TaskCenterPage({
     {
       key: "action",
       title: t("操作"),
-      width: 84,
+      width: 148,
       align: "right",
-      render: renderJobActions,
+      render: record => renderJobActions(record, true),
     },
   ];
 
@@ -304,7 +430,9 @@ export function TaskCenterPage({
     <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <span className="text-xs text-fg-muted">
         {hasActiveFilter
-          ? t("本页匹配 {{value0}} 条（筛选仅作用于当前页，共 {{value1}} 个任务）", { value0: filteredJobs.length, value1: pagination.total })
+          ? serverFiltering
+            ? t("匹配 {{value0}} 条任务", { value0: pagination.total })
+            : t("本页匹配 {{value0}} 条（共 {{value1}} 个任务）", { value0: filteredJobs.length, value1: pagination.total })
           : t("共 {{value0}} 个下载任务", { value0: pagination.total })}
       </span>
       <Pagination
@@ -326,11 +454,11 @@ export function TaskCenterPage({
             <Button
               type="danger"
               icon={<AlertCircle className="size-4" />}
-              aria-label={`${t("失败记录 (")}${failedTweetCount})`}
-              title={`${t("失败记录 (")}${failedTweetCount})`}
+              aria-label={`${t("待重试推文")} (${failedTweetCount})`}
+              title={`${t("待重试推文")} (${failedTweetCount})`}
               onClick={onOpenFailedDrawer}
             >
-              <span className="task-failure-label">{t("失败记录 (")}{failedTweetCount})</span>
+              <span className="task-failure-label">{t("待重试推文")} ({failedTweetCount})</span>
               <span className="task-failure-count" aria-hidden="true">{failedTweetCount}</span>
             </Button>
           )}
@@ -344,26 +472,26 @@ export function TaskCenterPage({
       </div>
 
       <div className="task-stats">
-        <Card className="task-stat task-stat-active" bodyStyle={{ padding: 16 }}>
+        <Card className="task-stat task-stat-active" bodyStyle={{ padding: 12 }}>
           <div className="task-stat-label">
             <span>{t("下载中任务")}</span>
             <Activity size={16} className={displayStats.active > 0 ? "text-brand-700" : "text-fg-subtle"} />
           </div>
           <div className="task-stat-value">{displayStats.active}</div>
         </Card>
-        <Card className="task-stat task-stat-completed" bodyStyle={{ padding: 16 }}>
+        <Card className="task-stat task-stat-completed" bodyStyle={{ padding: 12 }}>
           <div className="task-stat-label">
             <span>{t("已完成")}</span><CheckCircle2 size={16} className="text-success" />
           </div>
           <div className="task-stat-value">{displayStats.completed}</div>
         </Card>
-        <Card className="task-stat task-stat-failed" bodyStyle={{ padding: 16 }}>
+        <Card className="task-stat task-stat-failed" bodyStyle={{ padding: 12 }}>
           <div className="task-stat-label">
             <span>{t("异常 / 失败")}</span><AlertCircle size={16} className="text-danger" />
           </div>
           <div className="task-stat-value">{displayStats.failed}</div>
         </Card>
-        <Card className="task-stat" bodyStyle={{ padding: 16 }}>
+        <Card className="task-stat" bodyStyle={{ padding: 12 }}>
           <div className="task-stat-label">
             <span>{t("任务总数")}</span><FolderCheck size={16} />
           </div>
@@ -373,7 +501,8 @@ export function TaskCenterPage({
 
       {/* 过滤筛选工具栏 */}
       <div className="page-toolbar">
-        <Tooltip title={t("括号内为当前页的任务计数，全局统计见侧边栏与上方卡片")}>
+        <span className="text-xs text-fg-muted">{serverFiltering ? t("全量筛选") : t("本页筛选")}</span>
+        <Tooltip title={serverFiltering ? t("计数来自全部任务，分页只影响当前列表") : t("括号内为当前页的任务计数")}>
           <div className="toolbar-status" role="radiogroup" aria-label={t("当前状态")}>
             <RadioGroup
               type="button"
@@ -385,24 +514,24 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("全部")}</span>
-                      <span className="font-mono text-xs opacity-70">{jobs.length}</span>
+                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.all}</span>
                     </span>
                   ) : (
-                    t("全部 ({{value0}})", { value0: jobs.length })
+                    t("全部 ({{value0}})", { value0: globalFilterCounts.all })
                   ),
                   value: "all",
                 },
                 {
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
-                      {bucketCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
+                      {globalFilterCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
                       <span>{t("下载中")}</span>
-                      <span className="font-mono text-xs opacity-70">{bucketCounts.active}</span>
+                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.active}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
-                      {bucketCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
-                      <span>{t("下载中 (")}{bucketCounts.active})</span>
+                      {globalFilterCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
+                      <span>{t("下载中 (")}{globalFilterCounts.active})</span>
                     </span>
                   ),
                   value: "active",
@@ -411,24 +540,24 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("已完成")}</span>
-                      <span className="font-mono text-xs opacity-70">{bucketCounts.completed}</span>
+                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.completed}</span>
                     </span>
                   ) : (
-                    t("已完成 ({{value0}})", { value0: bucketCounts.completed })
+                    t("已完成 ({{value0}})", { value0: globalFilterCounts.completed })
                   ),
                   value: "completed",
                 },
                 {
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
-                      {bucketCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
+                      {globalFilterCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
                       <span>{t("失败")}</span>
-                      <span className="font-mono text-xs opacity-70">{bucketCounts.failed}</span>
+                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.failed}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
-                      {bucketCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
-                      <span>{t("失败/异常 (")}{bucketCounts.failed})</span>
+                      {globalFilterCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
+                      <span>{t("失败/异常 (")}{globalFilterCounts.failed})</span>
                     </span>
                   ),
                   value: "failed",
@@ -442,16 +571,16 @@ export function TaskCenterPage({
           <Input
             prefix={<Search size={16} />}
             aria-label={t("按标题、用户名、错误信息或 ID 搜索...")}
-            placeholder={t("按标题、用户名、错误信息或 ID 搜索...")}
+            placeholder={t("搜索本页任务、用户名或错误...")}
             value={searchKeyword}
-            onChange={setSearchKeyword}
+            onChange={changeSearchKeyword}
             showClear
             className="toolbar-search"
           />
 
           <Select
             value={kindFilter}
-            onChange={(value) => setKindFilter(String(value))}
+            onChange={(value) => changeKindFilter(String(value))}
             className="toolbar-select"
             aria-label={t("任务类型")}
             optionList={[
@@ -461,6 +590,8 @@ export function TaskCenterPage({
               { value: "list", label: t("列表媒体") },
               { value: "following", label: t("关注媒体") },
               { value: "failed_retry", label: t("重试任务") },
+              { value: "media_url", label: t("媒体链接") },
+              { value: "asset_migration", label: t("文件整理") },
             ]}
           />
 
@@ -479,21 +610,52 @@ export function TaskCenterPage({
         </div>
       </div>
 
+      {selectedJobIds.size > 0 && (
+        <div className="task-bulk-toolbar" role="toolbar" aria-label={t("批量操作")}>
+          <span className="text-xs text-fg-muted">{t("已选择 {{value0}} 个任务", { value0: selectedJobIds.size })}</span>
+          {cancelableSelectedIds.length > 0 && (
+            <Button
+              type="danger"
+              size="small"
+              loading={bulkCancel.isPending}
+              disabled={bulkCancel.isPending || bulkRetry.isPending}
+              onClick={() => bulkCancel.mutate(cancelableSelectedIds)}
+            >
+              {t("批量取消")}
+            </Button>
+          )}
+          {retryableSelectedIds.length > 0 && (
+            <Button
+              size="small"
+              loading={bulkRetry.isPending}
+              disabled={bulkCancel.isPending || bulkRetry.isPending}
+              onClick={() => bulkRetry.mutate(retryableSelectedIds)}
+            >
+              {t("批量重试")}
+            </Button>
+          )}
+          <Button size="small" type="tertiary" onClick={() => setSelectedJobIds(new Set())}>{t("清除选择")}</Button>
+        </div>
+      )}
+
       {/* 任务核心数据表格 */}
       {isMobile ? (
         <div className="min-w-0 space-y-4">
           <LoadingOverlay loading={tableLoading}>
             {filteredJobs.length === 0 ? (
-              <Empty description={t("暂无数据")} />
+              <Empty description={hasActiveFilter ? t(serverFiltering ? "没有匹配的任务" : "本页没有匹配的任务") : t("暂无任务")}>
+                {hasActiveFilter && <Button onClick={() => { changeSearchKeyword(""); changeKindFilter("all"); changeStatusFilter("all"); }}>{t("清除筛选")}</Button>}
+              </Empty>
             ) : (
               <ul aria-label={t("任务列表")} className="space-y-3">
                 {filteredJobs.map((job) => (
                   <MobileJobCard
                     key={job.id}
                     job={job}
+                    selected={selectedJobIds.has(job.id)}
+                    onSelect={checked => toggleSelected(job.id, checked)}
                     actions={renderJobActions(job)}
-                    onRetry={() => retry.mutate(job.id)}
-                    retryingJobId={retry.isPending ? retry.variables : undefined}
+                    onOpenDetails={() => openJobDetails(job.id)}
                   />
                 ))}
               </ul>
@@ -508,16 +670,17 @@ export function TaskCenterPage({
             rowKey={(r) => r.id}
             loading={tableLoading}
             className="task-table"
-            expandedRowRender={(record) => (
-              <ExpandedJobDetails
-                job={record}
-                onRetry={() => retry.mutate(record.id)}
-                retryingJobId={retry.isPending ? retry.variables : undefined}
-              />
-            )}
+            emptyText={hasActiveFilter ? t(serverFiltering ? "没有匹配的任务" : "本页没有匹配的任务") : t("暂无任务")}
             footer={paginationFooter}
           />
       )}
+      <Drawer open={Boolean(detailJob)} onClose={() => { setDetailId(null); setRetryCreatedJobId(null); }} width="min(100vw, 860px)" title={detailJob?.title || t("任务详情")} className="task-detail-drawer">
+        {detailJob && <>
+          <JobProgress job={detailJob} />
+          {retryCreatedJobId && <Alert type="success" message={t("重试任务已创建")} action={<a href={`/tasks?q=${retryCreatedJobId}`} className="text-brand-600">{t("查看新任务")}</a>} />}
+          <ExpandedJobDetails job={detailJob} onRetry={() => retry.mutate(detailJob.id)} retryingJobId={retry.isPending ? retry.variables : undefined} />
+        </>}
+      </Drawer>
     </div>
   );
 }
@@ -537,31 +700,39 @@ function JobProgress({ job }: { job: Job }) {
         {tooltip !== displayMsg && <div className="mt-2 whitespace-pre-wrap">{tooltip}</div>}
       </div>
     }>
-      <button type="button" className="task-progress" aria-label={`${meta.label} · ${percent}%`}>
-        <Tag tone={meta.tone} icon={meta.icon}>{meta.label}</Tag>
-      </button>
+      <div className="task-progress" aria-label={`${meta.label} · ${percent}%`}>
+        <div className="flex items-center justify-between gap-2"><Tag tone={meta.tone} icon={meta.icon}>{meta.label}</Tag>{job.status === "downloading" && <span className="text-xs font-mono">{percent}%</span>}</div>
+        {job.status === "downloading" && <progress className="task-progress-bar" value={percent} max={100} aria-label={t("下载进度")} />}
+        <span className={cn("task-progress-message", hasError && "text-danger")}>{displayMsg}</span>
+      </div>
     </Tooltip>
   );
 }
 
 function MobileJobCard({
   job,
+  selected,
+  onSelect,
   actions,
-  onRetry,
-  retryingJobId,
+  onOpenDetails,
 }: {
   job: Job;
+  selected: boolean;
+  onSelect: (checked: boolean) => void;
   actions: React.ReactNode;
-  onRetry: () => void;
-  retryingJobId?: number;
+  onOpenDetails: () => void;
 }) {
   useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const panelId = React.useId();
   return (
     <li className="mobile-job-card min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
       <div className="space-y-3 p-3">
-        <div className="flex items-start justify-between gap-2">
+        <div className="mobile-job-heading">
+          <input
+            type="checkbox"
+            aria-label={t("选择任务 #{{value0}}", { value0: job.id })}
+            checked={selected}
+            onChange={event => onSelect(event.target.checked)}
+          />
           <div className="min-w-0 flex-1">
             <h2 className="break-words text-sm font-semibold text-fg">{job.title || kindLabel(job.kind)}</h2>
             <p className="mt-1 break-all font-mono text-xs text-fg-muted">{job.input}</p>
@@ -577,22 +748,15 @@ function MobileJobCard({
           <Button
             theme="borderless"
             type="tertiary"
-            aria-label={expanded ? t("收起详情") : t("展开详情")}
-            aria-expanded={expanded}
-            aria-controls={expanded ? panelId : undefined}
-            onClick={() => setExpanded(!expanded)}
-            icon={<ChevronDown className={cn("size-4 transition-transform", expanded && "rotate-180")} />}
+            aria-label={t("查看任务详情")}
+            onClick={onOpenDetails}
+            icon={<FolderCheck className="size-4" />}
           >
-            {expanded ? t("收起详情") : t("查看详情")}
+            {t("查看详情")}
           </Button>
           {actions}
         </div>
       </div>
-      {expanded && (
-        <div id={panelId} className="border-t border-line">
-          <ExpandedJobDetails job={job} onRetry={onRetry} retryingJobId={retryingJobId} />
-        </div>
-      )}
     </li>
   );
 }
@@ -773,17 +937,15 @@ function ExpandedJobDetails({
     job.status === "failed" ||
     job.status === "completed_with_errors";
 
-  const [activeTab, setActiveTab] = useState<string>(
-    failed.length > 0 && downloads.length === 0 ? "failed" : "downloads",
-  );
+  const [activeTab, setActiveTab] = useState<string>(hasJobError ? "overview" : "files");
 
   React.useEffect(() => {
     if (downloads.length === 0 && failed.length > 0) {
-      setActiveTab("failed");
-    } else if (downloads.length > 0 && failed.length === 0) {
-      setActiveTab("downloads");
+      setActiveTab("errors");
+    } else if (downloads.length > 0 && failed.length === 0 && !hasJobError) {
+      setActiveTab("files");
     }
-  }, [downloads.length, failed.length]);
+  }, [downloads.length, failed.length, hasJobError]);
 
   const renderDownloadsList = () => (
     <PaginatedList<DownloadRecord>
@@ -895,6 +1057,32 @@ function ExpandedJobDetails({
     />
   );
 
+  const renderFilesContent = () => filesQuery.isLoading ? (
+    <div className="py-6 text-center">
+      <Spinner className="size-5 mx-auto" />
+      <p className="mt-2 text-xs text-fg-muted">{t("正在获取已下载媒体文件清单...")}</p>
+    </div>
+  ) : filesQuery.isError ? (
+    <Alert
+      type="error"
+      message={t("读取文件清单失败")}
+      description={getErrorMessage(filesQuery.error)}
+      action={<Button type="tertiary" onClick={() => void filesQuery.refetch()}>{t("重试")}</Button>}
+    />
+  ) : downloads.length === 0 ? (
+    hasJobError ? <Empty description={t("任务未生成已下载文件记录")} />
+      : job.status === "pending" || job.status === "resolving" || job.status === "downloading"
+        ? <div className="py-6 text-center text-xs text-fg-muted">{t("任务正在执行中，等待媒体拉取入库...")}</div>
+        : <Empty description={t("暂无已归档的文件记录")} />
+  ) : renderDownloadsList();
+
+  const renderErrorsContent = () => (
+    <div className="space-y-3">
+      {hasJobError && <JobErrorAlert job={job} />}
+      {failed.length > 0 ? renderFailedList() : !hasJobError && <Empty description={t("暂无错误与日志")} />}
+    </div>
+  );
+
   return (
     <div className="task-details">
       <div className="task-details-heading">
@@ -904,7 +1092,7 @@ function ExpandedJobDetails({
           <div><dt>{t("入库文件")}</dt><dd>
                 <div className="flex flex-wrap items-center gap-2">
                   <Tag tone="success">
-                    {t("成功 ")}{downloads.length}
+                    {filesQuery.data?.truncated ? t("已加载 ") : t("成功 ")}{downloads.length}
                   </Tag>
                   {failed.length > 0 && (
                     <Tag tone="danger">
@@ -934,90 +1122,18 @@ function ExpandedJobDetails({
         </div>
       </div>
 
-      {/* 错误提示横幅：结构化聚合相同报错并展示受影响账号 */}
-      {hasJobError && <JobErrorAlert job={job} />}
-
       {filesQuery.data?.truncated && (
         <Alert type="warning" message={t("文件清单过长，每类仅展示最近 5000 条记录")} />
       )}
-
-      {/* 文件与媒体清单：恢复为结构清晰的列表 */}
-      {filesQuery.isLoading ? (
-        <div className="py-6 text-center">
-          <Spinner className="size-5 mx-auto" />
-          <p className="mt-2 text-xs text-fg-muted">{t("正在获取已下载媒体文件清单...")}</p>
-        </div>
-      ) : filesQuery.isError ? (
-        <Alert
-          type="error"
-          message={t("读取文件清单失败")}
-          description={getErrorMessage(filesQuery.error)}
-          action={
-            <Button type="tertiary" onClick={() => void filesQuery.refetch()}>
-              {t("重试")}</Button>
-          }
-        />
-      ) : downloads.length === 0 && failed.length === 0 ? (
-        hasJobError ? (
-          <Empty description={t("任务未生成已下载文件记录")} />
-        ) : job.status === "pending" || job.status === "resolving" || job.status === "downloading" ? (
-          <div className="py-6 text-center text-xs text-fg-muted">
-            {t("任务正在执行中，等待媒体拉取入库...")}</div>
-        ) : (
-          <Empty description={t("暂无已归档的文件记录")} />
-        )
-      ) : downloads.length > 0 && failed.length > 0 ? (
-        <div className="pt-2 border-t border-line">
-          <Tabs
-            value={activeTab}
-            onChange={setActiveTab}
-            items={[
-              {
-                key: "downloads",
-                label: (
-                  <span className="flex items-center gap-1.5">
-                    <span>{t("已下载文件")}</span>
-                    <Tag tone="success" className="font-mono text-xs px-1 py-0">
-                      {downloads.length}
-                    </Tag>
-                  </span>
-                ),
-                children: renderDownloadsList(),
-              },
-              {
-                key: "failed",
-                label: (
-                  <span className="flex items-center gap-1.5">
-                    <span className="text-danger">{t("失败媒体")}</span>
-                    <Tag tone="danger" className="font-mono text-xs px-1 py-0">
-                      {failed.length}
-                    </Tag>
-                  </span>
-                ),
-                children: renderFailedList(),
-              },
-            ]}
-          />
-        </div>
-      ) : downloads.length > 0 ? (
-        <div className="space-y-2 pt-2 border-t border-line">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-fg-muted">
-              {t("已下载文件 (")}{downloads.length})
-            </span>
-          </div>
-          {renderDownloadsList()}
-        </div>
-      ) : (
-        <div className="space-y-2 pt-2 border-t border-line">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-danger">
-              {t("失败媒体 (")}{failed.length})
-            </span>
-          </div>
-          {renderFailedList()}
-        </div>
-      )}
+      <Tabs
+        value={activeTab}
+        onChange={setActiveTab}
+        items={[
+          { key: "overview", label: t("概览"), children: <div className="space-y-3"><p className="text-xs text-fg-muted">{job.message || t("暂无状态说明")}</p>{hasJobError ? <JobErrorAlert job={job} /> : <Empty description={t("任务未报告错误")} />}</div> },
+          { key: "files", label: <span className="flex items-center gap-1.5"><span>{t("文件")}</span><Tag tone="success" className="font-mono text-xs px-1 py-0">{downloads.length}</Tag></span>, children: renderFilesContent() },
+          { key: "errors", label: <span className="flex items-center gap-1.5"><span className={failed.length || hasJobError ? "text-danger" : ""}>{t("错误与日志")}</span>{(failed.length > 0 || hasJobError) && <Tag tone="danger" className="font-mono text-xs px-1 py-0">{failed.length || 1}</Tag>}</span>, children: renderErrorsContent() },
+        ]}
+      />
     </div>
   );
 }

@@ -46,6 +46,15 @@ func (s *Server) listTweets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, page)
 }
 
+func (s *Server) listTweetAuthors(w http.ResponseWriter, r *http.Request) {
+	authors, err := s.store.ListTweetAuthors(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, authors)
+}
+
 func (s *Server) enrichDownloads(r *http.Request, records []storage.DownloadRecord) {
 	for i := range records {
 		records[i].FileURL = "/api/library/downloads/" + strconv.FormatInt(records[i].ID, 10) + "/file"

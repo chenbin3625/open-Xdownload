@@ -23,7 +23,7 @@ test("media folders, ordered filenames and per-kind previews persist with the re
   await image.getByRole("combobox", { name: `${labels[0]} ${text("命名策略")}`, exact: true }).click();
   await page.getByRole("option", { name: text("自定义组合"), exact: true }).click();
   const add = image.getByRole("combobox", { name: `${labels[0]} ${text("添加命名字段")}`, exact: true });
-  for (const field of ["正文", "正文编号"]) {
+  for (const field of ["正文", "推文编号"]) {
     await add.click();
     await page.getByRole("option", { name: text(field), exact: true }).click();
   }

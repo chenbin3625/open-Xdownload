@@ -1,7 +1,6 @@
 import React from "react";
 import type { AppConfig } from "../lib/api";
 import { ConfigForm } from "../components/settings/ConfigForm";
-import { AccountSecurity } from "../components/settings/AccountSecurity";
 
 export interface SettingsPageProps {
   config: AppConfig;
@@ -21,7 +20,6 @@ export function SettingsPage({
         onRefresh={onRefresh}
         refreshPending={refreshPending}
       />
-      <AccountSecurity />
     </div>
   );
 }

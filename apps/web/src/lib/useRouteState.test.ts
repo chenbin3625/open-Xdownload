@@ -4,6 +4,7 @@ import {
   defaultGalleryFilter,
   normalizePathname,
   parseGalleryKind,
+  parseJobKind,
   parseJobPageSize,
   parsePositiveInteger,
   parseSearchKeyword,
@@ -41,6 +42,8 @@ describe("useRouteState helpers", () => {
     expect(parseStatusFilter("failed")).toBe("failed");
     expect(parseStatusFilter("bogus")).toBe("all");
     expect(parseStatusFilter(null)).toBe("all");
+    expect(parseJobKind("user")).toBe("user");
+    expect(parseJobKind("bogus")).toBe("all");
     expect(parseGalleryKind("videos")).toBe("videos");
     expect(parseGalleryKind("bogus")).toBe("all");
     expect(parseSearchKeyword("hi")).toBe("hi");
@@ -57,6 +60,7 @@ describe("useRouteState helpers", () => {
       "/overview?page=3&pageSize=50",
     );
     expect(buildRoutePath({ section: "tasks", jobStatus: "failed" })).toBe("/tasks?status=failed");
+    expect(buildRoutePath({ section: "tasks", jobPage: 2, jobStatus: "failed", jobKind: "user", jobSearch: "alice" })).toBe("/tasks?page=2&status=failed&kind=user&q=alice");
     expect(buildRoutePath({ section: "settings" })).toBe("/settings");
     // 设置页不携带任务分页/筛选参数
     expect(buildRoutePath({ section: "settings", jobPage: 3, jobPageSize: 50, jobStatus: "failed" })).toBe(
@@ -95,6 +99,8 @@ describe("readRouteState without window", () => {
     expect(state.jobPage).toBe(1);
     expect(state.jobPageSize).toBe(10);
     expect(state.jobStatus).toBe("all");
+    expect(state.jobKind).toBe("all");
+    expect(state.jobSearch).toBe("");
     expect(state.gallery).toEqual(defaultGalleryFilter);
   });
 });

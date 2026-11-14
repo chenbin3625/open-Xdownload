@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1621,6 +1622,74 @@ LIMIT ? OFFSET ?`, limit, offset)
 	return jobs, err
 }
 
+// ListJobsPageFiltered 返回服务端筛选后的任务页，以及同一类型/关键词条件下的全量状态计数。
+// 状态计数不受 filter.Status 影响，便于前端在状态标签上展示可用总数。
+func (s *Store) ListJobsPageFiltered(ctx context.Context, limit int, page int, filter JobListFilter) (JobListPage, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	baseWhere, baseArgs := jobListWhere(filter, false)
+	countWhere, countArgs := jobListWhere(filter, true)
+	result := JobListPage{Items: []Job{}, Page: page, PageSize: limit, Counts: JobListCounts{}}
+	countSQL := fmt.Sprintf(`SELECT COUNT(*),
+	COALESCE(SUM(CASE WHEN status IN (%s) THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN status = '%s' AND COALESCE(error, '') = '' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN status IN (%s) OR COALESCE(error, '') <> '' THEN 1 ELSE 0 END), 0)
+	FROM jobs WHERE `+countWhere, activeJobStatusesSQL, JobCompleted, failedJobStatusesSQL)
+	if err := s.db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&result.Counts.All, &result.Counts.Active, &result.Counts.Completed, &result.Counts.Failed); err != nil {
+		return JobListPage{}, err
+	}
+	switch filter.Status {
+	case "active":
+		result.Total = result.Counts.Active
+	case "completed":
+		result.Total = result.Counts.Completed
+	case "failed":
+		result.Total = result.Counts.Failed
+	default:
+		result.Total = result.Counts.All
+	}
+
+	offset := (page - 1) * limit
+	if err := s.db.SelectContext(ctx, &result.Items, `
+SELECT * FROM jobs
+WHERE `+baseWhere+`
+ORDER BY created_at DESC, id DESC
+LIMIT ? OFFSET ?`, append(baseArgs, limit, offset)...); err != nil {
+		return JobListPage{}, err
+	}
+	return result, nil
+}
+
+func jobListWhere(filter JobListFilter, ignoreStatus bool) (string, []any) {
+	where := []string{"1=1"}
+	args := []any{}
+	if !ignoreStatus {
+		switch filter.Status {
+		case "active":
+			where = append(where, "status IN ("+activeJobStatusesSQL+")")
+		case "completed":
+			where = append(where, "status = ? AND COALESCE(error, '') = ''")
+			args = append(args, string(JobCompleted))
+		case "failed":
+			where = append(where, "(status IN ("+failedJobStatusesSQL+") OR COALESCE(error, '') <> '')")
+		}
+	}
+	if filter.Kind != "" {
+		where = append(where, "kind = ?")
+		args = append(args, string(filter.Kind))
+	}
+	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
+		where = append(where, "(instr(lower(title), lower(?)) > 0 OR instr(lower(input), lower(?)) > 0 OR instr(lower(message), lower(?)) > 0 OR instr(lower(error), lower(?)) > 0 OR instr(CAST(id AS TEXT), ?) > 0)")
+		args = append(args, keyword, keyword, keyword, keyword, keyword)
+	}
+	return strings.Join(where, " AND "), args
+}
+
 func (s *Store) JobStats(ctx context.Context) (JobStats, error) {
 	stats, _, err := s.DashboardMeta(ctx)
 	return stats, err
@@ -2063,7 +2132,10 @@ func (s *Store) GetArchiveSchedule(ctx context.Context, id int64) (ArchiveSchedu
 	if err != nil {
 		return ArchiveSchedule{}, err
 	}
-	return hydrateArchiveSchedule(schedule)
+	if schedule, err = hydrateArchiveSchedule(schedule); err != nil {
+		return ArchiveSchedule{}, err
+	}
+	return s.enrichArchiveScheduleRunStatus(ctx, schedule)
 }
 
 func (s *Store) ListArchiveSchedules(ctx context.Context) ([]ArchiveSchedule, error) {
@@ -2073,7 +2145,11 @@ SELECT * FROM archive_schedules
 ORDER BY enabled DESC, next_run_at ASC, updated_at DESC`); err != nil {
 		return nil, err
 	}
-	return hydrateArchiveSchedules(items)
+	items, err := hydrateArchiveSchedules(items)
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichArchiveScheduleRunStatuses(ctx, items)
 }
 
 func (s *Store) ListDueArchiveSchedules(ctx context.Context, now time.Time, limit int) ([]ArchiveSchedule, error) {
@@ -2089,6 +2165,80 @@ LIMIT ?`, now.UTC(), limit); err != nil {
 		return nil, err
 	}
 	return hydrateArchiveSchedules(items)
+}
+
+func (s *Store) enrichArchiveScheduleRunStatuses(ctx context.Context, schedules []ArchiveSchedule) ([]ArchiveSchedule, error) {
+	for i := range schedules {
+		item, err := s.enrichArchiveScheduleRunStatus(ctx, schedules[i])
+		if err != nil {
+			return nil, err
+		}
+		schedules[i] = item
+	}
+	return schedules, nil
+}
+
+func (s *Store) enrichArchiveScheduleRunStatus(ctx context.Context, schedule ArchiveSchedule) (ArchiveSchedule, error) {
+	if len(schedule.LastJobIDs) == 0 {
+		return schedule, nil
+	}
+	type jobResult struct {
+		Status  JobStatus `db:"status"`
+		Message string    `db:"message"`
+		Error   string    `db:"error"`
+	}
+	query, args, err := sqlx.In(`SELECT status, message, error FROM jobs WHERE id IN (?)`, schedule.LastJobIDs)
+	if err != nil {
+		return schedule, err
+	}
+	var results []jobResult
+	if err := s.db.SelectContext(ctx, &results, s.db.Rebind(query), args...); err != nil {
+		return schedule, err
+	}
+	if len(results) == 0 {
+		return schedule, nil
+	}
+	hasActive := false
+	hasFailed := false
+	hasCanceled := false
+	message := ""
+	failureMessage := ""
+	for _, result := range results {
+		if IsActiveJobStatus(result.Status) {
+			hasActive = true
+		}
+		if slices.Contains(FailedJobStatuses, result.Status) || strings.TrimSpace(result.Error) != "" {
+			hasFailed = true
+			if failureMessage == "" {
+				failureMessage = strings.TrimSpace(result.Error)
+				if failureMessage == "" {
+					failureMessage = strings.TrimSpace(result.Message)
+				}
+			}
+		}
+		if result.Status == JobCanceled {
+			hasCanceled = true
+		}
+		if message == "" {
+			message = strings.TrimSpace(result.Error)
+			if message == "" {
+				message = strings.TrimSpace(result.Message)
+			}
+		}
+	}
+	switch {
+	case hasActive:
+		schedule.LastRunStatus = "running"
+	case hasFailed:
+		schedule.LastRunStatus = "failed"
+		message = failureMessage
+	case hasCanceled:
+		schedule.LastRunStatus = "canceled"
+	default:
+		schedule.LastRunStatus = "success"
+	}
+	schedule.LastRunMessage = message
+	return schedule, nil
 }
 
 func (s *Store) DeleteArchiveSchedule(ctx context.Context, id int64) error {

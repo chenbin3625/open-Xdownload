@@ -83,6 +83,8 @@ export interface ArchiveSchedule {
   intervalMinutes: number;
   items: ArchiveScheduleItem[];
   lastRunAt?: string;
+  lastRunStatus?: "running" | "success" | "failed" | "canceled" | string;
+  lastRunMessage?: string;
   nextRunAt: string;
   lastJobIds: number[];
   createdAt: string;
@@ -339,6 +341,8 @@ export interface JobsPage {
   items: Job[];
   page: number;
   pageSize: number;
+  total?: number;
+  counts?: { all: number; active: number; completed: number; failed: number };
 }
 
 export interface JobFiles {
@@ -525,9 +529,17 @@ export const changeAccountPassword = (currentPassword: string, newPassword: stri
 export const getJobsPage = ({
   page = 1,
   pageSize = 10,
+  status = "all",
+  kind = "all",
+  search = "",
   signal,
-}: { page?: number; pageSize?: number; signal?: AbortSignal } = {}) =>
-  api<JobsPage>(`/api/jobs?page=${page}&pageSize=${pageSize}`, { signal });
+}: { page?: number; pageSize?: number; status?: string; kind?: string; search?: string; signal?: AbortSignal } = {}) => {
+  const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+  if (status && status !== "all") params.set("status", status);
+  if (kind && kind !== "all") params.set("kind", kind);
+  if (search.trim()) params.set("q", search.trim());
+  return api<JobsPage>(`/api/jobs?${params}`, { signal });
+};
 
 export const getConfig = (signal?: AbortSignal) => api<AppConfig>("/api/config", { signal });
 

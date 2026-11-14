@@ -11,6 +11,7 @@ import {
   jobsQueryRoot,
 } from "./api";
 import { isDashboardMeta } from "./bootstrap";
+import { tweetAuthorsQueryKey } from "./archive";
 import {
   dashboardStatsWithJobStatusChange,
   isJobTerminal,
@@ -147,6 +148,11 @@ export function mergeNewerJobs(cached: JobsPage | undefined, fetched: JobsPage):
 // 统一 refetch"，既不丢失效语义（期间新挂载的查询仍会自己拉），也把请求压到一次。
 export const TERMINAL_REFRESH_DEBOUNCE_MS = 300;
 
+function isUnfilteredJobsQuery(query: { queryKey: readonly unknown[] }) {
+  const [, , , status, kind, search] = query.queryKey;
+  return status === undefined || status === "all" && kind === "all" && search === "";
+}
+
 type TerminalRefreshTimers = { timer: ReturnType<typeof setTimeout> | null };
 const terminalRefreshTimers = new WeakMap<QueryClient, TerminalRefreshTimers>();
 
@@ -162,12 +168,18 @@ function terminalTimersFor(queryClient: QueryClient): TerminalRefreshTimers {
 export function scheduleTerminalDataRefresh(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot, refetchType: "none" });
   void queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot, refetchType: "none" });
+  void queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot, refetchType: "none" });
+  void queryClient.invalidateQueries({ queryKey: tweetAuthorsQueryKey, refetchType: "none" });
+  void queryClient.invalidateQueries({ queryKey: jobsQueryRoot, predicate: query => !isUnfilteredJobsQuery(query), refetchType: "none" });
   const timers = terminalTimersFor(queryClient);
   if (timers.timer) clearTimeout(timers.timer);
   timers.timer = setTimeout(() => {
     timers.timer = null;
     void queryClient.refetchQueries({ queryKey: libraryDownloadsQueryRoot, type: "active" });
     void queryClient.refetchQueries({ queryKey: failedTweetQueryRoot, type: "active" });
+    void queryClient.refetchQueries({ queryKey: archiveScheduleQueryRoot, type: "active" });
+    void queryClient.refetchQueries({ queryKey: tweetAuthorsQueryKey, type: "active" });
+    void queryClient.refetchQueries({ queryKey: jobsQueryRoot, predicate: query => !isUnfilteredJobsQuery(query), type: "active" });
   }, TERMINAL_REFRESH_DEBOUNCE_MS);
 }
 
@@ -238,9 +250,14 @@ export function prependJobsToCaches(queryClient: QueryClient, jobs: Job[]) {
   const fresh = jobs.filter((job) => !known.has(job.id));
   if (fresh.length === 0) return;
 
-  queryClient.setQueriesData<JobsPage>({ queryKey: jobsQueryRoot }, (current) => {
+  queryClient.setQueriesData<JobsPage>({ queryKey: jobsQueryRoot, predicate: isUnfilteredJobsQuery }, (current) => {
     if (!current || current.page !== 1) return current;
-    return { ...current, items: [...fresh, ...current.items].slice(0, current.pageSize) };
+    return {
+      ...current,
+      items: [...fresh, ...current.items].slice(0, current.pageSize),
+      total: current.total === undefined ? undefined : current.total + fresh.length,
+      counts: current.counts ? { ...current.counts, all: current.counts.all + fresh.length, active: current.counts.active + fresh.length } : undefined,
+    };
   });
 
   queryClient.setQueryData<DashboardMeta>(dashboardMetaQueryRoot, (current) => {
@@ -290,12 +307,14 @@ export function applyDashboardEvent(
   }
   if (event.type === "jobs.created" && isDashboardJobList(event.payload)) {
     prependJobsToCaches(queryClient, event.payload);
+    void queryClient.invalidateQueries({ queryKey: jobsQueryRoot, predicate: query => !isUnfilteredJobsQuery(query) });
     // 新任务一定是 active 的，但 meta 缓存可能尚不知道；确保刷新统计。
     if (!applyEventMeta()) return "refresh-meta";
     return "handled";
   }
   if (event.type === "job.created" && isDashboardJobPayload(event.payload)) {
     prependJobsToCaches(queryClient, [event.payload]);
+    void queryClient.invalidateQueries({ queryKey: jobsQueryRoot, predicate: query => !isUnfilteredJobsQuery(query) });
     if (!applyEventMeta()) return "refresh-meta";
     return "handled";
   }

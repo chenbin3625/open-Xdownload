@@ -178,6 +178,16 @@ describe("prependJobsToCaches", () => {
     expect(page?.items.map((job) => job.id)).toEqual([9]);
     expect(queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot)?.stats.total).toBe(2);
   });
+
+  it("不把新任务插入服务端筛选页，并更新未筛选页的计数", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20, "all", "all", ""], { ...makeJobsPage([]), total: 2, counts: { all: 2, active: 1, completed: 1, failed: 0 } });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20, "failed", "all", ""], { ...makeJobsPage([]), total: 0, counts: { all: 2, active: 1, completed: 1, failed: 0 } });
+    prependJobsToCaches(queryClient, [makeJob({ id: 3, status: "pending" })]);
+    expect(queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20, "all", "all", ""])?.total).toBe(3);
+    expect(queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20, "all", "all", ""])?.counts?.active).toBe(2);
+    expect(queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20, "failed", "all", ""])?.items).toEqual([]);
+  });
 });
 
 describe("applyDashboardEvent", () => {
@@ -418,6 +428,17 @@ describe("terminal job.updated", () => {
       meta: { stats: { total: 1, active: 0, completed: 1, failed: 0 }, failedTweetCount: 0 },
     });
     expect(isInvalidated(queryClient, [...libraryDownloadsQueryRoot, "all"])).toBe(true);
+  });
+
+  it("任务终态使计划结果和服务端筛选页失效", () => {
+    const queryClient = new QueryClient();
+    const job = makeJob({ id: 1, status: "downloading" });
+    queryClient.setQueryData(archiveScheduleQueryRoot, []);
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20, "active", "all", ""], { ...makeJobsPage([job]), total: 1, counts: { all: 1, active: 1, completed: 0, failed: 0 } });
+    applyDashboardEvent(queryClient, { type: "job.updated", payload: makeJob({ id: 1, status: "completed", progress: 1, updatedAt: "2024-01-01T00:00:10Z" }) });
+    expect(isInvalidated(queryClient, archiveScheduleQueryRoot)).toBe(true);
+    expect(isInvalidated(queryClient, [...jobsQueryRoot, 1, 20, "active", "all", ""])).toBe(true);
+    cancelScheduledTerminalRefresh(queryClient);
   });
 
   it("leaves the library query alone for non-terminal progress", () => {

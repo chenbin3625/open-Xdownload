@@ -8,7 +8,7 @@ import { Button } from "@douyinfe/semi-ui";
 import { Field, Input } from "../semi";
 import { Modal } from "../semi";
 
-export function AccountSecurity() {
+export function AccountSecurity({ compact = false }: { compact?: boolean }) {
   useTranslation();
   const username = useContext(AccountContext);
   const formId = useId();
@@ -46,7 +46,7 @@ export function AccountSecurity() {
   }
 
   return (
-    <section className="semi-settings-section">
+    <section className={`semi-settings-section${compact ? " settings-account-shortcut" : ""}`}>
       <h2 className="settings-section-title"><KeyRound size={16} />{t("账号安全")}</h2>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="min-w-0 break-all text-sm text-fg-muted">{username}</p>

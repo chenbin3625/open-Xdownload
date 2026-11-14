@@ -28,34 +28,65 @@
   display: grid;
   min-width: 0;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 208px), 1fr));
-  gap: 16px;
+  gap: 14px;
 }
+
+.gallery-grid.gallery-density-standard { grid-template-columns: repeat(auto-fill, minmax(min(100%, 224px), 1fr)); }
+.gallery-grid.gallery-density-compact { grid-template-columns: repeat(auto-fill, minmax(min(100%, 176px), 1fr)); gap: 12px; }
+.gallery-entry { position: relative; min-width: 0; border-radius: var(--radius-card); }
+.gallery-entry > .gallery-entry-checkbox { position: absolute; top: 10px; left: 10px; z-index: 25; display: inline-flex; width: 24px; height: 24px; margin: 0; align-items: center; justify-content: center; background: var(--surface); border-radius: 3px; padding: 2px; }
+.gallery-entry-selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gallery-result-bar, .gallery-batch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.gallery-batch-actions { margin-left: auto; }
+.gallery-list { display: flex; flex-direction: column; gap: 8px; }
+.gallery-list .gallery-card { display: grid; grid-template-columns: 120px minmax(0, 1fr); align-items: center; }
+.gallery-list .semi-card-body { min-width: 0; }
+.gallery-list .gallery-card-cover { aspect-ratio: 4 / 3; border: 0; }
+.gallery-list .gallery-card-meta { grid-template-columns: auto auto 1fr; }
+.gallery-list .gallery-card .semi-card-body > div > div:first-child { white-space: normal; overflow-wrap: anywhere; }
+.gallery-preview-details { display: flex; flex-wrap: wrap; gap: 10px 20px; padding: 12px 16px; font-size: 12px; color: var(--fg-muted); }
+.gallery-preview-details a { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); }
+.gallery-preview-details code { flex-basis: 100%; overflow-wrap: anywhere; }
+.gallery-source-link { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; color: var(--fg-muted); border-radius: 4px; }
+.gallery-source-link:hover { color: var(--accent); background: var(--surface-muted); }
+.gallery-preview-frame button:disabled { opacity: .3; cursor: default; }
+@media (max-width: 767.98px) { .gallery-grid.gallery-density-standard, .gallery-grid.gallery-density-compact { grid-template-columns: repeat(2, minmax(0, 1fr)); } .gallery-list .gallery-card { grid-template-columns: 92px minmax(0, 1fr); } .gallery-list .gallery-card-meta { grid-template-columns: 1fr; } }
 
 .gallery-card {
   overflow: hidden;
 }
+
+.gallery-card-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.gallery-list .gallery-card { grid-template-columns: 104px minmax(0, 1fr); }
+.gallery-list .gallery-card-body { display: grid; grid-template-columns: minmax(0, 1fr) 148px minmax(320px, 1.1fr); align-items: center; gap: 16px; }
+.gallery-list .gallery-card-meta { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; padding: 0; }
+.gallery-list .gallery-card-meta > a { flex-shrink: 0; }
+.gallery-list .gallery-card-meta time { text-align: left; }
+.gallery-list .gallery-card-actions { flex-shrink: 0; }
+@media (max-width: 1099.98px) { .gallery-list .gallery-card-body { grid-template-columns: minmax(0, 1fr); gap: 4px; } .gallery-list .gallery-card-meta { flex-wrap: wrap; justify-content: flex-start; gap: 4px 12px; } .gallery-list .gallery-card-meta > a { display: none; } .gallery-list .gallery-card-actions { margin-left: auto; } .gallery-list .gallery-card-actions .semi-button, .gallery-list .gallery-download { width: 28px; height: 28px; } }
 
 .gallery-card-cover {
   aspect-ratio: 4 / 3;
 }
 
 .gallery-card-meta {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
-  flex-direction: column;
   gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
+  padding-top: 4px;
   color: var(--fg-subtle);
   font-size: 12px;
 }
 
 .gallery-card-meta time {
+  text-align: right;
   font: 12px/16px var(--font-mono);
   overflow-wrap: anywhere;
 }
 
 .gallery-card-actions {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: flex-end;

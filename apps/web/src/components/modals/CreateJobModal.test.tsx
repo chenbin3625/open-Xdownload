@@ -6,7 +6,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../../lib/api";
 import { act, renderWithProviders, screen, waitFor } from "../../test/render";
 import { toast } from "../semi";
-import { CreateJobModal, detectQuickInputTab, parseScreenName } from "./CreateJobModal";
+import { CreateJobModal, detectQuickInputTab, parseBatchInput, parseScreenName } from "./CreateJobModal";
+
+it("标记逐行重复和无效位置，保留待后端校验的数字 ID", () => {
+  const result = parseBatchInput("@Alice\nhttps://x.com/alice\ninvalid handle!\n44196397", "user");
+  expect(result.items.map(item => item.input)).toEqual(["Alice", "44196397"]);
+  expect(result.lines.map(line => [line.lineNumber, line.status, line.duplicateOf])).toEqual([
+    [1, "valid", undefined], [2, "duplicate", 1], [3, "invalid", undefined], [4, "pending", undefined],
+  ]);
+});
+
+it("列表目标不截取非法 URL 内的数字 ID", () => {
+  const result = parseBatchInput("https://example.com/lists/123\n1492019283xyz\nhttps://x.com/i/lists/1647289190", "list");
+  expect(result.items.map(item => item.input)).toEqual(["1647289190"]);
+  expect(result.invalid).toBe(2);
+});
 
 vi.mock("../../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/api")>();
@@ -103,6 +117,8 @@ describe("CreateJobModal", () => {
     await waitFor(() => expect(api.createJob).toHaveBeenCalledTimes(1));
     await user.click(screen.getByRole("button", { name: "取消" }));
     await user.click(screen.getByRole("button", { name: "Reopen" }));
+    expect((screen.getByPlaceholderText("https://x.com/username/status/1234567890") as HTMLInputElement).value).toBe("https://x.com/first/status/1");
+    await user.clear(screen.getByPlaceholderText("https://x.com/username/status/1234567890"));
     await user.type(screen.getByPlaceholderText("https://x.com/username/status/1234567890"), "https://x.com/second/status/2");
     await act(async () => {
       if (outcome === "success") {
@@ -162,7 +178,19 @@ describe("CreateJobModal", () => {
     renderModal({ initialInput: "https://x.com/OpenAI/media" });
 
     expect(screen.getByRole("tab", { name: /用户归档/, selected: true })).toBeTruthy();
-    expect(screen.getByText("已识别: 1 个")).toBeTruthy();
+    expect(screen.getByText("待校验目标 1 个")).toBeTruthy();
+  });
+
+  it("逐行展示校验并移除重复行", async () => {
+    const user = userEvent.setup();
+    renderModal({ initialInput: "@alice\n@alice\n44196397\ninvalid handle!" });
+    expect(screen.getByText("第 2 行")).toBeTruthy();
+    expect(screen.getByText("与第 1 行重复，已忽略")).toBeTruthy();
+    expect(screen.getByText("待后端校验")).toBeTruthy();
+    expect(screen.getByText("无效格式，已忽略")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "移除重复行" }));
+    expect(screen.queryByText("与第 1 行重复，已忽略")).toBeNull();
+    expect((screen.getByRole("textbox", { name: "用户归档" }) as HTMLTextAreaElement).value).toBe("@alice\n44196397\ninvalid handle!");
   });
 
   it("adds the scheme to a scheme-less tweet link from quick input", () => {
@@ -216,6 +244,8 @@ describe("CreateJobModal", () => {
     renderModal({ initialKind: "schedule" });
 
     await user.type(screen.getByPlaceholderText(/elonmusk/), "alice");
+    await user.click(screen.getByRole("combobox", { name: "每轮目标范围" }));
+    await user.click(screen.getByRole("option", { name: "限制数量" }));
     const input = screen.getByRole("spinbutton", { name: "每轮最多用户数" });
     await user.clear(input);
     await user.type(input, "50");

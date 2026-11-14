@@ -26,21 +26,26 @@ it("switches settings to English without losing the unsaved configuration draft"
   renderWithProviders(<QueryClientProvider client={new QueryClient()}>
     <SettingsPage config={config} />
   </QueryClientProvider>);
+  await user.click(screen.getByRole("tab", { name: "下载与归档" }));
   const proxy = screen.getByRole("textbox", { name: "网络代理 (Proxy)" });
   await user.type(proxy, "http://unsaved:7890");
+  await user.click(screen.getByRole("tab", { name: "界面" }));
   await user.click(screen.getByRole("combobox", { name: "界面语言" }));
   await user.click(screen.getByRole("option", { name: "English" }));
   await waitFor(() => expect(document.documentElement.lang).toBe("en"));
   expect(localStorage.getItem("open-xdownload-language")).toBe("en");
+  await user.click(screen.getByRole("tab", { name: "Downloads and archiving" }));
   expect(screen.getByRole("textbox", { name: "Network proxy (Proxy)" })).toBe(proxy);
   expect((proxy as HTMLInputElement).value).toBe("http://unsaved:7890");
-  expect(screen.getByRole("button", { name: "Save configuration" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Save download settings" })).toBeTruthy();
 });
 
 it("translates the X account pool section when the language changes", async () => {
+  const user = userEvent.setup();
   renderWithProviders(<QueryClientProvider client={new QueryClient()}>
     <SettingsPage config={config} />
   </QueryClientProvider>);
+  await user.click(screen.getByRole("tab", { name: "X 账号" }));
   expect(await screen.findByRole("heading", { name: "X 账号池" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "导入账号" })).toBeTruthy();
   await act(() => i18n.changeLanguage("en"));

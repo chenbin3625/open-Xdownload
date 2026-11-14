@@ -75,7 +75,14 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/auth/session") return json({ configured: true, authenticated: true, username: "owner" });
-      if (url.pathname === "/api/jobs") return json({ items: jobs, page: 1, pageSize: Number(url.searchParams.get("pageSize")) });
+      if (url.pathname === "/api/jobs") {
+        const status = url.searchParams.get("status");
+        const kind = url.searchParams.get("kind");
+        const search = url.searchParams.get("q")?.toLowerCase() ?? "";
+        const matching = jobs.filter(job => (!kind || job.kind === kind) && (!search || `${job.title} ${job.input} ${job.error ?? ""} ${job.id}`.toLowerCase().includes(search)));
+        const filtered = matching.filter(job => status === "failed" ? job.status === "failed" : status === "completed" ? job.status === "completed" : status === "active" ? job.status === "pending" : true);
+        return json({ items: filtered, page: 1, pageSize: Number(url.searchParams.get("pageSize")), total: filtered.length, counts: { all: matching.length, active: 0, completed: matching.filter(job => job.status === "completed").length, failed: matching.filter(job => job.status === "failed").length } });
+      }
       if (url.pathname === "/api/dashboard/meta") {
         return json({
           stats: { total: jobs.length, active: 0, completed: 1, failed: 1 },
@@ -148,11 +155,32 @@ describe("App 的 URL 状态", () => {
     renderApp();
     await waitFor(() => expect(screen.getByText("失败任务")).toBeTruthy());
 
-    const completedTabs = screen.getAllByText(/^已完成/);
-    await userEvent.click(completedTabs[completedTabs.length - 1]);
+    await userEvent.click(screen.getByRole("radio", { name: /已完成/ }));
 
     await waitFor(() => expect(window.location.search).not.toContain("status=failed"));
     await waitFor(() => expect(screen.getByText("成功任务")).toBeTruthy());
+  });
+
+  it("把状态、类型和关键词交给服务端并展示全量计数", async () => {
+    window.history.replaceState(null, "", "/tasks?status=failed&kind=user&q=failed_user");
+    renderApp();
+    await waitFor(() => expect(screen.getByText("失败任务")).toBeTruthy());
+    const requests = vi.mocked(fetch).mock.calls.map(([input]) => new URL(String(input), "http://localhost"));
+    expect(requests.some(url => url.pathname === "/api/jobs" && url.searchParams.get("status") === "failed" && url.searchParams.get("kind") === "user" && url.searchParams.get("q") === "failed_user")).toBe(true);
+    expect(screen.queryByText("成功任务")).toBeNull();
+  });
+
+  it("已筛选任务变更状态后从结果中移除", async () => {
+    window.history.replaceState(null, "", "/tasks?status=failed");
+    renderApp();
+    await screen.findByText("失败任务");
+    jobs[1].status = "completed";
+    jobs[1].error = undefined;
+    await userEvent.click(screen.getByRole("button", { name: "刷新数据" }));
+    await waitFor(() => expect(screen.queryByText("失败任务")).toBeNull());
+    expect(screen.getByText("匹配 0 条任务")).toBeTruthy();
+    jobs[1].status = "failed";
+    jobs[1].error = "用户不存在";
   });
 
   it("媒体库页面的分类筛选会写进 URL，并可刷新还原", async () => {

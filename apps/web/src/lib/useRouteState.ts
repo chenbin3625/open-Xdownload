@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t } from "./i18n";
 import { tablePageSizeOptions } from "./pagination";
 
 export type SectionKey =
@@ -10,7 +11,7 @@ export type SectionKey =
   | "tweets"
   | "settings";
 
-/** 任务中心的状态筛选（客户端过滤当前页，进 URL 只为刷新/分享还原）。 */
+/** 任务中心的服务端筛选（全部进 URL，查询会返回全量计数）。 */
 export type StatusFilterType = "all" | "active" | "completed" | "failed";
 
 export const statusFilterValues: StatusFilterType[] = ["all", "active", "completed", "failed"];
@@ -50,6 +51,8 @@ export type RouteState = {
   jobPage: number;
   jobPageSize: number;
   jobStatus: StatusFilterType;
+  jobKind: string;
+  jobSearch: string;
   gallery: GalleryRouteState;
   shouldReplace: boolean;
 };
@@ -57,6 +60,9 @@ export type RouteState = {
 export const defaultJobPage = 1;
 export const defaultJobPageSize = 10;
 export const defaultJobStatus: StatusFilterType = "all";
+export const defaultJobKind = "all";
+export const defaultJobSearch = "";
+const jobKindValues = ["all", "tweet_link", "media_url", "user", "list", "following", "failed_retry", "asset_migration"];
 
 export const sectionRoutes: Record<SectionKey, string> = {
   overview: "/overview",
@@ -86,6 +92,8 @@ export interface RouteQueryState {
   jobPage?: number;
   jobPageSize?: number;
   jobStatus?: StatusFilterType;
+  jobKind?: string;
+  jobSearch?: string;
   gallery?: Partial<GalleryRouteState>;
 }
 
@@ -108,6 +116,10 @@ export function parseStatusFilter(value: string | null): StatusFilterType {
   return statusFilterValues.includes(value as StatusFilterType)
     ? (value as StatusFilterType)
     : defaultJobStatus;
+}
+
+export function parseJobKind(value: string | null) {
+  return jobKindValues.includes(value ?? "") ? value! : defaultJobKind;
 }
 
 export function parseGalleryKind(value: string | null) {
@@ -145,6 +157,10 @@ export function buildRoutePath(state: RouteQueryState) {
     if (jobPageSize !== defaultJobPageSize) params.set("pageSize", String(jobPageSize));
     const status = state.jobStatus ?? defaultJobStatus;
     if (status !== defaultJobStatus) params.set("status", status);
+    const kind = state.jobKind ?? defaultJobKind;
+    if (kind !== defaultJobKind) params.set("kind", kind);
+    const search = state.jobSearch ?? defaultJobSearch;
+    if (search) params.set("q", search);
   } else if (section === "gallery") {
     const gallery = { ...defaultGalleryFilter, ...state.gallery };
     if (gallery.page > 1) params.set("page", String(gallery.page));
@@ -171,6 +187,8 @@ export function readRouteState(): RouteState {
       jobPage: defaultJobPage,
       jobPageSize: defaultJobPageSize,
       jobStatus: defaultJobStatus,
+      jobKind: defaultJobKind,
+      jobSearch: defaultJobSearch,
       gallery: { ...defaultGalleryFilter },
       shouldReplace: false,
     };
@@ -187,6 +205,8 @@ export function readRouteState(): RouteState {
     ? parseJobPageSize(params.get("pageSize"))
     : defaultJobPageSize;
   const jobStatus = carriesPagination ? parseStatusFilter(params.get("status")) : defaultJobStatus;
+  const jobKind = carriesPagination ? parseJobKind(params.get("kind")) : defaultJobKind;
+  const jobSearch = carriesPagination ? parseSearchKeyword(params.get("q") ?? params.get("search")) : defaultJobSearch;
   const gallery: GalleryRouteState =
     section === "gallery"
       ? {
@@ -202,7 +222,7 @@ export function readRouteState(): RouteState {
         }
       : { ...defaultGalleryFilter };
 
-  const canonicalRoute = buildRoutePath({ section, jobPage, jobPageSize, jobStatus, gallery });
+  const canonicalRoute = buildRoutePath({ section, jobPage, jobPageSize, jobStatus, jobKind, jobSearch, gallery });
   const currentRoute = `${window.location.pathname}${window.location.search}`;
 
   return {
@@ -210,6 +230,8 @@ export function readRouteState(): RouteState {
     jobPage,
     jobPageSize,
     jobStatus,
+    jobKind,
+    jobSearch,
     gallery,
     shouldReplace: currentRoute !== canonicalRoute,
   };
@@ -235,6 +257,8 @@ export function useRouteState() {
   const [jobPage, setJobPage] = useState(initialRoute.jobPage);
   const [jobPageSize, setJobPageSize] = useState(initialRoute.jobPageSize);
   const [jobStatus, setJobStatus] = useState<StatusFilterType>(initialRoute.jobStatus);
+  const [jobKind, setJobKind] = useState(initialRoute.jobKind);
+  const [jobSearch, setJobSearch] = useState(initialRoute.jobSearch);
   const [gallery, setGallery] = useState<GalleryRouteState>(initialRoute.gallery);
 
   const stateRef = useRef({
@@ -242,9 +266,11 @@ export function useRouteState() {
     jobPage: initialRoute.jobPage,
     jobPageSize: initialRoute.jobPageSize,
     jobStatus: initialRoute.jobStatus,
+    jobKind: initialRoute.jobKind,
+    jobSearch: initialRoute.jobSearch,
     gallery: initialRoute.gallery,
   });
-  stateRef.current = { section: activeSection, jobPage, jobPageSize, jobStatus, gallery };
+  stateRef.current = { section: activeSection, jobPage, jobPageSize, jobStatus, jobKind, jobSearch, gallery };
 
   const pushRoute = useCallback(
     (
@@ -253,6 +279,8 @@ export function useRouteState() {
         jobPage?: number;
         jobPageSize?: number;
         jobStatus?: StatusFilterType;
+        jobKind?: string;
+        jobSearch?: string;
         gallery?: GalleryRouteState;
       },
       replace = false,
@@ -272,6 +300,8 @@ export function useRouteState() {
           jobPage: initialRoute.jobPage,
           jobPageSize: initialRoute.jobPageSize,
           jobStatus: initialRoute.jobStatus,
+          jobKind: initialRoute.jobKind,
+          jobSearch: initialRoute.jobSearch,
           gallery: initialRoute.gallery,
         },
         true,
@@ -282,10 +312,19 @@ export function useRouteState() {
   useEffect(() => {
     function handlePopState() {
       const route = readRouteState();
+      if (route.section !== stateRef.current.section) {
+        const guard = new Event("settings:before-navigate", { cancelable: true });
+        if (!window.dispatchEvent(guard) && !window.confirm(t("放弃未保存的修改？"))) {
+          updateBrowserRoute(stateRef.current, true);
+          return;
+        }
+      }
       setActiveSection(route.section);
       setJobPage(route.jobPage);
       setJobPageSize(route.jobPageSize);
       setJobStatus(route.jobStatus);
+      setJobKind(route.jobKind);
+      setJobSearch(route.jobSearch);
       setGallery(route.gallery);
     }
 
@@ -333,6 +372,29 @@ export function useRouteState() {
     [pushRoute],
   );
 
+  const handleJobKindChange = useCallback(
+    (kind: string) => {
+      setJobKind(kind);
+      setJobPage(defaultJobPage);
+      if (isTaskCenterSection(stateRef.current.section)) {
+        pushRoute({ jobKind: kind, jobPage: defaultJobPage });
+      }
+    },
+    [pushRoute],
+  );
+
+  const handleJobSearchChange = useCallback(
+    (search: string) => {
+      const value = search.slice(0, 120);
+      setJobSearch(value);
+      setJobPage(defaultJobPage);
+      if (isTaskCenterSection(stateRef.current.section)) {
+        pushRoute({ jobSearch: value, jobPage: defaultJobPage }, true);
+      }
+    },
+    [pushRoute],
+  );
+
   /**
    * 媒体库筛选/页码统一入口：一次更新同时改 state 与 URL，避免"新筛选 + 旧页码"多发一次请求。
    * 搜索框逐字符输入用 replace 模式，避免把每个字符都压进浏览器历史。
@@ -368,11 +430,15 @@ export function useRouteState() {
     jobPage,
     jobPageSize,
     jobStatus,
+    jobKind,
+    jobSearch,
     gallery,
     handleSectionChange,
     handleJobPageChange,
     handleJobPageSizeChange,
     handleJobStatusChange,
+    handleJobKindChange,
+    handleJobSearchChange,
     handleGalleryChange,
     syncServerPage,
   };

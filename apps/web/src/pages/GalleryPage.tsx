@@ -8,6 +8,9 @@ import {
   ExternalLink,
   Film,
   HardDrive,
+  LayoutGrid,
+  Link,
+  List,
   Image as ImageIcon,
   PictureInPicture,
   Search,
@@ -16,7 +19,7 @@ import {
 } from "lucide-react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Card, Input, InputNumber, RadioGroup, Select } from "@douyinfe/semi-ui";
+import { Button, Card, Checkbox, Input, InputNumber, RadioGroup, Select } from "@douyinfe/semi-ui";
 import {
   formatBytes,
   getLibraryDownloadsPage,
@@ -56,6 +59,10 @@ function entryKey(item: DownloadRecord) {
   return item.id > 0 ? String(item.id) : item.filePath;
 }
 
+function sourceTweetURL(item: DownloadRecord) {
+  return item.tweetId ? `https://x.com/i/status/${encodeURIComponent(item.tweetId)}` : "";
+}
+
 // 焦点在 <video controls> 或可编辑元素上时，方向键属于该元素（视频拖动进度、文本移动光标），灯箱不应截获。
 function isKeyboardOwnedTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
@@ -83,10 +90,12 @@ function VideoPoster({
   item,
   fileName,
   onOpen,
+  fit,
 }: {
   item: DownloadRecord;
   fileName: string;
   onOpen: () => void;
+  fit: "contain" | "cover";
 }) {
   useTranslation();
   const sources = useMemo(() => {
@@ -120,7 +129,7 @@ function VideoPoster({
           decoding="async"
           referrerPolicy={sources[sourceIndex].remote ? "no-referrer" : undefined}
           onError={() => setSourceIndex((current) => current + 1)}
-          className="relative z-10 h-full w-full object-contain transition-transform duration-200 group-hover:scale-105"
+          className={`relative z-10 h-full w-full ${fit === "cover" ? "object-cover" : "object-contain"} transition-transform duration-200 group-hover:scale-105`}
         />
       )}
       <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/20 opacity-0 transition-opacity group-hover:opacity-100">
@@ -136,17 +145,21 @@ const GalleryCard = React.memo(function GalleryCard({
   item,
   isVideo,
   isPreviewableImage,
+  thumbnailFit,
   onOpen,
 }: {
   item: DownloadRecord;
   isVideo: boolean;
   isPreviewableImage: boolean;
+  thumbnailFit: "contain" | "cover";
   onOpen: (previewId: string) => void;
 }) {
   useTranslation();
   const fileName = displayFileName(item);
   const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
   const previewURL = fileURL(item);
+  const [imageFailed, setImageFailed] = useState(false);
+  useEffect(() => setImageFailed(false), [previewURL]);
 
   return (
     <Card
@@ -156,29 +169,39 @@ const GalleryCard = React.memo(function GalleryCard({
       cover={
         <div className="gallery-card-cover relative flex items-center justify-center overflow-hidden bg-surface-muted border-b border-line">
           {isVideo ? (
-            <VideoPoster key={`${item.id}:${item.previewUrl || ""}`} item={item} fileName={fileName} onOpen={() => onOpen(entryKey(item))} />
+            <VideoPoster key={`${item.id}:${item.previewUrl || ""}`} item={item} fileName={fileName} fit={thumbnailFit} onOpen={() => onOpen(entryKey(item))} />
           ) : isPreviewableImage ? (
-            <button
-              type="button"
-              className="group/img relative block h-full w-full cursor-pointer border-0 bg-transparent p-0 overflow-hidden"
-              onClick={() => onOpen(entryKey(item))}
-              aria-label={t("查看图片 {{value0}}", { value0: fileName })}
-            >
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-fg-subtle">
-                <ImageIcon className="size-8" />
-                <span className="text-xs font-mono">{ext}</span>
-              </div>
-              <img
-                src={previewURL}
-                alt={fileName}
-                loading="lazy"
-                decoding="async"
-                onError={(event) => {
-                  event.currentTarget.style.display = "none";
-                }}
-                className="relative z-10 h-full w-full object-contain"
-              />
-            </button>
+            <div className="relative h-full w-full overflow-hidden">
+              {imageFailed ? (
+                <div className="flex h-full flex-col items-center justify-center gap-1.5 text-fg-subtle">
+                  <ImageIcon className="size-8" />
+                  <span className="text-xs">{t("预览不可用")}</span>
+                  <button type="button" className="text-xs text-brand-600 hover:underline" onClick={() => setImageFailed(false)}>
+                    {t("重试预览")}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="group/img relative block h-full w-full cursor-pointer border-0 bg-transparent p-0 overflow-hidden"
+                  onClick={() => onOpen(entryKey(item))}
+                  aria-label={t("查看图片 {{value0}}", { value0: fileName })}
+                >
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-fg-subtle">
+                    <ImageIcon className="size-8" />
+                    <span className="text-xs font-mono">{ext}</span>
+                  </div>
+                  <img
+                    src={previewURL}
+                    alt={fileName}
+                    loading="lazy"
+                    decoding="async"
+                    onError={() => setImageFailed(true)}
+                    className={`relative z-10 h-full w-full ${thumbnailFit === "cover" ? "object-cover" : "object-contain"}`}
+                  />
+                </button>
+              )}
+            </div>
           ) : (
             <div className="flex flex-col items-center gap-1 text-fg-subtle">
               <Film className="size-8" />
@@ -192,7 +215,7 @@ const GalleryCard = React.memo(function GalleryCard({
         </div>
       }
     >
-      <div className="space-y-1.5">
+      <div className="gallery-card-body">
         <div className="truncate text-xs font-semibold text-fg tracking-tight" title={fileName}>
           {fileName}
         </div>
@@ -233,11 +256,24 @@ const GalleryCard = React.memo(function GalleryCard({
               <Button
                 theme="borderless"
                 type="tertiary"
-                icon={<ExternalLink size={16} />}
+                icon={<Link size={16} />}
                 onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
                 aria-label={t("复制下载直链")}
               />
             </Tooltip>
+            {sourceTweetURL(item) && (
+              <Tooltip title={t("打开来源推文")}>
+                <a
+                  className="gallery-source-link"
+                  href={sourceTweetURL(item)}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label={t("打开来源推文")}
+                >
+                  <ExternalLink size={16} />
+                </a>
+              </Tooltip>
+            )}
           </div>
         </div>
       </div>
@@ -261,6 +297,12 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   );
 
   const [previewId, setPreviewId] = useState<string | null>(null);
+  const [view, setView] = useState(() => { try { return localStorage.getItem("gallery-view") === "list" ? "list" : "grid"; } catch { return "grid"; } });
+  const [density, setDensity] = useState(() => { try { return localStorage.getItem("gallery-density") === "compact" ? "compact" : "standard"; } catch { return "standard"; } });
+  const [thumbnailFit, setThumbnailFit] = useState<"contain" | "cover">(() => { try { return localStorage.getItem("gallery-thumbnail-fit") === "cover" ? "cover" : "contain"; } catch { return "contain"; } });
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  useEffect(() => { try { localStorage.setItem("gallery-view", view); localStorage.setItem("gallery-density", density); localStorage.setItem("gallery-thumbnail-fit", thumbnailFit); } catch { /* Storage may be unavailable in private browsing. */ } }, [view, density, thumbnailFit]);
+  useEffect(() => { setSelected(new Set()); }, [filter.page, filter.kind, filter.user, filter.search, filter.sort, filter.from, filter.to, filter.minBytes, filter.maxBytes]);
   const pageSize = galleryPageSize;
   // 输入框即时响应，查询键用 300ms 防抖后的值。
   const debouncedSearch = useDebouncedValue(filter.search, GALLERY_SEARCH_DEBOUNCE_MS);
@@ -348,9 +390,42 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   }, [libraryQuery.data, libraryQuery.isPlaceholderData, debouncedSearch, filter.search, filter.page, totalPages, updateFilter]);
 
   const visibleEntries = indexedDownloads;
+  const selectedEntries = visibleEntries.filter(({ item }) => selected.has(entryKey(item)));
+  const selectionDisabled = libraryQuery.isPlaceholderData || Boolean(rangeError) || debouncedSearch !== filter.search;
   const hasActiveFilter =
     filter.kind !== "all" || filter.user !== "all" || filter.search.trim() !== "" ||
     filter.from !== "" || filter.to !== "" || filter.minBytes !== "" || filter.maxBytes !== "";
+
+  const downloadSelected = useCallback(() => {
+    selectedEntries.forEach(({ item }) => {
+      const anchor = document.createElement("a");
+      anchor.href = fileURL(item);
+      anchor.download = displayFileName(item);
+      anchor.rel = "noreferrer";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    });
+  }, [selectedEntries]);
+
+  const exportSelected = useCallback(() => {
+    const payload = selectedEntries.map(({ item }) => ({
+      id: item.id,
+      filePath: item.filePath,
+      fileUrl: fileURL(item),
+      mediaUrl: item.mediaUrl,
+      tweetId: item.tweetId,
+      createdAt: item.createdAt,
+    }));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `open-xdownload-media-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, [selectedEntries]);
 
   const previewIndex = useMemo(
     () =>
@@ -369,7 +444,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
   const stepPreview = useCallback(
     (delta: number) => {
-      if (visibleEntries.length === 0 || previewIndex === -1) return;
+      if (visibleEntries.length === 0 || previewIndex === -1 || pendingPreviewEdge || libraryQuery.isPlaceholderData) return;
       const nextIndex = previewIndex + delta;
       if (nextIndex >= visibleEntries.length) {
         if (filter.page < totalPages) {
@@ -387,7 +462,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       }
       setPreviewId(entryKey(visibleEntries[nextIndex].item));
     },
-    [filter.page, previewIndex, totalPages, updateFilter, visibleEntries],
+    [filter.page, previewIndex, totalPages, updateFilter, visibleEntries, pendingPreviewEdge, libraryQuery.isPlaceholderData],
   );
 
   useEffect(() => {
@@ -439,6 +514,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
     <div className="workspace-page gallery-page">
       <div className="page-heading">
         <h1 className="page-title">{t("媒体归档库")}</h1>
+        <div className="page-actions">
+          <RadioGroup type="button" aria-label={t("媒体视图")} value={view} onChange={event => setView(event.target.value)} options={[{ value: "grid", label: <span title={t("网格视图")} aria-label={t("网格视图")}><LayoutGrid size={16} /></span> }, { value: "list", label: <span title={t("列表视图")} aria-label={t("列表视图")}><List size={16} /></span> }]} />
+          {view === "grid" && <><label id="gallery-density-label" className="sr-only">{t("缩略图大小")}</label><Select value={density} aria-labelledby="gallery-density-label" onChange={value => setDensity(String(value))} optionList={[{ value: "standard", label: t("标准缩略图") }, { value: "compact", label: t("紧凑缩略图") }]} /><label id="gallery-fit-label" className="sr-only">{t("缩略图显示方式")}</label><Select value={thumbnailFit} aria-labelledby="gallery-fit-label" onChange={value => setThumbnailFit(value as "contain" | "cover")} optionList={[{ value: "contain", label: t("完整显示") }, { value: "cover", label: t("填充裁剪") }]} /></>}
+        </div>
       </div>
       <div className="page-toolbar gallery-toolbar">
         <div className="toolbar-status" role="radiogroup" aria-label={t("类型")}>
@@ -535,6 +614,20 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         </SimplePopover>
         {hasActiveFilter && <Tooltip title={t("清除筛选")}><Button theme="borderless" type="tertiary" icon={<X size={16} />} aria-label={t("清除筛选")} onClick={() => updateFilter({ kind: "all", user: "all", search: "", from: "", to: "", minBytes: "", maxBytes: "", page: 1 })} /></Tooltip>}
       </div>
+      <div className="gallery-result-bar">
+        <Checkbox checked={Boolean(visibleEntries.length) && selectedEntries.length === visibleEntries.length} indeterminate={selectedEntries.length > 0 && selectedEntries.length < visibleEntries.length} disabled={selectionDisabled || !visibleEntries.length} onChange={event => setSelected(event.target.checked ? new Set(visibleEntries.map(({ item }) => entryKey(item))) : new Set())}>{t("选择本页")}</Checkbox>
+        <span className="text-xs text-fg-muted" aria-live="polite">{libraryQuery.isPlaceholderData ? t("正在应用筛选...") : `${t("筛选结果")} ${totalEntries} ${t("项")}`}</span>
+        {selectedEntries.length > 0 && <div className="gallery-batch-actions"><span className="text-xs">{t("已选")} {selectedEntries.length}</span><Button size="small" icon={<Copy size={14} />} disabled={selectionDisabled} onClick={() => void copyToClipboard(selectedEntries.map(({ item }) => item.filePath).join("\n"), t("所选文件路径"))}>{t("复制路径")}</Button><Button size="small" icon={<Download size={14} />} disabled={selectionDisabled} onClick={downloadSelected}>{t("批量下载")}</Button><Button size="small" icon={<ExternalLink size={14} />} disabled={selectionDisabled} onClick={exportSelected}>{t("导出清单")}</Button><Button size="small" theme="borderless" icon={<X size={14} />} aria-label={t("取消选择")} onClick={() => setSelected(new Set())} /></div>}
+      </div>
+      {hasActiveFilter && <div className="active-filter-tags">
+        {[
+          { key: "search", label: filter.search, patch: { search: "" } },
+          { key: "kind", label: filter.kind !== "all" ? filter.kind === "images" ? t("图片") : filter.kind === "videos" ? t("视频") : t("动图") : "", patch: { kind: "all" as const } },
+          { key: "user", label: filter.user !== "all" ? filter.user : "", patch: { user: "all" } },
+          { key: "dates", label: filter.from || filter.to ? `${filter.from || t("不限")} ~ ${filter.to || t("不限")}` : "", patch: { from: "", to: "" } },
+          { key: "bytes", label: filter.minBytes || filter.maxBytes ? `${formatBytes(Number(filter.minBytes))} ~ ${filter.maxBytes ? formatBytes(Number(filter.maxBytes)) : t("不限")}` : "", patch: { minBytes: "", maxBytes: "" } },
+        ].filter(item => item.label).map(item => <button className="filter-chip" type="button" key={item.key} onClick={() => updateFilter({ ...item.patch, page: 1 })} aria-label={`${t("移除筛选")} ${item.label}`}>{item.label}<X size={12} /></button>)}
+      </div>}
       {rangeError && <Alert type="warning" message={rangeError} />}
       {libraryQuery.isError && libraryQuery.data && <Alert type="error" message={getErrorMessage(libraryQuery.error)} />}
 
@@ -582,20 +675,20 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           />
       ) : (
         <div
-          className={
-            libraryQuery.isFetching
-              ? "gallery-grid opacity-60 transition-opacity"
-              : "gallery-grid"
-          }
+          className={`gallery-${view} gallery-density-${density}${libraryQuery.isFetching ? " opacity-60 transition-opacity" : ""}`}
         >
           {visibleEntries.map(({ item, isVideo, isImage, isGif }) => (
+            <div key={entryKey(item)} className={`gallery-entry${selected.has(entryKey(item)) ? " gallery-entry-selected" : ""}`}>
+            <Checkbox className="gallery-entry-checkbox" aria-label={`${t("选择文件")} ${displayFileName(item)}`} checked={selected.has(entryKey(item))} disabled={selectionDisabled} onChange={event => setSelected(current => { const next = new Set(current); if (event.target.checked) next.add(entryKey(item)); else next.delete(entryKey(item)); return next; })} />
             <GalleryCard
               key={item.id || item.filePath}
               item={item}
               isVideo={isVideo}
               isPreviewableImage={isImage || isGif}
+              thumbnailFit={thumbnailFit}
               onOpen={openPreview}
             />
+            </div>
           ))}
         </div>
       )}
@@ -655,6 +748,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 <button
                   type="button"
                   aria-label={t("上一个媒体文件")}
+                  disabled={filter.page === 1 && previewIndex === 0 || Boolean(pendingPreviewEdge)}
                   onClick={() => stepPreview(-1)}
                   className="absolute left-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
                 >
@@ -663,12 +757,14 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 <button
                   type="button"
                   aria-label={t("下一个媒体文件")}
+                  disabled={filter.page === totalPages && previewIndex === visibleEntries.length - 1 || Boolean(pendingPreviewEdge)}
                   onClick={() => stepPreview(1)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
                 >
                   <ChevronRight className="size-5" />
                 </button>
               </div>
+              <div className="gallery-preview-details"><span>{pendingPreviewEdge || libraryQuery.isPlaceholderData ? t("加载中...") : `${((libraryQuery.data?.pagination.page ?? filter.page) - 1) * pageSize + previewIndex + 1} / ${totalEntries}`}</span>{item.jobId > 0 && <a href="/tasks">{t("来源任务")} #{item.jobId}</a>}{item.tweetId && <a href={`/tweets?id=${item.tweetId}`}>{t("archive.title")} <ExternalLink size={12} /></a>}<code title={item.filePath}>{item.filePath}</code></div>
 
               {/* 弹窗底部操作与详情栏 */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface px-4 py-3 text-xs">
@@ -705,11 +801,24 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                     <Button
                       theme="borderless"
                       type="tertiary"
-                      icon={<ExternalLink size={16} />}
+                      icon={<Link size={16} />}
                       aria-label={t("复制直链")}
                       onClick={() => void copyToClipboard(item.mediaUrl, t("原始下载直链"))}
                     />
                   </Tooltip>
+                  {sourceTweetURL(item) && (
+                    <Tooltip title={t("打开来源推文")}>
+                      <a
+                        className="gallery-source-link"
+                        href={sourceTweetURL(item)}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={t("打开来源推文")}
+                      >
+                        <ExternalLink size={16} />
+                      </a>
+                    </Tooltip>
+                  )}
                 </div>
               </div>
             </div>

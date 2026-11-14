@@ -37,12 +37,12 @@ func parseWorkbenchPage(r *http.Request) (page int, pageSize int) {
 }
 
 func (s *Server) loadWorkbenchBootstrap(ctx context.Context, page, pageSize int) (jobListPage, dashboardMeta, []storage.ArchiveSchedule, error) {
-	items, err := s.store.ListJobsPage(ctx, pageSize, (page-1)*pageSize)
+	jobPage, err := s.store.ListJobsPageFiltered(ctx, pageSize, page, storage.JobListFilter{})
 	if err != nil {
 		return jobListPage{}, dashboardMeta{}, nil, err
 	}
-	if items == nil {
-		items = []storage.Job{}
+	if jobPage.Items == nil {
+		jobPage.Items = []storage.Job{}
 	}
 	stats, failedTweetCount, err := s.store.DashboardMeta(ctx)
 	if err != nil {
@@ -55,7 +55,7 @@ func (s *Server) loadWorkbenchBootstrap(ctx context.Context, page, pageSize int)
 	if schedules == nil {
 		schedules = []storage.ArchiveSchedule{}
 	}
-	return jobListPage{Items: items, Page: page, PageSize: pageSize},
+	return jobListPage{Items: jobPage.Items, Page: jobPage.Page, PageSize: jobPage.PageSize, Total: jobPage.Total, Counts: jobPage.Counts},
 		dashboardMeta{Stats: stats, FailedTweetCount: failedTweetCount},
 		schedules,
 		nil

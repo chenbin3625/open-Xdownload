@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -105,6 +106,51 @@ func TestArchiveScheduleCRUD(t *testing.T) {
 	}
 	if len(remaining) != 0 {
 		t.Fatalf("list after delete = %#v, want empty", remaining)
+	}
+}
+
+func TestArchiveScheduleLastRunStatus(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	schedule, err := store.CreateArchiveSchedule(ctx, newTestSchedule("状态", 60, "alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.CreateJob(ctx, JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateJob(ctx, JobKindUser, "bob", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE archive_schedules SET last_job_ids=? WHERE id=?`, fmt.Sprintf("[%d,%d]", first.ID, second.ID), schedule.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		first, second JobStatus
+		want          string
+	}{
+		{JobPending, JobCompleted, "running"},
+		{JobFailed, JobCompleted, "failed"},
+		{JobCanceled, JobCompleted, "canceled"},
+		{JobCompleted, JobCompleted, "success"},
+	} {
+		if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET status=CASE id WHEN ? THEN ? ELSE ? END WHERE id IN (?,?)`, first.ID, tc.first, tc.second, first.ID, second.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.GetArchiveSchedule(ctx, schedule.ID)
+		if err != nil || got.LastRunStatus != tc.want {
+			t.Fatalf("get = %+v, %v, want %s", got, err, tc.want)
+		}
+		list, err := store.ListArchiveSchedules(ctx)
+		if err != nil || len(list) != 1 || list[0].LastRunStatus != tc.want {
+			t.Fatalf("list = %+v, %v, want %s", list, err, tc.want)
+		}
 	}
 }
 

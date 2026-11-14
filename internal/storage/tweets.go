@@ -52,6 +52,17 @@ type TweetPage struct {
 	Items      []ArchivedTweet `json:"items"`
 	Pagination Pagination      `json:"pagination"`
 }
+type TweetAuthor struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+func (s *Store) ListTweetAuthors(ctx context.Context) ([]TweetAuthor, error) {
+	authors := []TweetAuthor{}
+	err := s.db.SelectContext(ctx, &authors, `SELECT screen_name AS value, MAX(author_name) AS label FROM tweets GROUP BY author_id, screen_name ORDER BY lower(screen_name)`)
+	return authors, err
+}
+
 type TweetSync struct {
 	UserID    string    `json:"userId" db:"user_id"`
 	LastID    string    `json:"lastId" db:"last_id"`

@@ -22,15 +22,15 @@ import {
   type TweetData,
   type ArchiveMode,
 } from "../../lib/api";
-import { notifyError } from "../common/CommonUI";
+import { formatIntervalMinutes, notifyError } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
-import { Button } from "@douyinfe/semi-ui";
+import { Button, RadioGroup } from "@douyinfe/semi-ui";
 import { Checkbox, Tabs, type TabItem } from "../semi";
 import { Input, NumberInput, Textarea } from "../semi";
 import { Modal } from "../semi";
 import { Spinner } from "../semi";
 import { toast } from "../semi";
-import { Field, Select } from "../semi";
+import { Field, Select, Tag } from "../semi";
 
 export interface CreateJobModalProps {
   open: boolean;
@@ -106,32 +106,70 @@ export function detectQuickInputTab(input: string): "tweet_link" | "list" | "use
   return "user";
 }
 
-function parseLinesToItems(raw: string, kind: JobKind): JobRequest[] {
-  const seen = new Set<string>();
-  const items: JobRequest[] = [];
-  const lines = raw.split(/[\r\n]+/);
+export interface BatchInputLine {
+  lineNumber: number;
+  raw: string;
+  normalized: string;
+  status: "valid" | "pending" | "duplicate" | "invalid";
+  duplicateOf?: number;
+}
 
-  for (const rawLine of lines) {
+export interface BatchInputSummary {
+  items: JobRequest[];
+  recognized: number;
+  pendingValidation: number;
+  duplicates: number;
+  invalid: number;
+  lines: BatchInputLine[];
+}
+
+export function parseBatchInput(raw: string, kind: JobKind): BatchInputSummary {
+  const seen = new Set<string>();
+  const firstLineByValue = new Map<string, number>();
+  const items: JobRequest[] = [];
+  const lines: BatchInputLine[] = [];
+  let recognized = 0;
+  let pendingValidation = 0;
+  let duplicates = 0;
+  let invalid = 0;
+  for (const [lineIndex, rawLine] of raw.split(/\r?\n/).entries()) {
     let line = rawLine.trim();
     if (!line) continue;
 
     // 清洗常见的输入前缀
+    let validFormat = false;
     if (kind === "user" || kind === "following") {
-      // 识别不了的输入原样交给后端校验，避免静默丢弃。
-      line = parseScreenName(line) ?? line.replace(/^@+/, "").trim();
+      const parsed = parseScreenName(line);
+      validFormat = parsed !== null;
+      if (parsed) line = parsed;
     } else if (kind === "list") {
-      const match = line.match(/(?:lists\/|^)(\d+)/);
-      if (match) {
-        line = match[1];
-      }
+      const match = xLinkPattern.test(line) ? line.match(/\/lists\/(\d+)(?:[/?#]|$)/i) : line.match(/^(\d+)$/);
+      validFormat = match !== null;
+      if (match) line = match[1];
     }
 
-    if (!line || seen.has(line)) continue;
-    seen.add(line);
+    if (!line) continue;
+    if (!validFormat) {
+      invalid += 1;
+      lines.push({ lineNumber: lineIndex + 1, raw: rawLine, normalized: line, status: "invalid" });
+      continue;
+    }
+    const key = line.toLowerCase();
+    if (seen.has(key)) {
+      duplicates += 1;
+      lines.push({ lineNumber: lineIndex + 1, raw: rawLine, normalized: line, status: "duplicate", duplicateOf: firstLineByValue.get(key) });
+      continue;
+    }
+    recognized += 1;
+    const pending = kind === "list" || /^\d+$/.test(line);
+    if (pending) pendingValidation += 1;
+    lines.push({ lineNumber: lineIndex + 1, raw: rawLine, normalized: line, status: pending ? "pending" : "valid" });
+    firstLineByValue.set(key, lineIndex + 1);
+    seen.add(key);
     items.push({ kind, input: line });
   }
 
-  return items;
+  return { items, recognized, pendingValidation, duplicates, invalid, lines };
 }
 
 export function CreateJobModal({
@@ -146,6 +184,7 @@ export function CreateJobModal({
   const [archiveMode, setArchiveMode] = useState<ArchiveMode>("both");
   const [backfill, setBackfill] = useState(false);
   const [batchSize, setBatchSize] = useState(0);
+  const [limitTargets, setLimitTargets] = useState(false);
 
   const [tweetUrl, setTweetUrl] = useState("");
   const [batchInputs, setBatchInputs] = useState<Partial<Record<BatchKind, string>>>({});
@@ -157,6 +196,7 @@ export function CreateJobModal({
   const [isSchedule, setIsSchedule] = useState(false);
   const [scheduleName, setScheduleName] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState(360);
+  const [customFrequency, setCustomFrequency] = useState(false);
 
   useEffect(() => {
     parseSequence.current += 1;
@@ -171,22 +211,30 @@ export function CreateJobModal({
       } else {
         setBatchInputs({ [quickTab]: initialInput });
       }
-    } else {
+    } else if (!Object.values(batchInputs).some(value => value?.trim()) && !tweetUrl.trim()) {
       setActiveTab(tabKeys.includes(initialKind) ? initialKind : "user");
     }
     if (initialKind === "schedule") {
       setIsSchedule(true);
+      setActiveTab(current => current === "tweet_link" ? "user" : current);
     }
   }, [open, initialInput, initialKind]);
 
   // 单条推文不支持定时计划：切到该标签时勾选状态保留（切回可恢复），但不参与任何展示与提交。
   const scheduleMode = isSchedule && activeTab !== "tweet_link";
 
-  const currentBatchItems = useMemo(() => {
-    if (activeTab === "tweet_link") return [];
+  const currentBatchSummary = useMemo(() => {
+    if (activeTab === "tweet_link") return { items: [], recognized: 0, pendingValidation: 0, duplicates: 0, invalid: 0, lines: [] };
     const raw = batchInputs[activeTab as BatchKind] ?? "";
-    return parseLinesToItems(raw, activeTab as JobKind);
+    return parseBatchInput(raw, activeTab as JobKind);
   }, [activeTab, batchInputs]);
+  const currentBatchItems = currentBatchSummary.items;
+
+  function removeBatchLine(kind: BatchKind, lineNumber: number) {
+    const lines = (batchInputs[kind] ?? "").split(/\r?\n/);
+    lines.splice(lineNumber - 1, 1);
+    setBatchInputs(current => ({ ...current, [kind]: lines.join("\n") }));
+  }
 
   const parseMutation = useMutation({
     mutationFn: ({ url }: { url: string; sequence: number }) => parseTweetLink(url),
@@ -243,7 +291,7 @@ export function CreateJobModal({
       if (request.scheduleMode) {
         toast.success({
           message: t("定时归档计划已保存"),
-          description: t("执行频率: 每 {{value0}} 分钟", { value0: request.intervalMinutes }),
+          description: formatIntervalMinutes(request.intervalMinutes),
         });
       } else {
         toast.success({
@@ -251,6 +299,7 @@ export function CreateJobModal({
           description: t("已成功入库 {{value0}} 个任务并开始后台下载", { value0: jobs.length }),
         });
       }
+      setTweetUrl(""); setBatchInputs({}); setScheduleName(""); setIsSchedule(false);
       handleClose();
     },
     onError: (error, _variables, request) => {
@@ -261,11 +310,7 @@ export function CreateJobModal({
   const handleClose = () => {
     parseSequence.current += 1;
     createSequence.current += 1;
-    setTweetUrl("");
-    setBatchInputs({});
     setParsedTweet(null);
-    setIsSchedule(false);
-    setScheduleName("");
     onClose();
   };
 
@@ -290,9 +335,17 @@ export function CreateJobModal({
         <div className="space-y-3 pt-1">
           <div className="flex items-center justify-between text-xs text-fg-muted">
             <span>{tab.hint}</span>
-            <span className="font-mono font-medium text-brand-600">
-              {t("已识别: ")}{currentBatchItems.length} {t(" 个")}</span>
+            <span className="shrink-0 whitespace-nowrap font-mono font-medium text-brand-600">
+              {t("待校验目标")} {currentBatchItems.length} {t(" 个")}</span>
           </div>
+          {(currentBatchSummary.recognized > 0 || currentBatchSummary.pendingValidation > 0 || currentBatchSummary.duplicates > 0 || currentBatchSummary.invalid > 0) && (
+            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-subtle" aria-live="polite">
+              {currentBatchSummary.recognized > 0 && <span>{t("格式有效")} {currentBatchSummary.recognized}</span>}
+              {currentBatchSummary.pendingValidation > 0 && <span>{t("待后端校验")} {currentBatchSummary.pendingValidation}</span>}
+              {currentBatchSummary.duplicates > 0 && <span className="text-warning-strong">{t("重复目标")} {currentBatchSummary.duplicates}</span>}
+              {currentBatchSummary.invalid > 0 && <span className="text-danger">{t("无效格式")} {currentBatchSummary.invalid}</span>}
+            </div>
+          )}
           <Textarea
             rows={6}
             aria-label={tab.label}
@@ -303,6 +356,20 @@ export function CreateJobModal({
             placeholder={tab.placeholder}
             className="font-mono text-xs"
           />
+          {currentBatchSummary.lines.length > 0 && (
+            <div className="space-y-1.5" aria-label={t("逐行校验结果")}>
+              {currentBatchSummary.lines.map(line => (
+                <div key={`${tab.kind}-${line.lineNumber}`} className="flex min-w-0 items-center gap-2 text-xs">
+                  <span className="w-12 shrink-0 font-mono text-fg-subtle">{t("第 {{value0}} 行", { value0: line.lineNumber })}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-fg-muted" title={line.raw}>{line.normalized || line.raw}</span>
+                  {line.status === "valid" && <Tag tone="success">{t("格式有效")}</Tag>}
+                  {line.status === "pending" && <Tag tone="warning">{t("待后端校验")}</Tag>}
+                  {line.status === "invalid" && <Tag tone="danger">{t("无效格式，已忽略")}</Tag>}
+                  {line.status === "duplicate" && <><Tag tone="danger">{t("与第 {{value0}} 行重复，已忽略", { value0: line.duplicateOf })}</Tag><Button type="tertiary" size="small" onClick={() => removeBatchLine(tab.kind, line.lineNumber)}>{t("移除重复行")}</Button></>}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       ),
     })),
@@ -371,7 +438,7 @@ export function CreateJobModal({
     <Modal
       open={open}
       onClose={handleClose}
-      className="sm:w-[min(92vw,44rem)]"
+      className="create-job-modal sm:w-[min(92vw,44rem)]"
       title={
         <div className="flex items-center gap-3">
           <div className="flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600 font-bold">
@@ -379,9 +446,9 @@ export function CreateJobModal({
           </div>
           <div className="min-w-0">
             <div className="text-sm font-semibold text-fg sm:text-base">
-              {t("新建下载任务 / 归档计划")}</div>
+              {scheduleMode ? t("新建归档计划") : t("新建下载任务")}</div>
             <div className="hidden text-xs text-fg-muted font-normal sm:block">
-              {t("支持单条推文、批量用户时间线、列表与关注关系媒体高速入库")}</div>
+              {t("目标与归档设置")}</div>
           </div>
         </div>
       }
@@ -399,7 +466,7 @@ export function CreateJobModal({
               {t("取消")}</Button>
             <Button
               theme="solid"
-              disabled={!canSubmit || createJobsMutation.isPending}
+              disabled={!canSubmit || createJobsMutation.isPending || scheduleMode && (!Number.isInteger(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 43200 || archiveMode !== "media" && limitTargets && (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1000))}
               loading={createJobsMutation.isPending}
               aria-busy={createJobsMutation.isPending}
               onClick={() => createJobsMutation.mutate()}
@@ -416,6 +483,7 @@ export function CreateJobModal({
       }
     >
       <div className="space-y-4 py-1">
+        {activeTab !== "tweet_link" && <RadioGroup aria-label={t("执行方式")} type="button" value={isSchedule ? "schedule" : "once"} onChange={event => setIsSchedule(event.target.value === "schedule")} options={[{ value: "once", label: t("立即执行") }, { value: "schedule", label: t("定时计划") }]} />}
         <Field label={t("archive.mode")} className="mb-4">
           <Select value={archiveMode} onChange={value => setArchiveMode(value as ArchiveMode)} ariaLabel={t("archive.mode")} options={[{ value: "both", label: t("archive.both") }, { value: "tweets", label: t("archive.textOnly") }, { value: "media", label: t("archive.mediaOnly") }]} />
         </Field>
@@ -430,19 +498,14 @@ export function CreateJobModal({
         />
 
         {/* 存为定时归档计划选项 (单条推文除外) */}
-        {activeTab !== "tweet_link" && (
+        {scheduleMode && (
           <div className="space-y-3 rounded-card border border-line bg-surface-muted/50 p-3.5">
             <div className="flex items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2">
                 <Clock className="size-4 shrink-0 text-brand-500" />
                 <span className="text-xs font-semibold text-fg">
-                  {t("是否保存为自动归档计划（定期抓取）？")}</span>
+                  {t("调度设置")}</span>
               </div>
-              <Checkbox
-                checked={isSchedule}
-                onChange={(checked) => setIsSchedule(checked)}
-                ariaLabel={t("是否保存为自动归档计划（定期抓取）？")}
-              />
             </div>
 
             {isSchedule && (
@@ -454,25 +517,30 @@ export function CreateJobModal({
                     placeholder={t("例如：重点博主媒体日常归档")}
                   />
                 </Field>
-                <Field label={t("调度频率 (分钟)")}>
-                  <NumberInput
+                <Field label={t("执行频率")}>
+                  <Select ariaLabel={t("常用执行频率")} value={!customFrequency && [30, 60, 360, 720, 1440].includes(intervalMinutes) ? String(intervalMinutes) : "custom"} onChange={value => { setCustomFrequency(value === "custom"); if (value !== "custom") setIntervalMinutes(Number(value)); }} options={[30, 60, 360, 720, 1440].map(value => ({ value: String(value), label: formatIntervalMinutes(value) })).concat([{ value: "custom", label: t("自定义") }])} />
+                  {(customFrequency || ![30, 60, 360, 720, 1440].includes(intervalMinutes)) && <NumberInput
                     min={5}
+                    aria-label={t("调度频率 (分钟)")}
                     max={43200}
                     value={intervalMinutes}
                     onChange={(val) => setIntervalMinutes(val ?? 360)}
                     addonAfter={t("分钟")}
-                  />
+                  />}
                 </Field>
                 {archiveMode !== "media" && (
                   <Field label={t("每轮最多用户数")}>
+                    <Select ariaLabel={t("每轮目标范围")} value={limitTargets ? "limited" : "all"} onChange={value => { setLimitTargets(value === "limited"); setBatchSize(value === "all" ? 0 : 50); }} options={[{ value: "all", label: t("全部目标") }, { value: "limited", label: t("限制数量") }]} />
+                    {limitTargets && <>
                     <NumberInput
                       min={0}
+                      aria-label={t("每轮最多用户数")}
                       max={1000}
-                      value={batchSize}
+                      value={batchSize || null}
                       onChange={(val) => setBatchSize(val ?? 0)}
                       addonAfter={t("人")}
                     />
-                    <p className="mt-1 text-[11px] text-fg-subtle">{t("0 表示不限制，建议 50")}</p>
+                    </>}
                   </Field>
                 )}
               </div>

@@ -523,6 +523,12 @@ export function XAccountsSettings() {
       <p className="settings-section-description">
         {t("账号只通过导入 Cookie 添加，用于在多个账号间轮换以降低限流概率。")}
       </p>
+      <dl className="account-overview">
+        <div><dt>{t("全部账号")}</dt><dd>{accounts.length}</dd></div>
+        <div><dt>{t("已启用")}</dt><dd>{accounts.filter(account => account.active).length}</dd></div>
+        <div><dt>{t("受限账号")}</dt><dd>{accounts.filter(account => activeLocks(account.locks, now).length > 0).length}</dd></div>
+        <div><dt>{t("异常账号")}</dt><dd>{accounts.filter(account => account.errorMsg).length}</dd></div>
+      </dl>
 
       {query.isError ? (
         <Alert
