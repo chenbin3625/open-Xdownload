@@ -6,7 +6,7 @@
 
 - 用 twscrape 的模型替换 `internal/xclient` 底层：SQLite 账号表、持久化的按 queue 限流锁、`x-client-transaction-id`、queryId 自动发现、账号管理页。
 - 账号只通过导入 Cookie 添加。**不做用户名密码登录。**
-- jobs/httpapi 只依赖 `xapi.Source` 接口；`OPEN_XDOWNLOAD_SCRAPER=legacy|xscrape` 切换实现，本版默认 `legacy`。
+- jobs/httpapi 只依赖 `xapi.Source` 接口；`OPEN_XDOWNLOAD_SCRAPER=legacy|xscrape` 切换实现，**默认 `xscrape`**，显式设置 `legacy` 才退回旧实现。
 - 不做：密码登录、TLS 指纹伪装、SearchTimeline。
 
 ## 包结构
@@ -247,7 +247,7 @@ type HomeProber func(ctx context.Context, creds AccountCredentials) HomeProbeRes
 
 `Server.SetHomeProber(xapi.HomeProber)` 用于注入探测函数，由 `cmd/server` 负责接线；测试注入假函数。探测结果对应的存储操作见上面的「检测」说明。check-all 并发上限为 4，单个账号超时 20 秒。
 
-`GET /api/x-accounts` 里的 `scraper` 字段取自 `jobs.ScraperMode()`，返回 `"legacy"` 或 `"xscrape"`，由环境变量 `OPEN_XDOWNLOAD_SCRAPER` 决定，默认 `legacy`。
+`GET /api/x-accounts` 里的 `scraper` 字段取自 `jobs.ScraperMode()`，返回 `"legacy"` 或 `"xscrape"`，由环境变量 `OPEN_XDOWNLOAD_SCRAPER` 决定，默认 `xscrape`。
 
 改动账号的接口（POST/PATCH/DELETE/unlock，以及确认失效的 check）成功后，要调用 `manager.InvalidateXSource()`，让正在缓存的 Source 下次使用前重建或刷新。
 
@@ -320,14 +320,14 @@ legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewS
 - **请求中遇到 HTTP 401 的处置顺序**：先用探测确认（2 分钟内确认过有效的账号不重复探测）。探测成功说明是目标/接口级 401，原样返回 `HTTPError`（`IsUnauthorized` 为真）；确认失效则 `DeactivateXAccount` 并换号；无法判断则锁 `*` 5 分钟并换号。错误码 32/64/89/215/326 出现在非 401 响应里时直接停用。
 - **queryId 自动发现只是尽力而为。** 当前未登录首页已换成 x-web（Vite + Relay persisted query），不再引用 `responsive-web/client-web/main.*.js`，新 bundle 里也没有 `UserByScreenName`、`UserMedia` 等 operation 名。发现失败时使用内置表；内置 queryId 目前仍可用（2026-11-13 用 guest token 请求 `UserByScreenName` 返回 200）。优先级：环境变量覆盖 > 发现结果 > 内置表。
 - **环境变量账号用 `Store.SyncEnvXAccounts` 同步**：`OPEN_XDOWNLOAD_AUTH_TOKEN`/`OPEN_XDOWNLOAD_CT0` 是主账号，`OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` 按 `config.ParseCookiePairs` 逐条导入为非主账号。不再出现在环境变量里的 env 账号会被删除；同一组 Cookie 重启时保留 active/error_msg，换了 ct0 才重新启用。
-- **爬虫开关**由 `jobs.ScraperMode()` 解析（`jobs.EnvScraper`、`jobs.ScraperLegacy`、`jobs.ScraperXScrape`），未识别的值按 legacy 处理。
+- **爬虫开关**由 `jobs.ScraperMode()` 解析（`jobs.EnvScraper`、`jobs.ScraperLegacy`、`jobs.ScraperXScrape`）：未设置或空值用 `xscrape`，只有显式 `legacy`（大小写不敏感）才退回旧实现；其他未识别的值按默认 `xscrape` 处理并告警一次。
 - **legacy 账号池从 x_accounts 构建**：只使用 active=1 的账号，主账号（is_primary=1 且 active）排第一位。主账号停用或不存在时 legacy 池没有主账号（`HasPrimary()` 为 false，主账号专用操作返回错误），不会把备用账号当主账号用。账号级 proxy、user_agent、extra_cookies 在 legacy 里同样生效。没有任何 active 账号时退回 guest 推文抓取，且不再读取已废弃的 `cfg.AuthToken`。legacy 的禁用状态仍只在内存里，不写回 x_accounts。
 - **账号检测的重新启用规则**：`PATCH active=false` 同时清空 error_msg；检测成功时只有被系统停用的账号（active=0 且 error_msg 非空）才重新启用，用户手动停用的账号保持停用。检测成功只解除 `*` 锁，不解除按 queue 的限流锁。
 - **jobs 的 Source 缓存键只含全局代理**；账号变化统一通过 `InvalidateXSource` 触发重建。运行时不再读取 `AppConfig.AuthToken`/`CSRFToken`/`AdditionalCookies`，只有一次性迁移读取旧列。
 - **`/api/config`**：GET/PUT 响应不再包含这三个字段；PUT 时空值和打码占位符静默忽略，真实值返回 400 并提示到账号池导入。
 - **`/api/auth/check`** 保留为兼容接口：`configured` 表示存在 active 账号；对主账号（主账号不可用时取第一个 active 账号）做一次探测，不写库。
 - **请求统计**只在请求成功时 +1（`IncrementXAccountStat`）。
-- **xscrape 公共 API** 固定为 `internal/xscrape/engine.go` 里的 `Options`、`NewEngine(store, opts)`、`(*Engine).Source(ctx, cfg)`（签名与 `jobs.XSourceFactory` 一致）、`(*Engine).HomeProber()`。Engine 进程内只建一个，持有 xtid、queryId 表和每账号的内存执行槽；Source 重建时复用。cmd/server 无论哪种模式都创建 Engine，并把 `HomeProber()` 注入 httpapi；xscrape 模式下再把 `engine.Source` 设为 jobs 的工厂。
+- **xscrape 公共 API** 固定为 `internal/xscrape/engine.go` 里的 `Options`、`NewEngine(store, opts)`、`(*Engine).Source(ctx, cfg)`（签名与 `jobs.XSourceFactory` 一致）、`(*Engine).HomeProber()`。Engine 进程内只建一个，持有 xtid、queryId 表和每账号的内存执行槽；Source 重建时复用。cmd/server 无论哪种模式都创建 Engine，并把 `HomeProber()` 注入 httpapi；默认（xscrape）把 `engine.Source` 设为 jobs 的工厂，显式 legacy 时保留 Manager 的 xclient 工厂。
 - **jobs 的 Source 工厂签名**改为 `jobs.XSourceFactory func(ctx, cfg) (xapi.Source, error)`；`Manager.XSource`、`Manager.NewXSource` 同样增加 ctx 参数。
 - **`xapi.ViewerKey(authToken)`** 是 viewerKey 的唯一实现，两套实现共用。
 - **没有 active 账号时，xscrape 的 FetchTweet 用 guest token 请求**（`POST {APIBaseURL}/1.1/guest/activate.json`，请求带 `x-guest-token`，loggedIn=false）。2026-11-13 实测：只带 bearer 请求 `TweetResultByRestId` 返回 403，带 guest token 返回 200。
@@ -376,7 +376,7 @@ Playwright：`x-accounts.spec.ts` 12/12 通过（6 个项目 × 导入编辑检�
 | 只读时间线 | 真实 Cookie，flock 串行，10 次 GraphQL 请求，未触发 429 | 8 个接口全 PASS：UserByScreenName / UserByRestId 结果一致、UserMedia 首页 12 条含 cursor、UserTweets 首页 15 条正文非空且 HeadID=页内最大 ID、Following 50 人、ListByRestId + ListMembers（公开列表 461 成员，首页 100 人）、TweetResultByRestId 正文/媒体/时间齐全；404 路径只刷新 queryId，不加锁、不计数；账号池前后快照完全一致 |
 | 账号池 HTTP API | 真实后端 + 真实 Cookie | 11 组全 PASS：CRUD、三种 Cookie 格式导入、多行 issues 行号、primary 接替、env 账号只读、打码、代理 userinfo 脱敏与回填、检测停用与 errorMsg、check-all 并发 4、解锁、`/api/auth/check` 不写库（调用前后账号 JSON 逐字节一致） |
 | 前端账号池页面 | Playwright 6 个项目 + 独立脚本复核 | `x-accounts.spec.ts` 12/12；导入 issues 行号、列表 DOM 无完整 token、编辑代理回传打码值不丢密码、启停、检测失败 toast（zh/en）、删除二次确认、解锁后 `locks=[]`；i18n zh/en 各 604 key、双向缺失 0、en 无中文残留；pageerror/console.error/4xx/5xx 均为 0；Vitest 332/332、tsc 0 |
-| legacy 对照 | 真实请求 10 次认证 GraphQL/探测 + 8 次未认证发现，flock | 8 项全 PASS：四种 `OPEN_XDOWNLOAD_SCRAPER` 取值启动日志正确（未识别回落 legacy）；legacy 模式下 `/api/auth/check` 同样走 xscrape 探测且账号行不变；legacy 工厂的 inactive 过滤/primary 排首/停用 primary 后 `HasPrimary=false`/无 active 退化为 guest；同一推文两实现逐字段一致（含 bestURL 逐字符相同）；`GetUserByInput` 结构体完全相等；不存在的推文两实现同样报「推文详情接口没有返回正文」；账号 active/error_msg/锁状态与统计只增不减 |
+| legacy 对照 | 真实请求 10 次认证 GraphQL/探测 + 8 次未认证发现，flock | 8 项全 PASS：四种 `OPEN_XDOWNLOAD_SCRAPER` 取值启动日志正确（当时默认 legacy、未识别回落 legacy；该验收后默认已改为 xscrape，未识别值改为按默认处理并告警一次）；legacy 模式下 `/api/auth/check` 同样走 xscrape 探测且账号行不变；legacy 工厂的 inactive 过滤/primary 排首/停用 primary 后 `HasPrimary=false`/无 active 退化为 guest；同一推文两实现逐字段一致（含 bestURL 逐字符相同）；`GetUserByInput` 结构体完全相等；不存在的推文两实现同样报「推文详情接口没有返回正文」；账号 active/error_msg/锁状态与统计只增不减 |
 
 已知观察（均未构成失败，未在本次修改）：
 

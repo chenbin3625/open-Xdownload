@@ -127,7 +127,8 @@ func NewManager(store *storage.Store, parserService *parser.Service, eventBus *E
 		mediaLocks: make(map[string]*keyLock),
 		metrics:    make(map[int64]jobMetrics),
 	}
-	// 默认使用 legacy 实现；新实现通过 SetXSourceFactory 注入。
+	// NewManager 自身只装 legacy 工厂（不依赖 xscrape 包）；生产启动代码在默认
+	// xscrape 模式下用 SetXSourceFactory 换成 xscrape 引擎。
 	m.xSourceFactory = m.newLegacyXSource
 	return m
 }
@@ -1420,8 +1421,9 @@ func (m *Manager) xPool(ctx context.Context) (config.AppConfig, xapi.Source, err
 // XSourceFactory 构建 X 数据源。cfg 是当前生效配置（已套用环境变量覆盖）。
 type XSourceFactory func(ctx context.Context, cfg config.AppConfig) (xapi.Source, error)
 
-// SetXSourceFactory 替换 X 数据源实现。默认是 legacy 的 xclient；切换
-// OPEN_XDOWNLOAD_SCRAPER 时由启动代码注入另一套实现。替换工厂会丢弃旧缓存。
+// SetXSourceFactory 替换 X 数据源实现。启动代码按 OPEN_XDOWNLOAD_SCRAPER 注入：
+// 默认（xscrape）注入 xscrape 引擎，显式 legacy 时保留 NewManager 预置的 xclient
+// 工厂。替换工厂会丢弃旧缓存。
 func (m *Manager) SetXSourceFactory(factory XSourceFactory) {
 	m.xSourceMu.Lock()
 	defer m.xSourceMu.Unlock()

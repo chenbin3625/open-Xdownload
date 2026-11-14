@@ -46,7 +46,7 @@ func envTrimmed(key string) string {
 }
 
 // newXScrapeEngine 创建 xscrape 引擎。无论 scraper 模式都用它做账号检测：探测走的是
-// 独立的账号接口，不碰生产池；xscrape 模式下再把 Engine.Source 设为 jobs 的工厂。
+// 独立的账号接口，不碰生产池；默认模式下再把 Engine.Source 设为 jobs 的工厂。
 // 引擎在进程内只建一个：xtid、queryId 表、账号执行槽要跨 Source 重建复用。
 func newXScrapeEngine(store *storage.Store) *xscrape.Engine {
 	return xscrape.NewEngine(store, xscrape.Options{})

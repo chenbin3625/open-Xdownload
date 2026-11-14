@@ -117,13 +117,13 @@ func run() int {
 	resolver := parser.NewService()
 	manager := jobs.NewManager(store, resolver, eventBus)
 	// 账号检测始终用 xscrape 引擎的探测（独立的账号接口，不碰生产池）；数据源工厂
-	// 只有 xscrape 模式才替换，legacy 用 Manager 默认的 xclient 工厂。
+	// 默认就是 xscrape，只有显式 legacy 才保留 Manager 的 xclient 工厂。
 	engine := newXScrapeEngine(store)
-	if jobs.ScraperMode() == jobs.ScraperXScrape {
+	if jobs.ScraperMode() == jobs.ScraperLegacy {
+		log.Printf("x: 数据源 legacy（xclient），已显式设置 %s=legacy", jobs.EnvScraper)
+	} else {
 		manager.SetXSourceFactory(engine.Source)
 		log.Printf("x: 数据源 xscrape")
-	} else {
-		log.Printf("x: 数据源 legacy（xclient）")
 	}
 	recoveredCount := 0
 	if recovered, err := store.RequeueInterruptedJobs(ctx); err != nil {

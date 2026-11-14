@@ -157,7 +157,7 @@ Available service flags:
 | n/a | `OPEN_XDOWNLOAD_GUEST_BEARER` | built-in public web token | Overrides the guest bearer token used for unauthenticated endpoints. Only needed if X rotates the public token. |
 | n/a | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | empty | Supplies the primary X account via the environment. On startup it becomes a read-only account (`source = env`) in the account pool, synced on every start; removing the variables removes that account. |
 | n/a | `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` | empty | Supplies backup X accounts via the environment, same format as the browser `Cookie` header. Synced into the account pool as read-only `env` accounts. |
-| n/a | `OPEN_XDOWNLOAD_SCRAPER` | `legacy` | Data source implementation: `legacy` uses the original client, `xscrape` uses the twscrape-style pool (persisted per-queue locks, queryId discovery, `x-client-transaction-id`). |
+| n/a | `OPEN_XDOWNLOAD_SCRAPER` | `xscrape` | Data source implementation. `xscrape` (default) uses the twscrape-style pool (persisted per-queue locks, queryId discovery, `x-client-transaction-id`); set `legacy` to fall back to the original client. |
 | n/a | `OPEN_XDOWNLOAD_FORCE_CHOWN` | `0` | Docker entrypoint only: set to `1` to force a recursive `chown` of the download directory at startup. |
 
 ## First-Time Setup

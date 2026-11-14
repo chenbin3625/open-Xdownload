@@ -1,6 +1,7 @@
 // Package xscrape 是 twscrape 风格的 X 数据源实现：账号与限流锁持久化在 SQLite
 // （storage 的 x_accounts 系列表），请求带 x-client-transaction-id，queryId 支持自动
-// 发现。由 OPEN_XDOWNLOAD_SCRAPER=xscrape 启用，设计见 docs/xscrape-design.md。
+// 发现。它是默认实现；OPEN_XDOWNLOAD_SCRAPER=legacy 可退回 xclient。设计见
+// docs/xscrape-design.md。
 //
 // 导出的类型和函数签名是固定契约，cmd/server 按它接线。
 package xscrape
