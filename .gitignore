@@ -32,3 +32,6 @@ test-results/
 
 .reference/
 pnpm-lock.yaml
+
+# Claude Code 子代理工作区
+.claude/worktrees/
