@@ -517,7 +517,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	job, err := s.store.CreateArchiveJob(r.Context(), storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: req.ArchiveMode, Backfill: req.Backfill})
+	job, err := s.store.CreateArchiveJob(r.Context(), storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: req.ArchiveMode, Backfill: req.Backfill, BatchSize: req.BatchSize})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -555,7 +555,7 @@ func (s *Server) createJobsBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[key] = struct{}{}
-		prepared = append(prepared, storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill})
+		prepared = append(prepared, storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, BatchSize: item.BatchSize})
 	}
 	if len(prepared) == 0 {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("没有可创建的任务"))
@@ -676,6 +676,7 @@ type jobRequest struct {
 	Title       string              `json:"title"`
 	ArchiveMode storage.ArchiveMode `json:"archiveMode"`
 	Backfill    bool                `json:"backfill"`
+	BatchSize   int                 `json:"batchSize"`
 }
 
 type batchJobRequest struct {
@@ -738,6 +739,9 @@ type localDirectoryEntry struct {
 func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKind, string, string, error) {
 	if !req.ArchiveMode.Valid() {
 		return "", "", "", storage.ErrValidation("无效的归档模式")
+	}
+	if req.BatchSize < 0 || req.BatchSize > storage.MaxArchiveBatchSize {
+		return "", "", "", storage.ErrValidation(fmt.Sprintf("每轮用户数必须在 0 到 %d 之间", storage.MaxArchiveBatchSize))
 	}
 	if req.Kind == "" {
 		req.Kind = storage.JobKindTweetLink
