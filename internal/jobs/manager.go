@@ -116,7 +116,7 @@ var (
 var errYieldExecution = errors.New("task yielded execution slot")
 
 func NewManager(store *storage.Store, parserService *parser.Service, eventBus *EventBus) *Manager {
-	return &Manager{
+	m := &Manager{
 		store:      store,
 		parser:     parserService,
 		eventBus:   eventBus,
@@ -126,11 +126,54 @@ func NewManager(store *storage.Store, parserService *parser.Service, eventBus *E
 		userLocks:  make(map[string]*keyLock),
 		mediaLocks: make(map[string]*keyLock),
 		metrics:    make(map[int64]jobMetrics),
-		// 唯一直接引用 legacy 实现的位置；新实现通过 SetXSourceFactory 注入。
-		xSourceFactory: func(_ context.Context, cfg config.AppConfig) (xapi.Source, error) {
-			return xclient.NewSource(cfg)
-		},
 	}
+	// 默认使用 legacy 实现；新实现通过 SetXSourceFactory 注入。
+	m.xSourceFactory = m.newLegacyXSource
+	return m
+}
+
+// newLegacyXSource 是默认的 X 数据源工厂：从 x_accounts 读取账号，只保留 active 的，
+// 主账号排第一位，构建 legacy 账号池。没有 active 账号时 legacy 退回 guest 推文抓取。
+func (m *Manager) newLegacyXSource(ctx context.Context, cfg config.AppConfig) (xapi.Source, error) {
+	var stored []storage.XAccount
+	if m.store != nil {
+		var err error
+		if stored, err = m.store.ListXAccounts(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return xclient.NewSourceFromAccounts(cfg, legacyXAccounts(stored), xclient.Options{})
+}
+
+// legacyXAccounts 把账号表的行转换成 legacy 账号池的输入：只保留 active 账号，active 的
+// 主账号排第一位，其余保持原顺序。额外 Cookie 格式损坏时忽略它们，账号照常使用。
+func legacyXAccounts(stored []storage.XAccount) []xclient.Account {
+	accounts := make([]xclient.Account, 0, len(stored))
+	for _, account := range stored {
+		if !account.Active {
+			continue
+		}
+		extra, err := account.ExtraCookieMap()
+		if err != nil {
+			// 不记录 err：JSON 语法错误会带出原文里的字符。
+			log.Printf("[jobs] 账号 %d 的额外 Cookie 格式损坏，已忽略", account.ID)
+			extra = nil
+		}
+		converted := xclient.Account{
+			AuthToken:    account.AuthToken,
+			CSRFToken:    account.CSRFToken,
+			ExtraCookies: extra,
+			UserAgent:    account.UserAgent,
+			Proxy:        account.Proxy,
+			Primary:      account.IsPrimary,
+		}
+		if converted.Primary {
+			accounts = append([]xclient.Account{converted}, accounts...)
+			continue
+		}
+		accounts = append(accounts, converted)
+	}
+	return accounts
 }
 
 func (m *Manager) Start(ctx context.Context) {
@@ -1388,7 +1431,8 @@ func (m *Manager) SetXSourceFactory(factory XSourceFactory) {
 }
 
 // InvalidateXSource 清除缓存的 X 数据源，使下一次 XSource(cfg) 用当前工厂重建。
-// 账号池配置（Cookie/附加账号）变更后由账号管理 HTTP 层调用。
+// 账号池（x_accounts）变更后由账号管理 HTTP 层调用；缓存键只含全局代理，账号变化
+// 只能通过这里触发重建。
 func (m *Manager) InvalidateXSource() {
 	m.xSourceMu.Lock()
 	defer m.xSourceMu.Unlock()
@@ -1428,13 +1472,10 @@ func (m *Manager) XSource(ctx context.Context, cfg config.AppConfig) (xapi.Sourc
 	return source, nil
 }
 
+// xPoolConfigKey 是缓存 Source 的键：只含全局代理。账号变化由 InvalidateXSource 处理，
+// 运行时不再读取已废弃的 Cookie 配置字段。
 func xPoolConfigKey(cfg config.AppConfig) string {
-	return strings.Join([]string{
-		cfg.AuthToken,
-		cfg.CSRFToken,
-		cfg.AdditionalCookies,
-		cfg.ProxyURL,
-	}, "\x00")
+	return cfg.ProxyURL
 }
 
 // archiveCheckpointTask 是 archiveUserTask 的可序列化形式（检查点需要跨进程恢复）。
@@ -2730,7 +2771,7 @@ func enhanceErrorContext(job storage.Job, mediaURL string, err error) string {
 	// 不再重复追加，避免同一条建议出现两次。
 	if !strings.Contains(errMsg, "提示:") {
 		if strings.Contains(errMsg, "用户不可用") || strings.Contains(errMsg, "UserUnavailable") {
-			contextParts = append(contextParts, "提示: 账号可能已冻结/注销/受限；若多个不同账号都报此错误，多半是 X Cookie 已失效，请重新导入 AuthToken 与 CSRFToken")
+			contextParts = append(contextParts, "提示: 账号可能已冻结/注销/受限；若多个不同账号都报此错误，多半是 X Cookie 已失效，请在「设置 → X 账号池」检测并重新导入 Cookie")
 		} else if strings.Contains(strings.ToLower(errMsg), "timeout") || strings.Contains(errMsg, "超时") {
 			contextParts = append(contextParts, "提示: 网络超时，请检查网络连接或代理设置")
 		} else if strings.Contains(errMsg, "403") || strings.Contains(strings.ToLower(errMsg), "forbidden") {
@@ -2738,7 +2779,7 @@ func enhanceErrorContext(job storage.Job, mediaURL string, err error) string {
 		} else if strings.Contains(errMsg, "404") || strings.Contains(strings.ToLower(errMsg), "not found") {
 			contextParts = append(contextParts, "提示: 资源不存在，可能已被删除")
 		} else if strings.Contains(errMsg, "401") || strings.Contains(strings.ToLower(errMsg), "unauthorized") {
-			contextParts = append(contextParts, "提示: 认证失败，请检查 X 账号凭据（AuthToken 和 CSRFToken）")
+			contextParts = append(contextParts, "提示: 认证失败，请在「设置 → X 账号池」检测账号，必要时重新导入 Cookie")
 		} else if strings.Contains(strings.ToLower(errMsg), "proxy") || strings.Contains(errMsg, "代理") {
 			contextParts = append(contextParts, "提示: 代理连接问题，请检查代理设置")
 		} else if strings.Contains(strings.ToLower(errMsg), "no space") || strings.Contains(errMsg, "ENOSPC") {

@@ -157,6 +157,7 @@ func TestListResumeUsesCheckpointWithoutFetchingMembers(t *testing.T) {
 	if _, err := store.UpdateConfig(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
+	seedXAccountsFromTestConfig(t, store, cfg)
 	job, err := store.CreateJob(ctx, storage.JobKindList, "123", "list")
 	if err != nil {
 		t.Fatal(err)
