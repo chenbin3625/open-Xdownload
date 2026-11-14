@@ -291,6 +291,24 @@ type Source interface {
 
 legacy 实现（`xclient.Pool`）直接实现该接口；其工厂 `xclient.NewSource` 在凭据缺失时返回一个仅支持 `FetchTweet` 的 source，其余方法返回与 `xclient.NewPool` 相同的错误。
 
+## legacy 与 xscrape 的行为差异
+
+两套实现共用 `xapi` 的解析、分页与错误分类，账号来源也相同（`x_accounts`），但状态存放位置不同：
+
+| 维度 | legacy（`xclient`） | xscrape |
+|---|---|---|
+| 每账号 3 秒请求间隔 | 有（`request_limit.go`，按 `sha256(auth_token)` 跨池重建共享） | 有（`slots.go`，Engine 内共享） |
+| 同账号并发 | 内存单槽串行 | 内存单槽串行 |
+| 进程级节流 | 有（`httpx.WaitXRequest`） | 有（同一入口） |
+| 限流/冷却锁 | 只在内存，重启或多实例不共享 | 持久化在 `x_account_locks`，跨重启生效 |
+| 请求统计 | 无 | `x_account_stats`，按 UTC 天 + queue |
+| 账号禁用状态 | 只在内存，重启后恢复 | 写回 `x_accounts.active`/`error_msg` |
+| 账号读取时机 | 池在构建时固化，账号变化依赖 `InvalidateXSource` 重建 | 每次选号都重读 `x_accounts`，直接改库的热变更也能生效 |
+| 401 确认 | `/home` 自检 | `account/multi/list.json` 探测（见 2026-11-13 修订） |
+| queryId | 内置表 | 环境变量 > 发现 > 内置表，404 时刷新 |
+| `x-client-transaction-id` | 无 | 有（`xtid`） |
+
+"正在使用"的租约两边都只在内存里：多进程共用一个库时，同一账号仍可能被两个进程同时使用（设计上按单进程部署）。
 
 ## 2026-11-13 修订（实现前核对 x.com 现状）
 
