@@ -131,11 +131,15 @@ func emptyGraphQL(h *testHarness, w http.ResponseWriter, r *http.Request) {
 func TestGraphQLRotatesAccountsByLRUAndCountsStats(t *testing.T) {
 	var mu sync.Mutex
 	var tokens, transactionIDs []string
+	var missingSessionHeaders []string
 	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/i/api/graphql/") {
 			mu.Lock()
 			tokens = append(tokens, requestAuthToken(r))
 			transactionIDs = append(transactionIDs, r.Header.Get("x-client-transaction-id"))
+			if r.Header.Get("X-Twitter-Auth-Type") != "OAuth2Session" || r.Header.Get("X-Twitter-Active-User") != "yes" || r.Header.Get("X-Twitter-Client-Language") != "en" {
+				missingSessionHeaders = append(missingSessionHeaders, r.Header.Get("X-Twitter-Auth-Type")+"/"+r.Header.Get("X-Twitter-Active-User"))
+			}
 			mu.Unlock()
 		}
 		emptyGraphQL(h, w, r)
@@ -162,6 +166,9 @@ func TestGraphQLRotatesAccountsByLRUAndCountsStats(t *testing.T) {
 		if id != "test-transaction-id" {
 			t.Fatalf("x-client-transaction-id = %q", id)
 		}
+	}
+	if len(missingSessionHeaders) != 0 {
+		t.Fatalf("requests missing X session headers: %v", missingSessionHeaders)
 	}
 	stats, err := h.store.ListXAccountStats(ctx, h.clock.Now().UTC().Format("2006-01-02"))
 	if err != nil {
@@ -459,6 +466,53 @@ func TestGraphQL404InvalidatesAndReturnsQueryIDStale(t *testing.T) {
 	defer mu.Unlock()
 	if graphqlRequests != 2 {
 		t.Fatalf("graphql requests = %d, want one retry after rediscovery", graphqlRequests)
+	}
+}
+
+func TestNextAccountWaitedThenDisabledDoesNotPanic(t *testing.T) {
+	h := newHarness(t, emptyGraphQL)
+	account := h.account("token-1", "ct0-1", "")
+	ctx := context.Background()
+
+	// 先占住执行槽，让 nextAccount 在 acquire 上等待；期间停用账号，验证它唤醒后
+	// 不会对 nil excluded map 赋值，而是重新选择并返回"没有可用 X Cookie"。
+	_, release, _, err := h.engine.slots.acquire(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, releaseUsed, err := h.engine.nextAccount(ctx, "UserMedia", nil)
+		if releaseUsed != nil {
+			releaseUsed()
+		}
+		result <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		current, err := h.store.GetXAccount(ctx, account.ID)
+		if err == nil && current.LastUsed.Valid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("nextAccount did not select the account before the deadline")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	inactive := false
+	if _, err := h.store.UpdateXAccount(ctx, account.ID, storage.XAccountPatch{Active: &inactive}); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "没有可用 X Cookie") {
+			t.Fatalf("nextAccount error = %v, want no active account", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("nextAccount blocked after the account was disabled")
 	}
 }
 

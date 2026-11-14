@@ -384,6 +384,11 @@ func newAccountRequest(ctx context.Context, baseURL, method, path string, query,
 	request.Header.Set("X-Csrf-Token", account.CSRFToken)
 	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Accept", "application/json")
+	// 与浏览器会话/twscrape 保持一致；legacy 没设这三个头也能工作，但账号请求走
+	// OAuth2 session 语义时它们能避免部分接口把请求当成匿名访问。
+	request.Header.Set("X-Twitter-Auth-Type", "OAuth2Session")
+	request.Header.Set("X-Twitter-Active-User", "yes")
+	request.Header.Set("X-Twitter-Client-Language", "en")
 	if strings.Contains(path, "/graphql/") {
 		request.Header.Set("Content-Type", "application/json")
 	}
