@@ -508,11 +508,13 @@ func TestCheckAuthProbesWithIsolatedPool(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Default()
 	cfg.DownloadDir = t.TempDir()
-	cfg.AuthToken = "auth-token"
-	cfg.CSRFToken = "csrf-token"
 	cfg.ProxyURL = "http://127.0.0.1:1"
 	if _, err := db.UpdateConfig(ctx, cfg); err != nil {
 		t.Fatalf("seed config: %v", err)
+	}
+	// "已配置"看的是账号池里的 active 账号，不再是 app_config 的旧 Cookie 列。
+	if _, err := db.CreateXAccount(ctx, storage.XAccount{AuthToken: "auth-token", CSRFToken: "csrf-token"}); err != nil {
+		t.Fatalf("seed account: %v", err)
 	}
 	stored, err := db.GetStoredConfig(ctx)
 	if err != nil {

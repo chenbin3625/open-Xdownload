@@ -345,6 +345,7 @@ func TestScheduledArchiveSkipsUnchangedMediaCountAndPeriodicallyFullScans(t *tes
 			if _, err := store.UpdateConfig(ctx, cfg); err != nil {
 				t.Fatal(err)
 			}
+			seedXAccountsFromTestConfig(t, store, cfg)
 			manager := NewManager(store, parser.NewService(), NewEventBus())
 			user := xclient.User{ID: "u1", ScreenName: "alice", Name: "Alice", MediaCount: 100}
 			if _, err := store.UpsertUser(ctx, storageUser(user)); err != nil {

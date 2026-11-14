@@ -131,6 +131,9 @@ func TestEnhanceErrorContext(t *testing.T) {
 			wantContains: []string{
 				"401",
 				"提示: 认证失败",
+				"设置 → X 账号池",
+			},
+			wantNotContains: []string{
 				"AuthToken",
 				"CSRFToken",
 			},
@@ -174,6 +177,11 @@ func TestEnhanceErrorContext(t *testing.T) {
 				"用户不可用",
 				"目标: someone",
 				"提示: 账号可能已冻结",
+				"设置 → X 账号池",
+			},
+			wantNotContains: []string{
+				"AuthToken",
+				"CSRFToken",
 			},
 		},
 		{

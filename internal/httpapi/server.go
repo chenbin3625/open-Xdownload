@@ -115,6 +115,15 @@ func (s *Server) Routes() http.Handler {
 	read("/api/local-directories", s.listLocalDirectories)
 	r.Post("/api/local-directories", s.createLocalDirectory)
 	r.Post("/api/auth/check", s.checkAuth)
+	// 账号池：Cookie 的唯一录入入口（/api/config 的旧 Cookie 字段已拒绝写入）。
+	read("/api/x-accounts", s.listXAccounts)
+	r.Post("/api/x-accounts", s.createXAccount)
+	r.Post("/api/x-accounts/import", s.importXAccounts)
+	r.Post("/api/x-accounts/check-all", s.checkAllXAccounts)
+	r.Patch("/api/x-accounts/{id}", s.updateXAccount)
+	r.Delete("/api/x-accounts/{id}", s.deleteXAccount)
+	r.Post("/api/x-accounts/{id}/check", s.checkXAccount)
+	r.Post("/api/x-accounts/{id}/unlock", s.unlockXAccount)
 	r.Post("/api/parse/tweet-link", s.parseTweetLink)
 	r.Post("/api/jobs", s.createJob)
 	r.Post("/api/jobs/batch", s.createJobsBatch)
@@ -175,6 +184,10 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := dropLegacyCookieFields(fields); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	// 环境变量接管的字段：请求里回显的值不能参与校验（见下方 ProxyURL/DownloadDir），
 	// 落库值由 storage 的 ResolveSubmission 保证保留库内值，这里原样透传 patch。
 	cfg := stored
@@ -232,6 +245,46 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 	// 响应也要套一层 env 覆盖：GET 返回的是 env 生效值，若 PUT 响应回库内值，
 	// 前端"保存后比对"会永远不相等（这正是"env 覆盖部署下刷新配置被吞"的根因）。
 	writeJSON(w, http.StatusOK, config.ApplyEnvOverrides(updated).Redacted())
+}
+
+// legacyCookieConfigFields 是 /api/config 已移除的旧 Cookie 字段（JSON 名）。
+var legacyCookieConfigFields = []string{"authToken", "csrfToken", "additionalCookies"}
+
+// errLegacyCookieConfig 提示调用方 Cookie 已改到账号池管理。
+var errLegacyCookieConfig = storage.ErrValidation("Cookie 已改为在「设置 → X 账号池」中导入")
+
+// dropLegacyCookieFields 从配置 patch 里删掉旧 Cookie 字段，app_config 的旧列因此不会再经
+// /api/config 写入。空值和打码占位符（旧前端原样回传的读取结果）静默忽略；真实 Cookie
+// 返回 400，提示到账号池导入。
+func dropLegacyCookieFields(fields map[string]json.RawMessage) error {
+	for _, key := range legacyCookieConfigFields {
+		raw, ok := fields[key]
+		if !ok {
+			continue
+		}
+		delete(fields, key)
+		if !isLegacyCookiePlaceholder(raw) {
+			return errLegacyCookieConfig
+		}
+	}
+	return nil
+}
+
+// isLegacyCookiePlaceholder 报告提交值是否不含真实 Cookie：null、空串、SecretPlaceholder
+// 或 ClearSentinel。
+func isLegacyCookiePlaceholder(raw json.RawMessage) bool {
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	if value == nil {
+		return true
+	}
+	switch strings.TrimSpace(*value) {
+	case "", config.SecretPlaceholder, config.ClearSentinel:
+		return true
+	}
+	return false
 }
 
 // pathsEqual 比较两个目录是否指向同一位置，比较前统一 Abs + Clean，
@@ -369,12 +422,25 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg = config.ApplyEnvOverrides(resolved)
 	}
-	configured := cfg.AuthToken != "" && cfg.CSRFToken != ""
+	// Cookie 现在存在账号池里，app_config 的旧字段不再代表"已配置"。只要还有
+	// active 账号就交给数据源去检测；账号池为空时直接提示去导入。
+	accounts, err := s.store.ListXAccounts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	configured := false
+	for _, account := range accounts {
+		if account.Active {
+			configured = true
+			break
+		}
+	}
 	if !configured {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": false,
 			"ok":         false,
-			"message":    "请先配置 auth_token 和 ct0",
+			"message":    "请先在「设置 → X 账号池」导入至少一个可用账号",
 		})
 		return
 	}

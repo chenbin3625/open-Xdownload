@@ -44,6 +44,21 @@ func archiveTestPool(t *testing.T, cfg *config.AppConfig, handler http.HandlerFu
 	return pool
 }
 
+// seedXAccountsFromTestConfig 把 archiveTestPool 写进 cfg 的测试 Cookie 导入账号表。
+// 默认工厂只从 x_accounts 构建账号池，走 process* 的测试需要先有账号；主账号排第一位。
+func seedXAccountsFromTestConfig(t *testing.T, store *storage.Store, cfg config.AppConfig) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := store.CreateXAccount(ctx, storage.XAccount{AuthToken: cfg.AuthToken, CSRFToken: cfg.CSRFToken, IsPrimary: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range config.ParseCookiePairs(cfg.AdditionalCookies) {
+		if _, err := store.CreateXAccount(ctx, storage.XAccount{AuthToken: pair.AuthToken, CSRFToken: pair.CSRFToken}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestArchiveProtectedUsersUsesPrimaryRelationships(t *testing.T) {
 	for _, tc := range []struct {
 		name                             string

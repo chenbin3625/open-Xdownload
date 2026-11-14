@@ -124,6 +124,10 @@ type Client struct {
 	retryBackoff func(attempt int) time.Duration
 	authToken    string
 	csrfToken    string
+	// accountUserAgent 是账号级 User-Agent，空值使用默认 UA。
+	accountUserAgent string
+	// extraCookies 是账号的额外 Cookie，已按名字排序，附加在 auth_token/ct0 之后。
+	extraCookies []*http.Cookie
 	limiter      *rateLimiter
 	requests     *accountRequestLimit
 	screen       string
@@ -139,37 +143,32 @@ type Client struct {
 
 type Pool struct {
 	clients []*Client
-	next    int
-	mu      sync.Mutex
+	// hasPrimary 表示 clients[0] 是主账号。主账号停用或不存在时为 false：主账号专用操作
+	// 返回错误，不会把备用账号当主账号用。
+	hasPrimary bool
+	next       int
+	mu         sync.Mutex
 }
 
+// NewPool 用 cfg 里已废弃的旧 Cookie 字段（AuthToken/CSRFToken/AdditionalCookies）构建
+// 账号池，第一组 Cookie 是主账号。只保留给既有测试使用；运行时的账号来自 x_accounts，
+// 见 NewSourceFromAccounts。
 func NewPool(cfg config.AppConfig) (*Pool, error) {
 	if strings.TrimSpace(cfg.AuthToken) == "" || strings.TrimSpace(cfg.CSRFToken) == "" {
 		return nil, errors.New("需要先配置 auth_token 和 ct0 才能调用 X GraphQL")
 	}
-	creds := []Credentials{{AuthToken: cfg.AuthToken, CSRFToken: cfg.CSRFToken}}
-	creds = append(creds, ParseAdditionalCookies(cfg.AdditionalCookies)...)
-	clients := make([]*Client, 0, len(creds))
-	seen := map[string]struct{}{}
-	for _, cred := range creds {
-		if cred.AuthToken == "" || cred.CSRFToken == "" {
-			continue
-		}
-		key := cred.AuthToken + "\x00" + cred.CSRFToken
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		client, err := NewClient(cred, cfg.ProxyURL)
-		if err != nil {
-			return nil, err
-		}
-		clients = append(clients, client)
+	accounts := []Account{{AuthToken: cfg.AuthToken, CSRFToken: cfg.CSRFToken, Primary: true}}
+	for _, cred := range ParseAdditionalCookies(cfg.AdditionalCookies) {
+		accounts = append(accounts, Account{AuthToken: cred.AuthToken, CSRFToken: cred.CSRFToken})
 	}
-	if len(clients) == 0 {
+	pool, err := newPool(cfg, accounts, Options{})
+	if err != nil {
+		return nil, err
+	}
+	if pool == nil {
 		return nil, errors.New("没有可用 Cookie")
 	}
-	return &Pool{clients: clients}, nil
+	return pool, nil
 }
 
 // sameOrigin checks the scheme, hostname and effective port before forwarding credentials.
@@ -219,25 +218,12 @@ func newHTTPClient(transport http.RoundTripper) *http.Client {
 }
 
 func NewClient(cred Credentials, proxyURL string) (*Client, error) {
-	// 复用带连接池与链路本地地址拨号防护的 Transport（M1/S2）；空代理时尊重环境变量代理。
-	transport, err := httpx.Transport(proxyURL)
-	if err != nil {
-		return nil, err
-	}
-	requests := requestLimitForAccount(cred.AuthToken)
-	return &Client{
-		http:         newHTTPClient(transport),
-		baseURL:      host,
-		retryBackoff: requestRetryDelay,
-		authToken:    cred.AuthToken,
-		csrfToken:    cred.CSRFToken,
-		limiter:      requests.limiter,
-		requests:     requests,
-	}, nil
+	return newAccountClient(Account{AuthToken: cred.AuthToken, CSRFToken: cred.CSRFToken}, proxyURL, Options{})
 }
 
+// Primary 返回主账号客户端；池里没有主账号（主账号停用或不存在）时返回 nil。
 func (p *Pool) Primary() *Client {
-	if p == nil || len(p.clients) == 0 {
+	if p == nil || len(p.clients) == 0 || !p.hasPrimary {
 		return nil
 	}
 	return p.clients[0]
@@ -379,7 +365,7 @@ func (p *Pool) Diagnostics() PoolDiagnostics {
 	items := make([]ClientStatus, 0, len(p.clients))
 	available := 0
 	for index, client := range p.clients {
-		status := client.status(index, index == 0)
+		status := client.status(index, index == 0 && p.hasPrimary)
 		if status.OK {
 			available++
 		}
@@ -454,7 +440,7 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 		return "", err
 	}
 	c.setCookieHeaders(request)
-	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("User-Agent", c.requestUserAgent())
 	release, err := c.beginRequest(ctx, homeCheckPath)
 	if err != nil {
 		return "", err
@@ -966,7 +952,7 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 	c.setCookieHeaders(request)
 	request.Header.Set("Authorization", "Bearer "+guestBearer)
 	request.Header.Set("X-Csrf-Token", c.csrfToken)
-	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("User-Agent", c.requestUserAgent())
 	request.Header.Set("Accept", "application/json")
 	// 真实 GraphQL 路径由 graphQLPath 构造为 /i/api/graphql/...，只匹配
 	// "/graphql/" 前缀会让这里永远不生效。
@@ -1075,6 +1061,17 @@ func (c *Client) setCookieHeaders(request *http.Request) {
 	if c.csrfToken != "" {
 		request.AddCookie(&http.Cookie{Name: "ct0", Value: c.csrfToken})
 	}
+	for _, cookie := range c.extraCookies {
+		request.AddCookie(cookie)
+	}
+}
+
+// requestUserAgent 返回账号级 User-Agent，未设置时用默认 UA。
+func (c *Client) requestUserAgent() string {
+	if c.accountUserAgent != "" {
+		return c.accountUserAgent
+	}
+	return userAgent
 }
 
 func (c *Client) isDisabled() bool {

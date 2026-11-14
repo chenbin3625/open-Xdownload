@@ -107,9 +107,24 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 环境变量里的 Cookie 同步成 env 账号；失败不阻断启动（账号池仍可用库里已有账号）。
+	if err := syncEnvXAccounts(ctx, store); err != nil {
+		log.Printf("sync env x accounts: %v", err)
+	}
+	go purgeExpiredXAccountLocks(ctx, store)
+
 	eventBus := jobs.NewEventBus()
 	resolver := parser.NewService()
 	manager := jobs.NewManager(store, resolver, eventBus)
+	// 账号检测始终用 xscrape 引擎的探测（独立的账号接口，不碰生产池）；数据源工厂
+	// 只有 xscrape 模式才替换，legacy 用 Manager 默认的 xclient 工厂。
+	engine := newXScrapeEngine(store)
+	if jobs.ScraperMode() == jobs.ScraperXScrape {
+		manager.SetXSourceFactory(engine.Source)
+		log.Printf("x: 数据源 xscrape")
+	} else {
+		log.Printf("x: 数据源 legacy（xclient）")
+	}
 	recoveredCount := 0
 	if recovered, err := store.RequeueInterruptedJobs(ctx); err != nil {
 		log.Printf("recover interrupted jobs: %v", err)
@@ -126,6 +141,9 @@ func run() int {
 	defer ln.Close()
 	boundAddr := ln.Addr().String()
 	api := httpapi.NewServer(store, resolver, manager, eventBus)
+	if prober := homeProber(engine); prober != nil {
+		api.SetHomeProber(prober)
+	}
 	handler := withWebApp(api.Routes(), webDir, api.InjectIndexHTML)
 	h3Available := new(atomic.Bool)
 	h3Available.Store(true)

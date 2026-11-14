@@ -6,8 +6,11 @@ import (
 	"strings"
 )
 
-// CookieInput 是一条解析成功的账号 Cookie。
+// CookieInput 是一条解析成功的账号 Cookie。Index 是它在输入里的条目序号（从 0 开始，
+// 与 CookieInputIssue.Index 的计数方式相同），调用方据此把后续失败（例如重复账号）
+// 对应回原始条目。
 type CookieInput struct {
+	Index     int
 	AuthToken string
 	CSRFToken string
 	Extra     map[string]string
@@ -21,6 +24,12 @@ type CookieInputIssue struct {
 
 // validCookieName 限制额外 Cookie 的名字，避免把请求头/JSON 中的任意键带进 Cookie 头。
 var validCookieName = regexp.MustCompile(`^[A-Za-z0-9_\-.]+$`)
+
+// IsValidCookieName 报告 name 是否可以作为额外 Cookie 的名字（[A-Za-z0-9_\-.]+）。
+// 发送请求前用它再过滤一次，库里被手工改坏的名字不会进入 Cookie 头。
+func IsValidCookieName(name string) bool {
+	return validCookieName.MatchString(name)
+}
 
 // ParseCookieInput 支持四种输入格式：
 //  1. 浏览器 Cookie 请求头字符串，一行一个账号：a=b; auth_token=..; ct0=..
@@ -79,6 +88,7 @@ func parseCookieInputJSON(raw string) ([]CookieInput, []CookieInputIssue, bool) 
 				issues = append(issues, CookieInputIssue{Index: index, Reason: issue})
 				continue
 			}
+			input.Index = index
 			inputs = append(inputs, input)
 		}
 		return inputs, issues, true
@@ -144,6 +154,7 @@ func parseCookieInputLines(raw string) ([]CookieInput, []CookieInputIssue) {
 		if issue != "" {
 			issues = append(issues, CookieInputIssue{Index: index, Reason: issue})
 		} else {
+			input.Index = index
 			inputs = append(inputs, input)
 		}
 		index++

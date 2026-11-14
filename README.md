@@ -25,7 +25,7 @@ open-Xdownload is a local-first X / Twitter media downloader. It comes with a bu
 - Preview shortcuts: Use the left and right arrow keys, or the preview window buttons, to move between files.
 - Partial-failure detection: An archiving task with any failed media download is clearly marked "partial failure" instead of being lumped in with fully successful tasks.
 - Failure retry: Retryable failed posts from a batch archive go into a failure queue that can be retried manually in a dedicated drawer, or automatically when a task finishes; re-running a task creates a new task and keeps the original record.
-- Cookie pool: Supports a primary cookie plus multiple backup cookie groups, used for list / user / followed-account archiving and API rate-limit rotation.
+- X account pool: Import any number of accounts by Cookie (a whole browser `Cookie` header pasted per line works), optionally with a per-account proxy and `User-Agent`. Accounts are used for list / user / followed-account archiving, rotated on rate limits, kept disabled when X rejects them, and can be checked, unlocked and deleted from the settings page.
 - Local-directory storage: the download directory can be browsed, typed in, or created in the configuration UI.
 - Chinese and English UI: Settings > Interface language offers Browser default, 中文 and English. The browser preference is used initially (Chinese variants use Simplified Chinese; unsupported languages fall back to English). Explicit choices are stored in this browser. Backend status and error messages retain their original text; existing notifications keep the language used when they appeared.
 
@@ -155,8 +155,9 @@ Available service flags:
 | `-tls-auto` | `OPEN_XDOWNLOAD_TLS_AUTO` | off | Issue a self-signed localhost certificate into `<data-dir>/tls` and serve HTTPS. For local use only. |
 | n/a | `OPEN_XDOWNLOAD_PROXY_URL` | empty | Proxy used before a config row exists (first start / auth check). The proxy configured in the Web UI takes precedence afterwards. |
 | n/a | `OPEN_XDOWNLOAD_GUEST_BEARER` | built-in public web token | Overrides the guest bearer token used for unauthenticated endpoints. Only needed if X rotates the public token. |
-| n/a | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | empty | Supplies X credentials via the environment instead of the database. Env-provided values are never persisted and are always redacted in the API. |
-| n/a | `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` | empty | Extra cookies appended to X requests, same format as the browser `Cookie` header. |
+| n/a | `OPEN_XDOWNLOAD_AUTH_TOKEN` / `OPEN_XDOWNLOAD_CT0` | empty | Supplies the primary X account via the environment. On startup it becomes a read-only account (`source = env`) in the account pool, synced on every start; removing the variables removes that account. |
+| n/a | `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` | empty | Supplies backup X accounts via the environment, same format as the browser `Cookie` header. Synced into the account pool as read-only `env` accounts. |
+| n/a | `OPEN_XDOWNLOAD_SCRAPER` | `legacy` | Data source implementation: `legacy` uses the original client, `xscrape` uses the twscrape-style pool (persisted per-queue locks, queryId discovery, `x-client-transaction-id`). |
 | n/a | `OPEN_XDOWNLOAD_FORCE_CHOWN` | `0` | Docker entrypoint only: set to `1` to force a recursive `chown` of the download directory at startup. |
 
 ## First-Time Setup
@@ -166,9 +167,9 @@ After starting the service and opening the Web UI, go to the "Configuration" pag
 1. Configure the download directory: browse, type in, or create one; for Docker deployments this is usually `/downloads`.
 2. If you need a proxy to reach X or download media, set a proxy address such as `http://127.0.0.1:7890`.
 3. Set the filename pattern and max filename length.
-4. For user / list / followed-account archiving, fill in your X Cookie: `auth_token` and `ct0` (see [Getting the X Cookie](#getting-the-x-cookie)).
-5. If you have cookies for multiple accounts, enter them as groups under "Backup cookies" for rotation during batch archiving.
-6. Click "Save configuration", then "Verify login" to confirm the cookies work.
+4. For user / list / followed-account archiving, import your X Cookie on the same page under "X account pool" (see [Getting the X Cookie](#getting-the-x-cookie)).
+5. Import as many accounts as you like — paste several `Cookie` lines at once and they become a pool used for rate-limit rotation during batch archiving. Each account can also carry its own proxy and `User-Agent`.
+6. Click "Verify login" (or the per-account "Check" button) to confirm the cookies work. Accounts X rejects are disabled automatically; the page shows each account's locks, today's request count and last error.
 
 Sensitive fields are shown as `********` when read. Leaving them empty or as `********` on a later save won't overwrite the existing keys or passwords.
 
@@ -189,15 +190,15 @@ Both values must come from the same browser and the same account — X rejects a
 2. Open the developer tools: `F12`, or `Cmd+Option+I` on macOS, `Ctrl+Shift+I` on Windows / Linux.
 3. Open the **Application** panel (Firefox: **Storage**), expand **Cookies** in the sidebar, and select `https://x.com`.
 4. Copy the **Value** of the `auth_token` row, then the **Value** of the `ct0` row.
-5. Paste both into the "X Cookie" section of the "Configuration" page, click "Save configuration", then click "Verify login". A working pair is reported together with the account's `@screen_name`.
+5. Paste both into "Import accounts" under "X account pool" (Configuration page). One line per account, e.g. `auth_token=...; ct0=...`; pasting the whole browser `Cookie` header also works. Then use "Check" to verify the pair — a working one is reported together with the account's `@screen_name`.
 
 Notes:
 
 - `auth_token` is an `HttpOnly` cookie, so `document.cookie` in the browser console won't show it — copy it from the Cookies panel instead.
 - Logging out, changing the password, or X invalidating the session makes the pair stop working; copy both values again to recover.
-- One browser profile holds only one X session. For the backup cookie pool, log in to the other account in a private window or a second browser profile and copy its pair the same way.
-- The cookie is equivalent to the account password. It is stored only in the local database, so don't share it or paste it into other sites.
-- For headless deployments, `OPEN_XDOWNLOAD_AUTH_TOKEN`, `OPEN_XDOWNLOAD_CT0`, and `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` inject the same values as environment variables; values supplied only by the environment are used at runtime and are not written into the database.
+- One browser profile holds only one X session. For additional accounts in the pool, log in to the other account in a private window or a second browser profile and copy its pair the same way.
+- The cookie is equivalent to the account password. It is stored only in the local database (shown masked in the UI); request headers, logs and API responses never carry the full value, so don't share it or paste it into other sites.
+- For headless deployments, `OPEN_XDOWNLOAD_AUTH_TOKEN`, `OPEN_XDOWNLOAD_CT0`, and `OPEN_XDOWNLOAD_ADDITIONAL_COOKIES` inject the same accounts as environment variables; accounts supplied only by the environment are read-only in the UI and removed when the variables disappear.
 - Single-post parsing usually works without a cookie; one is needed only when the post itself isn't publicly visible.
 
 ## Usage Guide

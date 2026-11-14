@@ -76,8 +76,10 @@ func TestInjectIndexHTMLIncludesCreatedJob(t *testing.T) {
 	ctx := context.Background()
 	if _, err := db.UpdateConfig(ctx, config.AppConfig{
 		DownloadDir: t.TempDir(),
-		AuthToken:   "super-secret-token",
-		CSRFToken:   "csrf-secret",
+		ProxyURL:    "http://proxy-user:proxy-secret@127.0.0.1:7890",
+		// 旧 Cookie 列仍可能有值（迁移前的旧库），但 bootstrap 不能再带出这些字段。
+		AuthToken: "super-secret-token",
+		CSRFToken: "csrf-secret",
 	}); err != nil {
 		t.Fatalf("update config: %v", err)
 	}
@@ -108,8 +110,16 @@ func TestInjectIndexHTMLIncludesCreatedJob(t *testing.T) {
 	if !strings.Contains(string(settingsHTML), "********") {
 		t.Fatalf("settings bootstrap missing redacted secret: %s", settingsHTML)
 	}
-	if strings.Contains(string(settingsHTML), "super-secret-token") {
-		t.Fatal("settings bootstrap must not embed plaintext auth token")
+	if strings.Contains(string(settingsHTML), "proxy-secret") {
+		t.Fatal("settings bootstrap must not embed the plaintext proxy password")
+	}
+	if strings.Contains(string(settingsHTML), "super-secret-token") || strings.Contains(string(settingsHTML), "csrf-secret") {
+		t.Fatal("settings bootstrap must not embed plaintext cookies")
+	}
+	for _, key := range []string{`"authToken"`, `"csrfToken"`, `"additionalCookies"`} {
+		if strings.Contains(string(settingsHTML), key) {
+			t.Fatalf("settings bootstrap still carries legacy cookie field %s: %s", key, settingsHTML)
+		}
 	}
 	if strings.Contains(string(settingsHTML), "https://example.com/a.mp4") {
 		t.Fatalf("settings html should not embed workbench jobs: %s", settingsHTML)

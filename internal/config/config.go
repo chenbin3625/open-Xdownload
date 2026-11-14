@@ -38,14 +38,13 @@ var envFieldKeys = map[string]string{
 }
 
 // envFieldJSONNames 把结构体字段名映射到对外 JSON 字段名，切片顺序即 API 输出顺序。
+// Cookie 相关环境变量不在这里：它们现在生成只读的 env 账号（见 X 账号池），
+// /api/config 也不再有对应字段。
 var envFieldJSONNames = []struct {
 	field string
 	json  string
 }{
-	{"AuthToken", "authToken"},
-	{"CSRFToken", "csrfToken"},
 	{"ProxyURL", "proxyUrl"},
-	{"AdditionalCookies", "additionalCookies"},
 	{"DownloadDir", "downloadDir"},
 }
 
@@ -212,12 +211,15 @@ const (
 )
 
 type AppConfig struct {
-	DownloadDir             string `json:"downloadDir" db:"download_dir"`
-	MaxConcurrency          int    `json:"maxConcurrency" db:"max_concurrency"`
-	ProxyURL                string `json:"proxyUrl" db:"proxy_url"`
-	AuthToken               string `json:"authToken,omitempty" db:"auth_token"`
-	CSRFToken               string `json:"csrfToken,omitempty" db:"csrf_token"`
-	AdditionalCookies       string `json:"additionalCookies,omitempty" db:"additional_cookies"`
+	DownloadDir    string `json:"downloadDir" db:"download_dir"`
+	MaxConcurrency int    `json:"maxConcurrency" db:"max_concurrency"`
+	ProxyURL       string `json:"proxyUrl" db:"proxy_url"`
+	// AuthToken / CSRFToken / AdditionalCookies 是 app_config 里的旧 Cookie 列，只供
+	// storage 读写旧列和一次性迁移到 x_accounts 使用；运行时凭据只来自 X 账号池。
+	// 它们不参与 JSON：/api/config 的响应不再包含这三个字段，请求里的同名字段也不会被解析。
+	AuthToken               string `json:"-" db:"auth_token"`
+	CSRFToken               string `json:"-" db:"csrf_token"`
+	AdditionalCookies       string `json:"-" db:"additional_cookies"`
 	AutoRetryFailed         bool   `json:"autoRetryFailed" db:"auto_retry_failed"`
 	AutoFollowProtected     bool   `json:"autoFollowProtected" db:"auto_follow_protected"`
 	IncludeNestedTweetMedia bool   `json:"includeNestedTweetMedia" db:"include_nested_tweet_media"`
@@ -283,7 +285,7 @@ func (cfg AppConfig) Redacted() AppConfig {
 	cfg.AuthToken = redact(cfg.AuthToken)
 	cfg.CSRFToken = redact(cfg.CSRFToken)
 	cfg.AdditionalCookies = RedactAdditionalCookies(cfg.AdditionalCookies)
-	cfg.ProxyURL = redactURLUserinfo(cfg.ProxyURL)
+	cfg.ProxyURL = RedactURLUserinfo(cfg.ProxyURL)
 	cfg.EnvOverridden = EnvOverriddenFields()
 	return cfg
 }
@@ -348,6 +350,11 @@ func RedactAdditionalCookies(raw string) string {
 //
 // 该函数不再返回错误：任何提交都不应因为 Cookie 结构不完整而阻塞整份配置保存。
 func RestoreAdditionalCookies(submitted, stored string) string {
+	// 提交值就是库内原值（/api/config 不再接收 Cookie 字段，storage 用库内值回填）：
+	// 原样保留、不做格式规范化，保存其他配置时旧 Cookie 列逐字节不变。
+	if submitted == stored && submitted != ClearSentinel {
+		return stored
+	}
 	submitted = strings.TrimSpace(submitted)
 	if submitted == "" || submitted == ClearSentinel {
 		return ""
@@ -556,13 +563,13 @@ func setAuthCookieValue(current *AuthCookie, raw string) bool {
 	return true
 }
 
-// redactURLUserinfo strips embedded credentials from a URL for display,
+// RedactURLUserinfo strips embedded credentials from a URL for display,
 // replacing the userinfo with SecretPlaceholder while leaving the host and
 // path visible. URLs without userinfo (and unparseable values) are returned
 // unchanged so non-credential URLs are not re-encoded. The placeholder is
 // spliced in manually because url.String() percent-encodes "*" in userinfo,
 // which obscures the host in the UI.
-func redactURLUserinfo(rawURL string) string {
+func RedactURLUserinfo(rawURL string) string {
 	if rawURL == "" {
 		return ""
 	}
@@ -628,7 +635,7 @@ func normalizeHost(u *url.URL) string {
 	return host
 }
 
-// RestoreURLUserinfo reverses redactURLUserinfo when a redacted config is
+// RestoreURLUserinfo reverses RedactURLUserinfo when a redacted config is
 // submitted back for saving. If redacted's userinfo is the placeholder and the
 // URL still targets the same scheme/host/port, the stored URL's userinfo is
 // substituted back in; otherwise redacted is returned unchanged (the user edited
