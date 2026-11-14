@@ -29,6 +29,50 @@ func TestRedactedUsesStableMask(t *testing.T) {
 	}
 }
 
+// 旧 Cookie 列只在 storage 内部流转：序列化时不出现，反序列化时也不接受。
+func TestAppConfigJSONOmitsLegacyCookieFields(t *testing.T) {
+	cfg := AppConfig{
+		DownloadDir:       "/data/downloads",
+		AuthToken:         "secret-auth",
+		CSRFToken:         "secret-ct0",
+		AdditionalCookies: "auth_token=a; ct0=b",
+	}
+	payload, err := json.Marshal(cfg.Redacted())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"authToken", "csrfToken", "additionalCookies"} {
+		if _, ok := fields[key]; ok {
+			t.Fatalf("JSON still contains %q: %s", key, payload)
+		}
+	}
+	decoded := AppConfig{AuthToken: "kept"}
+	if err := json.Unmarshal([]byte(`{"authToken":"new","csrfToken":"new","additionalCookies":"new"}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.AuthToken != "kept" || decoded.CSRFToken != "" || decoded.AdditionalCookies != "" {
+		t.Fatalf("JSON decoding wrote legacy cookie fields: %#v", decoded)
+	}
+}
+
+// 配置保存时 storage 用库内原值回填旧 Cookie 列：原样提交必须逐字节保留，不能被
+// 规范化成带 id 的 JSON，否则保存任何配置都会改写旧列。
+func TestRestoreAdditionalCookiesKeepsUnchangedStoredValue(t *testing.T) {
+	for _, stored := range []string{
+		"auth_token=a; ct0=b\nauth_token=c; ct0=d",
+		`[{"authToken":"a","csrfToken":"b"}]`,
+		"  auth_token=a; ct0=b  ",
+	} {
+		if got := RestoreAdditionalCookies(stored, stored); got != stored {
+			t.Fatalf("RestoreAdditionalCookies(%q, same) = %q, want unchanged", stored, got)
+		}
+	}
+}
+
 func TestRedactedURLUserinfoRoundTrip(t *testing.T) {
 	redactCases := []struct {
 		name string
@@ -42,9 +86,9 @@ func TestRedactedURLUserinfoRoundTrip(t *testing.T) {
 	}
 	for _, tc := range redactCases {
 		t.Run("redact/"+tc.name, func(t *testing.T) {
-			got := redactURLUserinfo(tc.url)
+			got := RedactURLUserinfo(tc.url)
 			if got != tc.want {
-				t.Fatalf("redactURLUserinfo(%q) = %q, want %q", tc.url, got, tc.want)
+				t.Fatalf("RedactURLUserinfo(%q) = %q, want %q", tc.url, got, tc.want)
 			}
 		})
 	}
@@ -381,10 +425,12 @@ func TestEnvOverridesHelpers(t *testing.T) {
 		t.Fatalf("EffectiveDownloadDir = %q, want env value", got)
 	}
 
+	// Cookie 环境变量现在生成只读 env 账号，/api/config 没有对应字段，不再列入 envOverridden。
 	t.Setenv(EnvAuthToken, "env-auth")
+	t.Setenv(EnvProxyURL, "http://env-proxy:8080")
 	fields := EnvOverriddenFields()
-	if len(fields) != 2 || fields[0] != "authToken" || fields[1] != "downloadDir" {
-		t.Fatalf("EnvOverriddenFields = %#v, want [authToken downloadDir]", fields)
+	if len(fields) != 2 || fields[0] != "proxyUrl" || fields[1] != "downloadDir" {
+		t.Fatalf("EnvOverriddenFields = %#v, want [proxyUrl downloadDir]", fields)
 	}
 	redacted := AppConfig{AuthToken: "secret"}.Redacted()
 	if len(redacted.EnvOverridden) != 2 || redacted.AuthToken != SecretPlaceholder {
