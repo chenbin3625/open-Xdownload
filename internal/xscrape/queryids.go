@@ -214,6 +214,9 @@ func discoverQueryIDs(ctx context.Context, e *Engine, proxy string) (map[string]
 	if reply.status >= 400 {
 		return nil, fmt.Errorf("X 首页返回 HTTP %d", reply.status)
 	}
+	if len(reply.payload) > discoveryMaxBytes {
+		return nil, fmt.Errorf("X 首页超过 %d 字节上限", discoveryMaxBytes)
+	}
 
 	ids := map[string]string{}
 	scanQueryIDs(reply.payload, ids)
@@ -288,6 +291,9 @@ func fetchScript(ctx context.Context, client *http.Client, scriptURL string) ([]
 	}
 	if reply.status >= 400 {
 		return nil, fmt.Errorf("脚本返回 HTTP %d", reply.status)
+	}
+	if len(reply.payload) > discoveryMaxBytes {
+		return nil, fmt.Errorf("脚本超过 %d 字节上限", discoveryMaxBytes)
 	}
 	return reply.payload, nil
 }

@@ -219,7 +219,11 @@ func (s *source) doGuestRequest(ctx context.Context, path string, values url.Val
 }
 
 func guestHTTPError(reply *response) error {
-	return &xapi.HTTPError{StatusCode: reply.status, Payload: xapi.LimitedErrorPayload(reply.payload)}
+	httpErr := &xapi.HTTPError{StatusCode: reply.status, Payload: xapi.LimitedErrorPayload(reply.payload)}
+	if reply.status == http.StatusForbidden && xapi.LooksLikeWAFChallenge(reply.contentType(), reply.payload) {
+		httpErr.WAFChallenge = true
+	}
+	return httpErr
 }
 
 // rateLimitReset 解析 x-rate-limit-reset（unix 秒）与 Retry-After，缺失时用默认值。
