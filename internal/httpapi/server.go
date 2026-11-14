@@ -395,47 +395,30 @@ func (s *Server) createLocalDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, listing)
 }
 
+// checkAuth 是旧的"校验登录"兼容接口（契约见 docs/xscrape-design.md）：
+// configured 表示账号池里还有 active 账号；探测只打主账号（主账号不可用时取第一个
+// active 账号）一次，结果不写库——写库的检测走 POST /api/x-accounts/{id}/check。
 func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.store.GetConfig(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	// 有 body 时用提交的配置做探测；无 body 时用已存配置。
-	// ContentLength == -1 表示 chunked（也可能有 body），改用 Content-Type 判断。
+	// 旧前端会把整份配置 POST 过来。Cookie 已迁到账号池，请求体只做形状校验：
+	// 真实 Cookie 值按 /api/config 的规则拒绝，空值/打码占位符静默忽略。
 	hasBody := r.ContentLength > 0 || (r.ContentLength < 0 && r.Header.Get("Content-Type") != "")
 	if hasBody {
-		var submitted config.AppConfig
-		if err := decodeJSON(w, r, &submitted); err != nil {
+		fields, err := decodeJSONObject(w, r)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		stored, err := s.store.GetStoredConfig(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+		if err := dropLegacyCookieFields(fields); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		resolved, err := config.ResolveSubmission(submitted, stored)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, storage.ErrValidation(err.Error()))
-			return
-		}
-		cfg = config.ApplyEnvOverrides(resolved)
 	}
-	// Cookie 现在存在账号池里，app_config 的旧字段不再代表"已配置"。只要还有
-	// active 账号就交给数据源去检测；账号池为空时直接提示去导入。
 	accounts, err := s.store.ListXAccounts(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	configured := false
-	for _, account := range accounts {
-		if account.Active {
-			configured = true
-			break
-		}
-	}
+	target, configured := xAccountCheckTarget(accounts)
 	if !configured {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": false,
@@ -444,66 +427,60 @@ func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 用临时 Source 做"非破坏性探测"，不复用 jobs 的生产池：
-	// CheckAll/GetSelfScreenName 在 401（及非 WAF 的 403）时会调用 disable（主账号
-	// 30 分钟、备用 5 分钟）。如果探测打到正在归档的生产池上，用户点一次"检测 Cookie"
-	// 就可能让归档任务半小时内用不了主账号。临时 Source 与生产池共享底层
-	// httpx.Transport（按代理缓存），连接仍复用，探测本身只在手动点击时发生。
-	if s.manager == nil {
+	if s.homeProber == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": configured,
 			"ok":         false,
-			"message":    "X 数据源还没有初始化",
+			"message":    "账号检测功能还没有初始化",
 		})
 		return
 	}
-	probeSource, err := s.manager.NewXSource(r.Context(), cfg)
+	globalProxy, err := s.effectiveProxyURL(r.Context())
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	check := s.probeXAccount(r.Context(), target, globalProxy)
+	if r.Context().Err() != nil {
+		return
+	}
+	if check.Err != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": configured,
 			"ok":         false,
-			"message":    err.Error(),
-		})
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
-	diagnostics := probeSource.CheckAll(ctx)
-	// "校验通过"必须以真正拿到 screen name 为准：Diagnostics().Available 只表示
-	// "客户端没有被 disable"，网络不通/代理错误时它仍然是 1，会被误报成通过。
-	screenName := ""
-	for _, client := range diagnostics.Clients {
-		if client.OK && client.ScreenName != "" {
-			screenName = client.ScreenName
-			if client.Primary {
-				break
-			}
-		}
-	}
-	if screenName == "" {
-		message := "X 登录校验失败：未能通过认证（Cookie 可能已失效）"
-		if diagnostics.Available == 0 {
-			message = "所有 X Cookie 均不可用"
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"configured":  configured,
-			"ok":          false,
-			"message":     message,
-			"diagnostics": diagnostics,
+			"message":    "X 登录校验失败：" + check.Err,
 		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"configured": configured,
-		"ok":         true,
-		"screenName": screenName,
+		"ok":         check.ScreenName != "",
+		"screenName": check.ScreenName,
 		"message":    "X 登录校验通过",
-		// 检测只走 GET /home 并解析 screen name，证明的是"Cookie 能登录"，不代表
-		// 该账号能访问受保护或受年龄限制的内容。明确写出来，避免用户把检测通过
-		// 当成"所有归档都能成功"。
-		"note":        "仅验证登录状态，不代表可访问受保护或受年龄限制的内容",
-		"diagnostics": diagnostics,
+		// 检测只证明"Cookie 能登录"，不代表该账号能访问受保护或受年龄限制的内容。
+		// 明确写出来，避免用户把检测通过当成"所有归档都能成功"。
+		"note": "仅验证登录状态，不代表可访问受保护或受年龄限制的内容",
 	})
+}
+
+// xAccountCheckTarget 选兼容接口要探测的账号：active 主账号优先，否则第一个 active
+// 账号。没有 active 账号时第二个返回值为 false。
+func xAccountCheckTarget(accounts []storage.XAccount) (storage.XAccount, bool) {
+	var fallback storage.XAccount
+	found := false
+	for _, account := range accounts {
+		if !account.Active {
+			continue
+		}
+		if account.IsPrimary {
+			return account, true
+		}
+		if !found {
+			fallback = account
+			found = true
+		}
+	}
+	return fallback, found
 }
 
 func (s *Server) parseTweetLink(w http.ResponseWriter, r *http.Request) {

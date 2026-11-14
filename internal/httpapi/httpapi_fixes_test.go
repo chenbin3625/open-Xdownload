@@ -19,6 +19,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
+	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 )
 
 func openConfigStore(t *testing.T) *storage.Store {
@@ -500,64 +501,106 @@ func TestLibraryDownloadsPagedContract(t *testing.T) {
 	}
 }
 
-// /api/auth/check 必须用与 jobs 生产池隔离的临时池探测：CheckAll 会对 401/非 WAF 403
-// 的客户端 disable（30m/5m），打在正在归档的生产池上会让任务半小时用不了主账号。
-// 这里用"不可达代理"让探测快速失败（不依赖外网），再断言生产池诊断状态完全没变。
-func TestCheckAuthProbesWithIsolatedPool(t *testing.T) {
+// /api/auth/check 只探测主账号一次，且不写库：不碰 jobs 的生产池，也不改变账号状态。
+// 用注入的探测函数断言"探测的就是主账号、账号表完全没变"。
+func TestCheckAuthProbesPrimaryWithoutWriting(t *testing.T) {
 	db := openConfigStore(t)
 	ctx := context.Background()
 	cfg := config.Default()
 	cfg.DownloadDir = t.TempDir()
-	cfg.ProxyURL = "http://127.0.0.1:1"
 	if _, err := db.UpdateConfig(ctx, cfg); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	// "已配置"看的是账号池里的 active 账号，不再是 app_config 的旧 Cookie 列。
-	if _, err := db.CreateXAccount(ctx, storage.XAccount{AuthToken: "auth-token", CSRFToken: "csrf-token"}); err != nil {
-		t.Fatalf("seed account: %v", err)
-	}
-	stored, err := db.GetStoredConfig(ctx)
+	// 账号池的第一个账号自动成为主账号；第二个是备用账号。
+	primary, err := db.CreateXAccount(ctx, storage.XAccount{AuthToken: "primary-token", CSRFToken: "primary-ct0"})
 	if err != nil {
-		t.Fatalf("stored config: %v", err)
+		t.Fatalf("seed primary: %v", err)
+	}
+	if _, err := db.CreateXAccount(ctx, storage.XAccount{AuthToken: "backup-token", CSRFToken: "backup-ct0"}); err != nil {
+		t.Fatalf("seed backup: %v", err)
+	}
+	before, err := db.ListXAccounts(ctx)
+	if err != nil {
+		t.Fatalf("accounts: %v", err)
 	}
 
 	eventBus := jobs.NewEventBus()
 	manager := jobs.NewManager(db, nil, eventBus)
-	productionPool, err := manager.XSource(ctx, stored)
-	if err != nil {
-		t.Fatalf("production pool: %v", err)
-	}
-	before := productionPool.Diagnostics()
-
-	handler := authenticatedRoutes(t, NewServer(db, nil, manager, eventBus))
+	server := NewServer(db, nil, manager, eventBus)
+	var probed []string
+	server.SetHomeProber(func(_ context.Context, creds xapi.AccountCredentials) xapi.HomeProbeResult {
+		probed = append(probed, creds.AuthToken)
+		return xapi.HomeProbeResult{ScreenName: "alice"}
+	})
+	handler := authenticatedRoutes(t, server)
 	response := doRequest(t, handler, http.MethodPost, "/api/auth/check", "", map[string]string{"Content-Type": "application/json"})
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	var payload struct {
-		Configured bool `json:"configured"`
-		OK         bool `json:"ok"`
+		Configured bool   `json:"configured"`
+		OK         bool   `json:"ok"`
+		ScreenName string `json:"screenName"`
 	}
 	if err := jsonUnmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if !payload.Configured {
-		t.Fatalf("configured = false, body = %s", response.Body.String())
+	if !payload.Configured || !payload.OK || payload.ScreenName != "alice" {
+		t.Fatalf("payload = %+v, body = %s", payload, response.Body.String())
 	}
-	if payload.OK {
-		t.Fatalf("probe against unreachable proxy reported ok, body = %s", response.Body.String())
+	if !reflect.DeepEqual(probed, []string{primary.AuthToken}) {
+		t.Fatalf("probed = %v, want only the primary account", probed)
 	}
-
-	afterPool, err := manager.XSource(ctx, stored)
+	after, err := db.ListXAccounts(ctx)
 	if err != nil {
-		t.Fatalf("production pool after: %v", err)
+		t.Fatalf("accounts after: %v", err)
 	}
-	if afterPool != productionPool {
-		t.Fatal("auth check replaced the manager's cached pool")
-	}
-	after := productionPool.Diagnostics()
 	if !reflect.DeepEqual(before, after) {
-		t.Fatalf("production pool state changed by auth probe:\nbefore=%+v\nafter =%+v", before, after)
+		t.Fatalf("auth check wrote to the account table:\nbefore=%+v\nafter =%+v", before, after)
+	}
+}
+
+// 没有 active 账号时 /api/auth/check 直接提示导入，不发起探测。
+func TestCheckAuthWithoutAccountsReportsUnconfigured(t *testing.T) {
+	db := openConfigStore(t)
+	server := NewServer(db, nil, jobs.NewManager(db, nil, jobs.NewEventBus()), jobs.NewEventBus())
+	server.SetHomeProber(func(context.Context, xapi.AccountCredentials) xapi.HomeProbeResult {
+		t.Fatal("must not probe without an active account")
+		return xapi.HomeProbeResult{}
+	})
+	response := doRequest(t, authenticatedRoutes(t, server), http.MethodPost, "/api/auth/check", "", map[string]string{"Content-Type": "application/json"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Configured bool   `json:"configured"`
+		OK         bool   `json:"ok"`
+		Message    string `json:"message"`
+	}
+	if err := jsonUnmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if payload.Configured || payload.OK || payload.Message == "" {
+		t.Fatalf("payload = %+v, want unconfigured with a hint", payload)
+	}
+}
+
+func TestXAccountCheckTargetPrefersActivePrimary(t *testing.T) {
+	accounts := []storage.XAccount{
+		{ID: 1, Active: false, IsPrimary: true},
+		{ID: 2, Active: true},
+		{ID: 3, Active: true},
+	}
+	target, ok := xAccountCheckTarget(accounts)
+	if !ok || target.ID != 2 {
+		t.Fatalf("target = %+v, want the first active account when the primary is disabled", target)
+	}
+	accounts[1].IsPrimary = true
+	if target, _ := xAccountCheckTarget(accounts); target.ID != 2 {
+		t.Fatalf("target = %+v, want the active primary", target)
+	}
+	if _, ok := xAccountCheckTarget([]storage.XAccount{{ID: 1, Active: false}}); ok {
+		t.Fatal("no active account should not yield a target")
 	}
 }
 
