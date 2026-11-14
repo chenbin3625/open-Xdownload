@@ -383,3 +383,12 @@ Playwright：`x-accounts.spec.ts` 12/12 通过（6 个项目 × 导入编辑检�
 - `nextAccount` 先 `PickXAccount` 再 `acquire`，只有等过执行槽才重读锁；若 Pick 后、acquire 前账号被 HTTP 层停用或加锁，会多发一次请求。窗口很窄，未复现。
 - 执行槽只在内存，多进程共库时同账号可并发（设计上按单进程部署）。
 - 后端错误文案是中文直出（如「X 拒绝了该账号（code 32: …）」「缺少 ct0」），en-US 界面下会显示中文。要本地化需要给后端错误码做前端映射，留到后续版本。
+
+## 2026-11-14 归档失败修复：全文时间线末尾误判
+
+群晖 NAS（v0.11.0，xscrape，`archiveMode=both`）上关注归档每个周期都失败，任务错误为「全文时间线游标未前进，保留进度以供重试；目标: chenbin3625」。用 NAS 上的真实 Cookie 复现后确认：
+
+- 失效的是**每个用户全文时间线走到末尾时的结束判定**。X 到达末尾时返回 HTTP 200，`profile_with_replies_timeline_v2` 里只有 Top/Bottom 两个 cursor 条目、**0 条推文**，且 Bottom cursor 与请求里的 cursor **逐字节相同**；既没有空的 `next`，也没有 `TimelineTerminateTimeline`。
+- `WalkUserTweets` 把「`next == cursor` 且未命中 StopID」当成异常返回错误。走完整条时间线的用户必然命中，于是该用户的 `tweet_sync` 停在最后 66 字节游标上、状态 `failed`，每轮归档都在同一处重试并失败；`archiveBoth` 的媒体补齐阶段也永远到不了。实测 12 条推文的 @chenbin3625 第 2 页即复现，说明与账号大小无关。
+- 修复：与 `WalkUserMedia`、`GetFollowing`/`GetListMembers` 的语义对齐——游标不再前进（重复或回退到已见 cursor）即视为已到末尾，本页作为最后一页正常 `save(Complete=true)`。回归测试覆盖重复 cursor、回退 cursor、空 cursor 三种形态（`TestWalkUserTweetsEndOfTimelineRepeatingCursor`、`TestWalkUserTweetsEmptyCursorCompletes`）。
+- 附带观察：NAS 上 97 个用户 `tweet_sync` 的 HTTP 401 记录是 2026-11-13 旧 Cookie 的残留，换成 11-14 的新 Cookie 后同一批用户实测 200，不属于本次缺陷；`tweet_sync` 是每用户增量状态，重跑归档会覆盖。

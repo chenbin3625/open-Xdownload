@@ -274,7 +274,11 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 		batch.Cursor = next
 		batch.Complete = reached || next == ""
 		if !batch.Complete && (next == cursor || seenCursors[next]) {
-			return errors.New("全文时间线游标未前进，保留进度以供重试")
+			// 服务端走到时间线末尾时会返回"0 条目 + 原样 Bottom cursor"（没有空 next，
+			// 也没有 TimelineTerminateTimeline）。把它当成失败会让每个全量归档都卡在
+			// 最后一个用户上，游标永远无法推进。与媒体时间线、成员列表一致：游标不再
+			// 前进即视为已到末尾，本页作为最后一页正常提交。
+			batch.Complete = true
 		}
 		if err := save(batch); err != nil {
 			return err

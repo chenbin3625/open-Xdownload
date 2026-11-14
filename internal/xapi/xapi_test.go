@@ -222,6 +222,69 @@ func fullTweetPage(instructions string) string {
 	return `{"data":{"user_result_by_screen_name":{"result":{"profile_with_replies_timeline_v2":{"timeline":{"instructions":` + instructions + `}}}}}}`
 }
 
+// X 在全文时间线走到末尾时不返回空 cursor，也不发 TimelineTerminateTimeline：
+// 它返回 0 条目 + 原样 Bottom cursor。这里必须正常结束并提交最后一页，否则每个
+// 全量归档都会在最后一个用户上失败（"全文时间线游标未前进"），游标永远不推进。
+func TestWalkUserTweetsEndOfTimelineRepeatingCursor(t *testing.T) {
+	cursorPage := func(value string) string {
+		return fullTweetPage(`[{"__typename":"TimelineAddEntries","entries":[{"content":{"__typename":"TimelineTimelineCursor","cursor_type":"Bottom","value":"` + value + `"}}]}]`)
+	}
+	cases := []struct {
+		name  string
+		pages []string
+		want  int
+	}{
+		{
+			name:  "empty page repeats the request cursor",
+			pages: []string{cursorPage("page-2"), cursorPage("page-2")},
+			want:  2,
+		},
+		{
+			name:  "empty page falls back to an already seen cursor",
+			pages: []string{cursorPage("page-3"), cursorPage("page-2")},
+			want:  3,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			first := fullTweetPage(`[{"__typename":"TimelineAddEntries","entries":[` + fullTweetEntry("103", "42") + `,{"content":{"__typename":"TimelineTimelineCursor","cursor_type":"Bottom","value":"page-2"}}]}]`)
+			requester := &fakeRequester{pages: append([]string{first}, test.pages...)}
+			var pages []TweetTimelinePage
+			err := WalkUserTweets(context.Background(), requester, User{ID: "42", ScreenName: "author"}, TweetTimelineOptions{}, func(page TweetTimelinePage) error {
+				pages = append(pages, page)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("WalkUserTweets: %v", err)
+			}
+			if len(pages) != test.want || pages[0].Complete || !pages[len(pages)-1].Complete {
+				t.Fatalf("pages = %+v, want %d pages with the last complete", pages, test.want)
+			}
+			if len(pages[0].Tweets) != 1 || pages[0].Tweets[0].ID != "103" {
+				t.Fatalf("first page tweets = %+v", pages[0].Tweets)
+			}
+			if pages[len(pages)-1].HeadID != "103" {
+				t.Fatalf("head = %q, want 103 preserved on the closing page", pages[len(pages)-1].HeadID)
+			}
+		})
+	}
+}
+
+// 恢复正常：空 cursor 仍是结束信号，且只发一次请求。
+func TestWalkUserTweetsEmptyCursorCompletes(t *testing.T) {
+	requester := &fakeRequester{pages: []string{
+		fullTweetPage(`[{"__typename":"TimelineAddEntries","entries":[` + fullTweetEntry("103", "42") + `]}]`),
+	}}
+	var pages []TweetTimelinePage
+	err := WalkUserTweets(context.Background(), requester, User{ID: "42", ScreenName: "author"}, TweetTimelineOptions{}, func(page TweetTimelinePage) error {
+		pages = append(pages, page)
+		return nil
+	})
+	if err != nil || len(pages) != 1 || !pages[0].Complete || requester.calls != 1 {
+		t.Fatalf("pages = %+v calls = %d err = %v", pages, requester.calls, err)
+	}
+}
+
 func TestWalkUserTweetsPinnedBoundaryAndHead(t *testing.T) {
 	requester := &fakeRequester{pages: []string{
 		fullTweetPage(`[{"__typename":"TimelinePinEntry","entry":` + fullTweetEntry("20", "42") + `},{"__typename":"TimelineAddEntries","entries":[` + fullTweetEntry("103", "42") + `,` + fullTweetEntry("102", "42") + `,` + fullTweetEntry("104", "other") + `,{"content":{"__typename":"TimelineTimelineCursor","cursor_type":"Bottom","value":"page-2"}}]}]`),
