@@ -206,4 +206,24 @@ describe("CreateJobModal", () => {
 
     await waitFor(() => expect(api.createJob).toHaveBeenCalledWith("tweet_link", "https://x.com/OpenAI/status/123", expect.any(String), { archiveMode: "both", backfill: false }));
   });
+
+  it("submits batchSize for tweet-mode schedules", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.createArchiveSchedule).mockResolvedValue({
+      id: 1, name: "weekly", enabled: true, intervalMinutes: 360,
+      items: [], nextRunAt: "", lastJobIds: [], createdAt: "", updatedAt: "",
+    });
+    renderModal({ initialKind: "schedule" });
+
+    await user.type(screen.getByPlaceholderText(/elonmusk/), "alice");
+    const input = screen.getByRole("spinbutton", { name: "每轮最多用户数" });
+    await user.clear(input);
+    await user.type(input, "50");
+    await user.click(screen.getByRole("button", { name: /保存定时计划/ }));
+
+    await waitFor(() => expect(api.createArchiveSchedule).toHaveBeenCalledTimes(1));
+    expect(api.createArchiveSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      items: [expect.objectContaining({ input: "alice", batchSize: 50 })],
+    }));
+  });
 });

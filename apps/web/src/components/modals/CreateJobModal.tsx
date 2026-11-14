@@ -145,6 +145,7 @@ export function CreateJobModal({
   const [activeTab, setActiveTab] = useState<string>("user");
   const [archiveMode, setArchiveMode] = useState<ArchiveMode>("both");
   const [backfill, setBackfill] = useState(false);
+  const [batchSize, setBatchSize] = useState(0);
 
   const [tweetUrl, setTweetUrl] = useState("");
   const [batchInputs, setBatchInputs] = useState<Partial<Record<BatchKind, string>>>({});
@@ -225,7 +226,10 @@ export function CreateJobModal({
             t("自动归档 ({{value0}} 个目标)", { value0: currentBatchItems.length }),
           enabled: true,
           intervalMinutes,
-          items: currentBatchItems.map(item => ({ ...item, archiveMode, backfill })),
+          items: currentBatchItems.map(item => ({
+            ...item, archiveMode, backfill,
+            batchSize: archiveMode === "media" ? 0 : batchSize,
+          })),
         };
         await createArchiveSchedule(payload);
         return [];
@@ -459,6 +463,18 @@ export function CreateJobModal({
                     addonAfter={t("分钟")}
                   />
                 </Field>
+                {archiveMode !== "media" && (
+                  <Field label={t("每轮最多用户数")}>
+                    <NumberInput
+                      min={0}
+                      max={1000}
+                      value={batchSize}
+                      onChange={(val) => setBatchSize(val ?? 0)}
+                      addonAfter={t("人")}
+                    />
+                    <p className="mt-1 text-[11px] text-fg-subtle">{t("0 表示不限制，建议 50")}</p>
+                  </Field>
+                )}
               </div>
             )}
           </div>

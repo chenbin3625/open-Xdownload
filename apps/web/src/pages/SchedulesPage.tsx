@@ -130,7 +130,9 @@ export function SchedulesPage({
           </Empty>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {schedules.map((schedule) => (
+          {schedules.map((schedule) => {
+            const batchSize = Math.max(0, ...schedule.items.map(item => item.batchSize ?? 0));
+            return (
             <Card
               key={schedule.id}
               shadows="hover"
@@ -179,7 +181,10 @@ export function SchedulesPage({
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs text-fg-subtle">
                   <span>{t("目标清单")}</span>
-                  <span>{schedule.items.length} {t(" 个目标")}</span>
+                  <span>
+                    {schedule.items.length} {t(" 个目标")}
+                    {batchSize > 0 ? ` · ${t("每轮 {{value0}} 人", { value0: batchSize })}` : ""}
+                  </span>
                 </div>
                 <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
                   {schedule.items.map((item, idx) => (
@@ -233,7 +238,8 @@ export function SchedulesPage({
               </div>
               </div>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

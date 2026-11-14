@@ -51,6 +51,7 @@ export interface Job {
   updatedAt: string;
   archiveMode?: ArchiveMode;
   backfill?: boolean;
+  batchSize?: number;
 }
 
 export interface JobRequest {
@@ -59,6 +60,7 @@ export interface JobRequest {
   title?: string;
   archiveMode?: ArchiveMode;
   backfill?: boolean;
+  batchSize?: number;
 }
 
 export interface BatchJobRequest {
@@ -71,6 +73,7 @@ export interface ArchiveScheduleItem {
   title?: string;
   archiveMode?: ArchiveMode;
   backfill?: boolean;
+  batchSize?: number;
 }
 
 export interface ArchiveSchedule {
