@@ -26,7 +26,7 @@ func syncEnvXAccounts(ctx context.Context, store *storage.Store) error {
 	accounts := make([]storage.EnvXAccount, 0, 1)
 	if authToken != "" && csrfToken != "" {
 		accounts = append(accounts, storage.EnvXAccount{AuthToken: authToken, CSRFToken: csrfToken, Primary: true})
-	} else {
+	} else if authToken != "" || csrfToken != "" {
 		// 只配了一半时按"Cookie 不完整"处理：告警后照常同步其余环境变量，
 		// 这组残缺的 Cookie 不会被写成账号。
 		log.Printf("env: OPEN_XDOWNLOAD_AUTH_TOKEN 与 OPEN_XDOWNLOAD_CT0 必须同时设置，忽略这组 Cookie")
