@@ -293,6 +293,20 @@ func (s *source) executeAccountRequest(ctx context.Context, account storage.XAcc
 
 		httpErr := &xapi.HTTPError{StatusCode: reply.status, Payload: xapi.LimitedErrorPayload(reply.payload)}
 
+		// 非 200/401 的响应也可能带致命 API 错误码（X 有时用 400/403 包装 32/64/89/215/326）。
+		// 这些错误码说明账号本身不可用，必须停用而不是只做 403 冷却。
+		if reply.status != http.StatusOK && reply.status != http.StatusUnauthorized {
+			if code, _ := probeErrorCode(reply.payload); code != 0 {
+				if code == xapi.APIErrRateLimit {
+					return nil, e.rateLimited(ctx, account.ID, queue, reply)
+				}
+				if xapi.IsFatalAPIErrorCode(code) {
+					e.deactivateAccount(ctx, account, code)
+					return nil, &xapi.APIError{Code: code, Raw: xapi.LimitedErrorPayload(reply.payload)}
+				}
+			}
+		}
+
 		switch {
 		case reply.status == http.StatusOK:
 			if apiErr := xapi.ParseAPIError(reply.payload); apiErr != nil {

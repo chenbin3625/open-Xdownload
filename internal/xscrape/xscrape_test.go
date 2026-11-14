@@ -424,6 +424,23 @@ func TestGraphQLFatalAPICodeDeactivates(t *testing.T) {
 	}
 }
 
+func TestGraphQLFatalAPICodeOnNon200Deactivates(t *testing.T) {
+	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusForbidden, `{"errors":[{"code":32,"message":"Could not authenticate you"}]}`)
+	})
+	account := h.account("token-1", "ct0-1", "")
+	ctx := context.Background()
+	_, err := h.source().GraphQL(ctx, xapi.UserByRestIDPath, url.Values{})
+	var apiErr *xapi.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != 32 {
+		t.Fatalf("error = %v, want API code 32", err)
+	}
+	current, _ := h.store.GetXAccount(ctx, account.ID)
+	if current.Active {
+		t.Fatal("fatal API code on a non-200 response should deactivate the account")
+	}
+}
+
 func TestGraphQLAPI88LocksQueue(t *testing.T) {
 	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Rate-Limit-Reset", strconv.FormatInt(h.clock.Now().Add(2*time.Minute).Unix(), 10))
