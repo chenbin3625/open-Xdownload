@@ -14,6 +14,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,6 +23,7 @@ import { Button, Card, Input, RadioGroup, Select, Typography } from "@douyinfe/s
 import { getJobProgressDisplay, parseAggregatedErrors } from "../lib/jobErrors";
 import {
   cancelJob,
+  deleteJob,
   formatBytes,
   getJobFiles,
   jobFilesQueryRoot,
@@ -45,6 +47,7 @@ import {
 } from "../components/common/CommonUI";
 import {
   cancelableStatuses,
+  isJobTerminal,
   jobStatusBucket,
   retryableStatuses,
 } from "../lib/jobStatus";
@@ -58,6 +61,7 @@ import { LoadingOverlay, Spinner } from "../components/semi";
 import { Table, type TableColumn } from "../components/semi";
 import { Avatar, Tag, type Tone } from "../components/semi";
 import { toast } from "../components/semi";
+import { Popconfirm } from "../components/semi";
 import { cn } from "../lib/cn";
 
 export type StatusFilterType = "all" | "active" | "completed" | "failed";
@@ -156,6 +160,15 @@ export function TaskCenterPage({
     onError: notifyError(t("重试失败")),
   });
 
+  const removeJob = useMutation({
+    mutationFn: deleteJob,
+    onSuccess: () => {
+      void invalidateWorkbenchQueries(queryClient);
+      toast.success({ message: t("任务已删除") });
+    },
+    onError: notifyError(t("删除失败")),
+  });
+
   const retryAllFailed = useMutation({
     mutationFn: retryFailedTweets,
     onSuccess: (newJob) => {
@@ -241,6 +254,25 @@ export function TaskCenterPage({
           onClick={() => retry.mutate(record.id)}
         >
           {t("重试")}</Button>
+      )}
+      {isJobTerminal(record.status) && (
+        <Popconfirm
+          title={t("删除任务")}
+          description={t("确定删除任务 #JOB-{{value0}}？该任务的下载索引会一并移除，磁盘上的媒体文件不受影响。", { value0: record.id })}
+          okText={t("删除")}
+          cancelText={t("取消")}
+          onConfirm={() => removeJob.mutate(record.id)}
+        >
+          <Button
+            theme="borderless"
+            type="danger"
+            icon={<Trash2 className="size-3.5 text-danger" />}
+            loading={removeJob.isPending && removeJob.variables === record.id}
+            disabled={removeJob.isPending && removeJob.variables === record.id}
+            aria-busy={removeJob.isPending && removeJob.variables === record.id}
+            aria-label={t("删除任务")}
+          />
+        </Popconfirm>
       )}
     </div>
   );
