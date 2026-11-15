@@ -132,7 +132,7 @@ export function TaskCenterPage({
 }: TaskCenterPageProps) {
   useTranslation();
   const queryClient = useQueryClient();
-  const isMobile = !useBreakpointUp("md");
+  const isMobile = !useBreakpointUp("xl");
   const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilterType>("all");
   const statusFilter = controlledStatusFilter ?? localStatusFilter;
   // 受控时筛选条件由 App 交给服务端；未受控时保留本地筛选，便于独立使用和测试。
@@ -472,26 +472,26 @@ export function TaskCenterPage({
       </div>
 
       <div className="task-stats">
-        <Card className="task-stat task-stat-active" bodyStyle={{ padding: 12 }}>
+        <Card className="task-stat task-stat-active">
           <div className="task-stat-label">
             <span>{t("下载中任务")}</span>
             <Activity size={16} className={displayStats.active > 0 ? "text-brand-700" : "text-fg-subtle"} />
           </div>
           <div className="task-stat-value">{displayStats.active}</div>
         </Card>
-        <Card className="task-stat task-stat-completed" bodyStyle={{ padding: 12 }}>
+        <Card className="task-stat task-stat-completed">
           <div className="task-stat-label">
             <span>{t("已完成")}</span><CheckCircle2 size={16} className="text-success" />
           </div>
           <div className="task-stat-value">{displayStats.completed}</div>
         </Card>
-        <Card className="task-stat task-stat-failed" bodyStyle={{ padding: 12 }}>
+        <Card className="task-stat task-stat-failed">
           <div className="task-stat-label">
             <span>{t("异常 / 失败")}</span><AlertCircle size={16} className="text-danger" />
           </div>
           <div className="task-stat-value">{displayStats.failed}</div>
         </Card>
-        <Card className="task-stat" bodyStyle={{ padding: 12 }}>
+        <Card className="task-stat">
           <div className="task-stat-label">
             <span>{t("任务总数")}</span><FolderCheck size={16} />
           </div>
@@ -647,7 +647,7 @@ export function TaskCenterPage({
                 {hasActiveFilter && <Button onClick={() => { changeSearchKeyword(""); changeKindFilter("all"); changeStatusFilter("all"); }}>{t("清除筛选")}</Button>}
               </Empty>
             ) : (
-              <ul aria-label={t("任务列表")} className="space-y-3">
+              <ul aria-label={t("任务列表")} className="mobile-job-list">
                 {filteredJobs.map((job) => (
                   <MobileJobCard
                     key={job.id}

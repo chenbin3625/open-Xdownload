@@ -1,10 +1,14 @@
 /* =========================================================
-   设置页：分区、存储策略、文件名策略、开关列表
+   设置页：清晰的分区与紧凑表单
    ========================================================= */
 
 .settings-page,
 .settings-form {
   gap: 0;
+}
+
+.settings-form {
+  max-width: 1120px;
 }
 
 .settings-form > .page-heading {
@@ -13,6 +17,7 @@
   top: 0;
   margin-bottom: 0;
   padding-block: 8px 16px;
+  /* 粘性标题必须有实底，否则滚动时下方内容会透出。 */
   background: var(--canvas);
 }
 
@@ -20,13 +25,8 @@
   gap: 6px;
 }
 
-.settings-form .page-actions .semi-button {
-  padding-inline: 8px;
-}
-
 .semi-settings-section {
   padding: 20px 0;
-  border-top: 1px solid var(--line);
 }
 
 .settings-page .semi-settings-section {
@@ -40,8 +40,12 @@
   margin: 0 0 16px;
   color: var(--fg);
   font-size: 16px;
-  font-weight: 600;
-  line-height: 22px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.settings-section-title svg {
+  color: var(--accent);
 }
 
 .settings-page .settings-section-title {
@@ -62,10 +66,9 @@
 
 .settings-subsection-title {
   margin: 0 0 10px;
-  font-size: 13px;
+  color: var(--fg);
+  font-size: 14px;
   font-weight: 600;
-  line-height: 20px;
-  color: var(--fg-body);
 }
 
 /* ---------------- 存储设置 ---------------- */
@@ -109,7 +112,6 @@
   flex: 1;
 }
 
-.storage-media-heading,
 .storage-media-row {
   display: grid;
   grid-template-columns:
@@ -117,24 +119,15 @@
     minmax(0, 1.1fr);
   gap: 12px;
   align-items: start;
-}
-
-.storage-media-heading {
-  padding: 8px 10px;
-  background: var(--surface-muted);
-  color: var(--fg-muted);
-  font-size: 12px;
-}
-
-.storage-media-row {
   padding: 16px 10px;
-  border-bottom: 1px solid var(--line);
+}
+
+.storage-media-row + .storage-media-row {
+  border-top: 1px solid var(--line);
 }
 
 .storage-media-name {
   padding-top: 6px;
-  font-size: 12px;
-  font-weight: 500;
   overflow-wrap: anywhere;
 }
 
@@ -144,21 +137,13 @@
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--fg-muted);
 }
 
 .storage-media-field > div:first-child {
   display: none;
 }
 
-.storage-media-field .semi-select-disabled .semi-select-selection-text {
-  color: var(--fg-muted);
-}
-
 .storage-target-path {
-  font: 12px/1.5 var(--font-mono);
-  color: var(--fg-muted);
   overflow-wrap: anywhere;
 }
 
@@ -184,8 +169,6 @@
   align-items: center;
   gap: 6px;
   margin-top: 8px;
-  font-size: 12px;
-  color: var(--fg-muted);
 }
 
 .storage-folder-toggle .semi-switch {
@@ -206,36 +189,45 @@
   min-width: 0;
   gap: 2px;
   padding: 2px 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
 }
 
-.storage-filename-parts { flex-direction: row; flex-wrap: wrap; }
-.storage-filename-parts > .semi-select { flex-basis: 100%; }
-.account-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-block: 1px solid var(--line); padding: 16px 0; margin: 0 0 20px; }
-.account-overview > div { min-width: 0; padding-inline: 16px; border-right: 1px solid var(--line); }
-.account-overview > div:last-child { border: 0; }
-.account-overview dt { font-size: 12px; color: var(--fg-muted); }
-.account-overview dd { margin: 6px 0 0; color: var(--fg); font-size: 22px; font-weight: 600; }
+.storage-filename-parts {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.storage-filename-parts > .semi-select {
+  flex-basis: 100%;
+}
+
+.account-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 16px 0;
+  margin: 0 0 20px;
+}
+
+.account-overview > div {
+  min-width: 0;
+  padding-inline: 16px;
+}
+
+.account-overview dd {
+  margin: 6px 0 0;
+}
 
 .storage-filename-part > span {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
 .storage-filename-part .semi-button {
   flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  padding: 0;
 }
 
 .storage-filename-limit {
   margin-top: 8px;
-  font-size: 12px;
-  color: var(--fg-muted);
 }
 
 .storage-migration-row {
@@ -244,7 +236,6 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  border-top: 1px solid var(--line);
   padding-top: 12px;
 }
 
@@ -252,34 +243,16 @@
   margin-bottom: 4px;
 }
 
-.storage-default,
-.storage-policy {
-  padding: 20px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.storage-rule-fields {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1.4fr 1.6fr;
-  gap: 12px;
-  align-items: end;
-}
-
 .storage-path-preview {
   display: block;
   margin-top: 12px;
   padding: 10px;
-  background: var(--surface-muted);
-  font: 12px/1.6 var(--font-mono);
   overflow-wrap: anywhere;
 }
 
 .directory-tree-panel {
   position: relative;
   min-height: 96px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--surface);
   padding: 4px;
 }
 
@@ -295,7 +268,6 @@
   align-items: center;
   gap: 16px;
   padding: 10px 0;
-  border-bottom: 1px solid var(--line);
 }
 
 .settings-toggle-row > div:first-child {
@@ -306,17 +278,14 @@
   flex-shrink: 0;
 }
 
-.settings-toggle-row:last-child {
-  border-bottom: 0;
+.settings-toggle-row + .settings-toggle-row {
+  border-top: 1px solid var(--line);
 }
 
 /* ---------------- X 账号池 ---------------- */
 
 .settings-section-description {
   margin: -6px 0 14px;
-  color: var(--fg-muted);
-  font-size: 12px;
-  line-height: 18px;
 }
 
 .x-accounts-title {
@@ -330,26 +299,10 @@
   margin-bottom: 0;
 }
 
-.x-accounts-table .semi-table-container {
-  background: var(--surface);
-}
-
-.x-accounts-table .semi-table-thead > .semi-table-row > .semi-table-row-head {
-  background: var(--surface-muted);
-  color: var(--fg-muted);
-  font-size: 12px;
-  font-weight: 500;
-}
-
 .x-accounts-table .semi-table-row-cell {
   padding-block: 12px;
   vertical-align: top;
   overflow-wrap: anywhere;
-}
-
-.x-accounts-table .semi-table-row-expand-icon-cell,
-.x-accounts-table .semi-table-expand-cell {
-  background: var(--surface-muted);
 }
 
 .x-account-identity {
@@ -360,21 +313,11 @@
 }
 
 .x-account-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg);
   overflow-wrap: anywhere;
 }
 
 .x-account-token {
-  font: 12px/1.5 var(--font-mono);
-  color: var(--fg-body);
   overflow-wrap: anywhere;
-}
-
-.x-account-id {
-  font-size: 11px;
-  color: var(--fg-subtle);
 }
 
 .x-account-status {
@@ -386,9 +329,6 @@
 
 .x-account-error {
   margin: 0;
-  color: var(--danger-strong);
-  font-size: 11px;
-  line-height: 16px;
   overflow-wrap: anywhere;
 }
 
@@ -421,12 +361,6 @@
   gap: 2px;
 }
 
-.x-account-actions .semi-button {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-}
-
 .x-account-actions .semi-switch {
   flex-shrink: 0;
 }
@@ -442,7 +376,6 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  font-size: 12px;
 }
 
 .x-account-request-list li {
@@ -452,7 +385,6 @@
   justify-content: space-between;
   gap: 8px;
   padding: 2px 0;
-  border-bottom: 1px dashed var(--line);
 }
 
 .x-accounts-empty {
@@ -478,12 +410,7 @@
   gap: 4px;
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--surface-muted);
   list-style: none;
-  font-size: 12px;
-  color: var(--fg-body);
 }
 
 .x-account-import-formats li {
@@ -494,8 +421,6 @@
 }
 
 .x-account-import-formats code {
-  color: var(--fg-muted);
-  font: 11px/1.5 var(--font-mono);
   overflow-wrap: anywhere;
 }
 
@@ -518,20 +443,82 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  color: var(--danger-strong);
-  font-size: 12px;
   overflow-wrap: anywhere;
 }
-.settings-form [hidden] { display: none !important; }
-.settings-navigation { display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; border-bottom: 1px solid var(--line); padding: 0; }
-.settings-navigation button { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; flex: 0 0 auto; padding: 8px 16px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--fg-muted); font-size: 14px; white-space: nowrap; cursor: pointer; }
-.settings-navigation button:hover { background: var(--surface-muted); color: var(--fg); }
-.settings-navigation button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
-.settings-dirty-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warning); }
-.settings-account-shortcut { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 16px; border-bottom: 1px solid var(--line); }
-.settings-account-shortcut .settings-section-title { margin: 0; }
-.settings-account-shortcut > div { flex: 1; }
-.storage-inherited-summary { grid-column: 3 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; color: var(--fg-muted); font-size: 13px; overflow-wrap: anywhere; }
-.storage-inherited-summary code { font-size: 12px; }
-@media (max-width: 1099.98px) { .storage-inherited-summary { grid-column: 1 / -1; } }
-@media (max-width: 767.98px) { .settings-navigation { gap: 0; margin-inline: -12px; padding-inline: 12px; } .settings-navigation button { justify-content: center; padding-inline: 12px; font-size: 13px; } }
+
+.settings-form [hidden] {
+  display: none !important;
+}
+
+.settings-account-shortcut {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block: 16px;
+}
+
+.settings-account-shortcut .settings-section-title {
+  margin: 0;
+}
+
+.settings-account-shortcut > div {
+  flex: 1;
+}
+
+.storage-inherited-summary {
+  grid-column: 3 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1099.98px) {
+  .storage-inherited-summary {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ---- Flat (non-tabbed) layout ---- */
+
+.settings-flat .semi-settings-section {
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+}
+
+.settings-flat .settings-section-title {
+  margin-bottom: 10px;
+}
+
+.settings-flat .settings-toggle-row {
+  min-height: 36px;
+  padding: 4px 0;
+}
+
+.settings-flat .settings-toggle-list {
+  gap: 0;
+}
+
+.settings-flat .storage-settings {
+  gap: 12px 20px;
+}
+
+.settings-general-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 32px;
+  padding: 16px 0 20px;
+}
+
+.settings-general-bar .semi-settings-section,
+.settings-general-bar .settings-account-shortcut {
+  padding: 0;
+  border: 0;
+}
+
+.settings-general-bar .settings-account-shortcut > div {
+  flex: 0 1 auto;
+}

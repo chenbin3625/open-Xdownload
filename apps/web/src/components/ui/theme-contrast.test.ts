@@ -99,7 +99,7 @@ describe("主题对比度 token", () => {
 
   it("断点统一为约定值", () => {
     const maxWidths = new Set([...css.matchAll(/\(max-width:\s*([\d.]+)px\)/g)].map((m) => m[1]));
-    expect([...maxWidths].sort()).toEqual(["1099.98", "359.98", "639.98", "767.98"]);
+    expect([...maxWidths].sort()).toEqual(["1099.98", "1279.98", "359.98", "639.98", "767.98"]);
     const minWidths = new Set([...css.matchAll(/\(min-width:\s*([\d.]+)px\)/g)].map((m) => m[1]));
     expect([...minWidths].sort()).toEqual(["1280", "768"]);
   });
@@ -148,12 +148,6 @@ describe("主题对比度 token", () => {
       expect(contrast(strong, soft), `浅色 ${name}-strong 在 soft 底上不达标`).toBeGreaterThanOrEqual(AA);
       expect(contrast(strong, lightSurface), `浅色 ${name}-strong 在 surface 上不达标`).toBeGreaterThanOrEqual(AA);
     }
-  });
-
-  it("::selection 用配对前景色而不是写死白字", () => {
-    const selection = blockBody("::selection {");
-    expect(selection).toContain("color: var(--brand-contrast);");
-    expect(selection).not.toContain("#ffffff");
   });
 });
 

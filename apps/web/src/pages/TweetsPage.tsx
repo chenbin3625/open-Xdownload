@@ -14,6 +14,21 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// 旧归档数据可能缺少数组字段（后端返回 null）。页面里有大量 .length/.map，
+// 一条坏数据就会让整个页面白屏，这里在渲染前统一补成空数组。
+function normalizeArchivedTweet(tweet: ArchivedTweet): ArchivedTweet {
+  return {
+    ...tweet,
+    media: Array.isArray(tweet.media) ? tweet.media : [],
+    downloads: Array.isArray(tweet.downloads) ? tweet.downloads : [],
+    jobIds: Array.isArray(tweet.jobIds) ? tweet.jobIds : [],
+  };
+}
+
+function normalizeTweetPage(page: TweetPage | undefined): TweetPage | undefined {
+  return page && { ...page, items: (Array.isArray(page.items) ? page.items : []).map(normalizeArchivedTweet) };
+}
+
 function TweetText({ text, compact, highlight = "" }: { text: string; compact: boolean; highlight?: string }) {
   const body = useRef<HTMLParagraphElement>(null);
   const id = useId();
@@ -71,7 +86,7 @@ export function TweetsPage() {
       return { key: queryIdentity, page: incoming };
     });
   }, [tweets.data, tweets.isPlaceholderData, queryIdentity]);
-  const page = snapshot?.key === queryIdentity ? snapshot.page : tweets.data;
+  const page = normalizeTweetPage(snapshot?.key === queryIdentity ? snapshot.page : tweets.data);
   const authorOptions = useMemo(() => {
     const options = authors.data ?? [];
     if (author && !options.some(option => option.value.toLowerCase() === author.toLowerCase())) {
@@ -79,7 +94,7 @@ export function TweetsPage() {
     }
     return options;
   }, [author, authors.data]);
-  const newRecords = !tweets.isPlaceholderData && snapshot?.key === queryIdentity ? tweets.data?.items.filter(item => !snapshot.page.items.some(previous => previous.id === item.id)).length ?? 0 : 0;
+  const newRecords = !tweets.isPlaceholderData && snapshot?.key === queryIdentity ? (tweets.data?.items ?? []).filter(item => !snapshot.page.items.some(previous => previous.id === item.id)).length : 0;
   const detail = detailId ? page?.items.find(tweet => tweet.id === detailId) ?? detailSnapshot : null;
   const detailReposted = detail?.related?.find(related => related.id === detail.retweetedTweetId && related.text);
   function openMedia(tweet: ArchivedTweet, record: ArchivedTweet["downloads"][number]) {

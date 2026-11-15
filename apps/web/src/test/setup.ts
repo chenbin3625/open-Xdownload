@@ -10,8 +10,8 @@ beforeEach(async () => {
 afterEach(async () => {
   if (typeof document === "undefined") return;
   const { act, cleanup } = await import("@testing-library/react");
-  const { Toast } = await import("@douyinfe/semi-ui");
-  await act(async () => { Toast.destroyAll(); });
+  const { Notification } = await import("@douyinfe/semi-ui");
+  await act(async () => { Notification.destroyAll(); });
   cleanup();
 });
 
@@ -62,6 +62,6 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 }
 
 if (typeof document !== "undefined") {
-  const { Toast } = await import("@douyinfe/semi-ui");
-  Toast.defaultOpts.motion = false;
+  const { Notification } = await import("@douyinfe/semi-ui");
+  Notification.defaultProps = { ...Notification.defaultProps, duration: 0, motion: false };
 }

@@ -37,6 +37,21 @@ beforeEach(() => {
   vi.mocked(api).mockResolvedValue(job);
 });
 
+it("renders legacy records whose array fields are missing instead of crashing", async () => {
+  vi.mocked(getTweets).mockResolvedValue({
+    items: [{
+      ...tweet,
+      media: null as unknown as ArchivedTweet["media"],
+      downloads: null as unknown as ArchivedTweet["downloads"],
+      jobIds: null as unknown as ArchivedTweet["jobIds"],
+    }],
+    pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+  });
+  renderArchive();
+  const body = await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });
+  expect(body.textContent).toBe(tweet.text);
+});
+
 it("keeps the full body and available relations when media fails, with local previews and independent retry", async () => {
   const user = userEvent.setup(); renderArchive();
   const body = await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });

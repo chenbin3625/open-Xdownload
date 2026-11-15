@@ -150,32 +150,9 @@
 
   body {
     margin: 0;
-    font-family: var(--font-sans);
-    background-color: var(--canvas);
-    color: var(--fg);
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    -webkit-text-size-adjust: 100%;
-  }
-
-  code,
-  pre {
-    font-family: var(--font-mono);
   }
 
   svg {
     vertical-align: middle;
-  }
-
-  /* 选中文字使用品牌色的配对前景色。 */
-  ::selection {
-    background-color: var(--color-brand-500);
-    color: var(--brand-contrast);
-  }
-
-  :focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-    border-radius: var(--radius-control);
   }
 }

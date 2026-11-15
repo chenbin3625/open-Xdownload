@@ -4,10 +4,10 @@ import {
   Avatar as SAvatar, Badge, Banner, Button as SButton,
   Checkbox as SCheckbox, ConfigProvider, Descriptions as SDescriptions,
   Divider as SDivider, Empty as SEmpty, Form, Input as SInput, InputNumber,
-  Modal as SModal, Pagination as SPagination, Popconfirm as SPopconfirm,
+  Modal as SModal, Notification, Pagination as SPagination, Popconfirm as SPopconfirm,
   Popover, Progress as SProgress, Select as SSelect, SideSheet,
   Skeleton as SSkeleton, Spin, Switch as SSwitch, Table as STable,
-  Tabs as STabs, Tag as STag, TextArea, Toast, Tooltip as STooltip, Tree as STree,
+  Tabs as STabs, Tag as STag, TextArea, Tooltip as STooltip, Tree as STree,
 } from "@douyinfe/semi-ui";
 import zhCN from "@douyinfe/semi-ui/lib/es/locale/source/zh_CN";
 import enUS from "@douyinfe/semi-ui/lib/es/locale/source/en_US";
@@ -223,12 +223,6 @@ export function Tree({ nodes, expandedKeys, selectedKey, onExpandedChange, onSel
 export interface ToastOptions { message: React.ReactNode; description?: React.ReactNode; duration?: number }
 let toastSequence = 0;
 const toastIds = new Map<number, string>();
-function ToastMessage({ id, options }: { id: number; options: ToastOptions }) {
-  const [focused, setFocused] = useState(false); const [hovered, setHovered] = useState(false);
-  const duration = options.duration ?? 4500;
-  useEffect(() => { if (focused || hovered || duration <= 0) return; const timer = setTimeout(() => toast.dismiss(id), duration); return () => clearTimeout(timer); }, [id, duration, focused, hovered]);
-  return <div className="flex items-start gap-3" onFocusCapture={() => setFocused(true)} onBlurCapture={e => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false); }} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}><div>{options.message}{options.description && <div className="mt-1 text-xs">{options.description}</div>}</div><SButton size="small" theme="borderless" type="tertiary" icon={<X size={14} />} aria-label={t("关闭提示")} onClick={() => toast.dismiss(id)} /></div>;
-}
-function notify(type: "success" | "error" | "warning" | "info", options: ToastOptions) { const id = ++toastSequence; toastIds.set(id, Toast[type]({ content: <ToastMessage id={id} options={options} />, duration: 0, showClose: false, onClose: () => toastIds.delete(id) })); return id; }
-export const toast = { success: (o: ToastOptions) => notify("success", o), error: (o: ToastOptions) => notify("error", o), warning: (o: ToastOptions) => notify("warning", o), info: (o: ToastOptions) => notify("info", o), dismiss: (id: number) => { const key = toastIds.get(id); if (key) Toast.close(key); toastIds.delete(id); } };
+function notify(type: "success" | "error" | "warning" | "info", options: ToastOptions) { const id = ++toastSequence; toastIds.set(id, Notification[type]({ title: options.message, content: options.description, duration: (options.duration ?? 4500) / 1000, showClose: true, onClose: () => toastIds.delete(id), theme: "light" })); return id; }
+export const toast = { success: (o: ToastOptions) => notify("success", o), error: (o: ToastOptions) => notify("error", o), warning: (o: ToastOptions) => notify("warning", o), info: (o: ToastOptions) => notify("info", o), dismiss: (id: number) => { const key = toastIds.get(id); if (key) Notification.close(key); toastIds.delete(id); } };
 export function Toaster() { return null; }

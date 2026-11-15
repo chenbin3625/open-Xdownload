@@ -354,18 +354,64 @@ func (s *Store) GetTweet(ctx context.Context, id string) (ArchivedTweet, error) 
 	return s.getTweet(ctx, id, 0)
 }
 
+// normalizeTweetData 保证数组字段在 JSON 中始终是 []，而不是 null。
+// 早期归档或外部导入的数据可能缺少这些字段。
+func normalizeTweetData(tweet *parser.TweetData) {
+	if tweet.Media == nil {
+		tweet.Media = []parser.Media{}
+	}
+	for index := range tweet.Media {
+		if tweet.Media[index].Variants == nil {
+			tweet.Media[index].Variants = []parser.MediaVariant{}
+		}
+	}
+	for index := range tweet.Related {
+		normalizeTweetData(&tweet.Related[index])
+	}
+}
+
 func (s *Store) getTweet(ctx context.Context, id string, jobID int64) (ArchivedTweet, error) {
 	var row struct {
-		Payload    string    `db:"payload"`
-		ArchivedAt time.Time `db:"archived_at"`
+		ID          string    `db:"id"`
+		AuthorID    string    `db:"author_id"`
+		ScreenName  string    `db:"screen_name"`
+		AuthorName  string    `db:"author_name"`
+		Body        string    `db:"body"`
+		PublishedAt time.Time `db:"published_at"`
+		Payload     string    `db:"payload"`
+		ArchivedAt  time.Time `db:"archived_at"`
 	}
-	if err := s.db.GetContext(ctx, &row, `SELECT payload,archived_at FROM tweets WHERE id=?`, id); err != nil {
+	if err := s.db.GetContext(ctx, &row, `SELECT id,author_id,screen_name,author_name,body,published_at,payload,archived_at FROM tweets WHERE id=?`, id); err != nil {
 		return ArchivedTweet{}, err
 	}
 	result := ArchivedTweet{ArchivedAt: row.ArchivedAt, JobIDs: []int64{}, Downloads: []DownloadRecord{}}
 	if err := json.Unmarshal([]byte(row.Payload), &result.TweetData); err != nil {
 		return result, err
 	}
+	// 旧版本/外部导入的 payload 可能不完整。列里存的是归档时同一份基础字段，
+	// 用它们补全空值，避免列表显示空记录。
+	if result.ID == "" {
+		result.ID = row.ID
+	}
+	if result.Author.ID == "" {
+		result.Author.ID = row.AuthorID
+	}
+	if result.Author.ScreenName == "" {
+		result.Author.ScreenName = row.ScreenName
+	}
+	if result.Author.Name == "" {
+		result.Author.Name = row.AuthorName
+	}
+	if result.Text == "" {
+		result.Text = row.Body
+	}
+	if result.CreatedAt.IsZero() {
+		result.CreatedAt = row.PublishedAt
+	}
+	// 旧版本/不完整的 payload 可能没有 media 字段，反序列化后是 nil，
+	// 序列化出去会变成 "media": null。API 契约是数组，这里统一归一化，
+	// 避免前端对 null 调 .length 导致整页崩溃。
+	normalizeTweetData(&result.TweetData)
 	if err := s.db.SelectContext(ctx, &result.JobIDs, `SELECT job_id FROM tweet_jobs WHERE tweet_id=? ORDER BY job_id DESC`, id); err != nil {
 		return result, err
 	}
