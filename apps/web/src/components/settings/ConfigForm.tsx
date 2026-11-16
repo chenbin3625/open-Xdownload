@@ -41,6 +41,8 @@ export function ConfigForm({
   const envOverridden = readEnvOverridden(config);
   const [pendingSavedConfigKey, setPendingSavedConfigKey] = useState("");
   const pendingSavedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const configVersion = useRef(0);
+  const savedConfigVersion = useRef(0);
   const draftRevision = useRef(0);
 
   useEffect(() => {
@@ -64,6 +66,10 @@ export function ConfigForm({
     }
   }, [config, draftDirty, pendingSavedConfigKey]);
 
+  useEffect(() => {
+    configVersion.current += 1;
+  }, [config]);
+
   useEffect(() => () => {
     if (pendingSavedTimer.current) clearTimeout(pendingSavedTimer.current);
   }, []);
@@ -84,8 +90,11 @@ export function ConfigForm({
       clearTimeout(pendingSavedTimer.current);
       pendingSavedTimer.current = null;
     }
-    setDraftDirty(true);
-    setDraft(action);
+    setDraft(current => {
+      const next = typeof action === "function" ? action(current) : action;
+      setDraftDirty(configSyncKey(normalizeConfig(next)) !== configSyncKey(normalizeConfig(draftBase.current)));
+      return next;
+    });
   }
 
   const mutation = useMutation({
@@ -96,12 +105,13 @@ export function ConfigForm({
       draftBase.current = normalized;
       if (submitted?.revision === draftRevision.current) {
         setPendingSavedConfigKey(configSyncKey(normalized));
-        // 超时保护：env override 等情况下 GET 值可能永远不匹配 PUT 响应，
-        // 3 秒后放弃等待，重新同步最近一次 GET 配置。
+        savedConfigVersion.current = configVersion.current;
         if (pendingSavedTimer.current) clearTimeout(pendingSavedTimer.current);
         pendingSavedTimer.current = setTimeout(() => {
-          setPendingSavedConfigKey("");
           pendingSavedTimer.current = null;
+          if (savedConfigVersion.current !== configVersion.current) {
+            setPendingSavedConfigKey("");
+          }
         }, 3_000);
         setDraft(normalized);
         setDraftDirty(false);

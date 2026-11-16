@@ -4,23 +4,14 @@
 
 body {
   color: var(--fg-body);
-  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
   letter-spacing: 0;
+  margin: 0;
 }
 
-:where(.app-shell, .auth-page) a {
-  text-underline-offset: 3px;
-}
-
-:where(.app-shell, .auth-page) a:hover {
-  text-decoration: underline;
-}
-
-:where(.app-shell, .auth-page) :is(button, a, [role="button"], [role="menuitem"], [role="combobox"]):focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+:where(.app-shell, .auth-page) a:not(.semi-button) {
+  color: var(--semi-color-link);
 }
 
 /* 顶部全局加载条（GlobalLoadingBar） */
@@ -72,9 +63,9 @@ body {
 .page-title {
   margin: 0;
   color: var(--fg);
-  font-size: 22px;
-  font-weight: 650;
-  line-height: 1.35;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
   overflow-wrap: anywhere;
 }
 
@@ -89,11 +80,20 @@ body {
 .page-toolbar {
   display: flex;
   min-width: 0;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
   gap: 12px;
   padding-block: 14px;
   border-block: 1px solid var(--line);
+}
+
+.toolbar-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .page-actions .semi-button,
@@ -114,22 +114,35 @@ body {
 .toolbar-filters {
   display: flex;
   min-width: 0;
-  flex: 1 1 400px;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
 
 .toolbar-search {
-  flex: 1 1 220px;
-  min-width: 160px;
+  flex: 1 1 280px;
+  min-width: min(100%, 180px);
   width: auto;
 }
 
 .toolbar-select,
 .toolbar-user-select {
-  flex: 0 0 auto;
-  width: 148px;
+  flex: 0 1 168px;
+  min-width: 0;
+  width: 168px;
+}
+
+.toolbar-options {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.toolbar-summary {
+  color: var(--fg-muted);
+  font-size: 12px;
 }
 
 .toolbar-field {
@@ -157,33 +170,27 @@ body {
   align-items: center;
 }
 
-.filter-chip {
-  display: inline-flex;
+.active-filter-tags .filter-chip.semi-button {
   max-width: 100%;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 9px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  color: var(--fg-body);
-  font-size: 12px;
+  height: auto;
+  min-height: 24px;
+  padding-block: 2px;
+  white-space: normal;
   overflow-wrap: anywhere;
-  cursor: pointer;
-  transition: background-color 150ms ease, border-color 150ms ease;
 }
 
-.filter-chip:hover {
-  border-color: var(--line-strong);
-  background: var(--accent-soft);
+.active-filter-tags .filter-chip .semi-button-content {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-.filter-chip svg {
+.active-filter-tags .filter-chip.semi-button .semi-button-content-left {
+  display: block;
+  min-width: 0;
+  text-align: left;
+}
+
+.active-filter-tags .filter-chip svg {
   flex-shrink: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .filter-chip {
-    transition: none;
-  }
 }

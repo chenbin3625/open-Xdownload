@@ -235,7 +235,7 @@ const GalleryCard = React.memo(function GalleryCard({
           <div className="gallery-card-actions">
             <Tooltip title={t("下载原文件")}>
               <a
-                className="gallery-download"
+                className="gallery-download semi-button semi-button-borderless semi-button-tertiary semi-button-size-default semi-button-with-icon-only"
                 href={previewURL}
                 download={fileName}
                 aria-label={t("下载原文件")}
@@ -264,7 +264,7 @@ const GalleryCard = React.memo(function GalleryCard({
             {sourceTweetURL(item) && (
               <Tooltip title={t("打开来源推文")}>
                 <a
-                  className="gallery-source-link"
+                  className="gallery-source-link semi-button semi-button-borderless semi-button-tertiary semi-button-size-default semi-button-with-icon-only"
                   href={sourceTweetURL(item)}
                   target="_blank"
                   rel="noreferrer"
@@ -515,7 +515,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       <div className="page-heading">
         <h1 className="page-title">{t("媒体归档库")}</h1>
         <div className="page-actions">
-          <RadioGroup type="button" aria-label={t("媒体视图")} value={view} onChange={event => setView(event.target.value)} options={[{ value: "grid", label: <span title={t("网格视图")} aria-label={t("网格视图")}><LayoutGrid size={16} /></span> }, { value: "list", label: <span title={t("列表视图")} aria-label={t("列表视图")}><List size={16} /></span> }]} />
+          <RadioGroup type="button" buttonSize="middle" aria-label={t("媒体视图")} value={view} onChange={event => setView(event.target.value)} options={[{ value: "grid", label: <span title={t("网格视图")} aria-label={t("网格视图")}><LayoutGrid size={16} /></span> }, { value: "list", label: <span title={t("列表视图")} aria-label={t("列表视图")}><List size={16} /></span> }]} />
           {view === "grid" && <><label id="gallery-density-label" className="sr-only">{t("缩略图大小")}</label><Select value={density} aria-labelledby="gallery-density-label" onChange={value => setDensity(String(value))} optionList={[{ value: "standard", label: t("标准缩略图") }, { value: "compact", label: t("紧凑缩略图") }]} /><label id="gallery-fit-label" className="sr-only">{t("缩略图显示方式")}</label><Select value={thumbnailFit} aria-labelledby="gallery-fit-label" onChange={value => setThumbnailFit(value as "contain" | "cover")} optionList={[{ value: "contain", label: t("完整显示") }, { value: "cover", label: t("填充裁剪") }]} /></>}
         </div>
       </div>
@@ -559,7 +559,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             aria-labelledby="gallery-sort-label"
             value={filter.sort}
             onChange={value => updateFilter({ sort: value as GallerySort, page: 1 })}
-            className="gallery-sort"
+            className="toolbar-select gallery-sort"
             optionList={[
               { value: "date_desc", label: t("最新归档优先") },
               { value: "date_asc", label: t("最早归档优先") },
@@ -567,10 +567,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               { value: "size_asc", label: t("体积从小到大") },
             ]}
           />
-        </div>
+        <div className="toolbar-options">
         <SimplePopover trigger={<Button
           icon={<CalendarDays size={16} />}
-          theme={filter.from || filter.to ? "light" : "borderless"}
+          theme="light"
           type={filter.from || filter.to ? "primary" : "tertiary"}
           aria-label={t("归档日期（UTC）")}
           aria-pressed={Boolean(filter.from || filter.to)}
@@ -587,7 +587,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         </SimplePopover>
         <SimplePopover trigger={<Button
           icon={<HardDrive size={16} />}
-          theme={filter.minBytes !== "" || filter.maxBytes !== "" ? "light" : "borderless"}
+          theme="light"
           type={filter.minBytes !== "" || filter.maxBytes !== "" ? "primary" : "tertiary"}
           aria-label={t("文件体积（MiB）")}
           aria-pressed={filter.minBytes !== "" || filter.maxBytes !== ""}
@@ -613,11 +613,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         </div>
         </SimplePopover>
         {hasActiveFilter && <Tooltip title={t("清除筛选")}><Button theme="borderless" type="tertiary" icon={<X size={16} />} aria-label={t("清除筛选")} onClick={() => updateFilter({ kind: "all", user: "all", search: "", from: "", to: "", minBytes: "", maxBytes: "", page: 1 })} /></Tooltip>}
-      </div>
-      <div className="gallery-result-bar">
-        <Checkbox checked={Boolean(visibleEntries.length) && selectedEntries.length === visibleEntries.length} indeterminate={selectedEntries.length > 0 && selectedEntries.length < visibleEntries.length} disabled={selectionDisabled || !visibleEntries.length} onChange={event => setSelected(event.target.checked ? new Set(visibleEntries.map(({ item }) => entryKey(item))) : new Set())}>{t("选择本页")}</Checkbox>
-        <span className="text-xs text-fg-muted" aria-live="polite">{libraryQuery.isPlaceholderData ? t("正在应用筛选...") : `${t("筛选结果")} ${totalEntries} ${t("项")}`}</span>
-        {selectedEntries.length > 0 && <div className="gallery-batch-actions"><span className="text-xs">{t("已选")} {selectedEntries.length}</span><Button size="small" icon={<Copy size={14} />} disabled={selectionDisabled} onClick={() => void copyToClipboard(selectedEntries.map(({ item }) => item.filePath).join("\n"), t("所选文件路径"))}>{t("复制路径")}</Button><Button size="small" icon={<Download size={14} />} disabled={selectionDisabled} onClick={downloadSelected}>{t("批量下载")}</Button><Button size="small" icon={<ExternalLink size={14} />} disabled={selectionDisabled} onClick={exportSelected}>{t("导出清单")}</Button><Button size="small" theme="borderless" icon={<X size={14} />} aria-label={t("取消选择")} onClick={() => setSelected(new Set())} /></div>}
+        </div>
+        </div>
       </div>
       {hasActiveFilter && <div className="active-filter-tags">
         {[
@@ -626,8 +623,13 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           { key: "user", label: filter.user !== "all" ? filter.user : "", patch: { user: "all" } },
           { key: "dates", label: filter.from || filter.to ? `${filter.from || t("不限")} ~ ${filter.to || t("不限")}` : "", patch: { from: "", to: "" } },
           { key: "bytes", label: filter.minBytes || filter.maxBytes ? `${formatBytes(Number(filter.minBytes))} ~ ${filter.maxBytes ? formatBytes(Number(filter.maxBytes)) : t("不限")}` : "", patch: { minBytes: "", maxBytes: "" } },
-        ].filter(item => item.label).map(item => <button className="filter-chip" type="button" key={item.key} onClick={() => updateFilter({ ...item.patch, page: 1 })} aria-label={`${t("移除筛选")} ${item.label}`}>{item.label}<X size={12} /></button>)}
+        ].filter(item => item.label).map(item => <Button className="filter-chip" size="small" type="tertiary" icon={<X size={12} />} iconPosition="right" key={item.key} onClick={() => updateFilter({ ...item.patch, page: 1 })} aria-label={`${t("移除筛选")} ${item.label}`}>{item.label}</Button>)}
       </div>}
+      <div className="gallery-result-bar">
+        <Checkbox checked={Boolean(visibleEntries.length) && selectedEntries.length === visibleEntries.length} indeterminate={selectedEntries.length > 0 && selectedEntries.length < visibleEntries.length} disabled={selectionDisabled || !visibleEntries.length} onChange={event => setSelected(event.target.checked ? new Set(visibleEntries.map(({ item }) => entryKey(item))) : new Set())}>{t("选择本页")}</Checkbox>
+        <span className="text-xs text-fg-muted" aria-live="polite">{libraryQuery.isPlaceholderData ? t("正在应用筛选...") : `${t("筛选结果")} ${totalEntries} ${t("项")}`}</span>
+        {selectedEntries.length > 0 && <div className="gallery-batch-actions"><span className="text-xs">{t("已选")} {selectedEntries.length}</span><Button size="small" type="tertiary" icon={<Copy size={14} />} disabled={selectionDisabled} onClick={() => void copyToClipboard(selectedEntries.map(({ item }) => item.filePath).join("\n"), t("所选文件路径"))}>{t("复制路径")}</Button><Button size="small" type="tertiary" icon={<Download size={14} />} disabled={selectionDisabled} onClick={downloadSelected}>{t("批量下载")}</Button><Button size="small" type="tertiary" icon={<ExternalLink size={14} />} disabled={selectionDisabled} onClick={exportSelected}>{t("导出清单")}</Button><Button size="small" theme="borderless" type="tertiary" icon={<X size={14} />} aria-label={t("取消选择")} onClick={() => setSelected(new Set())} /></div>}
+      </div>
       {rangeError && <Alert type="warning" message={rangeError} />}
       {libraryQuery.isError && libraryQuery.data && <Alert type="error" message={getErrorMessage(libraryQuery.error)} />}
 
@@ -780,7 +782,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 <div className="flex items-center gap-2">
                   <Tooltip title={t("下载原文件")}>
                     <a
-                      className="gallery-download"
+                      className="gallery-download semi-button semi-button-borderless semi-button-tertiary semi-button-size-default semi-button-with-icon-only"
                       href={previewURL}
                       download={fileName}
                       aria-label={t("下载原文件")}
@@ -809,7 +811,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                   {sourceTweetURL(item) && (
                     <Tooltip title={t("打开来源推文")}>
                       <a
-                        className="gallery-source-link"
+                        className="gallery-source-link semi-button semi-button-borderless semi-button-tertiary semi-button-size-default semi-button-with-icon-only"
                         href={sourceTweetURL(item)}
                         target="_blank"
                         rel="noreferrer"

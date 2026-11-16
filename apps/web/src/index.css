@@ -1,7 +1,6 @@
 @import "tailwindcss";
 
-/* 样式按职责拆分；导入顺序即层叠顺序，后导入的规则优先。
-   tokens → base → semi → layout → 各页面 → 响应式覆盖 */
+/* Semi 提供组件外观，业务样式只补充布局和响应式约束。 */
 @import "./styles/tokens.css";
 @import "./styles/base.css";
 @import "./styles/semi.css";

@@ -7,8 +7,7 @@ import {
   FileText,
 } from "lucide-react";
 import React, { useLayoutEffect, useRef } from "react";
-import { Nav } from "@douyinfe/semi-ui";
-import { cn } from "../../lib/cn";
+import { Button, Nav } from "@douyinfe/semi-ui";
 import type { SectionKey } from "../../lib/useRouteState";
 
 export interface AppSidebarProps {
@@ -43,13 +42,13 @@ export function AppSidebar({
   });
 
   return (
-    <aside ref={sidebar} className="app-sidebar flex min-h-full w-full shrink-0 flex-col justify-between border-r border-line bg-surface select-none lg:w-56">
+    <aside ref={sidebar} className="app-sidebar flex min-h-full w-full shrink-0 flex-col justify-between border-r border-line bg-surface select-none lg:w-50">
       <div className="sidebar-content">
         {/* 品牌区 */}
         <div className="sidebar-brand flex items-center gap-2.5">
           <img src="/icon.svg" alt="" className="size-8 shrink-0" />
           <div className="min-w-0">
-            <div className="truncate text-sm font-bold tracking-tight text-fg">open-Xdownload</div>
+            <div className="truncate text-sm font-bold text-fg">open-Xdownload</div>
             <p className="text-xs text-fg-muted font-medium truncate">{t("推文多媒体归档工作台")}</p>
           </div>
         </div>
@@ -69,17 +68,19 @@ export function AppMobileNavigation({ activeSection, onSectionChange }: AppSideb
   return (
     <nav className="app-mobile-nav md:hidden" aria-label={t("主导航")}>
       {navigationItems.map(({ key, label, icon: Icon }) => (
-        <button
+        <Button
           key={key}
-          type="button"
+          theme="borderless"
+          type={currentKey === key ? "primary" : "tertiary"}
           className="app-mobile-nav-item"
+          contentClassName="app-mobile-nav-content"
           aria-label={t(label)}
           aria-current={currentKey === key ? "page" : undefined}
           onClick={() => onSectionChange(key)}
         >
           <span className="app-mobile-nav-icon"><Icon size={20} /></span>
           <span className="app-mobile-nav-label">{t(label)}</span>
-        </button>
+        </Button>
       ))}
     </nav>
   );

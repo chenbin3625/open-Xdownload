@@ -8,7 +8,8 @@
 }
 
 .settings-form {
-  max-width: 1120px;
+  width: 100%;
+  min-width: 0;
 }
 
 .settings-form > .page-heading {
@@ -40,12 +41,8 @@
   margin: 0 0 16px;
   color: var(--fg);
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.5;
-}
-
-.settings-section-title svg {
-  color: var(--accent);
 }
 
 .settings-page .settings-section-title {
@@ -75,7 +72,7 @@
 
 .storage-settings {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
   gap: 16px 24px;
 }
 
@@ -115,11 +112,11 @@
 .storage-media-row {
   display: grid;
   grid-template-columns:
-    minmax(120px, 0.9fr) 88px minmax(0, 1fr) minmax(0, 1fr)
-    minmax(0, 1.1fr);
+    80px 112px minmax(0, 1fr) minmax(0, 1fr)
+    minmax(0, 1.2fr) 144px;
   gap: 12px;
   align-items: start;
-  padding: 16px 10px;
+  padding: 16px 0;
 }
 
 .storage-media-row + .storage-media-row {
@@ -155,13 +152,19 @@
 }
 
 .storage-preview-row .storage-path-preview {
-  flex-basis: 100%;
+  flex: 1 1 240px;
   min-width: 0;
   margin: 0;
 }
 
 .storage-media-row > .storage-preview-row {
+  grid-column: -2 / -1;
+  justify-content: flex-end;
+}
+
+.storage-media-row:has(.storage-path-preview) > .storage-preview-row {
   grid-column: 1 / -1;
+  justify-content: flex-start;
 }
 
 .storage-folder-toggle {
@@ -185,8 +188,10 @@
 
 .storage-filename-part {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   min-width: 0;
+  max-width: 100%;
   gap: 2px;
   padding: 2px 4px;
 }
@@ -194,6 +199,7 @@
 .storage-filename-parts {
   flex-direction: row;
   flex-wrap: wrap;
+  gap: 4px 8px;
 }
 
 .storage-filename-parts > .semi-select {
@@ -216,7 +222,7 @@
   margin: 6px 0 0;
 }
 
-.storage-filename-part > span {
+.storage-filename-part > span:first-child {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
@@ -285,7 +291,7 @@
 /* ---------------- X 账号池 ---------------- */
 
 .settings-section-description {
-  margin: -6px 0 14px;
+  margin: 10px 0 14px;
 }
 
 .x-accounts-title {
@@ -297,6 +303,10 @@
 
 .x-accounts-title .settings-section-title {
   margin-bottom: 0;
+}
+
+.x-accounts-table .semi-table {
+  min-width: 100%;
 }
 
 /* 多行单元格顶部对齐。选择器与 Semi 的单元格规则同链，否则优先级不够。 */
@@ -466,18 +476,12 @@
 }
 
 .storage-inherited-summary {
-  grid-column: 3 / -1;
+  grid-column: 3 / -2;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 16px;
   overflow-wrap: anywhere;
-}
-
-@media (max-width: 1099.98px) {
-  .storage-inherited-summary {
-    grid-column: 1 / -1;
-  }
 }
 
 /* ---- Flat (non-tabbed) layout ---- */
@@ -488,16 +492,46 @@
 }
 
 .settings-flat .settings-section-title {
-  margin-bottom: 10px;
+  margin-bottom: 16px;
+}
+
+.settings-flat .settings-section-heading .settings-section-title {
+  margin-bottom: 0;
+}
+
+.settings-download-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 20px 32px;
+  align-items: start;
+}
+
+.settings-proxy-field {
+  min-width: 0;
+}
+
+.settings-download-grid .settings-toggle-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 28px;
+  margin: 0;
 }
 
 .settings-flat .settings-toggle-row {
-  min-height: 36px;
-  padding: 4px 0;
+  min-width: 0;
+  height: 100%;
+  min-height: 68px;
+  align-items: flex-start;
+  padding: 12px 0;
 }
 
-.settings-flat .settings-toggle-list {
-  gap: 0;
+.settings-flat .settings-toggle-row .semi-switch {
+  margin-top: 2px;
+}
+
+.settings-download-grid .settings-toggle-row:nth-child(-n + 2) {
+  padding-top: 0;
+  border-top: 0;
 }
 
 .settings-flat .storage-settings {
@@ -505,11 +539,15 @@
 }
 
 .settings-general-bar {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
   align-items: center;
   gap: 12px 32px;
   padding: 16px 0 20px;
+}
+
+.settings-general-bar > * {
+  min-width: 0;
 }
 
 .settings-general-bar .semi-settings-section,
@@ -518,6 +556,16 @@
   border: 0;
 }
 
+.settings-general-bar .settings-account-shortcut .settings-section-title {
+  margin: 0;
+  font-size: 14px;
+}
+
 .settings-general-bar .settings-account-shortcut > div {
-  flex: 0 1 auto;
+  justify-content: flex-end;
+}
+
+.settings-general-bar .settings-account-shortcut {
+  padding-left: 32px;
+  border-left: 1px solid var(--line);
 }

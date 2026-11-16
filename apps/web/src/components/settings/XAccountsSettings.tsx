@@ -46,25 +46,6 @@ import {
 } from "../semi";
 import { cn } from "../../lib/cn";
 
-const importFormats = [
-  {
-    example: "auth_token=xxx; ct0=yyy",
-    label: t("Cookie 请求头字符串：一行一个账号"),
-  },
-  {
-    example: "auth_token ct0 / auth_token,ct0",
-    label: t("两个裸值：auth_token 与 ct0，空格或逗号分隔"),
-  },
-  {
-    example: '{"auth_token":"xxx","ct0":"yyy"} 或 [{...}]',
-    label: t("JSON 对象或数组"),
-  },
-  {
-    example: '[{"name":"auth_token","value":"xxx"},{"name":"ct0","value":"yyy"}]',
-    label: t("浏览器扩展导出的 [{name,value}] 数组"),
-  },
-];
-
 function accountLabel(account: XAccountView) {
   return account.screenName ? `@${account.screenName}` : account.authToken;
 }
@@ -116,7 +97,7 @@ function useNow(active: boolean) {
 }
 
 export function XAccountsSettings() {
-  useTranslation();
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
@@ -125,6 +106,12 @@ export function XAccountsSettings() {
   const [editUserAgent, setEditUserAgent] = useState("");
   const [editProxy, setEditProxy] = useState("");
   const [editCookie, setEditCookie] = useState("");
+  const importFormats = [
+    { example: "auth_token=xxx; ct0=yyy", label: t("Cookie 请求头字符串：一行一个账号") },
+    { example: "auth_token ct0 / auth_token,ct0", label: t("两个裸值：auth_token 与 ct0，空格或逗号分隔") },
+    { example: '{"auth_token":"xxx","ct0":"yyy"} 或 [{...}]', label: t("JSON 对象或数组") },
+    { example: '[{"name":"auth_token","value":"xxx"},{"name":"ct0","value":"yyy"}]', label: t("浏览器扩展导出的 [{name,value}] 数组") },
+  ];
 
   const query = useQuery({
     queryKey: xAccountsQueryRoot,

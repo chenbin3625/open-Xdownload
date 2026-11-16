@@ -41,6 +41,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       sessionCheck.current += 1;
       queryClient.clear();
       setSession({ configured: true, authenticated: false });
+      setLoadError("");
       setNotice(t("登录已失效，请重新登录"));
     };
     const storageChanged = (event: StorageEvent) => {

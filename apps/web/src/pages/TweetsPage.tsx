@@ -82,7 +82,11 @@ export function TweetsPage() {
     if (!tweets.data || tweets.isPlaceholderData) return;
     const incoming = tweets.data;
     setSnapshot(current => {
-      if (current?.key === queryIdentity && incoming.items.some(item => !current.page.items.some(previous => previous.id === item.id))) return current;
+      if (current?.key === queryIdentity) {
+        const incomingByID = new Map(incoming.items.map(item => [item.id, item]));
+        const merged = current.page.items.map(item => incomingByID.get(item.id) ?? item);
+        return { key: queryIdentity, page: { ...current.page, items: merged } };
+      }
       return { key: queryIdentity, page: incoming };
     });
   }, [tweets.data, tweets.isPlaceholderData, queryIdentity]);
@@ -103,28 +107,36 @@ export function TweetsPage() {
   const previewRecord = preview?.tweet.downloads[preview.index];
   const previewVideo = previewRecord ? /\.(mp4|webm|mov|m4v|ogv)$/i.test(previewRecord.filePath) : false;
   return <div className={`workspace-page tweet-archive${compact ? " tweet-archive-compact" : ""}`}>
-    <div className="page-heading"><h1 className="page-title">{t("archive.title")}</h1><Button type="tertiary" icon={<RefreshCw size={16} />} loading={tweets.isFetching} disabled={tweets.isFetching} aria-busy={tweets.isFetching} onClick={() => void tweets.refetch().then(result => { if (result.data) setSnapshot({ key: queryIdentity, page: result.data }); })}>{t("刷新数据")}</Button></div>
+    <div className="page-heading">
+      <h1 className="page-title">{t("archive.title")}</h1>
+      <div className="page-actions">
+        <div className="archive-layout" role="radiogroup" aria-label={t("archive.layout")}><RadioGroup name="archive-layout" type="button" buttonSize="middle" value={compact ? "compact" : "comfortable"} onChange={event => change({ view: event.target.value === "comfortable" ? "comfortable" : "", page: filters.get("page") ?? "" })} options={[{ value: "compact", label: <span className="archive-layout-option"><AlignJustify size={14} />{t("archive.compact")}</span> }, { value: "comfortable", label: <span className="archive-layout-option"><Rows3 size={14} />{t("archive.comfortable")}</span> }]} /></div>
+        <Button type="tertiary" icon={<RefreshCw size={16} />} loading={tweets.isFetching} disabled={tweets.isFetching} aria-busy={tweets.isFetching} onClick={() => void tweets.refetch().then(result => { if (result.data) setSnapshot({ key: queryIdentity, page: result.data }); })}>{t("刷新数据")}</Button>
+      </div>
+    </div>
     <div className={`page-toolbar archive-filters${filtersOpen ? " archive-filters-expanded" : ""}`}>
-      <div className="toolbar-field archive-search"><label htmlFor="archive-search">{t("archive.search")}</label><Input id="archive-search" prefix={<Search size={16} />} value={search} onChange={setSearch} showClear /></div>
-      <Button className="archive-filter-toggle" icon={<SlidersHorizontal size={16} />} aria-expanded={filtersOpen} onClick={() => setFiltersOpen(!filtersOpen)}>{t("筛选")}</Button>
-      <div className="toolbar-field"><label htmlFor="archive-author">{t("archive.author")}</label><Input id="archive-author" list="archive-author-options" value={author} onChange={setAuthor} placeholder={t("所有用户")} showClear /><datalist id="archive-author-options">{authorOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</datalist></div>
-      <div className="toolbar-field archive-date">
-        <label htmlFor="archive-date">{t("发布时间")}</label>
+      <div className="toolbar-status archive-retweets" role="radiogroup" aria-label={t("archive.retweetFilter")}><RadioGroup name="archive-retweets" type="button" buttonSize="middle" value={retweets} onChange={event => change({ retweets: String(event.target.value) })} options={[{ value: "", label: t("archive.allTweets") }, { value: "exclude", label: t("archive.hideRetweets") }, { value: "only", label: t("archive.onlyRetweets") }]} /></div>
+      <div className="toolbar-filters">
+      <div className="toolbar-search archive-search"><label className="sr-only" htmlFor="archive-search">{t("archive.search")}</label><Input id="archive-search" prefix={<Search size={16} />} placeholder={t("archive.search")} value={search} onChange={setSearch} showClear /></div>
+      <Button className="archive-filter-toggle" type="tertiary" icon={<SlidersHorizontal size={16} />} aria-controls="archive-filter-fields" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(!filtersOpen)}>{t("筛选")}</Button>
+      <div className="archive-filter-fields" id="archive-filter-fields">
+      <div className="toolbar-select"><label className="sr-only" htmlFor="archive-author">{t("archive.author")}</label><Input id="archive-author" list="archive-author-options" value={author} onChange={setAuthor} placeholder={t("所有用户")} showClear /><datalist id="archive-author-options">{authorOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</datalist></div>
+      <label className="sr-only" id="archive-media-label" htmlFor="archive-media">{t("archive.mediaType")}</label><Select className="toolbar-select" id="archive-media" aria-labelledby="archive-media-label" value={filters.get("mediaType") ?? ""} onChange={value => change({ mediaType: String(value) })} optionList={[{ value: "", label: t("全部") }, { value: "text", label: t("archive.textOnly") }, { value: "photo", label: t("图片") }, { value: "video", label: t("视频") }, { value: "animated_gif", label: "GIF" }]} />
+      <label className="sr-only" id="archive-sort-label" htmlFor="archive-sort">{t("排序顺序")}</label><Select className="toolbar-select" id="archive-sort" aria-labelledby="archive-sort-label" value={filters.get("sort") === "asc" ? "asc" : "desc"} onChange={value => change({ sort: String(value) })} optionList={[{ value: "desc", label: t("最新发布优先"), showTick: false }, { value: "asc", label: t("最早发布优先"), showTick: false }]} />
+      <div className="archive-date">
         <DatePicker type="dateRange" format="yyyy-MM-dd" onChangeWithDateFirst={false} dropdownClassName="archive-date-picker"
           value={filters.get("from") && filters.get("to") ? [filters.get("from")!, filters.get("to")!] : []}
           onChange={value => { const dates = Array.isArray(value) ? value : []; change({ from: String(dates[0] ?? ""), to: String(dates[1] ?? "") }); }}
-          triggerRender={() => <Button id="archive-date" aria-label={t("发布时间")} icon={<CalendarDays size={16} />}>{filters.has("from") || filters.has("to") ? `${filters.get("from") || t("不限")} ~ ${filters.get("to") || t("不限")}` : t("全部时间")}</Button>}
+          triggerRender={() => <Button id="archive-date" type={filters.has("from") || filters.has("to") ? "primary" : "tertiary"} aria-label={t("发布时间")} aria-pressed={filters.has("from") || filters.has("to")} icon={<CalendarDays size={16} />}>{filters.has("from") || filters.has("to") ? `${filters.get("from") || t("不限")} ~ ${filters.get("to") || t("不限")}` : t("全部时间")}</Button>}
           showClear />
       </div>
-      <div className="toolbar-field"><label id="archive-sort-label" htmlFor="archive-sort">{t("排序顺序")}</label><Select id="archive-sort" aria-labelledby="archive-sort-label" value={filters.get("sort") === "asc" ? "asc" : "desc"} onChange={value => change({ sort: String(value) })} optionList={[{ value: "desc", label: t("最新发布优先"), showTick: false }, { value: "asc", label: t("最早发布优先"), showTick: false }]} /></div>
-      <div className="toolbar-field"><label id="archive-media-label" htmlFor="archive-media">{t("archive.mediaType")}</label><Select id="archive-media" aria-labelledby="archive-media-label" value={filters.get("mediaType") ?? ""} onChange={value => change({ mediaType: String(value) })} optionList={[{ value: "", label: t("全部") }, { value: "text", label: t("archive.textOnly") }, { value: "photo", label: t("图片") }, { value: "video", label: t("视频") }, { value: "animated_gif", label: "GIF" }]} /></div>
+      </div>
+      </div>
     </div>
+    {(filters.has("id") || filters.has("jobId") || filters.has("author") || filters.has("from") || filters.has("to") || filters.has("mediaType") || filters.has("search") || retweets) && <div className="archive-active-filters active-filter-tags">{["id", "jobId", "author", "from", "to", "mediaType", "search", "retweets"].filter(key => filters.get(key)).map(key => <Button size="small" type="tertiary" className="filter-chip" icon={<X size={12} />} iconPosition="right" key={key} aria-label={`${t("移除筛选")} ${filters.get(key)}`} onClick={() => { if (key === "search") setSearch(""); if (key === "author") setAuthor(""); change({ [key]: "" }); }}>{t(({ id: "推文 ID", jobId: "来源任务", author: "archive.author", from: "开始日期", to: "结束日期", mediaType: "archive.mediaType", search: "archive.search", retweets: "archive.retweetFilter" } as Record<string, string>)[key])}: {filters.get(key)}</Button>)}<Button size="small" theme="borderless" type="tertiary" onClick={() => { setSearch(""); setAuthor(""); change({ id: "", jobId: "", author: "", from: "", to: "", mediaType: "", search: "", retweets: "" }); }}>{t("archive.clearFilters")}</Button></div>}
     <div className="archive-results-bar">
-      <div className="archive-retweets" role="radiogroup" aria-label={t("archive.retweetFilter")}><RadioGroup name="archive-retweets" type="button" buttonSize="middle" value={retweets} onChange={event => change({ retweets: String(event.target.value) })} options={[{ value: "", label: t("archive.allTweets") }, { value: "exclude", label: t("archive.hideRetweets") }, { value: "only", label: t("archive.onlyRetweets") }]} /></div>
       {page && <span className="archive-result-count" aria-live="polite">{t("archive.total", { count: page.pagination.total })}</span>}
-      <div className="archive-layout" role="radiogroup" aria-label={t("archive.layout")}><RadioGroup name="archive-layout" type="button" buttonSize="middle" value={compact ? "compact" : "comfortable"} onChange={event => change({ view: event.target.value === "comfortable" ? "comfortable" : "", page: filters.get("page") ?? "" })} options={[{ value: "compact", label: <span className="archive-layout-option"><AlignJustify size={14} />{t("archive.compact")}</span> }, { value: "comfortable", label: <span className="archive-layout-option"><Rows3 size={14} />{t("archive.comfortable")}</span> }]} /></div>
     </div>
-    {(filters.has("id") || filters.has("jobId") || filters.has("author") || filters.has("from") || filters.has("to") || filters.has("mediaType") || filters.has("search") || retweets) && <div className="archive-active-filters active-filter-tags">{["id", "jobId", "author", "from", "to", "mediaType", "search", "retweets"].filter(key => filters.get(key)).map(key => <button type="button" className="filter-chip" key={key} aria-label={`${t("移除筛选")} ${filters.get(key)}`} onClick={() => { if (key === "search") setSearch(""); if (key === "author") setAuthor(""); change({ [key]: "" }); }}>{t(({ id: "推文 ID", jobId: "来源任务", author: "archive.author", from: "开始日期", to: "结束日期", mediaType: "archive.mediaType", search: "archive.search", retweets: "archive.retweetFilter" } as Record<string, string>)[key])}: {filters.get(key)}<X size={12} /></button>)}<Button size="small" theme="borderless" type="tertiary" onClick={() => { setSearch(""); setAuthor(""); change({ id: "", jobId: "", author: "", from: "", to: "", mediaType: "", search: "", retweets: "" }); }}>{t("archive.clearFilters")}</Button></div>}
     {(tweets.isPlaceholderData || search !== debounced || author !== debouncedAuthor) && <div role="status" className="archive-query-status">{t("正在应用筛选...")}</div>}
     {newRecords > 0 && <Button className="archive-new-records" icon={<RefreshCw size={14} />} onClick={() => { if (tweets.data) setSnapshot({ key: queryIdentity, page: tweets.data }); }}>{t("有 {{count}} 条新记录", { count: newRecords })}</Button>}
     {tweets.isError && <Alert type="error" message={tweets.error.message} action={<Button onClick={() => void tweets.refetch()}>{t("重试")}</Button>} />}
@@ -136,9 +148,9 @@ export function TweetsPage() {
         <header className="tweet-header">
           <Avatar>{tweet.author.name?.slice(0, 1) || tweet.author.screenName?.slice(0, 1) || "X"}</Avatar>
           <div className="tweet-identity"><strong>{tweet.author.name || tweet.author.screenName}</strong><button type="button" className="tweet-author" title={t("筛选此作者")} onClick={() => { setAuthor(tweet.author.screenName); change({ author: tweet.author.screenName }); }}>@{tweet.author.screenName}</button><time dateTime={tweet.createdAt}>{formatDateTime(tweet.createdAt)}</time></div>
-          <Tooltip content={t("复制正文")}><Button size="small" theme="borderless" icon={<Copy size={15} />} aria-label={t("复制正文")} onClick={() => void copyToClipboard(tweet.text, t("正文"))} /></Tooltip>
-          <Tooltip content={t("查看归档详情")}><Button size="small" theme="borderless" icon={<FileText size={15} />} aria-label={t("查看归档详情")} onClick={() => { setDetailSnapshot(tweet); setDetailId(tweet.id); }} /></Tooltip>
-          <Tooltip content={t("archive.original")}><a className="tweet-original" aria-label={t("archive.original")} href={tweet.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a></Tooltip>
+          <Tooltip content={t("复制正文")}><Button theme="borderless" type="tertiary" icon={<Copy size={16} />} aria-label={t("复制正文")} onClick={() => void copyToClipboard(tweet.text, t("正文"))} /></Tooltip>
+          <Tooltip content={t("查看归档详情")}><Button theme="borderless" type="tertiary" icon={<FileText size={16} />} aria-label={t("查看归档详情")} onClick={() => { setDetailSnapshot(tweet); setDetailId(tweet.id); }} /></Tooltip>
+          <Tooltip content={t("archive.original")}><a className="tweet-original semi-button semi-button-borderless semi-button-tertiary semi-button-size-default semi-button-with-icon-only" aria-label={t("archive.original")} href={tweet.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a></Tooltip>
         </header>
         <div className={`tweet-content${tweet.downloads.length ? " tweet-has-media" : ""}`}>
           <div className="tweet-copy">

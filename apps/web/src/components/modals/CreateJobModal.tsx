@@ -217,6 +217,8 @@ export function CreateJobModal({
     if (initialKind === "schedule") {
       setIsSchedule(true);
       setActiveTab(current => current === "tweet_link" ? "user" : current);
+    } else {
+      setIsSchedule(false);
     }
   }, [open, initialInput, initialKind]);
 
@@ -311,6 +313,7 @@ export function CreateJobModal({
     parseSequence.current += 1;
     createSequence.current += 1;
     setParsedTweet(null);
+    setIsSchedule(false);
     onClose();
   };
 

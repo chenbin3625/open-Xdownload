@@ -200,7 +200,7 @@ describe("TaskCenterPage", () => {
 
     expect(screen.getByText("用户不存在或已被封禁 (404 Not Found)")).toBeTruthy();
     expect(screen.getByText("下载完成")).toBeTruthy();
-    expect(screen.getByRole("progressbar").getAttribute("value")).toBe("40");
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("40");
     expect(screen.getByText("正在下载媒体")).toBeTruthy();
     expect(api.getJobFiles).not.toHaveBeenCalled();
   });

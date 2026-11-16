@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Input, RadioGroup, Select, Typography } from "@douyinfe/semi-ui";
+import { Button, Card, Checkbox, Input, Progress, RadioGroup, Select, Typography } from "@douyinfe/semi-ui";
 import { getJobProgressDisplay, parseAggregatedErrors } from "../lib/jobErrors";
 import {
   cancelJob,
@@ -354,21 +354,19 @@ export function TaskCenterPage({
     {
       key: "select",
       title: (
-        <input
-          type="checkbox"
+        <Checkbox
           aria-label={t("选择当前页任务")}
           checked={allVisibleSelected}
-          ref={input => { if (input) input.indeterminate = selectedJobIds.size > 0 && !allVisibleSelected; }}
-          onChange={event => toggleAllVisible(event.target.checked)}
+          indeterminate={selectedJobIds.size > 0 && !allVisibleSelected}
+          onChange={event => toggleAllVisible(event.target.checked === true)}
         />
       ),
       width: 42,
       render: record => (
-        <input
-          type="checkbox"
+        <Checkbox
           aria-label={t("选择任务 #{{value0}}", { value0: record.id })}
           checked={selectedJobIds.has(record.id)}
-          onChange={event => toggleSelected(record.id, event.target.checked)}
+          onChange={event => toggleSelected(record.id, event.target.checked === true)}
         />
       ),
     },
@@ -462,6 +460,18 @@ export function TaskCenterPage({
               <span className="task-failure-count" aria-hidden="true">{failedTweetCount}</span>
             </Button>
           )}
+          {failedTweetCount > 0 && (
+            <Button
+              type="tertiary"
+              icon={<RotateCcw className="size-4" />}
+              loading={retryAllFailed.isPending}
+              disabled={retryAllFailed.isPending}
+              aria-busy={retryAllFailed.isPending}
+              onClick={() => retryAllFailed.mutate()}
+            >
+              {t("重试失败推文")}
+            </Button>
+          )}
           <Button
             theme="solid"
             icon={<Plus className="size-4" />}
@@ -501,7 +511,7 @@ export function TaskCenterPage({
 
       {/* 过滤筛选工具栏 */}
       <div className="page-toolbar">
-        <span className="text-xs text-fg-muted">{serverFiltering ? t("全量筛选") : t("本页筛选")}</span>
+        <div className="toolbar-row">
         <Tooltip title={serverFiltering ? t("计数来自全部任务，分页只影响当前列表") : t("括号内为当前页的任务计数")}>
           <div className="toolbar-status" role="radiogroup" aria-label={t("当前状态")}>
             <RadioGroup
@@ -566,6 +576,8 @@ export function TaskCenterPage({
             />
           </div>
         </Tooltip>
+          <span className="toolbar-summary">{serverFiltering ? t("全量筛选") : t("本页筛选")}</span>
+        </div>
 
         <div className="toolbar-filters">
           <Input
@@ -594,19 +606,6 @@ export function TaskCenterPage({
               { value: "asset_migration", label: t("文件整理") },
             ]}
           />
-
-          {/* 该按钮走失败推文队列的重试接口，只看队列计数，与失败任务数无关 */}
-          {failedTweetCount > 0 && (
-            <Button
-              type="tertiary"
-              icon={<RotateCcw className="size-4" />}
-              loading={retryAllFailed.isPending}
-              disabled={retryAllFailed.isPending}
-              aria-busy={retryAllFailed.isPending}
-              onClick={() => retryAllFailed.mutate()}
-            >
-              {t("重试失败推文")}</Button>
-          )}
         </div>
       </div>
 
@@ -702,7 +701,7 @@ function JobProgress({ job }: { job: Job }) {
     }>
       <div className="task-progress" aria-label={`${meta.label} · ${percent}%`}>
         <div className="flex items-center justify-between gap-2"><Tag tone={meta.tone} icon={meta.icon}>{meta.label}</Tag>{job.status === "downloading" && <span className="text-xs font-mono">{percent}%</span>}</div>
-        {job.status === "downloading" && <progress className="task-progress-bar" value={percent} max={100} aria-label={t("下载进度")} />}
+        {job.status === "downloading" && <Progress percent={percent} showInfo={false} aria-label={t("下载进度")} />}
         <span className={cn("task-progress-message", hasError && "text-danger")}>{displayMsg}</span>
       </div>
     </Tooltip>
@@ -727,11 +726,10 @@ function MobileJobCard({
     <li className="mobile-job-card min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
       <div className="space-y-3 p-3">
         <div className="mobile-job-heading">
-          <input
-            type="checkbox"
+          <Checkbox
             aria-label={t("选择任务 #{{value0}}", { value0: job.id })}
             checked={selected}
-            onChange={event => onSelect(event.target.checked)}
+            onChange={event => onSelect(event.target.checked === true)}
           />
           <div className="min-w-0 flex-1">
             <h2 className="break-words text-sm font-semibold text-fg">{job.title || kindLabel(job.kind)}</h2>

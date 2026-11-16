@@ -150,27 +150,29 @@ export function SchedulesPage({
         <span className="text-xs text-fg-muted">{t("时区")}: {timeZone}</span>
       </div>
       <div className="page-toolbar">
-        <Input
-          className="toolbar-search"
-          prefix={<Search size={16} />}
-          value={search}
-          onChange={setSearch}
-          placeholder={t("搜索计划名称或目标...")}
-          aria-label={t("搜索计划")}
-          showClear
-        />
-        <Select
-          className="toolbar-select"
-          aria-label={t("计划状态")}
-          value={status}
-          onChange={(value) => setStatus(String(value))}
-          optionList={[
-            { value: "all", label: t("全部状态") },
-            { value: "enabled", label: t("已启用") },
-            { value: "paused", label: t("已暂停") },
-          ]}
-        />
-        <span className="text-xs text-fg-muted">
+        <div className="toolbar-filters">
+          <Input
+            className="toolbar-search"
+            prefix={<Search size={16} />}
+            value={search}
+            onChange={setSearch}
+            placeholder={t("搜索计划名称或目标...")}
+            aria-label={t("搜索计划")}
+            showClear
+          />
+          <Select
+            className="toolbar-select"
+            aria-label={t("计划状态")}
+            value={status}
+            onChange={(value) => setStatus(String(value))}
+            optionList={[
+              { value: "all", label: t("全部状态") },
+              { value: "enabled", label: t("已启用") },
+              { value: "paused", label: t("已暂停") },
+            ]}
+          />
+        </div>
+        <span className="toolbar-summary" aria-live="polite">
           {t("匹配计划")} {filtered.length}
         </span>
       </div>
@@ -295,17 +297,17 @@ export function SchedulesPage({
                     }
                   />
                 </Tooltip>
-                <button
-                  type="button"
-                  className="schedule-run-button"
+                <Button
+                  theme="borderless"
+                  type="tertiary"
                   title={t("立即执行")}
                   aria-label={`${t("立即执行")} ${schedule.name}`}
                   disabled={run.isPending}
                   aria-busy={run.isPending && run.variables === schedule.id}
+                  loading={run.isPending && run.variables === schedule.id}
+                  icon={<Play size={16} />}
                   onClick={() => run.mutate(schedule.id)}
-                >
-                  {run.isPending && run.variables === schedule.id ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />}
-                </button>
+                />
                 <Popconfirm
                   title={t("删除定时计划")}
                   description={t(
@@ -440,6 +442,7 @@ export function SchedulesPage({
               <Input
                 aria-label={t("计划名称")}
                 value={editing.name}
+                disabled={save.isPending}
                 onChange={(name) => setEditing({ ...editing, name })}
               />
             </Field>
@@ -450,6 +453,7 @@ export function SchedulesPage({
                 aria-label={t("调度频率 (分钟)")}
                 max={43200}
                 value={editing.intervalMinutes}
+                disabled={save.isPending}
                 onChange={(value) =>
                   setEditing({ ...editing, intervalMinutes: Number(value) })
                 }
@@ -465,6 +469,7 @@ export function SchedulesPage({
                 <Input
                   aria-label={`${t("目标")} ${index + 1}`}
                   value={item.input}
+                  disabled={save.isPending}
                   onChange={(input) =>
                     setEditing({
                       ...editing,
@@ -494,6 +499,7 @@ export function SchedulesPage({
             ))}
             <Button
               icon={<Plus size={16} />}
+              disabled={save.isPending}
               onClick={() =>
                 setEditing({
                   ...editing,

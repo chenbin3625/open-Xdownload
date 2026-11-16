@@ -14,7 +14,7 @@ describe("AppSidebar", () => {
   it("使用更窄的侧边栏宽度", () => {
     const { container } = render(<AppSidebar {...baseProps} />);
 
-    expect(container.querySelector("aside")?.className).toContain("lg:w-56");
+    expect(container.querySelector("aside")?.className).toContain("lg:w-50");
   });
 
   it("品牌区不展示版本号", () => {

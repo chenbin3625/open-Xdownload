@@ -9,27 +9,6 @@
   gap: 12px;
 }
 
-.task-stat .semi-card-body {
-  padding: 16px 18px;
-}
-
-/* 四张卡片的顶边都是 2px（总数卡用中性灰），标签与数字才在同一水平线上。 */
-.app-shell .task-stat {
-  border-top: 2px solid var(--line-strong);
-}
-
-.app-shell .task-stat-active {
-  border-top: 2px solid var(--accent);
-}
-
-.app-shell .task-stat-completed {
-  border-top: 2px solid var(--success);
-}
-
-.app-shell .task-stat-failed {
-  border-top: 2px solid var(--danger);
-}
-
 .mobile-job-list {
   display: grid;
   gap: 12px;
@@ -40,22 +19,6 @@
   grid-template-columns: 20px minmax(0, 1fr) minmax(95px, 38%);
   gap: 10px;
   align-items: start;
-}
-
-/* 原生复选框与 Semi 复选框同样式；移动端卡片里放大到 20px 便于点按。 */
-.task-table input[type="checkbox"],
-.mobile-job-heading input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-.mobile-job-heading input[type="checkbox"] {
-  width: 20px;
-  height: 20px;
-  margin-top: 1px;
 }
 
 .task-bulk-toolbar {
@@ -114,15 +77,6 @@
 
 .task-table {
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
-}
-
-.task-table .semi-table-footer {
-  border-top: 1px solid var(--line);
-  background: var(--surface);
 }
 
 .task-table table {
@@ -151,30 +105,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.task-progress-bar {
-  width: 100%;
-  height: 4px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  accent-color: var(--accent);
-}
-
-.task-progress-bar::-webkit-progress-bar {
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-}
-
-.task-progress-bar::-webkit-progress-value {
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-}
-
-.task-progress-bar::-moz-progress-bar {
-  border-radius: var(--radius-sm);
-  background: var(--accent);
 }
 
 .task-progress .semi-tag {
@@ -308,9 +238,8 @@
 .schedule-list {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: var(--radius-card);
+  border-radius: var(--semi-border-radius-medium);
   background: var(--surface);
-  box-shadow: var(--shadow-card);
 }
 
 .schedule-list-heading {
@@ -322,11 +251,6 @@
 
 .schedule-row {
   border-top: 1px solid var(--line);
-  transition: background-color 150ms ease;
-}
-
-.schedule-row:hover {
-  background: var(--canvas);
 }
 
 .schedule-list-heading,
@@ -363,15 +287,6 @@
   display: flex;
   justify-content: flex-end;
   gap: 2px;
-}
-
-/* 尺寸、颜色与 hover 见 semi.css 的「自定义图标操作」。 */
-.schedule-run-button {
-  cursor: pointer;
-}
-
-.schedule-run-button:disabled {
-  cursor: default;
 }
 
 .schedule-edit-target {
@@ -417,11 +332,5 @@
 @media (min-width: 768px) and (max-width: 1279.98px) {
   .mobile-job-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .schedule-row {
-    transition: none;
   }
 }

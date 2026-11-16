@@ -1,188 +1,15 @@
-/* =========================================================
-   Semi UI 主题变量与常用控件的统一表面
-   弹窗、抽屉、下拉都挂在 body 下的 .semi-portal 里，所以控件样式
-   同时作用于 .app-shell / .auth-page / .semi-portal：页面和弹层里的
-   输入框、按钮、分段控件是同一种外观。
-   ========================================================= */
-
-:root body {
-  --semi-color-bg-0: var(--canvas);
-  --semi-color-bg-1: var(--surface);
-  --semi-color-bg-2: var(--surface);
-  --semi-color-border: var(--line);
-  --semi-color-text-0: var(--fg);
-  --semi-color-text-1: var(--fg-body);
-  --semi-color-text-2: var(--fg-muted);
-  --semi-color-primary: var(--accent);
-  --semi-color-primary-hover: var(--accent-hover);
-  --semi-color-primary-active: var(--accent-active);
-  --semi-color-primary-disabled: var(--color-brand-300);
-  --semi-color-primary-light-default: var(--accent-soft);
-  --semi-color-primary-light-hover: var(--accent-soft-hover);
-  --semi-color-primary-light-active: var(--accent-soft-active);
-  --semi-color-focus-border: var(--accent);
-
-  /* Semi 默认的红 / 橙在浅灰按钮底上只有 3.2–3.7:1。
-     改用 *-strong（白底与 soft 底都 ≥4.5:1），hover / active 依次加深。 */
-  --semi-color-danger: var(--danger-strong);
-  --semi-color-danger-hover: rgba(var(--semi-red-8), 1);
-  --semi-color-danger-active: rgba(var(--semi-red-9), 1);
-  --semi-color-warning: var(--warning-strong);
-  --semi-color-warning-hover: rgba(var(--semi-orange-8), 1);
-  --semi-color-warning-active: rgba(var(--semi-orange-9), 1);
-}
-
-/* ---------------- 输入控件 ---------------- */
-
-:is(.app-shell, .auth-page, .semi-portal) :is(.semi-input-wrapper, .semi-select, .semi-input-textarea-wrapper) {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
-}
-
-:is(.app-shell, .auth-page, .semi-portal) :is(.semi-input-wrapper, .semi-select, .semi-input-textarea-wrapper):hover {
-  border-color: var(--line-strong);
-}
-
-:is(.app-shell, .auth-page, .semi-portal) :is(.semi-input-wrapper, .semi-input-textarea-wrapper):focus-within,
-:is(.app-shell, .auth-page, .semi-portal) .semi-select:is(:focus-visible, .semi-select-open) {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--brand-glow);
-}
-
-/* 禁用态用浅灰底，和可编辑的白底区分开（只靠文字变灰不够明显）。 */
-:is(.app-shell, .auth-page, .semi-portal) :is(.semi-input-wrapper-disabled, .semi-select-disabled, .semi-input-textarea-wrapper-disabled),
-:is(.app-shell, .auth-page, .semi-portal) :is(.semi-input-wrapper-disabled, .semi-select-disabled, .semi-input-textarea-wrapper-disabled):hover {
-  border-color: var(--line);
-  background: var(--surface-muted);
-}
-
-/* ---------------- 按钮与卡片 ---------------- */
-
-:is(.app-shell, .auth-page, .semi-portal) .semi-button {
-  border-radius: var(--radius-control);
-}
-
-/* 浅色按钮 hover 时底色变深一档，主色文字保持 ≥4.5:1。 */
-:is(.app-shell, .auth-page, .semi-portal) .semi-button-primary.semi-button-light:not(.semi-button-disabled):is(:hover, :active) {
-  color: var(--accent-active);
-}
-
-:is(.app-shell, .auth-page, .semi-portal) .semi-button-with-icon-only {
-  flex-shrink: 0;
-}
-
-:is(.app-shell, .semi-portal) .semi-card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
-}
-
-/* ---------------- 分段按钮（RadioGroup type="button"） ----------------
-   与输入框、按钮同为 32px：1px 边框 + 2px 内衬 + 26px 选项。
-   Semi 的内边距在选项 label 上，外层组本身没有 padding。 */
-
-:is(.app-shell, .auth-page, .semi-portal) .semi-radioGroup-buttonRadio {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-}
-
-:is(.app-shell, .auth-page, .semi-portal) .semi-radio-buttonRadioGroup {
-  padding-block: 2px;
-}
-
-:is(.app-shell, .auth-page, .semi-portal) .semi-radio-addon-buttonRadio {
-  display: flex;
-  height: 26px;
-  align-items: center;
-  justify-content: center;
-  padding-block: 0;
-  border-radius: var(--radius-sm);
-  line-height: 16px;
-}
-
-:is(.app-shell, .auth-page, .semi-portal) .semi-radio-addon-buttonRadio-checked {
-  box-shadow: var(--shadow-card);
-}
-
-/* ---------------- 头像 ----------------
-   Semi 的蓝底白字只有 2.3:1，改为浅蓝底深蓝字（6.6:1）。 */
-
-.semi-avatar.semi-avatar-blue {
-  background-color: var(--accent-soft-hover);
-  color: var(--accent-active);
-  font-weight: 600;
-}
-
-/* ---------------- 表格 ----------------
-   表头与归档计划列表头同一写法：浅灰底、12px 次要色、1px 分隔线。
-   选择器与 Semi 的表头规则同链，否则优先级不够。 */
-
-:is(.app-shell, .semi-portal) .semi-table-thead > .semi-table-row > .semi-table-row-head {
-  border-bottom-width: 1px;
-  background-color: var(--surface-muted);
-  color: var(--fg-muted);
-  font-size: 12px;
-}
-
-/* 推文卡片头部的图标按钮与头像同高（32px），触控更容易点中。 */
-:is(.app-shell, .auth-page, .semi-portal) .tweet-header .semi-button.semi-button-with-icon-only.semi-button-size-small {
-  width: 32px;
-  height: 32px;
-}
-
-/* ---------------- 自定义图标操作 ----------------
-   下载链接、来源链接、立即执行这类没法用 Semi Button 的图标操作，
-   尺寸、颜色和 hover 与相邻的无边框 tertiary 图标按钮一致。 */
-
-.gallery-download,
-.gallery-source-link,
-.tweet-original,
-.schedule-run-button {
-  display: inline-flex;
-  flex: none;
-  width: 32px;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-control);
-  color: var(--fg-body);
-  transition: background-color 150ms ease;
-}
-
-:is(.gallery-download, .gallery-source-link, .tweet-original, .schedule-run-button):not(:disabled):hover {
-  background-color: var(--semi-color-fill-0);
-}
-
-:is(.gallery-download, .gallery-source-link, .tweet-original, .schedule-run-button):not(:disabled):active {
-  background-color: var(--semi-color-fill-1);
-}
-
-.semi-input-wrapper,
-.semi-select {
-  min-width: 0;
-}
-
+/* 只补充业务布局和视口约束，组件外观使用 Semi 默认样式。 */
 .semi-field {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 6px;
-  min-width: 0;
-}
-
-.semi-field .semi-form-field-label {
-  margin: 0;
-  padding: 0;
 }
 
 .semi-field .semi-select,
 .semi-field .semi-input-number {
   width: 100%;
 }
-
-/* ---------------- 分页 ---------------- */
 
 .semi-pagination-bar {
   display: flex;
@@ -191,11 +18,7 @@
   flex-wrap: wrap;
   gap: 12px;
   padding: 12px 0;
-  color: var(--fg-muted);
-  font-size: 12px;
 }
-
-/* ---------------- 弹窗 / 侧边抽屉 ---------------- */
 
 body .semi-modal-wrap {
   display: flex;
@@ -238,19 +61,15 @@ body .semi-modal-wrap {
   padding: 0;
 }
 
-/* ---------------- 描述列表 ---------------- */
-
 .semi-description-grid {
   display: grid;
   grid-template-columns: var(--description-grid-columns, repeat(3, minmax(0, 1fr)));
 }
 
-@media (prefers-reduced-motion: reduce) {
-  :is(.app-shell, .auth-page, .semi-portal) :is(.semi-input-wrapper, .semi-select, .semi-input-textarea-wrapper),
-  .gallery-download,
-  .gallery-source-link,
-  .tweet-original,
-  .schedule-run-button {
-    transition: none;
-  }
+/* 链接保留下载与新窗口语义，使用 Semi 按钮的原生样式。 */
+.gallery-download,
+.gallery-source-link,
+.tweet-original {
+  flex: none;
+  text-decoration: none;
 }

@@ -2,26 +2,13 @@
    推文归档：筛选行、内容流与媒体
    ========================================================= */
 
-/* 带标签筛选行：同一行展示，窄屏自动均衡换行。 */
-.archive-filters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px;
-}
-
-.archive-filters .toolbar-field {
-  flex: 1 1 150px;
-  min-width: 0;
-  gap: 4px;
-}
-
-.archive-filters .archive-search {
-  flex: 1.6 1 220px;
+.archive-filter-fields {
+  display: contents;
 }
 
 .archive-filters .archive-date {
-  flex: 1.4 1 220px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .archive-date .semi-datepicker {
@@ -33,20 +20,12 @@
   width: 100%;
 }
 
-.tweet-archive {
-  gap: 12px;
-}
-
 .archive-results-bar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 16px;
   min-width: 0;
-}
-
-.archive-layout {
-  margin-left: auto;
 }
 
 .archive-layout-option {
@@ -71,7 +50,7 @@
 .tweet-list:not(:empty) {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: var(--radius-card);
+  border-radius: var(--semi-border-radius-medium);
   background: var(--surface);
 }
 
@@ -293,7 +272,7 @@
   padding: 8px 12px;
 }
 
-.archive-filters .archive-filter-toggle {
+.archive-filters .archive-filter-toggle.semi-button {
   display: none;
 }
 
@@ -302,16 +281,24 @@
 }
 
 @media (max-width: 767.98px) {
-  .archive-filters .archive-filter-toggle {
+  .archive-filters .archive-filter-toggle.semi-button {
     display: inline-flex;
     align-self: flex-end;
   }
 
   .tweet-archive .archive-filters .archive-search {
-    flex: 1 1 180px;
+    flex: 1 1 0;
   }
 
-  .archive-filters:not(.archive-filters-expanded) > .toolbar-field:not(.archive-search) {
+  .archive-filter-fields {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .archive-filters:not(.archive-filters-expanded) .archive-filter-fields {
     display: none;
   }
 }
@@ -326,6 +313,6 @@
 }
 
 .tweet-media-item {
-  border-radius: var(--radius-sm);
+  border-radius: var(--semi-border-radius-small);
   background: var(--surface-muted);
 }

@@ -3,28 +3,6 @@
    只保留布局；颜色、字体、边框等视觉样式交给 Semi 原生。
    ========================================================= */
 
-.gallery-sort {
-  flex: 0 0 auto;
-  width: 172px;
-}
-
-.gallery-toolbar {
-  flex-wrap: wrap;
-}
-
-.gallery-toolbar .toolbar-status {
-  flex: 0 1 auto;
-  max-width: 100%;
-}
-
-.gallery-toolbar .toolbar-filters {
-  flex: 1 1 480px;
-}
-
-.gallery-toolbar .toolbar-search {
-  flex: 1 1 180px;
-}
-
 .gallery-grid {
   display: grid;
   min-width: 0;
@@ -140,13 +118,6 @@
 
 .gallery-card {
   overflow: hidden;
-  transition: border-color 150ms ease, box-shadow 150ms ease;
-}
-
-.app-shell .gallery-card:hover,
-.app-shell .gallery-card:focus-within {
-  border-color: var(--line-strong);
-  box-shadow: var(--shadow-raised);
 }
 
 .gallery-card-body {
@@ -259,10 +230,4 @@
 .gallery-preview-frame {
   height: min(64dvh, 640px);
   flex: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .gallery-card {
-    transition: none;
-  }
 }

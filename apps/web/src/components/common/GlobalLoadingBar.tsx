@@ -33,7 +33,7 @@ export function GlobalLoadingBar() {
       <div
         className={cn(
           "h-full w-2/5 rounded-full",
-          "bg-gradient-to-r from-brand-300 via-brand-500 to-brand-600",
+          "bg-brand-500",
           visible && "animate-loading-bar",
         )}
       />
