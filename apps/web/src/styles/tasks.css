@@ -9,12 +9,13 @@
   gap: 12px;
 }
 
-.task-stat {
-  min-height: 98px;
-}
-
 .task-stat .semi-card-body {
   padding: 16px 18px;
+}
+
+/* 四张卡片的顶边都是 2px（总数卡用中性灰），标签与数字才在同一水平线上。 */
+.app-shell .task-stat {
+  border-top: 2px solid var(--line-strong);
 }
 
 .app-shell .task-stat-active {
@@ -41,8 +42,20 @@
   align-items: start;
 }
 
+/* 原生复选框与 Semi 复选框同样式；移动端卡片里放大到 20px 便于点按。 */
+.task-table input[type="checkbox"],
 .mobile-job-heading input[type="checkbox"] {
-  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.mobile-job-heading input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
 }
 
 .task-bulk-toolbar {
@@ -107,10 +120,6 @@
   box-shadow: var(--shadow-card);
 }
 
-.task-table thead th {
-  background: var(--surface-muted);
-}
-
 .task-table .semi-table-footer {
   border-top: 1px solid var(--line);
   background: var(--surface);
@@ -119,11 +128,6 @@
 .task-table table {
   width: 100%;
   table-layout: fixed;
-}
-
-.task-table .semi-table-row-cell {
-  padding-block: 12px;
-  overflow-wrap: anywhere;
 }
 
 .task-table .semi-table-expand-cell {
@@ -296,7 +300,8 @@
 
 .schedule-summary strong {
   color: var(--fg);
-  font-size: 18px;
+  font-size: 16px;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
 
@@ -360,23 +365,13 @@
   gap: 2px;
 }
 
+/* 尺寸、颜色与 hover 见 semi.css 的「自定义图标操作」。 */
 .schedule-run-button {
-  display: inline-flex;
-  width: 32px;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
   cursor: pointer;
 }
 
 .schedule-run-button:disabled {
   cursor: default;
-}
-
-.schedule-run-button:not(:disabled):hover {
-  border-radius: var(--radius-control);
-  background: var(--accent-soft);
-  color: var(--accent-active);
 }
 
 .schedule-edit-target {

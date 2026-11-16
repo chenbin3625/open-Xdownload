@@ -21,8 +21,9 @@
   padding: 0 12px 20px;
 }
 
+/* 69px = 顶栏 .header-inner 的 68px + 1px 底边，两条分隔线才在同一高度。 */
 .sidebar-brand {
-  min-height: 72px;
+  min-height: 69px;
   margin-bottom: 16px;
   padding: 12px 4px;
   border-bottom: 1px solid var(--line);
@@ -113,7 +114,6 @@
   padding: 6px 8px max(6px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
   background: var(--surface);
-  box-shadow: 0 -4px 16px rgb(24 34 48 / 0.04);
 }
 
 .app-mobile-nav-item {

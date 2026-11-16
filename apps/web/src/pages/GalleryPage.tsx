@@ -225,7 +225,7 @@ const GalleryCard = React.memo(function GalleryCard({
             <span className="min-w-0 truncate">{item.userName || t("未识别用户")}</span>
           )}
           {item.userScreenName && (
-            <span className="min-w-0 truncate text-brand-500 font-medium">@{item.userScreenName}</span>
+            <span className="min-w-0 truncate text-brand-600 font-medium">@{item.userScreenName}</span>
           )}
         </div>
 

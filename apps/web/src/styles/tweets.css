@@ -122,15 +122,6 @@
   cursor: pointer;
 }
 
-.tweet-original {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-}
-
 .tweet-content,
 .tweet-copy,
 .tweet-text {

@@ -299,10 +299,9 @@
   margin-bottom: 0;
 }
 
-.x-accounts-table .semi-table-row-cell {
-  padding-block: 12px;
+/* 多行单元格顶部对齐。选择器与 Semi 的单元格规则同链，否则优先级不够。 */
+.x-accounts-table .semi-table-tbody > .semi-table-row > .semi-table-row-cell {
   vertical-align: top;
-  overflow-wrap: anywhere;
 }
 
 .x-account-identity {

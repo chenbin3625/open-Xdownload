@@ -119,14 +119,6 @@
   overflow-wrap: anywhere;
 }
 
-.gallery-source-link {
-  display: inline-flex;
-  width: 28px;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-}
-
 .gallery-preview-frame button:disabled {
   cursor: default;
 }
@@ -216,10 +208,6 @@
     margin-left: auto;
   }
 
-  .gallery-list .gallery-download {
-    width: 28px;
-    height: 28px;
-  }
 }
 
 .gallery-card-cover {
@@ -271,21 +259,6 @@
 .gallery-preview-frame {
   height: min(64dvh, 640px);
   flex: none;
-}
-
-.gallery-download {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-}
-
-.gallery-download:hover {
-  border-radius: var(--radius-control);
-  background: var(--accent-soft);
-  color: var(--accent-active);
 }
 
 @media (prefers-reduced-motion: reduce) {

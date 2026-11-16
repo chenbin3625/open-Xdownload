@@ -73,17 +73,19 @@
     margin: 0;
   }
 
-  .task-center .toolbar-status .semi-radio-content,
-  .task-center .toolbar-status .semi-radio-addon-buttonRadio {
-    flex: 1;
+  /* Semi 的 .semi-radio-content 是纵向 flex，选项不能参与伸缩，
+     否则 flex:1 会把高度压到 16px。 */
+  .task-center .toolbar-status .semi-radio-content {
     width: 100%;
   }
 
   .task-center .toolbar-status .semi-radio-addon-buttonRadio {
+    flex: none;
+    width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 6px 4px;
+    padding: 0 4px;
   }
 
   .task-center .toolbar-status .semi-radio-addon-buttonRadio > span {
@@ -188,7 +190,7 @@
 
   .task-stat-value {
     margin-top: 4px;
-    font-size: 23px;
+    font-size: 22px;
   }
 
   .task-failure-label {
@@ -261,10 +263,6 @@
     padding-block: 20px;
   }
 
-  .gallery-download {
-    width: 40px;
-    height: 40px;
-  }
 }
 
 /* ---------------- ≤359.98px：极窄屏 ---------------- */

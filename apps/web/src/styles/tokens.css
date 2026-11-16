@@ -16,7 +16,7 @@
   --color-brand-300: #7dd3fc;
   --color-brand-400: #38bdf8;
   --color-brand-500: #1d9bf0;
-  --color-brand-600: #087ac1;
+  --color-brand-600: #076ead;
   --color-brand-700: #0369a1;
   --color-brand-800: #075985;
   --color-brand-900: #0c4a6e;
@@ -88,14 +88,14 @@
     --brand-glow: rgba(29, 155, 240, 0.18);
 
     /* 主色别名：Semi 主色与业务样式共用，避免两套蓝并存。
-       --accent 在白色与 canvas 上均达到 4.5:1，可作链接文字。 */
+       --accent 在白色、canvas 以及浅色按钮的灰底（约 #ebecee）上都 ≥4.5:1，可作文字色。 */
     --accent: var(--color-brand-600);
     --accent-hover: var(--color-brand-700);
     --accent-active: var(--color-brand-800);
     --accent-soft: var(--color-brand-50);
     --accent-soft-hover: var(--color-brand-100);
     --accent-soft-active: var(--color-brand-200);
-    /* 实心主色上的前景色：#087ac1 + 白字 = 4.6:1 */
+    /* 实心主色上的前景色：#076ead + 白字 = 5.5:1 */
     --accent-contrast: #ffffff;
 
     /* 媒体占位底：比任何表面色都深，用于视频封面等照片下方。 */

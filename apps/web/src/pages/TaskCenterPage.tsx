@@ -514,7 +514,7 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("全部")}</span>
-                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.all}</span>
+                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.all}</span>
                     </span>
                   ) : (
                     t("全部 ({{value0}})", { value0: globalFilterCounts.all })
@@ -526,7 +526,7 @@ export function TaskCenterPage({
                     <span className="flex items-center gap-1.5">
                       {globalFilterCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
                       <span>{t("下载中")}</span>
-                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.active}</span>
+                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.active}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
@@ -540,7 +540,7 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("已完成")}</span>
-                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.completed}</span>
+                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.completed}</span>
                     </span>
                   ) : (
                     t("已完成 ({{value0}})", { value0: globalFilterCounts.completed })
@@ -552,7 +552,7 @@ export function TaskCenterPage({
                     <span className="flex items-center gap-1.5">
                       {globalFilterCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
                       <span>{t("失败")}</span>
-                      <span className="font-mono text-xs opacity-70">{globalFilterCounts.failed}</span>
+                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.failed}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
@@ -827,7 +827,7 @@ function JobErrorAlert({ job }: { job: Job }) {
       description={
         <div className="mt-2 space-y-2.5">
           {groups.length === 0 ? (
-            <div className="font-mono text-xs text-danger font-medium break-all">
+            <div className="font-mono text-xs text-danger-strong font-medium break-all">
               {job.error || job.message || t("未知异常，任务未能成功完成")}
             </div>
           ) : (
@@ -847,7 +847,7 @@ function JobErrorAlert({ job }: { job: Job }) {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <AlertCircle className="size-3.5 text-danger shrink-0" />
-                        <span className="text-xs font-semibold text-danger break-all">
+                        <span className="text-xs font-semibold text-danger-strong break-all">
                           {group.reason}
                         </span>
                       </div>
@@ -1023,7 +1023,7 @@ function ExpandedJobDetails({
               <AlertCircle className="size-4" />
             </div>
             <div className="min-w-0 flex-1 space-y-0.5">
-              <div className="font-medium text-danger break-all">
+              <div className="font-medium text-danger-strong break-all">
                 {item.error || t("媒体下载失败")}
               </div>
               <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-fg-muted">
