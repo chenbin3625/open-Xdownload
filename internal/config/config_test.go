@@ -261,6 +261,20 @@ func TestParseCookiePairsAcceptsYAMLColonFormat(t *testing.T) {
 	}
 }
 
+func TestParseCookiePairsSingleObjectAndLiteralColons(t *testing.T) {
+	for _, raw := range []string{
+		`{"auth_token":"auth:part","ct0":"csrf:part"}`,
+		`{"authToken":"auth:part","csrfToken":"csrf:part"}`,
+		"auth_token=auth:part; ct0=csrf:part",
+		"auth_token:auth:part;ct0:csrf:part",
+	} {
+		pairs := ParseCookiePairs(raw)
+		if len(pairs) != 1 || pairs[0].AuthToken != "auth:part" || pairs[0].CSRFToken != "csrf:part" {
+			t.Fatalf("ParseCookiePairs(%q) = %+v", raw, pairs)
+		}
+	}
+}
+
 func TestApplyEnvOverrides(t *testing.T) {
 	t.Setenv(EnvAuthToken, "env-auth")
 	t.Setenv(EnvCSRFToken, "env-ct0")

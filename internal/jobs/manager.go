@@ -811,7 +811,8 @@ func (m *Manager) failRetryJob(ctx context.Context, job storage.Job, err error) 
 	// 限流有明确的恢复时间，交给 fail() 重新入队即可，不应再叠加 10 分钟的
 	// “自动重试失败”暂停窗口（那会让已经可恢复的任务多等一轮）。
 	if retryAt, ok := xapi.RateLimitRetryAt(err); ok {
-		if !m.rateLimitDeferExceeded(job, retryAt) && m.requeueForRateLimit(ctx, job, retryAt) {
+		pacing := xapi.IsPacingRateLimit(err)
+		if (pacing || !m.rateLimitDeferExceeded(job, retryAt)) && m.requeueForRateLimit(ctx, job, retryAt, pacing) {
 			return
 		}
 	}
@@ -1568,9 +1569,24 @@ func (m *Manager) saveArchiveCheckpoint(ctx context.Context, jobID int64, tasks 
 // yieldJob 在安全边界把任务放回队列并立即允许再次领取。刷新 enqueued_at 让其他
 // 排队任务先获得执行槽；与本任务自身的检查点配合，恢复时不会重做已提交的用户。
 func (m *Manager) yieldJob(ctx context.Context, job storage.Job, message string) {
-	updated, err := m.store.RequeueJobAt(ctx, job.ID, time.Now().UTC(), message)
+	var updated *storage.Job
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		updated, err = m.store.RequeueJobAt(ctx, job.ID, time.Now().UTC(), message)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+	}
 	if err != nil {
 		log.Printf("yield job %d: %v", job.ID, err)
+		job.Status = storage.JobFailed
+		job.Error = fmt.Sprintf("任务重新入队失败: %v", err)
+		job.Message = "任务无法重新入队，已终止"
+		m.save(ctx, job)
 		return
 	}
 	if updated != nil {
@@ -1621,7 +1637,8 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 			if user.Protected && user.ID != "" && pool != nil && pool.HasPrimary() {
 				refreshed, err := pool.GetUserByIDAsPrimary(ctx, user.ID)
 				if err != nil {
-					if isCancellation(ctx, err) || shouldAbortArchiveUsers(err) {
+					_, limited := xapi.RateLimitRetryAt(err)
+					if limited || isCancellation(ctx, err) || shouldAbortArchiveUsers(err) {
 						return stats, err
 					}
 					stats.Failed++
@@ -2712,8 +2729,9 @@ func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, er
 	// 账号池全部限流不是任务失败：把任务放回队列并设置冷却时间，立即释放执行槽。
 	// 限额恢复后同一任务会从已提交的进度/检查点继续。
 	if retryAt, ok := xapi.RateLimitRetryAt(err); ok {
-		if !m.rateLimitDeferExceeded(job, retryAt) {
-			if m.requeueForRateLimit(ctx, job, retryAt) {
+		pacing := xapi.IsPacingRateLimit(err)
+		if pacing || !m.rateLimitDeferExceeded(job, retryAt) {
+			if m.requeueForRateLimit(ctx, job, retryAt, pacing) {
 				return
 			}
 		} else {
@@ -2825,15 +2843,24 @@ func (m *Manager) rateLimitDeferExceeded(job storage.Job, retryAt time.Time) boo
 }
 
 // requeueForRateLimit 把限流任务置为 pending 并推迟到 retryAt。返回 true 表示已经
-// 处理（包括任务在此期间被用户取消/进入终态，无需再写失败态）。
-func (m *Manager) requeueForRateLimit(ctx context.Context, job storage.Job, retryAt time.Time) bool {
+// 处理（包括任务在此期间被用户取消/进入终态，无需再写失败态）。pacing 表示这只是
+// 配额内的匀速等待：不计入 deferred_seconds，否则正常分页会耗尽限流推迟上限。
+func (m *Manager) requeueForRateLimit(ctx context.Context, job storage.Job, retryAt time.Time, pacing bool) bool {
 	wait := time.Until(retryAt)
 	if wait < time.Second {
 		wait = time.Second
 	}
-	message := fmt.Sprintf("账号池限流，累计推迟约 %s，约 %s 后继续",
-		(time.Duration(job.DeferredSeconds)*time.Second + wait).Round(time.Second), wait.Round(time.Second))
-	updated, err := m.store.RequeueJobAtWithDefer(ctx, job.ID, retryAt, message, wait)
+	retryAt = time.Now().Add(wait)
+	var updated *storage.Job
+	var err error
+	if pacing {
+		message := fmt.Sprintf("接口配额匀速等待，约 %s 后继续", wait.Round(time.Second))
+		updated, err = m.store.RequeueJobAt(ctx, job.ID, retryAt, message)
+	} else {
+		message := fmt.Sprintf("账号池限流，累计推迟约 %s，约 %s 后继续",
+			(time.Duration(job.DeferredSeconds)*time.Second + wait).Round(time.Second), wait.Round(time.Second))
+		updated, err = m.store.RequeueJobAtWithDefer(ctx, job.ID, retryAt, message, wait)
+	}
 	if err != nil {
 		log.Printf("requeue rate-limited job %d: %v", job.ID, err)
 		return false

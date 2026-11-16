@@ -107,6 +107,9 @@ func interpretProbe(reply *response, extraCookies map[string]string) xapi.HomePr
 	switch reply.status {
 	case http.StatusOK:
 		// 少数接口会以 HTTP 200 携带错误码；凭证/封禁类错误码必须先于 users 解析。
+		if code == xapi.APIErrRateLimit {
+			return xapi.HomeProbeResult{Err: fmt.Errorf("X 登录校验被限流（code %d）", code)}
+		}
 		if xapi.IsFatalAPIErrorCode(code) {
 			return xapi.HomeProbeResult{Unauthorized: true, Err: probeRejection(code, message, reply)}
 		}
@@ -122,6 +125,9 @@ func interpretProbe(reply *response, extraCookies map[string]string) xapi.HomePr
 	}
 	if code == 353 {
 		return xapi.HomeProbeResult{Unauthorized: true, Err: errors.New("ct0 与 auth_token 不匹配（code 353）")}
+	}
+	if code == xapi.APIErrRateLimit {
+		return xapi.HomeProbeResult{Err: fmt.Errorf("X 登录校验被限流（code %d）", code)}
 	}
 	if xapi.IsFatalAPIErrorCode(code) {
 		return xapi.HomeProbeResult{Unauthorized: true, Err: probeRejection(code, message, reply)}

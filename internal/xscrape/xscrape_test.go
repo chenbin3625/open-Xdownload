@@ -333,7 +333,7 @@ func TestGraphQLUnauthorizedWithValidProbeKeepsAccountAndCaches(t *testing.T) {
 	}
 }
 
-func TestGraphQLUnauthorizedUnconfirmedLocksWildcard(t *testing.T) {
+func TestGraphQLUnauthorizedUnconfirmedDoesNotLock(t *testing.T) {
 	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == probePath {
 			writeJSON(w, http.StatusInternalServerError, `{"error":"boom"}`)
@@ -357,8 +357,8 @@ func TestGraphQLUnauthorizedUnconfirmedLocksWildcard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(locks) != 1 || locks[0].Queue != "*" || !locks[0].Until.Equal(h.clock.Now().Add(forbiddenLock)) {
-		t.Fatalf("locks = %+v, want a 5 minute wildcard lock", locks)
+	if len(locks) != 0 {
+		t.Fatalf("locks = %+v, want no wildcard lock", locks)
 	}
 }
 
@@ -483,6 +483,24 @@ func TestGraphQL404InvalidatesAndReturnsQueryIDStale(t *testing.T) {
 	defer mu.Unlock()
 	if graphqlRequests != 2 {
 		t.Fatalf("graphql requests = %d, want one retry after rediscovery", graphqlRequests)
+	}
+}
+
+// TestTransactionIDInvalidationIsThrottled 覆盖批量 404：目标级 404 不应让每个请求
+// 都重新抓首页和签名脚本。
+func TestTransactionIDInvalidationIsThrottled(t *testing.T) {
+	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, "<html></html>")
+	})
+	h.engine.invalidateTransactionIDs()
+	h.engine.invalidateTransactionIDs()
+	if _, invalidates := h.gen.counts(); invalidates != 1 {
+		t.Fatalf("invalidates = %d, want 1 within throttle interval", invalidates)
+	}
+	h.clock.Advance(tidInvalidateInterval)
+	h.engine.invalidateTransactionIDs()
+	if _, invalidates := h.gen.counts(); invalidates != 2 {
+		t.Fatalf("invalidates = %d, want 2 after throttle interval", invalidates)
 	}
 }
 

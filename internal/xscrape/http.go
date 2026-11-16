@@ -90,11 +90,25 @@ func (e *Engine) applyTransactionID(ctx context.Context, request *http.Request, 
 	}
 }
 
+// tidInvalidateInterval 限制 GraphQL 404 触发的 xtid 失效频率。404 也可能是目标级
+// 错误（列表已删除/受保护资源等）；每个 404 都重新抓首页和最多 24 个脚本会放大请求。
+const tidInvalidateInterval = time.Minute
+
 // invalidateTransactionIDs 让下次请求重新抓取 xtid 脚本（GraphQL 404 时）。
 func (e *Engine) invalidateTransactionIDs() {
-	if generator := e.currentGenerator(); generator != nil {
-		generator.Invalidate()
+	e.tidMu.Lock()
+	generator := e.tid
+	if e.opts.TransactionIDs != nil {
+		generator = e.opts.TransactionIDs
 	}
+	now := e.now()
+	if generator == nil || (!e.tidInvalidatedAt.IsZero() && now.Sub(e.tidInvalidatedAt) < tidInvalidateInterval) {
+		e.tidMu.Unlock()
+		return
+	}
+	e.tidInvalidatedAt = now
+	e.tidMu.Unlock()
+	generator.Invalidate()
 }
 
 func doRequest(client *http.Client, request *http.Request) *response {

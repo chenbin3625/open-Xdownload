@@ -146,7 +146,6 @@ func run() int {
 	}
 	handler := withWebApp(api.Routes(), webDir, api.InjectIndexHTML)
 	h3Available := new(atomic.Bool)
-	h3Available.Store(true)
 	if listen.tlsEnabled() {
 		handler = withHTTP3AltSvc(handler, listenPort(boundAddr), h3Available)
 	}
@@ -182,6 +181,7 @@ func run() int {
 	}()
 	if http3Server != nil {
 		go func() {
+			h3Available.Store(true)
 			if err := http3Server.ListenAndServeTLS(listen.certFile, listen.keyFile); err != nil && !isHTTPServerClosed(err) {
 				h3Available.Store(false)
 				// HTTP/3 is optional — log a warning but let TCP continue serving.

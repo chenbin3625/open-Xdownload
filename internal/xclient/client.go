@@ -96,10 +96,6 @@ func (c *Client) rateLimitedError(path string, cause error) error {
 // 冷却到期后下一次请求会重新探测，真正失效的 Cookie 会再次被禁用，因此不需要锁太久。
 var clientDisableCooldown = 10 * time.Minute
 
-// clientUnverifiedDisableCooldown 用于接口 401 但 /home 校验无法给出结论（网络错误、
-// 挑战页、限流）的情况：既不能确认失效，也不能放任继续撞接口。
-var clientUnverifiedDisableCooldown = 5 * time.Minute
-
 // homeVerifiedTTL 内 /home 校验通过过，接口 401 直接视为接口/目标级问题，不重复探测。
 const homeVerifiedTTL = 2 * time.Minute
 
@@ -267,6 +263,11 @@ var maxPoolSelectWait = 15*time.Minute + 10*time.Second
 // maxPoolSelectWaitStep 单次等待上限：若最早复位时间很远，只等待一个上限时长后重新评估。
 var maxPoolSelectWaitStep = 60 * time.Second
 
+// maxPacingWait 是调度器模式下为"配额内主动匀速"原地等待的上限。匀速不是限流：
+// 短等待直接吸收，避免每个分页请求都把任务重新入队；超过上限才交还调度器，
+// 此时错误带 Pacing 标记，不按限流累计推迟。
+const maxPacingWait = 3 * time.Second
+
 func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 	if p == nil || len(p.clients) == 0 {
 		return nil, errors.New("没有可用 X 客户端")
@@ -275,6 +276,7 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 	excluded := excludedClients(ctx)
 	for {
 		var blocked int
+		var pacingBlocked int
 		var disabled int
 		var skipped int
 		p.mu.Lock()
@@ -293,6 +295,9 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 				continue
 			}
 			if path != "" && client.limiter != nil && client.limiter.wouldBlock(path) {
+				if client.limiter.pacingOnly(path) {
+					pacingBlocked++
+				}
 				blocked++
 				continue
 			}
@@ -315,16 +320,28 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 		if wait <= 0 {
 			wait = 200 * time.Millisecond
 		}
-		// 调度器模式下不在这里等：把最早的恢复时间交回去，让任务释放执行槽。
-		// 直接媒体下载、其他接口或下一个任务可以先运行。
 		if yieldsToScheduler(ctx) {
-			return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited}
+			// 至少有一个账号只是需要按配额匀速发送：短间隔直接在这里等，避免把
+			// 正常分页当成"账号池全部限流"重新入队。等待较长时交还调度器，但错误
+			// 必须保留 Pacing 标记，不能计入限流累计推迟。
+			if pacingBlocked > 0 {
+				if wait > maxPacingWait {
+					return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait, Pacing: true}
+				}
+			} else {
+				// 调度器模式下不在这里等：把最早的恢复时间交回去，让任务释放执行槽。
+				// 直接媒体下载、其他接口或下一个任务可以先运行。
+				return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited, PoolExhausted: true}
+			}
 		}
 		if wait > maxPoolSelectWaitStep {
 			wait = maxPoolSelectWaitStep
 		}
 		if waited+wait > maxPoolSelectWait {
-			return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited}
+			if pacingBlocked > 0 {
+				return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait, Pacing: true}
+			}
+			return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited, PoolExhausted: true}
 		}
 		waited += wait
 		timer := time.NewTimer(wait)
@@ -825,6 +842,10 @@ func (p *Pool) graphQL(ctx context.Context, path string, values url.Values) ([]b
 
 func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Values) ([]byte, *Client, error) {
 	var lastErr error
+	excluded := make(map[*Client]bool)
+	for client := range excludedClients(ctx) {
+		excluded[client] = true
+	}
 	failures, handoffs := 0, 0
 	// 为备用账号保留尝试机会，同时限制所有 Cookie 的总请求次数。
 	if requestBudgetFrom(ctx) == nil {
@@ -839,8 +860,11 @@ func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Va
 		if err != nil {
 			// "全部限流"必须原样上抛（保留最后一次失败作上下文）：manager 靠这个分类中止
 			// 批量归档，被 lastErr（通常是一个 429）覆盖后会继续对后面每个用户撞限流。
-			if IsAllClientsRateLimited(err) && lastErr != nil {
-				return nil, nil, fmt.Errorf("%w: %w", err, lastErr)
+			if _, limited := RateLimitRetryAt(err); limited {
+				if lastErr != nil {
+					return nil, nil, fmt.Errorf("%w: %w", err, lastErr)
+				}
+				return nil, nil, err
 			}
 			if lastErr != nil {
 				return nil, nil, lastErr
@@ -864,7 +888,10 @@ func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Va
 			}
 			return nil, nil, err
 		}
-		if !client.isDisabled() && !isTransientError(err) {
+		if IsUnauthorized(err) {
+			excluded[client] = true
+			ctx = withExcludedClients(ctx, excluded)
+		} else if !client.isDisabled() && !isTransientError(err) {
 			return nil, nil, err
 		}
 		failures++
@@ -1113,7 +1140,9 @@ func (c *Client) handleUnauthorized(ctx context.Context, err error) {
 		// 成功：Cookie 有效，不禁用；/home 401：已按失效禁用；取消：不做判断。
 		return
 	}
-	c.disableFor(err, clientUnverifiedDisableCooldown)
+	// /home 网络错误、限流、WAF 或响应格式异常都不能确认凭证失效；
+	// 保留原始接口错误，交给 Pool 选择其他客户端，不要把唯一账号锁死。
+	c.recordError(err)
 }
 
 // enable 在登录校验成功后解除禁用，让用户在设置页重新检测即可恢复被误禁的 Cookie。

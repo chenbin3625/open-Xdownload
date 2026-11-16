@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,7 +228,10 @@ func (g *Generator) loadSigningJS(ctx context.Context, page []byte) ([]byte, err
 		if matchesIndicesFile(u) {
 			body, err := g.get(ctx, u)
 			if err != nil {
-				return nil, fmt.Errorf("下载签名脚本失败: %w", err)
+				continue
+			}
+			if !matchesKeyByteIndices(body) {
+				continue
 			}
 			return body, nil
 		}
@@ -294,6 +298,10 @@ func (g *Generator) crawlForIndices(ctx context.Context, seeds []string) ([]byte
 }
 
 func (g *Generator) get(ctx context.Context, rawURL string) ([]byte, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || !g.allowedHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("拒绝请求非 X 脚本主机: %s", rawURL)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
@@ -316,6 +324,15 @@ func (g *Generator) get(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, fmt.Errorf("响应 %s 超过 %d 字节上限", rawURL, maxBodyBytes)
 	}
 	return body, nil
+}
+
+func (g *Generator) allowedHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	base, err := url.Parse(g.baseURL)
+	if err == nil && strings.EqualFold(host, base.Hostname()) {
+		return true
+	}
+	return host == "x.com" || host == "www.x.com" || host == "abs.twimg.com" || host == "pbs.twimg.com"
 }
 
 func defaultRandByte() byte {

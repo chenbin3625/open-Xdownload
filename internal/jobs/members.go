@@ -59,9 +59,9 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 		if err != nil {
 			return nil, err
 		}
-		if page.Cursor != "" && (page.Cursor == state.Cursor || seenCursors[page.Cursor]) {
-			return nil, fmt.Errorf("成员列表游标未前进")
-		}
+		// 服务端到末尾时会返回原样（或已见过）的 Bottom cursor。与媒体时间线一致：
+		// 游标不再前进即视为正常结束，而不是让整个列表归档失败。
+		stalled := page.Cursor != "" && (page.Cursor == state.Cursor || seenCursors[page.Cursor])
 		before := len(state.Users)
 		for _, user := range page.Users {
 			if user.ID != "" && !seenUsers[user.ID] {
@@ -70,7 +70,10 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 			}
 		}
 		state.Cursor, state.ViewerKey = page.Cursor, page.ViewerKey
-		state.Complete = page.Cursor == ""
+		state.Complete = page.Cursor == "" || stalled
+		if stalled {
+			log.Printf("jobs: 成员列表游标不再前进，视为已到末尾 (job=%d, users=%d)", job.ID, len(state.Users))
+		}
 		// X 翻到末尾后仍会返回不断前进的 Bottom cursor（如 "0|..."）但不再有用户；
 		// 不加判断会一直翻到安全页数上限并让整个任务失败。
 		if len(state.Users) > before {
@@ -82,7 +85,7 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 				state.Complete = true
 			}
 		}
-		if page.Cursor != "" {
+		if page.Cursor != "" && !stalled {
 			state.SeenCursors = append(state.SeenCursors, page.Cursor)
 			seenCursors[page.Cursor] = true
 		}

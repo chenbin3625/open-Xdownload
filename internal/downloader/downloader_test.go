@@ -50,6 +50,32 @@ func TestDownloadRejectsOversizedContentLengthBeforeReading(t *testing.T) {
 	}
 }
 
+func TestDownloadRejectsErrorPagesWithoutPublishingFiles(t *testing.T) {
+	for _, test := range []struct{ name, contentType, body string }{
+		{"html-type", "text/html", "error"},
+		{"json-type", "application/json", "error"},
+		{"xml-type", "application/xml", "error"},
+		{"html-body", "video/mp4", "  <!DOCTYPE html><html>challenge</html>"},
+		{"json-body", "application/octet-stream", `{"error":"expired"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", test.contentType)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			if _, err := newTestDownloader().Download(context.Background(), server.URL+"/movie.mp4", dir, "movie"); err == nil {
+				t.Fatal("error page was accepted as media")
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("rejected response left files: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestOpenRejectsResponsesWithoutCompleteMedia(t *testing.T) {
 	for _, status := range []int{209, http.StatusNotModified, http.StatusNoContent, http.StatusPartialContent} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
@@ -518,6 +544,40 @@ func TestPublishFileFallsBackToRenameWhenHardLinksUnsupported(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(tempPath); !os.IsNotExist(statErr) {
 		t.Fatalf("temp file not removed after rename: %v", statErr)
+	}
+}
+
+func TestPublishFilePreservesEmptyReservation(t *testing.T) {
+	originalLink := linkFile
+	t.Cleanup(func() { linkFile = originalLink })
+	for _, fallback := range []bool{false, true} {
+		t.Run(fmt.Sprint(fallback), func(t *testing.T) {
+			linkFile = originalLink
+			if fallback {
+				linkFile = func(string, string) error { return syscall.EPERM }
+			}
+			dir := t.TempDir()
+			tempPath := filepath.Join(dir, "media.part")
+			candidate := filepath.Join(dir, "media.mp4")
+			if err := os.WriteFile(tempPath, []byte("new media"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(candidate, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handled, err := publishFile(tempPath, candidate, 9)
+			if err != nil || handled {
+				t.Fatalf("publishFile = %v, %v; want a filename conflict", handled, err)
+			}
+			after, err := os.Stat(candidate)
+			if err != nil || after.Size() != 0 || !os.SameFile(before, after) {
+				t.Fatalf("another download's reservation was replaced: %v", err)
+			}
+		})
 	}
 }
 

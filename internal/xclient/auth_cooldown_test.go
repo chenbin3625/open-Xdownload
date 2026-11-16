@@ -62,7 +62,7 @@ func TestUnauthorizedConfirmedByHomeDisablesWithModerateCooldown(t *testing.T) {
 	}
 }
 
-// /home 无法给出结论（网络错误/挑战页）时按短冷却处理，不锁 30 分钟。
+// /home 无法给出结论（网络错误/挑战页）时不禁用 Cookie。
 func TestUnauthorizedWithInconclusiveHomeUsesShortCooldown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/home" {
@@ -76,11 +76,32 @@ func TestUnauthorizedWithInconclusiveHomeUsesShortCooldown(t *testing.T) {
 	if _, err := getUserByInput(context.Background(), client, "alice"); err == nil {
 		t.Fatal("expected 401 error")
 	}
-	client.mu.Lock()
-	remaining := time.Until(client.disabledUntil)
-	client.mu.Unlock()
-	if remaining < 4*time.Minute || remaining > 6*time.Minute {
-		t.Fatalf("inconclusive 401 cooldown = %s, want about 5m", remaining)
+	if client.isDisabled() {
+		t.Fatal("inconclusive /home result must not disable the client")
+	}
+}
+
+func TestPoolUnauthorizedWithInconclusiveHomeTriesBackup(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/home" {
+			_, _ = w.Write([]byte(`<html>challenge</html>`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"user":{"result":{"rest_id":"42","legacy":{"screen_name":"backup"}}}}}`))
+	}))
+	defer backup.Close()
+	first := newHeaderTestClient(primary)
+	pool := &Pool{clients: []*Client{first, newHeaderTestClient(backup)}}
+	user, err := pool.GetUserByInput(context.Background(), "target")
+	if err != nil || user.ID != "42" {
+		t.Fatalf("backup result = %+v, %v", user, err)
+	}
+	if first.isDisabled() {
+		t.Fatal("inconclusive authentication must not globally disable the first account")
 	}
 }
 

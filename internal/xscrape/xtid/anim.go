@@ -33,14 +33,15 @@ func calcAnimationKey(animationPaths []string, indices []int, verification []byt
 		return "", fmt.Errorf("动画只有 %d 帧，索引 %d 越界", len(rows), rowIndex)
 	}
 
-	frameTime := 1
+	frameTime := new(big.Int).SetInt64(1)
 	for _, idx := range indices[1:] {
-		frameTime *= int(verification[idx]) % 16
+		frameTime.Mul(frameTime, big.NewInt(int64(int(verification[idx])%16)))
 	}
 	// 与 JS Math.round(frame_time / 10) * 10 一致（frame_time 非负）。
-	frameTime = int(math.Floor(float64(frameTime)/10+0.5)) * 10
+	frameFloat, _ := new(big.Float).SetInt(frameTime).Float64()
+	frameFloat = math.Floor(frameFloat/10+0.5) * 10
 
-	return animationKeyFromRow(rows[rowIndex], float64(frameTime)/4096)
+	return animationKeyFromRow(rows[rowIndex], frameFloat/4096)
 }
 
 // animationKeyFromRow 对应参考实现的 cacl_anim_key(frames, target_time)。

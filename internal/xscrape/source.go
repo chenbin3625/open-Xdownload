@@ -323,10 +323,17 @@ func (s *source) Diagnostics() xapi.PoolDiagnostics {
 	e := s.engine
 	accounts, err := e.store.ListXAccounts(ctx)
 	if err != nil {
+		e.logs.printf("diagnostics", time.Minute, "xscrape: 读取账号诊断失败: %v", err)
 		return xapi.PoolDiagnostics{}
 	}
-	locks, _ := e.store.ListXAccountLocks(ctx, e.now())
-	stats, _ := e.store.ListXAccountStats(ctx, e.now().UTC().Format("2006-01-02"))
+	locks, lockErr := e.store.ListXAccountLocks(ctx, e.now())
+	if lockErr != nil {
+		e.logs.printf("diagnostics", time.Minute, "xscrape: 读取账号限流锁失败: %v", lockErr)
+	}
+	stats, statsErr := e.store.ListXAccountStats(ctx, e.now().UTC().Format("2006-01-02"))
+	if statsErr != nil {
+		e.logs.printf("diagnostics", time.Minute, "xscrape: 读取账号统计失败: %v", statsErr)
+	}
 
 	locksByAccount := map[int64][]xapi.RateLimitSnapshot{}
 	for _, lock := range locks {
@@ -366,6 +373,7 @@ func (s *source) HasPrimary() bool {
 	defer cancel()
 	accounts, err := s.engine.store.ListXAccounts(ctx)
 	if err != nil {
+		s.engine.logs.printf("diagnostics", time.Minute, "xscrape: 查询主账号失败: %v", err)
 		return false
 	}
 	for _, account := range accounts {

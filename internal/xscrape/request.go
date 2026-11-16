@@ -344,9 +344,9 @@ func (s *source) executeAccountRequest(ctx context.Context, account storage.XAcc
 			if _, _, ok := splitGraphQLPath(path); !ok {
 				return nil, httpErr
 			}
-			e.invalidateTransactionIDs()
-			e.queryIDs.refreshFor404(ctx, e, proxy)
 			if !retried404 {
+				e.invalidateTransactionIDs()
+				e.queryIDs.refreshFor404(ctx, e, proxy)
 				retried404 = true
 				continue
 			}
@@ -451,7 +451,7 @@ func (e *Engine) confirmUnauthorized(ctx context.Context, account storage.XAccou
 		if message := result.Err.Error(); message != "" {
 			reason += ": " + message
 		}
-		_ = e.store.LockXAccount(ctx, account.ID, "*", e.now().Add(forbiddenLock), reason)
+		_ = e.store.SetXAccountError(ctx, account.ID, reason)
 	}
 }
 

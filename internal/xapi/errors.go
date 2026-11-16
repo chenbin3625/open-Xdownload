@@ -38,6 +38,11 @@ type RateLimitedError struct {
 	Path    string
 	RetryAt time.Time
 	Cause   error
+	// PoolExhausted 标记是否确实没有可用账号；单账号主动匀速等待不应被归类为全池限流。
+	PoolExhausted bool
+	// Pacing 标记本次等待只是配额内的主动匀速（X-Rate-Limit 头推导出的发送间隔），
+	// 不是真实限流。任务可以重新入队，但不能把等待计入限流推迟上限。
+	Pacing bool
 }
 
 func (e *RateLimitedError) Error() string {
@@ -54,11 +59,20 @@ func (e *RateLimitedError) Unwrap() error { return e.Cause }
 
 // Is 保持原有分类：调用方仍可用 errors.Is(err, ErrAllClientsRateLimited) 判断
 // “全部账号限流”，从而中止逐个用户的批量归档。
-func (e *RateLimitedError) Is(target error) bool { return target == ErrAllClientsRateLimited }
+func (e *RateLimitedError) Is(target error) bool {
+	return target == ErrAllClientsRateLimited && (e.PoolExhausted || e.Cause == nil || errors.Is(e.Cause, ErrAllClientsRateLimited))
+}
 
 // IsAllClientsRateLimited 报告 err 是否属于"账号池全部限流"。
 func IsAllClientsRateLimited(err error) bool {
 	return errors.Is(err, ErrAllClientsRateLimited)
+}
+
+// IsPacingRateLimit 报告限流错误是否只是配额内的主动匀速等待。调用方应把任务重新
+// 入队到恢复时间，但不应计入"累计限流推迟"上限或用户失败计数。
+func IsPacingRateLimit(err error) bool {
+	var limited *RateLimitedError
+	return errors.As(err, &limited) && limited.Pacing
 }
 
 // RateLimitRetryAt 返回限流错误的最早恢复时间；不是限流错误时返回 false。

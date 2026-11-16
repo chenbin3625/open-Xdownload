@@ -520,4 +520,13 @@ func TestLibraryAuthorFiltersUseLatestRecordForSharedFiles(t *testing.T) {
 			t.Errorf("users for shared file = %+v, want only bob", page.Users)
 		}
 	}
+	for search, want := range map[string]int{"alice": 0, "bob": 1, "shared.jpg": 1} {
+		page, err := store.ListLibraryDownloadsPage(ctx, LibraryPageOptions{Filter: LibraryFilter{Search: search}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Pagination.Total != want || len(page.Items) != want {
+			t.Errorf("%s search: total=%d items=%d, want %d", search, page.Pagination.Total, len(page.Items), want)
+		}
+	}
 }

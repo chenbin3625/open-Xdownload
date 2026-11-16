@@ -62,6 +62,8 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 	cursor := options.Cursor
 	seenCursor := map[string]struct{}{}
 	seenTweetIDs := map[string]struct{}{}
+	parseCandidates := 0
+	failedParseCount := 0
 	parsedTweets := 0
 	emptyPages := 0
 	// 首页命中的 stopID 可能是置顶项；页尾仍比 stopID 新时必须继续翻页。
@@ -143,6 +145,7 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 				}
 			}
 			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result, options.Parse)
+			parseCandidates++
 			if errors.Is(err, parser.ErrTweetUnavailable) {
 				continue
 			}
@@ -150,6 +153,7 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 				// 单条推文解析失败只跳过并计数：不再让整个用户的时间线归档失败
 				// （否则一条无法解析的推文会让增量游标永远无法推进）。
 				stats.SkippedTweets++
+				failedParseCount++
 				stats.SkippedTweetIDs = append(stats.SkippedTweetIDs, id)
 				log.Printf("xclient: 跳过无法解析的推文 %s (user=%s): %v", id, user.ID, err)
 				continue
@@ -181,7 +185,7 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 			// 安全检查：timeline 返回了推文条目但全部被解析失败跳过。这通常意味着 X 改了
 			// 推文结构或 legacy 字段缺失，而非"该用户没有媒体推文"。若当成正常空结果返回，
 			// 上层会推进增量游标，导致这些推文的媒体被永久跳过。
-			if parsedTweets == 0 && stats.SkippedTweets > 0 && len(seenTweetIDs) == stats.SkippedTweets {
+			if parsedTweets == 0 && failedParseCount > 0 && failedParseCount == parseCandidates {
 				return stats, fmt.Errorf("时间线返回了 %d 条推文但全部解析失败（user=%s，跳过的推文: %s）",
 					stats.SkippedTweets, user.ID, strings.Join(stats.SkippedTweetIDs, ", "))
 			}

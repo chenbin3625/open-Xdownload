@@ -133,6 +133,12 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		return Result{}, err
 	}
 	defer response.Body.Close()
+	if mediaType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type")); parseErr == nil {
+		mediaType = strings.ToLower(mediaType)
+		if mediaType == "text/html" || mediaType == "application/json" || mediaType == "application/xml" {
+			return Result{}, fmt.Errorf("媒体响应 Content-Type 无效: %s", response.Header.Get("Content-Type"))
+		}
+	}
 	const maxMediaBytes = 4 << 30
 	if response.ContentLength > maxMediaBytes {
 		return Result{}, fmt.Errorf("媒体文件过大: %w", httpx.ErrBodyTooLarge)
@@ -196,6 +202,10 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		_ = os.Remove(tempPath)
 		return Result{}, closeErr
 	}
+	if looksLikeNonMediaPayload(tempPath) {
+		_ = os.Remove(tempPath)
+		return Result{}, fmt.Errorf("媒体响应内容疑似 HTML/JSON 错误页")
+	}
 	// 拒绝 0 字节媒体：200 + Content-Length:0 或空 body 会产生空文件，之后被永久
 	// 当成"完整下载"跳过（size 0 == CL 0），永远无法自愈。
 	if bytes == 0 {
@@ -222,6 +232,17 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		_ = os.Chtimes(result.Path, time.Now(), options.ModTime)
 	}
 	return result, nil
+}
+
+func looksLikeNonMediaPayload(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	prefix, _ := io.ReadAll(io.LimitReader(file, 512))
+	body := strings.ToLower(strings.TrimSpace(string(prefix)))
+	return strings.HasPrefix(body, "<html") || strings.HasPrefix(body, "<!doctype") || strings.HasPrefix(body, "{") || strings.HasPrefix(body, "[")
 }
 
 // existingContentHash 返回已存在完整文件的内容哈希：优先用调用方已知的哈希
@@ -256,7 +277,7 @@ func existingFileState(path string, contentLength int64) (Result, bool, bool, er
 	if err != nil {
 		return Result{}, false, false, err
 	}
-	if info.IsDir() {
+	if info.IsDir() || !info.Mode().IsRegular() {
 		return Result{}, false, false, nil
 	}
 	if contentLength < 0 {

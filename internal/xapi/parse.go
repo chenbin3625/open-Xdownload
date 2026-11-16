@@ -161,11 +161,15 @@ func ParseUser(raw gjson.Result) (User, error) {
 	if !legacy.Exists() {
 		return User{}, errors.New("响应中没有用户 legacy 数据")
 	}
+	id := strings.TrimSpace(raw.Get("rest_id").String())
+	if id == "" {
+		return User{}, errors.New("响应中没有用户 rest_id")
+	}
 	// X 已把部分字段从 legacy 迁到 core / privacy / relationship_perspectives，不同接口
 	// 返回的结构并不一致：新位置优先，旧位置兜底。
 	relationship := raw.Get("relationship_perspectives")
 	return User{
-		ID:           raw.Get("rest_id").String(),
+		ID:           id,
 		Name:         FirstString(raw.Get("core.name"), legacy.Get("name")),
 		ScreenName:   FirstString(raw.Get("core.screen_name"), legacy.Get("screen_name")),
 		Protected:    FirstBool(raw.Get("privacy.protected"), legacy.Get("protected")),

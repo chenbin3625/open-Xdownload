@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -151,9 +152,15 @@ func validatePassword(password string) error {
 }
 
 func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
-	if !s.checkLoginRate(w) {
+	if !s.checkLoginRate(w, r) {
 		return
 	}
+	succeeded := false
+	defer func() {
+		if succeeded {
+			s.clearLoginFailures(r)
+		}
+	}()
 	if account, err := s.store.GetAccount(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -197,12 +204,19 @@ func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.respondLogin(w, r, account, http.StatusCreated)
+	succeeded = true
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if !s.checkLoginRate(w) {
+	if !s.checkLoginRate(w, r) {
 		return
 	}
+	succeeded := false
+	defer func() {
+		if succeeded {
+			s.clearLoginFailures(r)
+		}
+	}()
 	var req struct{ Username, Password string }
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -228,6 +242,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.respondLogin(w, r, *account, http.StatusOK)
+	succeeded = true
 }
 
 func (s *Server) respondLogin(w http.ResponseWriter, r *http.Request, account storage.Account, status int) {
@@ -279,25 +294,54 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 // dummyBcryptHash 用于用户名不匹配时跑一次假 hash，防止时序差异泄漏"用户名是否存在"。
 var dummyBcryptHash, _ = bcrypt.GenerateFromPassword([]byte("dummy-timing-defense"), bcrypt.DefaultCost)
 
-// checkLoginRate 全局登录限速（滑动窗口）。返回 false 表示已限流并已写响应。
-func (s *Server) checkLoginRate(w http.ResponseWriter) bool {
+func loginClientKey(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	if remote := strings.TrimSpace(r.RemoteAddr); remote != "" {
+		return remote
+	}
+	return "unknown"
+}
+
+// checkLoginRate 在检查时预留额度，失败及尚未完成的请求都计入来源地址限额。
+func (s *Server) checkLoginRate(w http.ResponseWriter, r *http.Request) bool {
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
+	if s.loginAttempts == nil {
+		s.loginAttempts = make(map[string][]time.Time)
+	}
+	key := loginClientKey(r)
 	now := time.Now()
 	cutoff := now.Add(-loginRateWindow)
-	// 滑动窗口：丢弃过期记录。
+	for client, attempts := range s.loginAttempts {
+		if len(attempts) == 0 || !attempts[len(attempts)-1].After(cutoff) {
+			delete(s.loginAttempts, client)
+		}
+	}
+	attempts := s.loginAttempts[key]
 	valid := 0
-	for _, t := range s.loginAttempts {
+	for _, t := range attempts {
 		if t.After(cutoff) {
-			s.loginAttempts[valid] = t
+			attempts[valid] = t
 			valid++
 		}
 	}
-	s.loginAttempts = s.loginAttempts[:valid]
-	if len(s.loginAttempts) >= maxLoginAttempts {
+	attempts = attempts[:valid]
+	if len(attempts) >= maxLoginAttempts || (len(attempts) == 0 && len(s.loginAttempts) >= maxLoginClients) {
 		writeError(w, http.StatusTooManyRequests, errors.New("登录尝试过于频繁，请稍后再试"))
 		return false
 	}
-	s.loginAttempts = append(s.loginAttempts, now)
+	s.loginAttempts[key] = append(attempts, now)
 	return true
+}
+
+func (s *Server) clearLoginFailures(r *http.Request) {
+	s.loginMu.Lock()
+	delete(s.loginAttempts, loginClientKey(r))
+	s.loginMu.Unlock()
 }

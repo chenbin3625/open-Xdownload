@@ -311,6 +311,46 @@ func gzipWithComment(body, comment string) []byte {
 	return buf.Bytes()
 }
 
+func TestAssetCacheAccountsForLazyBodiesAndReplacements(t *testing.T) {
+	files := fstest.MapFS{"assets/app.js.gz": {Data: gzipWithComment(jsBody, "first")}}
+	cache := newAssetCache(http.FS(files))
+	first, ok := cache.get("assets/app.js")
+	if !ok || string(first.body("")) != jsBody {
+		t.Fatal("sidecar-only asset did not decode")
+	}
+	if want := int64(len(first.gzip) + len(first.identity)); cache.bytes != want {
+		t.Fatalf("cache bytes = %d, want %d including decoded identity", cache.bytes, want)
+	}
+	files["assets/app.js.gz"] = &fstest.MapFile{Data: gzipWithComment(jsBody+";console.log('new');", "replacement")}
+	second, ok := cache.get("assets/app.js")
+	if !ok || first == second || cache.bytes != int64(len(second.gzip)) {
+		t.Fatalf("replacement left stale bytes in cache: %d", cache.bytes)
+	}
+	first.body("br")
+	if cache.bytes != int64(len(second.gzip)) {
+		t.Fatal("an evicted asset changed the cache budget")
+	}
+	second.body("br")
+	if want := int64(len(second.identity) + len(second.gzip) + len(second.brotli)); cache.bytes != want {
+		t.Fatalf("cache bytes = %d, want %d including generated brotli", cache.bytes, want)
+	}
+}
+
+func TestAssetCacheEvictsWhenLazyBodyExceedsBudget(t *testing.T) {
+	cache := newAssetCache(testWebFS())
+	item, ok := cache.get("assets/app.js")
+	if !ok {
+		t.Fatal("asset not loaded")
+	}
+	cache.bytes = maxStaticCacheBytes
+	if len(item.body("gzip")) == 0 {
+		t.Fatal("active request lost its response body")
+	}
+	if len(cache.items) != 0 || cache.bytes != 0 {
+		t.Fatalf("over-budget cache was retained: items=%d bytes=%d", len(cache.items), cache.bytes)
+	}
+}
+
 func TestPrecompressedSidecarIsServedWithoutReencoding(t *testing.T) {
 	sidecar := gzipWithComment(jsBody, "prebuilt")
 	fsys := http.FS(fstest.MapFS{

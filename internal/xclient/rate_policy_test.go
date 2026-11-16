@@ -2,6 +2,7 @@ package xclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,85 @@ func TestQuotaPacingSpreadsRemainingRequestsAcrossWindow(t *testing.T) {
 	}
 	if limiter.wouldBlock("/lookup") {
 		t.Fatal("one endpoint's pacing blocked an unrelated endpoint")
+	}
+}
+
+// 配额内的主动匀速只等几十毫秒时，Pool.Select 应原地吸收，而不是把它当成
+// “账号池全部限流”让任务重新入队。
+func TestPoolSelectAbsorbsShortQuotaPacing(t *testing.T) {
+	limiter := newRateLimiter()
+	now := time.Now()
+	limiter.limits["/media"] = rateLimitState{
+		remaining:   90,
+		limit:       100,
+		reset:       now.Add(15 * time.Minute),
+		ready:       true,
+		nextRequest: now.Add(25 * time.Millisecond),
+	}
+	pool := &Pool{clients: []*Client{{limiter: limiter}}}
+	ctx, cancel := context.WithTimeout(WithYieldToScheduler(context.Background()), time.Second)
+	defer cancel()
+	client, err := pool.Select(ctx, "/media")
+	if err != nil || client == nil {
+		t.Fatalf("Select = %v, %v; want a client after pacing wait", client, err)
+	}
+}
+
+// 匀速等待较长时交还调度器，但必须标记为 Pacing：它不是全池限流，也不应累计
+// 限流推迟。
+func TestPoolSelectLongQuotaPacingIsNotPoolExhaustion(t *testing.T) {
+	limiter := newRateLimiter()
+	now := time.Now()
+	limiter.limits["/media"] = rateLimitState{
+		remaining:   90,
+		limit:       100,
+		reset:       now.Add(15 * time.Minute),
+		ready:       true,
+		nextRequest: now.Add(30 * time.Second),
+	}
+	pool := &Pool{clients: []*Client{{limiter: limiter}}}
+	_, err := pool.Select(WithYieldToScheduler(context.Background()), "/media")
+	if err == nil {
+		t.Fatal("expected pacing yield error")
+	}
+	if IsAllClientsRateLimited(err) {
+		t.Fatalf("pacing error classified as pool exhaustion: %v", err)
+	}
+	if !IsPacingRateLimit(err) {
+		t.Fatalf("error = %v, want Pacing marker", err)
+	}
+	var limited *RateLimitedError
+	if !errors.As(err, &limited) {
+		t.Fatalf("error = %v, want RateLimitedError", err)
+	}
+	if wait := time.Until(limited.RetryAt); wait < 29*time.Second || wait > 31*time.Second {
+		t.Fatalf("retryAt in %s, want about 30s", wait)
+	}
+}
+
+func TestPoolGraphQLPreservesPacingAfterAnotherAccountRateLimit(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("paced account must wait before sending a request")
+	}))
+	defer backup.Close()
+	second := newHeaderTestClient(backup)
+	second.limiter.limits[userByScreenNamePath] = rateLimitState{
+		remaining: 90, limit: 100, ready: true,
+		reset: time.Now().Add(15 * time.Minute), nextRequest: time.Now().Add(30 * time.Second),
+	}
+	pool := &Pool{clients: []*Client{newHeaderTestClient(primary), second}}
+	_, err := pool.GraphQL(WithYieldToScheduler(context.Background()), userByScreenNamePath, nil)
+	if !IsPacingRateLimit(err) {
+		t.Fatalf("error = %v, want the backup account's pacing yield", err)
+	}
+	retryAt, ok := RateLimitRetryAt(err)
+	if wait := time.Until(retryAt); !ok || wait < 29*time.Second || wait > 31*time.Second {
+		t.Fatalf("retryAt in %s, want about 30s", wait)
 	}
 }
 

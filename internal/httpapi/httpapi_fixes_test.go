@@ -304,7 +304,7 @@ func TestPosterFetchGroupDeduplicatesConcurrentFetches(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_ = group.Do("poster-key", func() error {
+			_ = group.Do(context.Background(), "poster-key", func() error {
 				calls.Add(1)
 				time.Sleep(20 * time.Millisecond)
 				return nil

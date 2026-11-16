@@ -88,7 +88,9 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	if err != nil {
 		return mediaDownloadResult{}, err
 	}
-	defer release()
+	if release != nil {
+		defer release()
+	}
 	kind := config.AssetVideo
 	mediaType := parser.MediaVideo
 	if photo {

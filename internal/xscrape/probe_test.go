@@ -122,6 +122,21 @@ func TestProbeRules(t *testing.T) {
 		}
 	})
 
+	// code 88 是限流，不是凭证失效：不能因为这些响应把有效账号批量停用。
+	t.Run("429 with code 88 is undecided", func(t *testing.T) {
+		result := run(state{status: http.StatusTooManyRequests, contentType: "application/json", body: `{"errors":[{"code":88,"message":"Rate limit exceeded"}]}`})
+		if result.Unauthorized || result.Err == nil {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+
+	t.Run("200 with code 88 is undecided", func(t *testing.T) {
+		result := run(state{status: http.StatusOK, contentType: "application/json", body: `{"errors":[{"code":88}]}`})
+		if result.Unauthorized || result.Err == nil {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+
 	t.Run("404 is undecided", func(t *testing.T) {
 		result := run(state{status: http.StatusNotFound, contentType: "application/json", body: `{"errors":[{"code":34}]}`})
 		if result.Unauthorized || result.Err == nil {

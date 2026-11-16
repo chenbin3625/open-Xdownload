@@ -62,6 +62,46 @@ func TestRateLimitedJobReturnsExecutionSlot(t *testing.T) {
 	}
 }
 
+// TestPacingRateLimitRequeueDoesNotAccumulateDefer 覆盖正常配额匀速：任务仍会按恢复
+// 时间重新入队，但不能累计 deferred_seconds，否则长时间归档会被误判为“限流超时”。
+func TestPacingRateLimitRequeueDoesNotAccumulateDefer(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	job, err := store.CreateJob(ctx, storage.JobKindUser, "alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimPendingJobs(ctx, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %+v %v", claimed, err)
+	}
+	// 即使历史累计推迟已超过上限，匀速等待也不应让任务失败。
+	claimed[0].DeferredSeconds = int64(maxRateLimitDefer/time.Second) + 60
+
+	manager := NewManager(store, parser.NewService(), NewEventBus())
+	retryAt := time.Now().Add(90 * time.Second)
+	manager.fail(ctx, claimed[0], "", &xclient.RateLimitedError{Path: "/i/api/graphql/x/UserMedia", RetryAt: retryAt, Pacing: true})
+
+	updated, err := store.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != storage.JobPending {
+		t.Fatalf("status = %s, want pending", updated.Status)
+	}
+	if updated.DeferredSeconds != 0 {
+		t.Fatalf("deferred_seconds = %d, want 0 (pacing must not accumulate defer)", updated.DeferredSeconds)
+	}
+	if updated.AvailableAt == nil || updated.AvailableAt.Before(time.Now().Add(80*time.Second)) {
+		t.Fatalf("availableAt = %v, want ~+90s", updated.AvailableAt)
+	}
+}
+
 // TestPlainAllClientsRateLimitedUsesConservativeCooldown 保证没有结构化恢复时间的
 // 旧错误也会退避，而不是立即被再次领取形成忙循环。
 func TestPlainAllClientsRateLimitedUsesConservativeCooldown(t *testing.T) {

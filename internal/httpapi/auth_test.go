@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,85 @@ func responseToken(t *testing.T, w *httptest.ResponseRecorder) string {
 		t.Fatalf("missing token: %s (%v)", w.Body.String(), err)
 	}
 	return result.Token
+}
+
+// TestLoginRateLimitBucketsByClientAndClearsOnSuccess 覆盖登录限速：按来源地址分桶，
+// 只统计失败尝试，成功登录后清零；匿名客户端不能把其他地址（包括 Owner）一起锁死。
+func TestLoginRateLimitBucketsByClientAndClearsOnSuccess(t *testing.T) {
+	s := NewServer(nil, nil, nil, nil)
+	request := func(remote string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+		r.RemoteAddr = remote
+		return r
+	}
+	attacker := request("198.51.100.10:40000")
+	owner := request("203.0.113.20:40000")
+
+	for i := 0; i < maxLoginAttempts; i++ {
+		if !s.checkLoginRate(httptest.NewRecorder(), attacker) {
+			t.Fatalf("attempt %d unexpectedly limited", i)
+		}
+	}
+	limited := httptest.NewRecorder()
+	if s.checkLoginRate(limited, attacker) {
+		t.Fatal("attacker address should be rate limited")
+	}
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", limited.Code)
+	}
+	if !s.checkLoginRate(httptest.NewRecorder(), owner) {
+		t.Fatal("one address's failures must not limit another address")
+	}
+
+	s.clearLoginFailures(attacker)
+	if !s.checkLoginRate(httptest.NewRecorder(), attacker) {
+		t.Fatal("successful login should clear the failure bucket")
+	}
+}
+
+func TestLoginRateLimitsConcurrentAttempts(t *testing.T) {
+	s := NewServer(nil, nil, nil, nil)
+	start := make(chan struct{})
+	results := make(chan bool, maxLoginAttempts*4)
+	for i := 0; i < cap(results); i++ {
+		go func() {
+			<-start
+			r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+			r.RemoteAddr = "198.51.100.10:40000"
+			results <- s.checkLoginRate(httptest.NewRecorder(), r)
+		}()
+	}
+	close(start)
+	allowed := 0
+	for i := 0; i < cap(results); i++ {
+		if <-results {
+			allowed++
+		}
+	}
+	if allowed != maxLoginAttempts {
+		t.Fatalf("allowed %d concurrent attempts, want %d", allowed, maxLoginAttempts)
+	}
+}
+
+func TestLoginRateReclaimsExpiredClientsAndBoundsBuckets(t *testing.T) {
+	s := NewServer(nil, nil, nil, nil)
+	for i := 0; i < maxLoginClients; i++ {
+		s.loginAttempts[strconv.Itoa(i)] = []time.Time{time.Now()}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+	r.RemoteAddr = "198.51.100.10:40000"
+	if s.checkLoginRate(httptest.NewRecorder(), r) {
+		t.Fatal("new client should be rejected when all buckets are occupied")
+	}
+	for key := range s.loginAttempts {
+		s.loginAttempts[key] = []time.Time{time.Now().Add(-2 * loginRateWindow)}
+	}
+	if !s.checkLoginRate(httptest.NewRecorder(), r) {
+		t.Fatal("expired buckets must not block a new client")
+	}
+	if len(s.loginAttempts) != 1 {
+		t.Fatalf("client buckets = %d, want 1", len(s.loginAttempts))
+	}
 }
 
 func TestSingleUserAuthenticationLifecycle(t *testing.T) {

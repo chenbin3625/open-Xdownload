@@ -60,9 +60,10 @@ type Engine struct {
 	now   func() time.Time
 	sleep func(ctx context.Context, d time.Duration) error
 
-	tidMu    sync.Mutex
-	tid      TransactionIDGenerator
-	tidProxy string
+	tidMu            sync.Mutex
+	tid              TransactionIDGenerator
+	tidProxy         string
+	tidInvalidatedAt time.Time
 
 	// globalProxy 是最近一次 Source 使用的全局代理，作为账号未单独配置代理时的
 	// 探测/请求回退。HomeProber 可能在 Source 之前被调用，此时为空。

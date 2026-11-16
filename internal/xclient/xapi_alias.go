@@ -90,6 +90,7 @@ func (a requesterAdapter) GraphQL(ctx context.Context, path string, values url.V
 
 func IsUnauthorized(err error) bool          { return xapi.IsUnauthorized(err) }
 func IsAllClientsRateLimited(err error) bool { return xapi.IsAllClientsRateLimited(err) }
+func IsPacingRateLimit(err error) bool       { return xapi.IsPacingRateLimit(err) }
 func RateLimitRetryAt(err error) (time.Time, bool) {
 	return xapi.RateLimitRetryAt(err)
 }

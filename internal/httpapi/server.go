@@ -35,9 +35,9 @@ type Server struct {
 	eventBus    *jobs.EventBus
 	authMu      sync.RWMutex
 	authChanged chan struct{}
-	// loginLimiter 全局登录限速：滑动窗口内最多 maxLoginAttempts 次尝试。
+	// 登录限速按来源地址分桶，检查时即预留额度，成功后清零。
 	loginMu       sync.Mutex
-	loginAttempts []time.Time
+	loginAttempts map[string][]time.Time
 	// bcryptSem 限制并发 bcrypt 操作，避免 CPU DoS。
 	bcryptSem chan struct{}
 	// homeProber 是账号检测用的探测函数，由 cmd/server 注入；nil 表示未初始化。
@@ -45,14 +45,16 @@ type Server struct {
 }
 
 const maxLoginAttempts = 10             // 窗口内最大尝试次数
+const maxLoginClients = 4096            // 限制匿名来源地址桶的内存占用
 const loginRateWindow = 5 * time.Minute // 滑动窗口时长
 const maxConcurrentBcrypt = 2           // 并发 bcrypt 上限
 
 func NewServer(store *storage.Store, parserService *parser.Service, manager *jobs.Manager, eventBus *jobs.EventBus) *Server {
 	return &Server{
 		store: store, parser: parserService, manager: manager, eventBus: eventBus,
-		authChanged: make(chan struct{}),
-		bcryptSem:   make(chan struct{}, maxConcurrentBcrypt),
+		authChanged:   make(chan struct{}),
+		bcryptSem:     make(chan struct{}, maxConcurrentBcrypt),
+		loginAttempts: make(map[string][]time.Time),
 	}
 }
 
@@ -1165,7 +1167,7 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 	// 其它等待同一张海报的请求不应该跟着失败。超时由 client.Timeout 兜底。
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
 	defer cancel()
-	err = posterFetchGroup.Do(posterPath, func() error {
+	err = posterFetchGroup.Do(r.Context(), posterPath, func() error {
 		return fetchRemotePoster(fetchCtx, client, posterFetchLimiter, posterURL, posterPath, maxPosterBytes)
 	})
 	if err != nil {
@@ -1257,12 +1259,16 @@ type posterFetchCall struct {
 	err  error
 }
 
-func (g *posterFetchSingleFlight) Do(key string, fn func() error) error {
+func (g *posterFetchSingleFlight) Do(ctx context.Context, key string, fn func() error) error {
 	g.mu.Lock()
 	if call, ok := g.calls[key]; ok {
 		g.mu.Unlock()
-		<-call.done
-		return call.err
+		select {
+		case <-call.done:
+			return call.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	call := &posterFetchCall{done: make(chan struct{})}
 	if g.calls == nil {
@@ -1706,6 +1712,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 		if errors.Is(err, io.EOF) {
 			return storage.ErrValidation("请求体不能为空")
 		}
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return errRequestBodyTooLarge
+		}
 		return storage.ErrValidation("请求格式无效")
 	}
 	// 拒绝尾随 JSON（如 `{"a":1}{"b":2}`）：只接受单个顶层值。
@@ -1714,6 +1724,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	}
 	return nil
 }
+
+var errRequestBodyTooLarge = errors.New("请求体超过大小限制")
 
 // decodeJSONObject 在 decodeJSON 之上要求请求体是一个 JSON 对象（非 null）。
 // JSON `null` 解进 map 会得到 nil map 且不报错；若继续走 PATCH 路径，
@@ -1737,6 +1749,10 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	if errors.Is(err, errRequestBodyTooLarge) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "请求体超过 2 MiB 限制"})
+		return
+	}
 	if errors.Is(err, storage.ErrJobQueueFull) {
 		w.Header().Set("Retry-After", "60")
 	}

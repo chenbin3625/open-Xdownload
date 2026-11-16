@@ -61,7 +61,7 @@ func (rl *rateLimiter) before(ctx context.Context, path string) error {
 		}
 		rl.mu.Lock()
 		now := time.Now()
-		readyAt := rl.readyAtLocked(path, now)
+		readyAt, pacing := rl.readyReasonLocked(path, now)
 		if !readyAt.After(now) {
 			state, ok := rl.limits[path]
 			if ok && state.ready && now.Before(state.reset) {
@@ -74,7 +74,7 @@ func (rl *rateLimiter) before(ctx context.Context, path string) error {
 		rl.mu.Unlock()
 		wait := time.Until(readyAt)
 		if yieldsOnRateLimit(ctx) || wait > maxLocalRateLimitWait {
-			return &RateLimitedError{Path: path, RetryAt: readyAt, Cause: errRateLimitBusyWait}
+			return &RateLimitedError{Path: path, RetryAt: readyAt, Cause: errRateLimitBusyWait, Pacing: pacing}
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -88,7 +88,15 @@ func (rl *rateLimiter) before(ctx context.Context, path string) error {
 
 // 调用方持有 mu；账号冷却优先，接口配额和主动匀速都使用同一个可恢复时间。
 func (rl *rateLimiter) readyAtLocked(path string, now time.Time) time.Time {
+	readyAt, _ := rl.readyReasonLocked(path, now)
+	return readyAt
+}
+
+// readyReasonLocked 与 readyAtLocked 相同，并报告阻塞是否仅来自"配额内的主动匀速"
+// （nextRequest），而不是账号冷却或配额耗尽。只有后者才是真正的限流。
+func (rl *rateLimiter) readyReasonLocked(path string, now time.Time) (time.Time, bool) {
 	var readyAt time.Time
+	pacing := false
 	if !rl.accountUntil.IsZero() {
 		readyAt = rl.accountUntil.Add(5 * time.Second)
 	}
@@ -100,9 +108,20 @@ func (rl *rateLimiter) readyAtLocked(path string, now time.Time) time.Time {
 			}
 		} else if now.Before(state.reset) && state.nextRequest.After(readyAt) {
 			readyAt = state.nextRequest
+			// 账号仍在冷却时不能把等待归因为匀速。
+			pacing = !rl.accountUntil.Add(5 * time.Second).After(now)
 		}
 	}
-	return readyAt
+	return readyAt, pacing
+}
+
+// pacingOnly 报告 path 当前是否只因主动匀速而暂时不可用。
+func (rl *rateLimiter) pacingOnly(path string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	readyAt, pacing := rl.readyReasonLocked(path, now)
+	return pacing && readyAt.After(now)
 }
 
 func (rl *rateLimiter) after(path string, header http.Header) {

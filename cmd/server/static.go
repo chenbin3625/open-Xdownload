@@ -158,7 +158,9 @@ func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) 
 		// identity on disk — ignore Range and serve the negotiated body.
 		if r.Header.Get("Range") != "" && fileExists(fsys, name) {
 			setCacheControl(w, name)
-			fileServer.ServeHTTP(w, r)
+			rangeReq := r.Clone(r.Context())
+			rangeReq.URL.Path = "/" + name
+			fileServer.ServeHTTP(w, rangeReq)
 			return
 		}
 
@@ -259,6 +261,9 @@ type cachedAsset struct {
 	// 外部 webDir 部分重建时 identity 与 .br/.gz 可能来自不同版本，若 ETag 取自
 	// identity 而 body 取自 sidecar，就会出现同一 ETag 对应两份内容（缓存串味）。
 	hashes map[string]uint64
+	// cachedBytes 由 assetCache.mu 保护；onGrow 在表示惰性生成时更新预算。
+	cachedBytes int64
+	onGrow      func(int64)
 }
 
 type assetSource struct {
@@ -272,10 +277,16 @@ func (a *cachedAsset) ensureIdentity() []byte {
 	}
 	if len(a.brotli) > 0 {
 		a.identity = decompressBytes(a.brotli, httpx.EncodingBrotli)
+		if a.onGrow != nil {
+			a.onGrow(int64(len(a.identity)))
+		}
 		return a.identity
 	}
 	if len(a.gzip) > 0 {
 		a.identity = decompressBytes(a.gzip, httpx.EncodingGzip)
+		if a.onGrow != nil {
+			a.onGrow(int64(len(a.identity)))
+		}
 		return a.identity
 	}
 	return nil
@@ -288,11 +299,17 @@ func (a *cachedAsset) body(encoding string) []byte {
 	case httpx.EncodingBrotli:
 		if len(a.brotli) == 0 {
 			a.brotli = compressBytes(a.ensureIdentity(), encoding)
+			if a.onGrow != nil {
+				a.onGrow(int64(len(a.brotli)))
+			}
 		}
 		return a.brotli
 	case httpx.EncodingGzip:
 		if len(a.gzip) == 0 {
 			a.gzip = compressBytes(a.ensureIdentity(), encoding)
+			if a.onGrow != nil {
+				a.onGrow(int64(len(a.gzip)))
+			}
 		}
 		return a.gzip
 	default:
@@ -326,6 +343,7 @@ type assetCache struct {
 	fsys  http.FileSystem
 	mu    sync.Mutex
 	items map[string]*cachedAsset
+	bytes int64
 }
 
 func newAssetCache(fsys http.FileSystem) *assetCache {
@@ -371,16 +389,36 @@ func (c *assetCache) get(name string) (*cachedAsset, bool) {
 		ctype:    contentTypeFor(name),
 		sources:  sources,
 	}
+	item.cachedBytes = int64(len(identity) + len(gzipBody) + len(brotliBody))
+	item.onGrow = func(delta int64) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.items[name] != item {
+			return
+		}
+		item.cachedBytes += delta
+		c.bytes += delta
+		if c.bytes > maxStaticCacheBytes {
+			clear(c.items)
+			c.bytes = 0
+		}
+	}
 
 	c.mu.Lock()
 	if existing, ok := c.items[name]; ok && existing.sources == sources {
 		c.mu.Unlock()
 		return existing, true
 	}
-	if len(c.items) >= 128 {
+	if previous := c.items[name]; previous != nil {
+		c.bytes -= previous.cachedBytes
+	}
+	itemBytes := item.cachedBytes
+	if len(c.items) >= 128 || c.bytes+itemBytes > maxStaticCacheBytes {
 		clear(c.items)
+		c.bytes = 0
 	}
 	c.items[name] = item
+	c.bytes += itemBytes
 	c.mu.Unlock()
 	return item, true
 }
@@ -393,6 +431,7 @@ func isCompressionSidecar(name string) bool {
 // maxStaticAssetBytes 是单个静态资源解压后的上限。超过此值的 sidecar 按损坏处理，
 // 防止极小压缩包解压打爆内存（外部 --web-dir 场景）。正常 SPA 产物远小于此值。
 const maxStaticAssetBytes = 32 << 20 // 32 MiB
+const maxStaticCacheBytes = 256 << 20
 
 func readOptional(fsys http.FileSystem, name string) []byte {
 	file, err := fsys.Open(name)

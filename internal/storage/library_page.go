@@ -239,24 +239,22 @@ type libraryQuery struct {
 }
 
 func buildLibraryQuery(filter LibraryFilter, snap *librarySnapshot) libraryQuery {
-	conds := make([]string, 0, 3)
 	args := make([]any, 0, 6)
-	if kindSQL, kindArgs, kindOK := libraryKindSQL("d.file_path", filter.Kind); !kindOK {
+	kindSQL, kindArgs, kindOK := libraryKindSQL("d.file_path", filter.Kind)
+	if !kindOK {
 		return libraryQuery{noMatch: true}
-	} else if kindSQL != "" {
-		conds = append(conds, kindSQL)
-		args = append(args, kindArgs...)
-	}
-	if filter.Search != "" {
-		conds = append(conds, "(instr(lower(d.file_path), ?) > 0 OR instr(lower(d.media_url), ?) > 0 OR instr(lower(d.tweet_id), ?) > 0)")
-		args = append(args, filter.Search, filter.Search, filter.Search)
 	}
 	result := libraryQuery{}
-	if len(conds) > 0 {
-		result.where = "WHERE " + strings.Join(conds, " AND ")
-	}
 	result.args = args
 	var entryConds []string
+	if kindSQL != "" {
+		entryConds = append(entryConds, strings.ReplaceAll(kindSQL, "d.file_path", "file_path"))
+		result.args = append(result.args, kindArgs...)
+	}
+	if filter.Search != "" {
+		entryConds = append(entryConds, "(instr(lower(file_path), ?) > 0 OR instr(lower(media_url), ?) > 0 OR instr(lower(tweet_id), ?) > 0)")
+		result.args = append(result.args, filter.Search, filter.Search, filter.Search)
+	}
 	if filter.User != libraryKindAll {
 		if filter.User == libraryUserUnknown {
 			// 目录前缀可能很多，无作者记录的目录归属留到 Go 侧逐条判定。
@@ -419,12 +417,7 @@ func (s *Store) countLibraryEntries(ctx context.Context, query libraryQuery) (in
 		return 0, nil
 	}
 	var total int
-	sqlText := `SELECT COUNT(*) FROM (
-	SELECT 1 FROM downloads d ` + query.where + `
-	GROUP BY CASE WHEN d.file_path = '' THEN 'record:' || d.id ELSE d.file_path END)`
-	if query.entryWhere != "" {
-		sqlText = "SELECT COUNT(*) FROM (" + libraryEntriesSQL(query) + ")"
-	}
+	sqlText := "SELECT COUNT(*) FROM (" + libraryEntriesSQL(query) + ")"
 	err := s.db.GetContext(ctx, &total, sqlText, query.args...)
 	return total, err
 }

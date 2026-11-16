@@ -492,6 +492,18 @@ func ParseCookiePairs(raw string) []AuthCookie {
 			return pairs
 		}
 	}
+	var single cookieJSON
+	if json.Unmarshal([]byte(raw), &single) == nil && (single.AuthToken != "" || single.AuthToken2 != "" || single.CSRFToken != "" || single.CT0 != "") {
+		auth := single.AuthToken
+		if auth == "" {
+			auth = single.AuthToken2
+		}
+		csrf := single.CSRFToken
+		if csrf == "" {
+			csrf = single.CT0
+		}
+		return []AuthCookie{{ID: strings.TrimSpace(single.ID), AuthToken: strings.TrimSpace(auth), CSRFToken: strings.TrimSpace(csrf)}}
+	}
 	blocks := strings.Split(raw, "\n")
 	pairs := make([]AuthCookie, 0, len(blocks))
 	current := AuthCookie{}
