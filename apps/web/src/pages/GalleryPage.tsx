@@ -14,6 +14,7 @@ import {
   Image as ImageIcon,
   PictureInPicture,
   Search,
+  Users,
   Video,
   X,
 } from "lucide-react";
@@ -23,8 +24,11 @@ import { Button, Card, Checkbox, Input, InputNumber, RadioGroup, Select } from "
 import {
   formatBytes,
   getLibraryDownloadsPage,
+  getLibraryUsers,
   libraryDownloadsQueryRoot,
+  libraryUsersQueryRoot,
   type DownloadRecord,
+  type LibraryUserSummary,
 } from "../lib/api";
 import { copyToClipboard, formatDateTime, getErrorMessage } from "../components/common/CommonUI";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
@@ -281,9 +285,56 @@ const GalleryCard = React.memo(function GalleryCard({
   );
 });
 
+/** 账号卡片：用头像 + X 名字区分不同归档账号，点击进入该账号的媒体列表。 */
+const UserCard = React.memo(function UserCard({
+  summary,
+  onOpen,
+}: {
+  summary: LibraryUserSummary;
+  onOpen: (screenName: string) => void;
+}) {
+  useTranslation();
+  const initial = (summary.displayName || summary.screenName).trim().charAt(0).toUpperCase();
+  return (
+    <Card shadows="hover" className="gallery-card min-w-0" bodyStyle={{ padding: 12 }}>
+      <button
+        type="button"
+        onClick={() => onOpen(summary.screenName)}
+        className="flex w-full cursor-pointer items-center gap-3 border-0 bg-transparent p-0 text-left"
+        aria-label={t("查看 @{{value0}} 的媒体", { value0: summary.screenName })}
+      >
+        {summary.avatarUrl ? (
+          <img
+            src={summary.avatarUrl}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            className="size-12 shrink-0 rounded-full border border-line object-cover"
+          />
+        ) : (
+          <span className="flex size-12 shrink-0 items-center justify-center rounded-full border border-line bg-surface-muted text-base font-semibold text-fg-muted">
+            {initial || <Users className="size-5" />}
+          </span>
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium text-fg">{summary.displayName || summary.screenName}</span>
+          <span className="block truncate font-mono text-xs text-fg-muted">@{summary.screenName}</span>
+        </span>
+      </button>
+      <div className="gallery-card-meta mt-3">
+        <span>{t("{{value0}} 个媒体 · {{value1}}", { value0: summary.mediaCount, value1: formatBytes(summary.totalBytes) })}</span>
+        <time>{formatDateTime(summary.latestAt)}</time>
+      </div>
+    </Card>
+  );
+});
+
 export function GalleryPage({ filter: controlledFilter, onFilterChange }: GalleryPageProps) {
   useTranslation();
   const [localFilter, setLocalFilter] = useState<GalleryRouteState>(defaultGalleryFilter);
+  // 归档库的两种浏览方式：媒体网格 / 按账号卡片。
+  const [viewMode, setViewMode] = useState<"media" | "users">("media");
   const filter = controlledFilter ?? localFilter;
   const updateFilter = useCallback(
     (patch: Partial<GalleryRouteState>, options?: { replace?: boolean }) => {
@@ -310,6 +361,14 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
     ? t("开始日期不能晚于结束日期")
     : filter.minBytes !== "" && filter.maxBytes !== "" && Number(filter.minBytes) > Number(filter.maxBytes)
       ? t("最小体积不能大于最大体积") : "";
+
+  // 只有切到「按账号」时才拉聚合数据，避免每次进归档库都多一次全量扫描。
+  const usersQuery = useQuery({
+    queryKey: libraryUsersQueryRoot,
+    queryFn: getLibraryUsers,
+    enabled: viewMode === "users",
+    staleTime: 30_000,
+  });
 
   const libraryQuery = useQuery({
     queryKey: [
@@ -515,8 +574,21 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       <div className="page-heading">
         <h1 className="page-title">{t("媒体归档库")}</h1>
         <div className="page-actions">
-          <RadioGroup type="button" buttonSize="middle" aria-label={t("媒体视图")} value={view} onChange={event => setView(event.target.value)} options={[{ value: "grid", label: <span title={t("网格视图")} aria-label={t("网格视图")}><LayoutGrid size={16} /></span> }, { value: "list", label: <span title={t("列表视图")} aria-label={t("列表视图")}><List size={16} /></span> }]} />
-          {view === "grid" && <><label id="gallery-density-label" className="sr-only">{t("缩略图大小")}</label><Select value={density} aria-labelledby="gallery-density-label" onChange={value => setDensity(String(value))} optionList={[{ value: "standard", label: t("标准缩略图") }, { value: "compact", label: t("紧凑缩略图") }]} /><label id="gallery-fit-label" className="sr-only">{t("缩略图显示方式")}</label><Select value={thumbnailFit} aria-labelledby="gallery-fit-label" onChange={value => setThumbnailFit(value as "contain" | "cover")} optionList={[{ value: "contain", label: t("完整显示") }, { value: "cover", label: t("填充裁剪") }]} /></>}
+          <RadioGroup
+            type="button"
+            buttonSize="middle"
+            aria-label={t("浏览方式")}
+            value={viewMode}
+            onChange={(event) => setViewMode(String(event.target.value) as "media" | "users")}
+            options={[
+              { label: t("媒体"), value: "media" },
+              { label: t("按账号"), value: "users" },
+            ]}
+          />
+          {viewMode === "media" && <>
+            <RadioGroup type="button" buttonSize="middle" aria-label={t("媒体视图")} value={view} onChange={event => setView(event.target.value)} options={[{ value: "grid", label: <span title={t("网格视图")} aria-label={t("网格视图")}><LayoutGrid size={16} /></span> }, { value: "list", label: <span title={t("列表视图")} aria-label={t("列表视图")}><List size={16} /></span> }]} />
+            {view === "grid" && <><label id="gallery-density-label" className="sr-only">{t("缩略图大小")}</label><Select value={density} aria-labelledby="gallery-density-label" onChange={value => setDensity(String(value))} optionList={[{ value: "standard", label: t("标准缩略图") }, { value: "compact", label: t("紧凑缩略图") }]} /><label id="gallery-fit-label" className="sr-only">{t("缩略图显示方式")}</label><Select value={thumbnailFit} aria-labelledby="gallery-fit-label" onChange={value => setThumbnailFit(value as "contain" | "cover")} optionList={[{ value: "contain", label: t("完整显示") }, { value: "cover", label: t("填充裁剪") }]} /></>}
+          </>}
         </div>
       </div>
       <div className="page-toolbar gallery-toolbar">
@@ -637,6 +709,40 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         <Alert type="warning" message={t("媒体库索引已达上限，当前仅显示最近的记录")} />
       )}
 
+      {/* 按账号浏览：头像 + 名字的卡片网格，点卡片回到该账号的媒体列表 */}
+      {viewMode === "users" ? (
+        usersQuery.isLoading ? (
+          <div className="gallery-grid">
+            {Array.from({ length: 8 }, (_, index) => (
+              <Card key={index} bodyStyle={{ padding: 12 }}>
+                <div className="flex items-center gap-3">
+                  <Skeleton className="size-12 rounded-full" />
+                  <div className="flex-1 space-y-2">
+                    <Skeleton className="h-3 w-3/5" />
+                    <Skeleton className="h-2.5 w-2/5" />
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        ) : (usersQuery.data?.items.length ?? 0) === 0 ? (
+          <Empty description={t("还没有可浏览的账号")} />
+        ) : (
+          <div className="gallery-grid">
+            {(usersQuery.data?.items ?? []).map((summary) => (
+              <UserCard
+                key={summary.screenName}
+                summary={summary}
+                onOpen={(screenName) => {
+                  setViewMode("media");
+                  updateFilter({ user: screenName, page: 1 });
+                }}
+              />
+            ))}
+          </div>
+        )
+      ) : (
+        <>
       {/* 媒体内容流展示 */}
       {libraryQuery.isLoading ? (
         <div className="gallery-grid">
@@ -706,6 +812,9 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             onPageChange={goToPage}
           />
         </div>
+      )}
+
+        </>
       )}
 
       {/* 沉浸式多媒体灯箱预览弹窗 */}

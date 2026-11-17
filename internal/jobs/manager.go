@@ -3037,6 +3037,7 @@ func storageUser(user xapi.User) storage.User {
 		ID:           user.ID,
 		ScreenName:   user.ScreenName,
 		Name:         user.Name,
+		AvatarURL:    user.AvatarURL,
 		Protected:    user.Protected,
 		FriendsCount: user.FriendsCount,
 		MediaCount:   user.MediaCount,

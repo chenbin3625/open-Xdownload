@@ -804,6 +804,13 @@ func init() {
 		"jobs(archive_mode,available_at,available_ns,backfill,created_at,",
 		"jobs(archive_mode,available_at,available_ns,backfill,batch_size,created_at,", 1)
 	schemaColumnsForVersion[11] = v11
+
+	// v12 在 v11 基础上：users 增加 avatar_url（归档库按用户浏览时显示头像）。
+	v12 := strings.Replace(v11,
+		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
+		"users(avatar_url,friends_count,id,media_count,name,protected,screen_name,updated_at)", 1)
+	schemaColumnsForVersion[12] = v12
+
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {

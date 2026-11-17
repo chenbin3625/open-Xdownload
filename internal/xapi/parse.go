@@ -172,6 +172,7 @@ func ParseUser(raw gjson.Result) (User, error) {
 		ID:           id,
 		Name:         FirstString(raw.Get("core.name"), legacy.Get("name")),
 		ScreenName:   FirstString(raw.Get("core.screen_name"), legacy.Get("screen_name")),
+		AvatarURL:    NormalizeAvatarURL(FirstString(raw.Get("avatar.image_url"), legacy.Get("profile_image_url_https"))),
 		Protected:    FirstBool(raw.Get("privacy.protected"), legacy.Get("protected")),
 		FriendsCount: int(legacy.Get("friends_count").Int()),
 		MediaCount:   int(legacy.Get("media_count").Int()),
@@ -273,6 +274,21 @@ func FirstString(values ...gjson.Result) string {
 		}
 	}
 	return ""
+}
+
+// NormalizeAvatarURL 把 X 返回的 48px 缩略头像地址换成 400px 版本；两个接口给的
+// 尺寸后缀不同（_normal / _bigger / _mini），这里统一成 _400x400，列表里更清晰。
+func NormalizeAvatarURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	for _, suffix := range []string{"_normal.", "_bigger.", "_mini."} {
+		if strings.Contains(value, suffix) {
+			return strings.Replace(value, suffix, "_400x400.", 1)
+		}
+	}
+	return value
 }
 
 func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, string, error) {

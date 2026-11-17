@@ -23,6 +23,7 @@ type User struct {
 	ID           string
 	Name         string
 	ScreenName   string
+	AvatarURL    string
 	Protected    bool
 	FriendsCount int
 	MediaCount   int

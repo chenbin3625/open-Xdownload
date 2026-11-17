@@ -63,6 +63,7 @@ func TestParseUserReadsRelocatedFields(t *testing.T) {
 		"__typename": "User",
 		"rest_id": "u1",
 		"core": {"screen_name": "owner", "name": "Owner"},
+		"avatar": {"image_url": "https://pbs.twimg.com/profile_images/1/a_normal.jpg"},
 		"privacy": {"protected": true},
 		"relationship_perspectives": {"following": true},
 		"legacy": {"media_count": 7, "friends_count": 3}
@@ -73,6 +74,9 @@ func TestParseUserReadsRelocatedFields(t *testing.T) {
 	}
 	if user.ScreenName != "owner" || user.Name != "Owner" || !user.Protected || !user.Following || user.MediaCount != 7 {
 		t.Fatalf("user = %+v, want relocated fields parsed", user)
+	}
+	if user.AvatarURL != "https://pbs.twimg.com/profile_images/1/a_400x400.jpg" {
+		t.Fatalf("AvatarURL = %q, want 400x400 avatar", user.AvatarURL)
 	}
 }
 
