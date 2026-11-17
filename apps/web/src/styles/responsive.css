@@ -311,22 +311,20 @@
     flex-direction: column;
   }
 
-  /* 推文归档紧凑视图 */
+  /* 推文归档紧凑视图：单列时媒体移到正文下方。 */
   .tweet-archive-compact .tweet-has-media {
     grid-template-columns: minmax(0, 1fr);
-    gap: 8px;
+    gap: 10px;
   }
 
-  .tweet-archive-compact .tweet-media {
-    width: min(100%, 176px);
-  }
-
+  .tweet-archive-compact .tweet-has-media > .tweet-media,
   .tweet-archive-compact .tweet-media-multiple {
     width: min(100%, 358px);
   }
 
-  .tweet-identity time {
+  .tweet-archive-meta {
     flex-basis: 100%;
+    margin-left: 0;
   }
 
   .archive-retweets {
@@ -344,8 +342,11 @@
 
   /* 推文媒体、描述列表、分页 */
   .tweet-media {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    max-width: 488px;
+    max-width: 100%;
+  }
+
+  .tweet-media-count-4 {
+    aspect-ratio: 4 / 3;
   }
 
   .semi-description-grid {

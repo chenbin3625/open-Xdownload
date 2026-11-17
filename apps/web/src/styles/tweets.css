@@ -41,10 +41,13 @@
   gap: 8px;
 }
 
-/* ---------------- 推文列表 ---------------- */
+/* ---------------- 推文列表：X 时间线 ---------------- */
 
 .tweet-list {
+  width: 100%;
+  max-width: 760px;
   min-width: 0;
+  margin-inline: auto;
 }
 
 .tweet-list:not(:empty) {
@@ -58,47 +61,117 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 12px;
-  padding: 20px;
+  gap: 8px;
+  padding: 16px 18px;
+  transition: background-color 0.15s ease;
 }
 
 .tweet-entry + .tweet-entry {
   border-top: 1px solid var(--line);
 }
 
-.tweet-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
+.tweet-entry:hover {
+  background: var(--surface-muted);
 }
 
-.tweet-header .semi-avatar {
-  flex-shrink: 0;
+.tweet-context {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  margin-left: 52px;
+  color: var(--fg-muted);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.tweet-context:hover {
+  color: var(--semi-color-link);
+}
+
+.tweet-layout {
+  display: flex;
+  min-width: 0;
+  gap: 12px;
+}
+
+.tweet-avatar {
+  flex: none;
+}
+
+.tweet-avatar .semi-avatar {
+  font-weight: 600;
+}
+
+.tweet-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.tweet-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
 }
 
 .tweet-identity {
   display: flex;
+  min-width: 0;
   flex: 1;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 2px 8px;
-  min-width: 0;
+  gap: 2px 6px;
   overflow-wrap: anywhere;
 }
 
-.tweet-identity time {
-  white-space: nowrap;
+.tweet-name {
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .tweet-author {
   min-width: 0;
   max-width: 100%;
   padding: 0;
+  color: var(--fg-muted);
+  font-size: 14px;
   text-align: left;
-  color: var(--accent-active);
   overflow-wrap: anywhere;
   cursor: pointer;
+}
+
+.tweet-author:hover {
+  color: var(--semi-color-link);
+  text-decoration: underline;
+}
+
+.tweet-separator,
+.tweet-identity time {
+  color: var(--fg-muted);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.tweet-reply-context {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.tweet-reply-context:hover {
+  color: var(--semi-color-link);
 }
 
 .tweet-content,
@@ -107,11 +180,16 @@
   min-width: 0;
 }
 
+.tweet-content {
+  margin-top: 3px;
+}
+
 .tweet-copy {
   display: flex;
+  max-width: 920px;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: 8px;
 }
 
 .tweet-copy > .tweet-text {
@@ -121,7 +199,8 @@
 .tweet-body {
   margin: 0;
   color: var(--fg-body);
-  line-height: 1.65;
+  font-size: 15px;
+  line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -133,20 +212,302 @@
   overflow: hidden;
 }
 
-.tweet-expand.semi-button {
-  margin-top: 2px;
+.tweet-entity {
+  color: var(--semi-color-link);
+  text-decoration: none;
 }
 
-.tweet-repost {
+.tweet-entity:hover {
+  text-decoration: underline;
+}
+
+.tweet-body mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: var(--semi-color-warning-light-default);
+  color: inherit;
+}
+
+.tweet-expand.semi-button {
+  height: auto;
+  margin-top: -2px;
+  padding: 0;
+  color: var(--semi-color-link);
+}
+
+.tweet-note {
+  color: var(--fg-muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.tweet-note:hover {
+  color: var(--semi-color-link);
+  text-decoration: underline;
+}
+
+.tweet-media-error {
+  margin: 0;
+  color: var(--semi-color-danger);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* 主媒体：1 张全宽，2 张并排，3 张左大右小，4 张九宫格。 */
+.tweet-media {
+  position: relative;
+  display: grid;
+  width: 100%;
+  max-width: 516px;
+  margin-top: 2px;
+  gap: 2px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-medium);
+  background: var(--surface-muted);
+}
+
+.tweet-media-count-1,
+.tweet-media-count-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tweet-media-count-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.tweet-media-count-3 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  aspect-ratio: 16 / 11;
+}
+
+.tweet-media-count-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  aspect-ratio: 1 / 1;
+}
+
+.tweet-media-count-1 .tweet-media-item,
+.tweet-media-count-2 .tweet-media-item {
+  aspect-ratio: 16 / 10;
+}
+
+.tweet-media-count-3 .tweet-media-item:first-child {
+  grid-row: span 2;
+}
+
+.tweet-media-item {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--surface-muted);
+}
+
+.tweet-media-item button {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.tweet-media img,
+.tweet-media video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tweet-play-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--semi-color-overlay-bg, rgba(0, 0, 0, 0.55));
+  color: var(--semi-color-white);
+  transform: translate(-50%, -50%);
+}
+
+.tweet-media-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--semi-color-overlay-bg, rgba(0, 0, 0, 0.65));
+  color: var(--semi-color-white);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.tweet-media-count {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--semi-color-white);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.tweet-more-media {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--semi-color-overlay-bg, rgba(0, 0, 0, 0.7));
+  color: var(--semi-color-white);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 引用推文卡片 */
+.tweet-quote {
+  display: flex;
+  width: 100%;
+  max-width: 516px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-medium);
+  background: var(--canvas);
+}
+
+.tweet-quote-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.tweet-quote-author {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.tweet-quote-author strong {
+  font-size: 14px;
+}
+
+.tweet-quote-author span,
+.tweet-quote-header time {
+  color: var(--fg-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.tweet-quote .tweet-body {
+  font-size: 14px;
+}
+
+.tweet-quote .tweet-body-clamped {
+  -webkit-line-clamp: 3;
+}
+
+.tweet-quote-media {
+  display: grid;
+  gap: 2px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-small);
+}
+
+.tweet-quote-media.tweet-media-count-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.tweet-quote-media.tweet-media-count-2,
+.tweet-quote-media.tweet-media-count-3 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tweet-quote-media.tweet-media-count-3 .tweet-media-item:first-child {
+  grid-row: span 2;
+}
+
+.tweet-quote-media .tweet-media-item {
+  aspect-ratio: 16 / 10;
+}
+
+.tweet-quote-media.tweet-media-count-2 .tweet-media-item {
+  aspect-ratio: 16 / 10;
+}
+
+/* 归档详情抽屉里的关联推文 */
+.tweet-related {
+  align-self: stretch;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--canvas);
+  overflow-wrap: anywhere;
+}
+
+.tweet-related > a {
+  color: var(--semi-color-link);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.tweet-related .tweet-body {
+  margin-top: 4px;
+}
+
+/* 操作栏与归档元信息 */
+.tweet-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 8px;
+}
+
+.tweet-action.semi-button,
+.tweet-toolbar .tweet-original {
+  color: var(--fg-muted);
+}
+
+.tweet-action.semi-button:hover,
+.tweet-toolbar .tweet-original:hover {
+  background: var(--surface-hover);
+  color: var(--semi-color-link);
+}
+
+.tweet-toolbar .semi-button {
+  height: 28px;
 }
 
 .tweet-relations {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  gap: 2px 10px;
+  color: var(--fg-muted);
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -154,102 +515,90 @@
   display: none;
 }
 
-.tweet-media {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 240px));
-  gap: 6px;
-  margin-top: 10px;
+.tweet-relations a {
+  color: var(--fg-muted);
+  text-decoration: none;
 }
 
-.tweet-media-item {
-  aspect-ratio: 16 / 10;
-  min-width: 0;
-  overflow: hidden;
+.tweet-relations a:hover {
+  color: var(--semi-color-link);
+  text-decoration: underline;
 }
 
-.tweet-media-item button {
-  display: block;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  cursor: zoom-in;
-}
-
-.tweet-media img,
-.tweet-media video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.tweet-related {
-  align-self: stretch;
-  min-width: 0;
-  margin: 0;
-  padding: 6px 10px;
-  border-left: 2px solid var(--line-strong);
-  background: var(--canvas);
-  overflow-wrap: anywhere;
-}
-
-.tweet-related .tweet-body {
-  margin-top: 4px;
-}
-
-.tweet-related .tweet-body-clamped {
-  -webkit-line-clamp: 2;
-}
-
-.tweet-archive-compact .tweet-entry {
-  padding-block: 14px;
-  gap: 8px;
-}
-
-.tweet-archive-compact .tweet-has-media {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 216px;
-  align-items: start;
-  gap: 16px;
-}
-
-.tweet-archive-compact .tweet-media {
-  margin-top: 0;
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.tweet-archive-compact .tweet-media-multiple {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.tweet-retry.semi-button {
+  height: 26px;
+  color: var(--fg-muted);
+  font-size: 12px;
 }
 
 .tweet-archive-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 16px;
-  margin-top: 10px;
-  color: var(--fg-muted);
+  align-items: center;
+  gap: 4px 12px;
+  margin-left: auto;
+  color: var(--fg-subtle);
   font-size: 12px;
 }
 
-.tweet-copy {
-  min-width: 0;
-  max-width: 920px;
+.tweet-archive-meta a {
+  color: inherit;
 }
 
-.tweet-play-icon {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
+.tweet-archive-meta a:hover {
+  color: var(--semi-color-link);
 }
 
-.tweet-more-media {
-  min-height: 32px;
-  cursor: pointer;
+/* 紧凑视图：媒体缩到正文右侧，保持一屏多条。 */
+.tweet-archive-compact .tweet-entry {
+  gap: 6px;
+  padding-block: 12px;
+}
+
+.tweet-archive-compact .tweet-layout {
+  gap: 10px;
+}
+
+.tweet-archive-compact .tweet-context {
+  margin-left: 50px;
+}
+
+.tweet-archive-compact .tweet-body {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.tweet-archive-compact .tweet-has-media {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 196px;
+  align-items: start;
+  gap: 16px;
+}
+
+.tweet-archive-compact .tweet-has-media > .tweet-media {
+  max-width: none;
+  margin-top: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 0;
+  border-radius: var(--semi-border-radius-small);
+  background: transparent;
+}
+
+.tweet-archive-compact .tweet-has-media > .tweet-media-count-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.tweet-archive-compact .tweet-has-media > .tweet-media .tweet-media-item {
+  aspect-ratio: 1 / 1;
+}
+
+.tweet-archive-compact .tweet-has-media > .tweet-media.tweet-media-count-1 .tweet-media-item {
+  aspect-ratio: 16 / 10;
+}
+
+.tweet-archive-compact .tweet-action.semi-button,
+.tweet-archive-compact .tweet-toolbar .tweet-original {
+  height: 26px;
 }
 
 .tweet-detail-file {
@@ -301,18 +650,4 @@
   .archive-filters:not(.archive-filters-expanded) .archive-filter-fields {
     display: none;
   }
-}
-
-.tweet-archive-compact .tweet-media-item {
-  aspect-ratio: 16 / 10;
-  min-height: 0;
-}
-
-.tweet-media-item button {
-  position: relative;
-}
-
-.tweet-media-item {
-  border-radius: var(--semi-border-radius-small);
-  background: var(--surface-muted);
 }

@@ -38,6 +38,7 @@ import {
   copyToClipboard,
   formatDateTime,
   getErrorMessage,
+  JobKindIcon,
   kindLabel,
   notifyError,
   writeClipboard,
@@ -60,6 +61,16 @@ import { toast } from "../components/semi";
 import { cn } from "../lib/cn";
 
 export type StatusFilterType = "all" | "active" | "completed" | "failed";
+
+const jobKindFilterValues = [
+  "tweet_link",
+  "user",
+  "list",
+  "following",
+  "failed_retry",
+  "media_url",
+  "asset_migration",
+] as const;
 
 export interface TaskCenterPageProps {
   jobs: Job[];
@@ -376,7 +387,7 @@ export function TaskCenterPage({
       render: (record) => (
         <div className="flex min-w-0 items-center gap-2.5 py-0.5">
           <Avatar>
-            {record.kind === "user" ? "@" : "𝕏"}
+            <JobKindIcon kind={record.kind} className="size-4" />
           </Avatar>
           <div className="min-w-0 flex-1">
             <button type="button" className="task-title-link" onClick={() => openJobDetails(record.id)} title={record.title || kindLabel(record.kind)}>
@@ -392,9 +403,9 @@ export function TaskCenterPage({
     {
       key: "kind",
       title: t("类型"),
-      width: 96,
+      width: 120,
       render: (record) => (
-        <Tag tone="default">
+        <Tag tone="default" icon={<JobKindIcon kind={record.kind} />}>
           {kindLabel(record.kind)}
         </Tag>
       ),
@@ -597,13 +608,7 @@ export function TaskCenterPage({
             aria-label={t("任务类型")}
             optionList={[
               { value: "all", label: t("全部任务类型") },
-              { value: "tweet_link", label: t("单条推文") },
-              { value: "user", label: t("用户媒体") },
-              { value: "list", label: t("列表媒体") },
-              { value: "following", label: t("关注媒体") },
-              { value: "failed_retry", label: t("重试任务") },
-              { value: "media_url", label: t("媒体链接") },
-              { value: "asset_migration", label: t("文件整理") },
+              ...jobKindFilterValues.map((kind) => ({ value: kind, label: kindLabel(kind) })),
             ]}
           />
         </div>
@@ -738,7 +743,7 @@ function MobileJobCard({
           <JobProgress job={job} />
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
-          <Tag>{kindLabel(job.kind)}</Tag>
+          <Tag icon={<JobKindIcon kind={job.kind} />}>{kindLabel(job.kind)}</Tag>
           <span className="font-mono">#JOB-{job.id}</span>
           <time className="ml-auto font-mono text-xs" dateTime={job.updatedAt}>{formatDateTime(job.updatedAt)}</time>
         </div>

@@ -162,6 +162,23 @@ describe("TaskCenterPage 移动端", () => {
     await waitFor(() => expect(screen.queryByText("pic1.jpg")).toBeNull());
   });
 
+  it("在任务列表里区分用户归档与关注归档", () => {
+    const jobs: Job[] = [
+      { ...mockJobs[1], id: 21, kind: "user", title: "用户 alice", input: "@alice" },
+      { ...mockJobs[1], id: 22, kind: "following", title: "关注 alice", input: "@alice" },
+    ];
+    renderWithClient(
+      <TaskCenterPage
+        {...props}
+        jobs={jobs}
+        pagination={{ page: 1, pageSize: 20, total: 2, totalPages: 1 }}
+      />,
+    );
+
+    expect(screen.getByText("用户归档")).toBeTruthy();
+    expect(screen.getByText("关注归档")).toBeTruthy();
+  });
+
   it("保留取消、重试与搜索操作", async () => {
     const user = userEvent.setup();
     const activeJob = { ...mockJobs[0], id: 4, status: "downloading" as const };

@@ -216,3 +216,37 @@ it.each(["m4v", "ogv"])("plays archived .%s media as video with a remote poster 
   expect(video?.getAttribute("poster")).toBe("/api/library/downloads/7/preview");
   expect(screen.getByRole("img", { name: "alice · 123" }).getAttribute("src")).toBe("/api/library/downloads/7/preview");
 });
+
+it("renders X-style entities and an embedded quote card without changing the archived text", async () => {
+  const text = "Hello @bob https://t.co/x #archive";
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, text }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+  const { container } = renderArchive();
+  await screen.findByText("Quoted text available offline");
+  const body = container.querySelector(".tweet-body") as HTMLElement;
+  expect(body.textContent).toBe(text);
+  expect(within(body).getByRole("link", { name: "@bob" }).getAttribute("href")).toBe("https://x.com/bob");
+  expect(within(body).getByRole("link", { name: "https://t.co/x" }).getAttribute("href")).toBe("https://t.co/x");
+  expect(within(body).getByRole("link", { name: "#archive" }).getAttribute("href")).toBe("https://x.com/hashtag/archive");
+  const quote = container.querySelector(".tweet-quote") as HTMLElement;
+  expect(within(quote).getByText("Quoted text available offline")).toBeTruthy();
+  expect(within(quote).getByRole("link", { name: /Bob.*@bob/ }).getAttribute("href")).toBe("/tweets?id=122");
+});
+
+it("lays out multiple archived media as an X-style grid with an overflow count", async () => {
+  const downloads = Array.from({ length: 6 }, (_, index) => ({
+    ...tweet.downloads[0],
+    id: 30 + index,
+    mediaUrl: `https://pbs.twimg.com/media/M${index}?format=jpg&name=small`,
+    filePath: `asset:photo/${index}.jpg`,
+    fileUrl: `/api/assets/${index}`,
+  }));
+  vi.mocked(getTweets).mockResolvedValue({ items: [{ ...tweet, downloads }], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } });
+  window.history.replaceState(null, "", "/tweets?view=comfortable");
+  const { container } = renderArchive();
+  await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });
+  const media = container.querySelector(".tweet-media") as HTMLElement;
+  expect(media.className).toContain("tweet-media-count-4");
+  expect(media.querySelectorAll(".tweet-media-item").length).toBe(4);
+  expect(within(media).getByText("+2")).toBeTruthy();
+  expect(container.querySelector(".tweet-entry footer")).toBeNull();
+});

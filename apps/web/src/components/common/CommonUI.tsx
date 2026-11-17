@@ -1,5 +1,5 @@
 import i18n, { t, useTranslation } from "../../lib/i18n";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, FolderSync, HelpCircle, Image as ImageIcon, Link as LinkIcon, List as ListIcon, RotateCcw, User, UserPlus, type LucideIcon } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import type { JobKind } from "../../lib/api";
 import { cn } from "../../lib/cn";
@@ -299,13 +299,29 @@ export function clampPercent(value: number) {
   return Math.min(100, Math.max(0, Math.round(value * 100)));
 }
 
+const jobKindIcons: Record<string, LucideIcon> = {
+  tweet_link: LinkIcon,
+  media_url: ImageIcon,
+  user: User,
+  list: ListIcon,
+  following: UserPlus,
+  failed_retry: RotateCcw,
+  asset_migration: FolderSync,
+};
+
+/** 任务类型图标：与「新建任务」各归档入口保持同一套视觉语言。 */
+export function JobKindIcon({ kind, className }: { kind: JobKind; className?: string }) {
+  const Icon = jobKindIcons[kind] ?? HelpCircle;
+  return <Icon aria-hidden="true" className={cn("size-3.5 shrink-0", className)} />;
+}
+
 export function kindLabel(kind: JobKind) {
   const labels: Record<string, string> = {
-    tweet_link: t("推文链接"),
+    tweet_link: t("单条推文"),
     media_url: t("媒体地址"),
-    user: t("用户"),
-    list: t("列表"),
-    following: t("关注"),
+    user: t("用户归档"),
+    list: t("列表归档"),
+    following: t("关注归档"),
     failed_retry: t("失败重试"),
     asset_migration: t("storage.migrationJob"),
   };
