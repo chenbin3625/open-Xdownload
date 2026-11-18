@@ -1,0 +1,38 @@
+diff --git a/node_modules/picomatch/lib/parse.js b/node_modules/picomatch/lib/parse.js
+index 2920751..931782f 100644
+--- a/node_modules/picomatch/lib/parse.js
++++ b/node_modules/picomatch/lib/parse.js
+@@ -284,6 +284,24 @@ const repeatedExtglobRecursion = pattern => {
+   return depth;
+ };
+ 
++const hasUnboundedBranchQuantifier = branch => {
++  let escaped = false;
++  let bracket = 0;
++  let quote = false;
++  for (let i = 0; i < branch.length; i++) {
++    const ch = branch[i];
++    if (escaped) { escaped = false; continue; }
++    if (ch === '\\') { escaped = true; continue; }
++    if (ch === '"' && bracket === 0) { quote = !quote; continue; }
++    if (quote) continue;
++    if (ch === '[') { bracket++; continue; }
++    if (ch === ']' && bracket > 0) { bracket--; continue; }
++    if (bracket > 0) continue;
++    if (ch === '*' || (ch === '+' && branch[i + 1] === '(')) return true;
++  }
++  return false;
++};
++
+ const analyzeRepeatedExtglob = (body, options) => {
+   if (options.maxExtglobRecursion === false) {
+     return { risky: false };
+@@ -332,7 +350,7 @@ const analyzeRepeatedExtglob = (body, options) => {
+ 
+     combinable = false;
+ 
+-    if (repeatedExtglobRecursion(branch) > max) {
++    if (hasUnboundedBranchQuantifier(branch) || repeatedExtglobRecursion(branch) > max) {
+       return { risky: true };
+     }
+   }

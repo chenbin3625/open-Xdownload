@@ -6,14 +6,16 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:lan": "vite --host 0.0.0.0",
-    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "build": "node scripts/check-picomatch.cjs && tsc --noEmit -p tsconfig.json && vite build",
+    "test:security": "node scripts/check-picomatch.cjs",
     "preview": "vite preview --host 127.0.0.1",
     "preview:lan": "vite preview --host 0.0.0.0",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "postinstall": "patch-package --error-on-fail"
   },
   "dependencies": {
-    "@douyinfe/semi-ui": "^2.104.0",
+    "@douyinfe/semi-ui": "~2.104.0",
     "@tanstack/react-query": "^5.102.8",
     "clsx": "^2.1.1",
     "i18next": "^26.5.12",
@@ -24,6 +26,7 @@
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
+    "patch-package": "^8.0.1",
     "@playwright/test": "^1.65.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/react": "^16.3.3",

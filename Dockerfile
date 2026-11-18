@@ -3,11 +3,12 @@
 FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 WORKDIR /src/apps/web
 COPY apps/web/package*.json ./
+COPY apps/web/patches/ ./patches/
 RUN npm ci
 COPY apps/web ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
 COPY go.mod go.sum ./
