@@ -42,11 +42,7 @@
   color: var(--fg);
   font-size: 16px;
   font-weight: 600;
-  line-height: 1.5;
-}
-
-.settings-page .settings-section-title {
-  margin-bottom: 18px;
+  line-height: 24px;
 }
 
 .settings-section-heading {
@@ -61,11 +57,16 @@
   margin-bottom: 0;
 }
 
+.settings-page .settings-section-title {
+  margin-bottom: 16px;
+}
+
 .settings-subsection-title {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   color: var(--fg);
   font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
 }
 
 /* ---------------- 存储设置 ---------------- */
@@ -206,11 +207,12 @@
   flex-basis: 100%;
 }
 
+/* 概览数字与任务统计卡同一套层级：标签 12/16 弱化，数值 20/28 加重。 */
 .account-overview {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  padding: 16px 0;
   margin: 0 0 20px;
+  padding: 4px 0;
 }
 
 .account-overview > div {
@@ -218,8 +220,27 @@
   padding-inline: 16px;
 }
 
+.account-overview > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.account-overview > div:first-child {
+  padding-left: 0;
+}
+
+.account-overview dt {
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
 .account-overview dd {
-  margin: 6px 0 0;
+  margin: 4px 0 0;
+  color: var(--fg);
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 28px;
 }
 
 .storage-filename-part > span:first-child {
@@ -273,7 +294,7 @@
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  padding: 10px 0;
+  padding: 12px 0;
 }
 
 .settings-toggle-row > div:first-child {
@@ -291,7 +312,9 @@
 /* ---------------- X 账号池 ---------------- */
 
 .settings-section-description {
-  margin: 10px 0 14px;
+  margin: 8px 0 16px;
+  color: var(--fg-muted);
+  line-height: 20px;
 }
 
 .x-accounts-title {
@@ -322,6 +345,7 @@
 }
 
 .x-account-name {
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -336,8 +360,17 @@
   gap: 4px;
 }
 
+.x-account-id {
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
 .x-account-error {
   margin: 0;
+  color: var(--semi-color-danger);
+  font-size: 12px;
+  line-height: 16px;
   overflow-wrap: anywhere;
 }
 
@@ -487,7 +520,7 @@
 /* ---- Flat (non-tabbed) layout ---- */
 
 .settings-flat .semi-settings-section {
-  padding: 22px 0;
+  padding: 24px 0;
   border-top: 1px solid var(--line);
 }
 
@@ -559,6 +592,7 @@
 .settings-general-bar .settings-account-shortcut .settings-section-title {
   margin: 0;
   font-size: 14px;
+  line-height: 20px;
 }
 
 .settings-general-bar .settings-account-shortcut > div {

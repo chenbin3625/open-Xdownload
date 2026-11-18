@@ -140,7 +140,7 @@ export function TweetCard({ tweet, compact, highlight, onFilterAuthor, onOpenDet
   const retryable = shown.media.length > 0 && !["completed", "not_requested"].includes(tweet.mediaStatus);
   return <article className="tweet-entry">
     {display.repostedBy && <a className="tweet-context" href={`/tweets?id=${encodeURIComponent(tweet.retweetedTweetId ?? "")}`}>
-      <Repeat2 size={15} aria-hidden="true" />
+      <Repeat2 size={14} aria-hidden="true" />
       <span>{t("archive.repostedFrom", { author: shown.author.screenName })}</span>
     </a>}
     <div className="tweet-layout">
@@ -171,7 +171,7 @@ export function TweetCard({ tweet, compact, highlight, onFilterAuthor, onOpenDet
           <Tooltip content={t("查看归档详情")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<FileText size={16} />} aria-label={t("查看归档详情")} onClick={onOpenDetail} /></Tooltip>
           <Tooltip content={t("复制正文")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<Copy size={16} />} aria-label={t("复制正文")} onClick={() => void copyToClipboard(shown.text, t("正文"))} /></Tooltip>
           <Tooltip content={t("archive.original")}><a className="tweet-action tweet-original semi-button semi-button-borderless semi-button-tertiary semi-button-with-icon-only" aria-label={t("archive.original")} href={shown.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a></Tooltip>
-          {retryable && <Button className="tweet-retry" size="small" theme="borderless" type="tertiary" icon={<RefreshCw size={13} />} loading={retryPending} disabled={retryPending} aria-busy={retryPending} onClick={() => onRetry(tweet.id)}>{t("archive.retryMedia")}</Button>}
+          {retryable && <Button className="tweet-retry" size="small" theme="borderless" type="tertiary" icon={<RefreshCw size={14} />} loading={retryPending} disabled={retryPending} aria-busy={retryPending} onClick={() => onRetry(tweet.id)}>{t("archive.retryMedia")}</Button>}
           <div className="tweet-relations">{[["replyToId", "archive.reply"], ["quotedTweetId", "archive.quote"], ["retweetedTweetId", "archive.retweet"]].map(([key, label]) => tweet[key as "replyToId" | "quotedTweetId" | "retweetedTweetId"] ? <a key={key} href={`/tweets?id=${encodeURIComponent(tweet[key as "replyToId"]!)}`}>{t(label)} {tweet[key as "replyToId"]}</a> : null)}</div>
           <div className="tweet-archive-meta"><time dateTime={tweet.archivedAt}>{t("归档于")} {formatDateTime(tweet.archivedAt)}</time><span>{tweet.downloads.length} {t("个文件")}</span>{tweet.jobIds.length > 0 && <a href={`/tasks?q=${tweet.jobIds[0]}`}>{t("来源任务")} #{tweet.jobIds[0]}</a>}</div>
         </div>

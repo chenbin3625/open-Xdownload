@@ -66,7 +66,7 @@ export function StorageManagement() {
     setDirty(edited); toast.success({ message: t("storage.saved") });
   }, onError: error => toast.error({ message: error.message }) });
   const migration = useMutation({ mutationFn: migrateStorage, onSuccess: job => { setMigrationId(job.id); void client.invalidateQueries({ queryKey: ["jobs"] }); toast.success({ message: t("storage.migrationQueued") }); }, onError: error => toast.error({ message: error.message }) });
-  if (!draft) return query.isError ? <Alert type="error" message={query.error.message} action={<Button onClick={() => void query.refetch()}>{t("重试")}</Button>} /> : <ListSkeleton rows={3} />;
+  if (!draft) return query.isError ? <Alert type="error" message={query.error.message} action={<Button type="tertiary" onClick={() => void query.refetch()}>{t("重试")}</Button>} /> : <ListSkeleton rows={3} />;
   const target = draft.targets.find(item => item.id === draft.default.targetId);
   function changeRoot(root: string) {
     update({ ...draft!, targets: draft!.targets.map(item => item.id === target?.id ? { ...item, root } : item) });
@@ -95,7 +95,7 @@ export function StorageManagement() {
       <h3 className="settings-subsection-title">{t("storage.location")}</h3>
       <div className={`storage-directory-options ${draft.targets.length > 1 ? "storage-has-targets" : ""}`}>
         {draft.targets.length > 1 && <Field label={t("storage.target")}><Select ariaLabel={t("storage.target")} value={draft.default.targetId} options={draft.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => update({ ...draft, default: { ...draft.default, targetId } })} /></Field>}
-        <Field label={t("保存目录")}><div className="flex min-w-0 gap-2"><Input aria-label={t("保存目录")} value={target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root ?? ""} disabled={target?.type === "s3"} onChange={event => changeRoot(event.target.value)} />{target?.type !== "s3" && <Tooltip content={t("选择目录")}><Button icon={<FolderOpen size={16} />} aria-label={t("选择目录")} onClick={() => setPickingDirectory(true)} /></Tooltip>}</div></Field>
+        <Field label={t("保存目录")}><div className="flex min-w-0 gap-2"><Input aria-label={t("保存目录")} value={target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root ?? ""} disabled={target?.type === "s3"} onChange={event => changeRoot(event.target.value)} />{target?.type !== "s3" && <Tooltip content={t("选择目录")}><Button type="tertiary" icon={<FolderOpen size={16} />} aria-label={t("选择目录")} onClick={() => setPickingDirectory(true)} /></Tooltip>}</div></Field>
       </div>
     </div>
     <div className="storage-default-rules">
@@ -114,7 +114,7 @@ export function StorageManagement() {
         <StoragePathPreview document={draft} kind={kind} tweet={tweets.data?.items[0]} />
       </div>)}
     </div>
-    <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{dirty ? t("请先保存存储设置") : t("storage.sourceRetained")}</p>{migrationId && <a className="text-sm text-brand-600" href="/tasks">{t("查看整理任务")} #{migrationId}</a>}</div><Popconfirm title={t("storage.migrateConfirm")} onConfirm={() => migration.mutate()}><Button disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
+    <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{dirty ? t("请先保存存储设置") : t("storage.sourceRetained")}</p>{migrationId && <a className="text-sm text-brand-600" href="/tasks">{t("查看整理任务")} #{migrationId}</a>}</div><Popconfirm title={t("storage.migrateConfirm")} onConfirm={() => migration.mutate()}><Button type="tertiary" disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
     <Modal open={pickingDirectory} onClose={() => setPickingDirectory(false)} title={t("选择目录")} footer={null}><LocalDirectoryPicker path={target?.root ?? ""} onSelect={root => { changeRoot(root); setPickingDirectory(false); }} /></Modal>
   </section>;
 }

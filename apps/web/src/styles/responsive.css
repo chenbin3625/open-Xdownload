@@ -168,10 +168,6 @@
     gap: 10px;
   }
 
-  .page-title {
-    font-size: 20px;
-  }
-
   /* 任务统计卡片 */
   .task-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -180,7 +176,8 @@
 
   .task-stat-value {
     margin-top: 4px;
-    font-size: 22px;
+    font-size: 20px;
+    line-height: 28px;
   }
 
   .task-failure-label {
@@ -202,7 +199,16 @@
   }
 
   .mobile-job-card > div:first-child {
-    padding: 14px;
+    padding: 12px;
+  }
+
+  .mobile-job-card .task-progress-message {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .toolbar-status {

@@ -8,7 +8,7 @@ export function LanguageSettings() {
   const [preference, setPreference] = useState(readLanguagePreference);
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <label id="interface-language-label" htmlFor="interface-language" className="flex items-center gap-2 text-sm font-medium text-fg">
+      <label id="interface-language-label" htmlFor="interface-language" className="flex items-center gap-2 text-sm font-semibold text-fg">
         <Languages className="size-4 text-fg-muted" />
         {t("language.label")}
       </label>

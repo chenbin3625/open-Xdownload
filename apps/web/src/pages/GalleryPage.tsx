@@ -193,7 +193,7 @@ const GalleryCard = React.memo(function GalleryCard({
                 >
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-fg-subtle">
                     <ImageIcon className="size-8" />
-                    <span className="text-xs font-mono">{ext}</span>
+                    <span className="text-xs text-fg-subtle">{ext}</span>
                   </div>
                   <img
                     src={previewURL}
@@ -209,27 +209,27 @@ const GalleryCard = React.memo(function GalleryCard({
           ) : (
             <div className="flex flex-col items-center gap-1 text-fg-subtle">
               <Film className="size-8" />
-              <span className="text-xs font-mono font-medium">{ext} {t(" 文件")}</span>
+              <span className="text-xs font-medium">{ext} {t(" 文件")}</span>
             </div>
           )}
 
-          <span className="pointer-events-none absolute top-2 right-2 z-20 rounded-md bg-black/75 px-1.5 py-0.5 text-xs font-mono text-white/90 backdrop-blur-md border border-white/10 shadow-xs">
+          <span className="pointer-events-none absolute top-2 right-2 z-20 rounded-sm bg-black/70 px-1.5 py-0.5 text-xs text-white tabular-nums">
             {ext} · {formatBytes(item.bytes)}
           </span>
         </div>
       }
     >
       <div className="gallery-card-body">
-        <div className="truncate text-xs font-semibold text-fg tracking-tight" title={fileName}>
+        <div className="truncate text-sm font-semibold text-fg" title={fileName}>
           {fileName}
         </div>
 
-        <div className="truncate font-mono text-xs text-fg-muted flex items-center gap-1">
+        <div className="flex items-center gap-1 truncate text-xs text-fg-muted">
           {(item.userName || !item.userScreenName) && (
             <span className="min-w-0 truncate">{item.userName || t("未识别用户")}</span>
           )}
           {item.userScreenName && (
-            <span className="min-w-0 truncate text-brand-600 font-medium">@{item.userScreenName}</span>
+            <span className="min-w-0 truncate">@{item.userScreenName}</span>
           )}
         </div>
 
@@ -318,8 +318,8 @@ const UserCard = React.memo(function UserCard({
           </span>
         )}
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-fg">{summary.displayName || summary.screenName}</span>
-          <span className="block truncate font-mono text-xs text-fg-muted">@{summary.screenName}</span>
+          <span className="block truncate text-sm font-semibold text-fg">{summary.displayName || summary.screenName}</span>
+          <span className="block truncate text-xs text-fg-muted">@{summary.screenName}</span>
         </span>
       </button>
       <div className="gallery-card-meta mt-3">
@@ -880,10 +880,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               {/* 弹窗底部操作与详情栏 */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface px-4 py-3 text-xs">
                 <div className="w-full min-w-0 sm:w-auto sm:max-w-md">
-                  <div className="font-medium text-fg truncate" title={fileName}>
+                  <div className="font-semibold text-fg truncate" title={fileName}>
                     {fileName}
                   </div>
-                  <div className="font-mono text-fg-muted text-xs truncate">
+                  <div className="text-xs text-fg-muted tabular-nums truncate">
                     {formatBytes(item.bytes)} · {formatDateTime(item.createdAt)}
                   </div>
                 </div>

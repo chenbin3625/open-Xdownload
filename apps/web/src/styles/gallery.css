@@ -191,6 +191,17 @@
   min-width: 0;
   gap: 6px;
   padding-top: 4px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.gallery-card-meta a {
+  color: var(--semi-color-link);
+}
+
+.gallery-card-meta a:hover {
+  text-decoration: underline;
 }
 
 .gallery-card-meta time {

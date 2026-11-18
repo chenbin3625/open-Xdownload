@@ -29,7 +29,7 @@
 }
 
 .archive-layout-option {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
 }
@@ -84,6 +84,7 @@
   color: var(--fg-muted);
   font-size: 13px;
   font-weight: 600;
+  line-height: 18px;
   text-decoration: none;
 }
 
@@ -132,7 +133,8 @@
 .tweet-name {
   color: var(--fg);
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 600;
+  line-height: 20px;
 }
 
 .tweet-author {
@@ -141,6 +143,7 @@
   padding: 0;
   color: var(--fg-muted);
   font-size: 14px;
+  line-height: 20px;
   text-align: left;
   overflow-wrap: anywhere;
   cursor: pointer;
@@ -155,6 +158,7 @@
 .tweet-identity time {
   color: var(--fg-muted);
   font-size: 14px;
+  line-height: 20px;
   white-space: nowrap;
 }
 
@@ -167,6 +171,7 @@
   margin-top: 2px;
   color: var(--fg-muted);
   font-size: 13px;
+  line-height: 18px;
   text-decoration: none;
 }
 
@@ -200,7 +205,7 @@
   margin: 0;
   color: var(--fg-body);
   font-size: 15px;
-  line-height: 1.55;
+  line-height: 22px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -238,6 +243,7 @@
 .tweet-note {
   color: var(--fg-muted);
   font-size: 13px;
+  line-height: 18px;
   text-decoration: none;
 }
 
@@ -250,6 +256,7 @@
   margin: 0;
   color: var(--semi-color-danger);
   font-size: 12px;
+  line-height: 16px;
   overflow-wrap: anywhere;
 }
 
@@ -345,8 +352,9 @@
   border-radius: 3px;
   background: var(--semi-color-overlay-bg, rgba(0, 0, 0, 0.65));
   color: var(--semi-color-white);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
   letter-spacing: 0.04em;
 }
 
@@ -360,6 +368,7 @@
   color: var(--semi-color-white);
   font-size: 20px;
   font-weight: 600;
+  line-height: 28px;
 }
 
 .tweet-more-media {
@@ -375,6 +384,7 @@
   background: var(--semi-color-overlay-bg, rgba(0, 0, 0, 0.7));
   color: var(--semi-color-white);
   font-size: 12px;
+  line-height: 16px;
   cursor: pointer;
 }
 
@@ -410,17 +420,21 @@
 
 .tweet-quote-author strong {
   font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
 }
 
 .tweet-quote-author span,
 .tweet-quote-header time {
   color: var(--fg-muted);
   font-size: 13px;
+  line-height: 18px;
   white-space: nowrap;
 }
 
 .tweet-quote .tweet-body {
   font-size: 14px;
+  line-height: 20px;
 }
 
 .tweet-quote .tweet-body-clamped {
@@ -470,6 +484,7 @@
 .tweet-related > a {
   color: var(--semi-color-link);
   font-size: 13px;
+  line-height: 18px;
   text-decoration: none;
 }
 
@@ -498,16 +513,13 @@
   color: var(--semi-color-link);
 }
 
-.tweet-toolbar .semi-button {
-  height: 28px;
-}
-
 .tweet-relations {
   display: flex;
   flex-wrap: wrap;
   gap: 2px 10px;
   color: var(--fg-muted);
   font-size: 12px;
+  line-height: 16px;
   overflow-wrap: anywhere;
 }
 
@@ -526,9 +538,7 @@
 }
 
 .tweet-retry.semi-button {
-  height: 26px;
   color: var(--fg-muted);
-  font-size: 12px;
 }
 
 .tweet-archive-meta {
@@ -539,6 +549,7 @@
   margin-left: auto;
   color: var(--fg-subtle);
   font-size: 12px;
+  line-height: 16px;
 }
 
 .tweet-archive-meta a {
@@ -565,7 +576,7 @@
 
 .tweet-archive-compact .tweet-body {
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 20px;
 }
 
 .tweet-archive-compact .tweet-has-media {
@@ -594,11 +605,6 @@
 
 .tweet-archive-compact .tweet-has-media > .tweet-media.tweet-media-count-1 .tweet-media-item {
   aspect-ratio: 16 / 10;
-}
-
-.tweet-archive-compact .tweet-action.semi-button,
-.tweet-archive-compact .tweet-toolbar .tweet-original {
-  height: 26px;
 }
 
 .tweet-detail-file {

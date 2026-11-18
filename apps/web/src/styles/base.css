@@ -5,7 +5,8 @@
 body {
   color: var(--fg-body);
   font-size: 14px;
-  line-height: 1.5;
+  /* 与 Semi 的正文行高一致；子元素按需显式声明 12/16、16/24 等整数行高。 */
+  line-height: 20px;
   letter-spacing: 0;
   margin: 0;
 }
@@ -83,7 +84,7 @@ body {
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
-  padding-block: 14px;
+  padding-block: 12px;
   border-block: 1px solid var(--line);
 }
 
@@ -143,6 +144,7 @@ body {
 .toolbar-summary {
   color: var(--fg-muted);
   font-size: 12px;
+  line-height: 16px;
 }
 
 .toolbar-field {
@@ -161,6 +163,7 @@ body {
   color: var(--fg-muted);
   font-size: 12px;
   font-weight: 600;
+  line-height: 16px;
 }
 
 .active-filter-tags {
@@ -193,4 +196,22 @@ body {
 
 .active-filter-tags .filter-chip svg {
   flex-shrink: 0;
+}
+
+/* ---------------- 行内提示（Semi Banner 的 in-container 形态） ----------------
+   Semi 默认把 Banner 标题渲染成 h5（18/24），在卡片和抽屉里比正文大一级；
+   这里压到与正文一致，并让底色块与卡片使用同一个圆角。 */
+.semi-banner.semi-banner-in-container {
+  border-radius: var(--semi-border-radius-medium);
+}
+
+.semi-banner .semi-banner-title.semi-typography {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.semi-banner .semi-banner-description.semi-typography {
+  font-size: 14px;
+  line-height: 20px;
 }

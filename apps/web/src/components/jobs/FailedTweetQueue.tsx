@@ -96,7 +96,7 @@ export function FailedTweetQueue({ total }: { total: number }) {
         <div className="flex items-center gap-2">
           <Button
             type="tertiary"
-            icon={<RotateCcw className="size-3.5" />}
+            icon={<RotateCcw className="size-4" />}
             loading={retryAll.isPending}
             disabled={pagination.total === 0 || retryAll.isPending}
             aria-busy={retryAll.isPending}
@@ -113,7 +113,7 @@ export function FailedTweetQueue({ total }: { total: number }) {
           >
             <Button
               type="danger"
-              icon={<Trash2 className="size-3.5" />}
+              icon={<Trash2 className="size-4" />}
               loading={clearAll.isPending}
               disabled={pagination.total === 0 || clearAll.isPending}
               aria-busy={clearAll.isPending}
@@ -155,10 +155,10 @@ export function FailedTweetQueue({ total }: { total: number }) {
                   </div>
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-medium text-fg truncate">
+                      <span className="text-sm font-semibold text-fg truncate">
                         {item.jobTitle || item.tweetId}
                       </span>
-                      <Tag tone="neutral" className="font-mono">
+                      <Tag tone="neutral" size="sm">
                         {item.userScreenName ? `@${item.userScreenName}` : item.userId || t("未知用户")}
                       </Tag>
                     </div>
@@ -170,7 +170,7 @@ export function FailedTweetQueue({ total }: { total: number }) {
                       {item.error || t("未知错误")}
                     </Typography.Text>
                     <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
-                      <span className="font-mono">{t("推文 ")}{item.tweetId}</span>
+                      <span className="tabular-nums">{t("推文 ")}{item.tweetId}</span>
                       <span>{formatDateTime(item.updatedAt || item.createdAt)}</span>
                       {item.entityName && <span>{item.entityName}</span>}
                     </div>
@@ -189,7 +189,7 @@ export function FailedTweetQueue({ total }: { total: number }) {
                     <Button
                       theme="borderless"
                       type="danger"
-                      icon={<Trash2 className="size-3.5 text-danger" />}
+                      icon={<Trash2 className="size-4 text-danger" />}
                       loading={removeOne.isPending && removeOne.variables === item.id}
                       disabled={removeOne.isPending && removeOne.variables === item.id}
                       aria-busy={removeOne.isPending && removeOne.variables === item.id}

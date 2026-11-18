@@ -102,7 +102,7 @@
   padding: 0 2px;
 }
 
-.app-mobile-nav-item .app-mobile-nav-content {
+.app-mobile-nav-item .semi-button-content {
   display: flex;
   min-width: 0;
   width: 100%;
@@ -128,8 +128,8 @@
   align-items: center;
   justify-content: center;
   text-align: center;
-  font-size: 11px;
-  line-height: 1.2;
+  font-size: 12px;
+  line-height: 16px;
   white-space: normal;
   overflow-wrap: anywhere;
 }

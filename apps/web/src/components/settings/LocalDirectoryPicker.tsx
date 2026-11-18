@@ -136,7 +136,7 @@ export function LocalDirectoryPicker({
             {t("打开")}</Button>
           <Button
             type="tertiary"
-            icon={<FolderPlus className="size-3.5" />}
+            icon={<FolderPlus className="size-4" />}
             onClick={createSelectedPath}
             loading={createDirectory.isPending}
             disabled={!selectedPath.trim() || createDirectory.isPending}
@@ -157,7 +157,7 @@ export function LocalDirectoryPicker({
           <div className="flex min-w-0 items-center gap-2">
             <Button
               type="tertiary"
-              icon={<ArrowUp className="size-3.5" />}
+              icon={<ArrowUp className="size-4" />}
               disabled={!listing.data?.parent || listing.isLoading || listing.isError}
               onClick={() => listing.data?.parent && setRootPath(listing.data.parent)}
             >
@@ -173,7 +173,7 @@ export function LocalDirectoryPicker({
               <Button
                 theme="borderless"
                 type="tertiary"
-                icon={<RefreshCw className={`size-3.5 ${listing.isFetching ? "animate-spin" : ""}`} />}
+                icon={<RefreshCw className={`size-4 ${listing.isFetching ? "animate-spin" : ""}`} />}
                 onClick={() => listing.refetch()}
                 aria-label={t("刷新目录")}
               />

@@ -1,7 +1,7 @@
 import { t, useTranslation } from "../../lib/i18n";
-import { KeyRound } from "lucide-react";
+import { KeyRound, LogOut } from "lucide-react";
 import React, { useContext, useId, useState } from "react";
-import { changeAccountPassword } from "../../lib/api";
+import { changeAccountPassword, logoutAccount } from "../../lib/api";
 import { invalidateSession } from "../../lib/session";
 import { AccountContext } from "../auth/AuthGate";
 import { Button } from "@douyinfe/semi-ui";
@@ -50,8 +50,18 @@ export function AccountSecurity({ compact = false }: { compact?: boolean }) {
       <h2 className="settings-section-title"><KeyRound size={16} />{t("账号安全")}</h2>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="min-w-0 break-all text-sm text-fg-muted">{username}</p>
-        <Button icon={<KeyRound className="size-4" />} onClick={() => setOpen(true)}>{t("修改密码")}</Button>
+        <div className="flex flex-wrap gap-2">
+          <Button type="tertiary" icon={<KeyRound className="size-4" />} onClick={() => setOpen(true)}>{t("修改密码")}</Button>
+          <Button type="tertiary" icon={<LogOut className="size-4" />} disabled={pending} onClick={async () => {
+            setPending(true);
+            setError("");
+            try { await logoutAccount(); invalidateSession(); }
+            catch (error) { setError(error instanceof Error ? error.message : t("退出登录失败")); }
+            finally { setPending(false); }
+          }}>{t("退出登录")}</Button>
+        </div>
       </div>
+      {!open && error && <p role="alert" className="text-sm text-danger-strong">{error}</p>}
       <Modal open={open} onClose={close} title={t("修改密码")} description={t("修改成功后需重新登录。")} footer={<>
         <Button type="tertiary" onClick={close} disabled={pending}>{t("取消")}</Button>
         <Button htmlType="submit" form={formId} theme="solid" icon={<KeyRound className="size-4" />} loading={pending} disabled={pending} aria-busy={pending}>{t("修改密码")}</Button>

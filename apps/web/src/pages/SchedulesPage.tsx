@@ -204,6 +204,7 @@ export function SchedulesPage({
           }
         >
           <Button
+            type={schedules.length ? "tertiary" : "primary"}
             onClick={() => {
               if (schedules.length) {
                 setSearch("");
@@ -252,11 +253,11 @@ export function SchedulesPage({
                 {runStatus && <Tag tone={runStatus.tone}>{runStatus.label}</Tag>}
                 {schedule.lastRunStatus === "failed" && schedule.lastRunMessage && <span className="text-xs text-danger break-words">{schedule.lastRunMessage}</span>}
               </div>
-              <span className="text-sm">
+              <span className="text-sm tabular-nums">
                 {formatIntervalMinutes(schedule.intervalMinutes)}
               </span>
               <time
-                className="text-xs text-fg-muted"
+                className="text-sm text-fg-muted tabular-nums"
                 dateTime={schedule.nextRunAt}
               >
                 {schedule.enabled
@@ -278,7 +279,7 @@ export function SchedulesPage({
                     value0: schedule.name,
                   })}
                 />
-                <span className="text-xs">
+                <span className="text-xs text-fg-muted">
                   {schedule.enabled ? t("已启用") : t("已暂停")}
                 </span>
               </div>
@@ -286,6 +287,7 @@ export function SchedulesPage({
                 <Tooltip content={t("编辑计划")}>
                   <Button
                     theme="borderless"
+                    type="tertiary"
                     icon={<Pencil size={16} />}
                     aria-label={`${t("编辑计划")} ${schedule.name}`}
                     disabled={toggle.isPending || save.isPending}
@@ -360,12 +362,12 @@ export function SchedulesPage({
               <dd>{timeZone}</dd>
               {detail.lastRunMessage && <><dt>{t("执行摘要")}</dt><dd className={detail.lastRunStatus === "failed" ? "text-danger" : undefined}>{detail.lastRunMessage}</dd></>}
             </dl>
-            <h2 className="text-sm font-semibold">
+            <h2 className="text-sm font-semibold text-fg">
               {t("目标清单")} ({detail.items.length})
             </h2>
             {detail.items.map((item, index) => (
               <div key={index} className="border-b border-line pb-3">
-                <div className="text-sm font-medium break-all">
+                <div className="text-sm font-semibold text-fg break-all">
                   {item.input}
                 </div>
                 <div className="flex flex-wrap gap-2 mt-2">
@@ -383,7 +385,7 @@ export function SchedulesPage({
             ))}
             {detail.lastJobIds?.length > 0 && (
               <div>
-                <h2 className="text-sm font-semibold mb-2">
+                <h2 className="text-sm font-semibold text-fg mb-2">
                   {t("最近执行任务")}
                 </h2>
                 <a href="/tasks" className="text-sm text-brand-600">
@@ -392,6 +394,7 @@ export function SchedulesPage({
               </div>
             )}
             <Button
+              type="tertiary"
               icon={<Pencil size={16} />}
               onClick={() => {
                 setEditing({
@@ -414,7 +417,7 @@ export function SchedulesPage({
         title={t("编辑计划")}
         footer={
           <div className="flex justify-end gap-2">
-            <Button disabled={save.isPending} onClick={() => setEditing(null)}>
+            <Button type="tertiary" disabled={save.isPending} onClick={() => setEditing(null)}>
               {t("取消")}
             </Button>
             <Button
@@ -462,7 +465,7 @@ export function SchedulesPage({
                 {formatIntervalMinutes(editing.intervalMinutes)}
               </span>
             </Field>
-            <h3 className="text-sm font-semibold">{t("目标清单")}</h3>
+            <h3 className="text-sm font-semibold text-fg">{t("目标清单")}</h3>
             {editing.items.map((item, index) => (
               <div className="schedule-edit-target" key={index}>
                 <Tag>{kindLabel(item.kind)}</Tag>
@@ -498,6 +501,7 @@ export function SchedulesPage({
               </div>
             ))}
             <Button
+              type="tertiary"
               icon={<Plus size={16} />}
               disabled={save.isPending}
               onClick={() =>

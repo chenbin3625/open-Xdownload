@@ -338,11 +338,11 @@ export function CreateJobModal({
         <div className="space-y-3 pt-1">
           <div className="flex items-center justify-between text-xs text-fg-muted">
             <span>{tab.hint}</span>
-            <span className="shrink-0 whitespace-nowrap font-mono font-medium text-brand-600">
+            <span className="shrink-0 whitespace-nowrap font-semibold text-brand-600 tabular-nums">
               {t("待校验目标")} {currentBatchItems.length} {t(" 个")}</span>
           </div>
           {(currentBatchSummary.recognized > 0 || currentBatchSummary.pendingValidation > 0 || currentBatchSummary.duplicates > 0 || currentBatchSummary.invalid > 0) && (
-            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-subtle" aria-live="polite">
+            <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-subtle tabular-nums" aria-live="polite">
               {currentBatchSummary.recognized > 0 && <span>{t("格式有效")} {currentBatchSummary.recognized}</span>}
               {currentBatchSummary.pendingValidation > 0 && <span>{t("待后端校验")} {currentBatchSummary.pendingValidation}</span>}
               {currentBatchSummary.duplicates > 0 && <span className="text-warning-strong">{t("重复目标")} {currentBatchSummary.duplicates}</span>}
@@ -363,12 +363,12 @@ export function CreateJobModal({
             <div className="space-y-1.5" aria-label={t("逐行校验结果")}>
               {currentBatchSummary.lines.map(line => (
                 <div key={`${tab.kind}-${line.lineNumber}`} className="flex min-w-0 items-center gap-2 text-xs">
-                  <span className="w-12 shrink-0 font-mono text-fg-subtle">{t("第 {{value0}} 行", { value0: line.lineNumber })}</span>
+                  <span className="w-12 shrink-0 text-fg-subtle tabular-nums">{t("第 {{value0}} 行", { value0: line.lineNumber })}</span>
                   <span className="min-w-0 flex-1 truncate font-mono text-fg-muted" title={line.raw}>{line.normalized || line.raw}</span>
-                  {line.status === "valid" && <Tag tone="success">{t("格式有效")}</Tag>}
-                  {line.status === "pending" && <Tag tone="warning">{t("待后端校验")}</Tag>}
-                  {line.status === "invalid" && <Tag tone="danger">{t("无效格式，已忽略")}</Tag>}
-                  {line.status === "duplicate" && <><Tag tone="danger">{t("与第 {{value0}} 行重复，已忽略", { value0: line.duplicateOf })}</Tag><Button type="tertiary" size="small" onClick={() => removeBatchLine(tab.kind, line.lineNumber)}>{t("移除重复行")}</Button></>}
+                  {line.status === "valid" && <Tag tone="success" size="sm">{t("格式有效")}</Tag>}
+                  {line.status === "pending" && <Tag tone="warning" size="sm">{t("待后端校验")}</Tag>}
+                  {line.status === "invalid" && <Tag tone="danger" size="sm">{t("无效格式，已忽略")}</Tag>}
+                  {line.status === "duplicate" && <><Tag tone="danger" size="sm">{t("与第 {{value0}} 行重复，已忽略", { value0: line.duplicateOf })}</Tag><Button type="tertiary" size="small" onClick={() => removeBatchLine(tab.kind, line.lineNumber)}>{t("移除重复行")}</Button></>}
                 </div>
               ))}
             </div>
@@ -414,7 +414,7 @@ export function CreateJobModal({
                 <span className="min-w-0 break-all font-semibold text-fg">
                   @{parsedTweet.author.screenName} ({parsedTweet.author.name})
                 </span>
-                <span className="font-medium text-success">
+                <span className="font-semibold text-success tabular-nums">
                   {parsedTweet.media.length} {t(" 个可用媒体")}</span>
               </div>
               <p className="line-clamp-2 text-fg-body">
@@ -444,13 +444,13 @@ export function CreateJobModal({
       className="create-job-modal sm:w-[min(92vw,44rem)]"
       title={
         <div className="flex items-center gap-3">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600 font-bold">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600">
             <Plus className="size-4" />
           </div>
           <div className="min-w-0">
-            <div className="text-sm font-semibold text-fg sm:text-base">
-              {scheduleMode ? t("新建归档计划") : t("新建下载任务")}</div>
-            <div className="hidden text-xs text-fg-muted font-normal sm:block">
+            {/* 标题字号交给 Semi 的模态标题（18/24），与其它弹窗同一层级。 */}
+            <div>{scheduleMode ? t("新建归档计划") : t("新建下载任务")}</div>
+            <div className="hidden text-xs text-fg-muted sm:block">
               {t("目标与归档设置")}</div>
           </div>
         </div>

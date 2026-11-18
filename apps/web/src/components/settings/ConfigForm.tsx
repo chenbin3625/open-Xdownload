@@ -143,7 +143,7 @@ export function ConfigForm({
   const reloadButton = (
     <Button
       type="tertiary"
-      icon={<RefreshCw className={`size-3.5 ${refreshPending ? "animate-spin" : ""}`} />}
+      icon={<RefreshCw className={`size-4 ${refreshPending ? "animate-spin" : ""}`} />}
       loading={refreshPending}
       disabled={refreshPending}
       aria-busy={refreshPending}
@@ -171,7 +171,7 @@ export function ConfigForm({
             <Tooltip content={t("重新加载配置")}>
               <Button
                 type="tertiary"
-                icon={<RefreshCw className={`size-3.5 ${refreshPending ? "animate-spin" : ""}`} />}
+                icon={<RefreshCw className={`size-4 ${refreshPending ? "animate-spin" : ""}`} />}
                 loading={refreshPending}
                 disabled={refreshPending}
                 aria-busy={refreshPending}
@@ -198,7 +198,7 @@ export function ConfigForm({
       </div>
 
       <section className="semi-settings-section settings-download">
-        <h2 className="settings-section-title"><Download size={16} />{t("下载与归档")}</h2>
+        <h2 className="settings-section-title"><Download size={16} className="shrink-0" />{t("下载与归档")}</h2>
         <DownloadSettingsFields draft={draft} onChange={updateDraft} envOverridden={envOverridden} />
       </section>
 

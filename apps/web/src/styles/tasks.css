@@ -36,8 +36,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 0;
+  color: var(--fg);
+  font-weight: 600;
   text-align: left;
   cursor: pointer;
+}
+
+.task-title-link:hover {
+  color: var(--semi-color-link);
 }
 
 .task-detail-drawer .task-details {
@@ -58,6 +64,7 @@
   color: var(--fg-muted);
   font-size: 12px;
   font-weight: 600;
+  line-height: 16px;
 }
 
 .task-stat-label svg {
@@ -67,16 +74,24 @@
 .task-stat-value {
   margin-top: 6px;
   color: var(--fg);
-  font-size: 26px;
-  font-weight: 700;
+  font-size: 24px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
+  line-height: 32px;
 }
 
 /* ---------------- 任务表 ---------------- */
 
-.task-table {
+/* 与归档计划、推文列表同一种带边框容器，表格不再直接落在页面底色上。 */
+.data-table {
   overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-medium);
+  background: var(--surface);
+}
+
+.data-table .semi-table-tbody > .semi-table-row:last-child > .semi-table-row-cell {
+  border-bottom: 0;
 }
 
 .task-table table {
@@ -85,7 +100,7 @@
 }
 
 .task-table .semi-table-expand-cell {
-  padding: 0 12px 14px;
+  padding: 0 16px 16px;
 }
 
 .task-progress {
@@ -102,6 +117,7 @@
   display: block;
   color: var(--fg-muted);
   font-size: 12px;
+  line-height: 16px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -123,7 +139,7 @@
   min-width: 0;
   flex-direction: column;
   gap: 16px;
-  padding: 18px 20px;
+  padding: 16px 20px;
 }
 
 .task-details-heading {
@@ -147,12 +163,17 @@
   min-width: 0;
 }
 
+/* 键值对：标签用 12/16 弱化，值保持正文 14/20。 */
 .task-details-meta dt {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 16px;
 }
 
 .task-details-meta dd {
   margin: 0;
+  color: var(--fg);
   overflow-wrap: anywhere;
 }
 
@@ -176,17 +197,6 @@
 .task-error-alert .semi-banner-title,
 .task-error-alert .semi-banner-description {
   min-width: 0;
-}
-
-.task-error-alert .semi-banner-content {
-  align-items: flex-start;
-}
-
-.task-error-alert .semi-banner-content-body {
-  width: 100%;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
 }
 
 .task-error-alert .semi-banner-title {
@@ -231,8 +241,9 @@
 .schedule-summary strong {
   color: var(--fg);
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  line-height: 24px;
 }
 
 .schedule-list {
@@ -242,11 +253,13 @@
   background: var(--surface);
 }
 
+/* 与 Semi 表格表头保持一致：14/20、600、text-2、2px 分隔线。 */
 .schedule-list-heading {
-  background: var(--surface-muted);
+  background: var(--surface);
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
 }
 
 .schedule-row {
@@ -259,14 +272,23 @@
   grid-template-columns: minmax(180px, 2fr) minmax(100px, 1fr) minmax(130px, 1fr) 120px 120px;
   align-items: center;
   gap: 16px;
-  padding: 14px 16px;
+  padding: 12px 16px;
+}
+
+.schedule-list-heading {
+  padding-block: 8px;
+  border-bottom: 2px solid var(--line);
+}
+
+.schedule-list-heading + .schedule-row {
+  border-top: 0;
 }
 
 .schedule-identity {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .schedule-identity > div:first-of-type {
@@ -303,7 +325,21 @@
 .schedule-detail-meta {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 12px 20px;
+  gap: 8px 20px;
+  margin: 0;
+}
+
+.schedule-detail-meta dt {
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.schedule-detail-meta dd {
+  margin: 0;
+  color: var(--fg);
+  line-height: 20px;
+  overflow-wrap: anywhere;
 }
 
 .create-job-modal .semi-modal-body {

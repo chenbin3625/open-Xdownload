@@ -344,7 +344,7 @@ export function TaskCenterPage({
         <Button
           theme="borderless"
           type="tertiary"
-          icon={<FolderCheck className="size-3.5" />}
+          icon={<FolderCheck className="size-4" />}
           aria-label={t("查看任务详情")}
           onClick={() => openJobDetails(record.id)}
         >
@@ -382,7 +382,7 @@ export function TaskCenterPage({
           <Button
             theme="borderless"
             type="danger"
-            icon={<Trash2 className="size-3.5 text-danger" />}
+            icon={<Trash2 className="size-4 text-danger" />}
             loading={removeJob.isPending && removeJob.variables === record.id}
             disabled={removeJob.isPending && removeJob.variables === record.id}
             aria-busy={removeJob.isPending && removeJob.variables === record.id}
@@ -425,7 +425,7 @@ export function TaskCenterPage({
             <button type="button" className="task-title-link" onClick={() => openJobDetails(record.id)} title={record.title || kindLabel(record.kind)}>
               {record.title || kindLabel(record.kind)}
             </button>
-            <div className="truncate font-mono text-xs text-fg-muted" title={record.input}>
+            <div className="truncate text-xs text-fg-muted" title={record.input}>
               {t("目标: ")}{record.input} · #JOB-{record.id}
             </div>
           </div>
@@ -453,7 +453,7 @@ export function TaskCenterPage({
       title: t("更新时间"),
       width: 140,
       render: (record) => (
-        <span className="font-mono text-xs text-fg-subtle">
+        <span className="text-xs text-fg-subtle tabular-nums">
           {formatDateTime(record.updatedAt)}
         </span>
       ),
@@ -461,29 +461,28 @@ export function TaskCenterPage({
     {
       key: "action",
       title: t("操作"),
-      width: 148,
+      /* 详情 + 取消/重试 + 删除，四枚 32px 控件在 148px 里会溢出。 */
+      width: 212,
       align: "right",
       render: record => renderJobActions(record, true),
     },
   ];
 
+  const summaryLabel = hasActiveFilter
+    ? serverFiltering
+      ? t("匹配 {{value0}} 条任务", { value0: pagination.total })
+      : t("本页匹配 {{value0}} 条（共 {{value1}} 个任务）", { value0: filteredJobs.length, value1: pagination.total })
+    : t("共 {{value0}} 个下载任务", { value0: pagination.total });
+
   const paginationFooter = (
-    <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
-      <span className="text-xs text-fg-muted">
-        {hasActiveFilter
-          ? serverFiltering
-            ? t("匹配 {{value0}} 条任务", { value0: pagination.total })
-            : t("本页匹配 {{value0}} 条（共 {{value1}} 个任务）", { value0: filteredJobs.length, value1: pagination.total })
-          : t("共 {{value0}} 个下载任务", { value0: pagination.total })}
-      </span>
-      <Pagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
-        onPageChange={onPageChange}
-        onPageSizeChange={onPageSizeChange}
-      />
-    </div>
+    <Pagination
+      page={pagination.page}
+      pageSize={pagination.pageSize}
+      total={pagination.total}
+      onPageChange={onPageChange}
+      onPageSizeChange={onPageSizeChange}
+      totalLabel={() => summaryLabel}
+    />
   );
 
   return (
@@ -567,7 +566,7 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("全部")}</span>
-                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.all}</span>
+                      <span className="text-xs text-fg-muted tabular-nums">{globalFilterCounts.all}</span>
                     </span>
                   ) : (
                     t("全部 ({{value0}})", { value0: globalFilterCounts.all })
@@ -579,7 +578,7 @@ export function TaskCenterPage({
                     <span className="flex items-center gap-1.5">
                       {globalFilterCounts.active > 0 && <span className="size-1.5 rounded-full bg-brand-500 animate-pulse" />}
                       <span>{t("下载中")}</span>
-                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.active}</span>
+                      <span className="text-xs text-fg-muted tabular-nums">{globalFilterCounts.active}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
@@ -593,7 +592,7 @@ export function TaskCenterPage({
                   label: isMobile ? (
                     <span className="flex items-center gap-1.5">
                       <span>{t("已完成")}</span>
-                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.completed}</span>
+                      <span className="text-xs text-fg-muted tabular-nums">{globalFilterCounts.completed}</span>
                     </span>
                   ) : (
                     t("已完成 ({{value0}})", { value0: globalFilterCounts.completed })
@@ -605,7 +604,7 @@ export function TaskCenterPage({
                     <span className="flex items-center gap-1.5">
                       {globalFilterCounts.failed > 0 && <span className="size-1.5 rounded-full bg-danger" />}
                       <span>{t("失败")}</span>
-                      <span className="font-mono text-xs text-fg-muted">{globalFilterCounts.failed}</span>
+                      <span className="text-xs text-fg-muted tabular-nums">{globalFilterCounts.failed}</span>
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
@@ -663,6 +662,7 @@ export function TaskCenterPage({
           {retryableSelectedIds.length > 0 && (
             <Button
               size="small"
+              type="tertiary"
               loading={bulkRetry.isPending}
               disabled={bulkCancel.isPending || bulkRetry.isPending}
               onClick={() => bulkRetry.mutate(retryableSelectedIds)}
@@ -705,7 +705,7 @@ export function TaskCenterPage({
             data={filteredJobs}
             rowKey={(r) => r.id}
             loading={tableLoading}
-            className="task-table"
+            className="task-table data-table"
             emptyText={hasActiveFilter ? t(serverFiltering ? "没有匹配的任务" : "本页没有匹配的任务") : t("暂无任务")}
             footer={paginationFooter}
           />
@@ -730,14 +730,14 @@ function JobProgress({ job }: { job: Job }) {
     <Tooltip content={
       <div className="task-progress-tooltip">
         <div className="flex items-center justify-between gap-4 font-medium">
-          <span>{meta.label}</span><span className="font-mono">{percent}%</span>
+          <span>{meta.label}</span><span className="tabular-nums">{percent}%</span>
         </div>
         <div className={cn("mt-2", hasError && "font-medium")}>{displayMsg}</div>
         {tooltip !== displayMsg && <div className="mt-2 whitespace-pre-wrap">{tooltip}</div>}
       </div>
     }>
       <div className="task-progress" aria-label={`${meta.label} · ${percent}%`}>
-        <div className="flex items-center justify-between gap-2"><Tag tone={meta.tone} icon={meta.icon}>{meta.label}</Tag>{job.status === "downloading" && <span className="text-xs font-mono">{percent}%</span>}</div>
+        <div className="flex items-center justify-between gap-2"><Tag tone={meta.tone} icon={meta.icon}>{meta.label}</Tag>{job.status === "downloading" && <span className="text-xs tabular-nums">{percent}%</span>}</div>
         {job.status === "downloading" && <Progress percent={percent} showInfo={false} aria-label={t("下载进度")} />}
         <span className={cn("task-progress-message", hasError && "text-danger")}>{displayMsg}</span>
       </div>
@@ -760,7 +760,7 @@ function MobileJobCard({
 }) {
   useTranslation();
   return (
-    <li className="mobile-job-card min-w-0 overflow-hidden rounded-lg border border-line bg-surface">
+    <li className="mobile-job-card min-w-0 overflow-hidden rounded-card border border-line bg-surface">
       <div className="space-y-3 p-3">
         <div className="mobile-job-heading">
           <Checkbox
@@ -770,14 +770,14 @@ function MobileJobCard({
           />
           <div className="min-w-0 flex-1">
             <h2 className="break-words text-sm font-semibold text-fg">{job.title || kindLabel(job.kind)}</h2>
-            <p className="mt-1 break-all font-mono text-xs text-fg-muted">{job.input}</p>
+            <p className="mt-1 break-all text-xs text-fg-muted">{job.input}</p>
           </div>
           <JobProgress job={job} />
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
           <Tag icon={<JobKindIcon kind={job.kind} />}>{kindLabel(job.kind)}</Tag>
-          <span className="font-mono">#JOB-{job.id}</span>
-          <time className="ml-auto font-mono text-xs" dateTime={job.updatedAt}>{formatDateTime(job.updatedAt)}</time>
+          <span className="tabular-nums">#JOB-{job.id}</span>
+          <time className="ml-auto text-xs tabular-nums" dateTime={job.updatedAt}>{formatDateTime(job.updatedAt)}</time>
         </div>
         <div className="flex items-center justify-between border-t border-line pt-2">
           <Button
@@ -853,7 +853,7 @@ function JobErrorAlert({ job }: { job: Job }) {
             theme="borderless"
             type="danger"
             onClick={() => void handleCopy()}
-            icon={copied ? <Check className="size-3 text-success" /> : <Copy className="size-3" />}
+            icon={copied ? <Check className="size-4 text-success" /> : <Copy className="size-4" />}
           >
             {copied ? t("已复制诊断信息") : t("复制错误信息")}
           </Button>
@@ -892,7 +892,7 @@ function JobErrorAlert({ job }: { job: Job }) {
                             {group.action}
                           </Tag>
                         )}
-                        <Tag size="sm" tone="danger" className="font-medium">
+                        <Tag size="sm" tone="danger" className="font-semibold">
                           {group.count} {group.countUnit ? t("种异常") : t("个失败")}
                         </Tag>
                       </div>
@@ -925,7 +925,7 @@ function JobErrorAlert({ job }: { job: Job }) {
                             </Tag>
                           ))}
                           {hiddenCount > 0 && (
-                            <Tag size="sm" tone="warning" className="font-mono">
+                            <Tag size="sm" tone="warning" className="tabular-nums">
                               {t("另有 ")}{hiddenCount} {t(" 个账号（相同原因已聚合）")}</Tag>
                           )}
                         </div>
@@ -939,7 +939,7 @@ function JobErrorAlert({ job }: { job: Job }) {
 
           {job.message && (
             <div className="flex min-w-0 flex-wrap items-start gap-1.5 border-t border-danger/15 pt-1 text-xs text-fg-muted">
-              <span className="shrink-0 font-medium text-fg-subtle">{t("状态概况:")}</span>
+              <span className="shrink-0 font-semibold text-fg-subtle">{t("状态概况:")}</span>
               <span className="min-w-0 break-all">{job.message}</span>
             </div>
           )}
@@ -995,16 +995,16 @@ function ExpandedJobDetails({
         return (
           <div className="flex items-center justify-between gap-3 text-xs">
             <div className="flex min-w-0 flex-1 items-start gap-2.5">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded bg-brand-500/10 font-mono text-xs font-bold text-brand-600">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-card bg-brand-500/10 text-xs font-semibold text-brand-600">
                 {ext}
               </span>
               <div className="min-w-0 flex-1 space-y-0.5">
                 <div className="flex items-center gap-2">
-                  <span className="truncate font-medium text-fg" title={fileName}>
+                  <span className="truncate font-semibold text-fg" title={fileName}>
                     {fileName}
                   </span>
                   {item.bytes > 0 && (
-                    <span className="shrink-0 font-mono text-xs text-fg-subtle">
+                    <span className="shrink-0 text-xs text-fg-subtle tabular-nums">
                       {formatBytes(item.bytes)}
                     </span>
                   )}
@@ -1032,7 +1032,7 @@ function ExpandedJobDetails({
                 <Button
                   theme="borderless"
                   type="tertiary"
-                  icon={<Copy className="size-3.5" />}
+                  icon={<Copy className="size-4" />}
                   onClick={() => void copyToClipboard(item.filePath, t("本地路径"))}
                   aria-label={t("复制本地路径")}
                 />
@@ -1058,7 +1058,7 @@ function ExpandedJobDetails({
               <AlertCircle className="size-4" />
             </div>
             <div className="min-w-0 flex-1 space-y-0.5">
-              <div className="font-medium text-danger-strong break-all">
+              <div className="font-semibold text-danger-strong break-all">
                 {item.error || t("媒体下载失败")}
               </div>
               <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-fg-muted">
@@ -1069,7 +1069,7 @@ function ExpandedJobDetails({
                   {item.mediaUrl}
                 </span>
                 {item.createdAt && (
-                  <span className="text-fg-subtle/70">
+                  <span className="text-fg-subtle/70 tabular-nums">
                     · {formatDateTime(item.createdAt)}
                   </span>
                 )}
@@ -1081,7 +1081,7 @@ function ExpandedJobDetails({
               <Button
                 theme="borderless"
                 type="tertiary"
-                icon={<Copy className="size-3.5" />}
+                icon={<Copy className="size-4" />}
                 onClick={() => void copyToClipboard(item.mediaUrl, t("媒体地址"))}
                 aria-label={t("复制媒体地址")}
               />
@@ -1122,8 +1122,8 @@ function ExpandedJobDetails({
     <div className="task-details">
       <div className="task-details-heading">
         <dl className="task-details-meta">
-          <div><dt>{t("任务 ID")}</dt><dd className="font-mono">#{job.id}</dd></div>
-          <div><dt>{t("创建时间")}</dt><dd className="font-mono">{formatDateTime(job.createdAt)}</dd></div>
+          <div><dt>{t("任务 ID")}</dt><dd className="tabular-nums">#{job.id}</dd></div>
+          <div><dt>{t("创建时间")}</dt><dd className="tabular-nums">{formatDateTime(job.createdAt)}</dd></div>
           <div><dt>{t("入库文件")}</dt><dd>
                 <div className="flex flex-wrap items-center gap-2">
                   <Tag tone="success">
@@ -1146,7 +1146,7 @@ function ExpandedJobDetails({
         {retryableStatuses.includes(job.status) && (
           <Button
             type="tertiary"
-            icon={<RotateCcw className="size-3.5" />}
+            icon={<RotateCcw className="size-4" />}
             onClick={onRetry}
             loading={retryingJobId === job.id}
             aria-busy={retryingJobId === job.id}
@@ -1165,8 +1165,8 @@ function ExpandedJobDetails({
         onChange={setActiveTab}
         items={[
           { key: "overview", label: t("概览"), children: <div className="space-y-3"><p className="text-xs text-fg-muted">{job.message || t("暂无状态说明")}</p>{hasJobError ? <JobErrorAlert job={job} /> : <Empty description={t("任务未报告错误")} />}</div> },
-          { key: "files", label: <span className="flex items-center gap-1.5"><span>{t("文件")}</span><Tag tone="success" className="font-mono text-xs px-1 py-0">{downloads.length}</Tag></span>, children: renderFilesContent() },
-          { key: "errors", label: <span className="flex items-center gap-1.5"><span className={failed.length || hasJobError ? "text-danger" : ""}>{t("错误与日志")}</span>{(failed.length > 0 || hasJobError) && <Tag tone="danger" className="font-mono text-xs px-1 py-0">{failed.length || 1}</Tag>}</span>, children: renderErrorsContent() },
+          { key: "files", label: <span className="flex items-center gap-1.5"><span>{t("文件")}</span><Tag tone="success" size="sm" className="tabular-nums">{downloads.length}</Tag></span>, children: renderFilesContent() },
+          { key: "errors", label: <span className="flex items-center gap-1.5"><span className={failed.length || hasJobError ? "text-danger" : ""}>{t("错误与日志")}</span>{(failed.length > 0 || hasJobError) && <Tag tone="danger" size="sm" className="tabular-nums">{failed.length || 1}</Tag>}</span>, children: renderErrorsContent() },
         ]}
       />
     </div>

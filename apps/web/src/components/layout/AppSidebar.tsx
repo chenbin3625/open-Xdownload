@@ -48,8 +48,8 @@ export function AppSidebar({
         <div className="sidebar-brand flex items-center gap-2.5">
           <img src="/icon.svg" alt="" className="size-8 shrink-0" />
           <div className="min-w-0">
-            <div className="truncate text-sm font-bold text-fg">open-Xdownload</div>
-            <p className="text-xs text-fg-muted font-medium truncate">{t("推文多媒体归档工作台")}</p>
+            <div className="truncate text-sm font-semibold text-fg">open-Xdownload</div>
+            <p className="text-xs text-fg-muted truncate">{t("推文多媒体归档工作台")}</p>
           </div>
         </div>
 
@@ -73,7 +73,6 @@ export function AppMobileNavigation({ activeSection, onSectionChange }: AppSideb
           theme="borderless"
           type={currentKey === key ? "primary" : "tertiary"}
           className="app-mobile-nav-item"
-          contentClassName="app-mobile-nav-content"
           aria-label={t(label)}
           aria-current={currentKey === key ? "page" : undefined}
           onClick={() => onSectionChange(key)}

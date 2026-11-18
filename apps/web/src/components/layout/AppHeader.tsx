@@ -72,7 +72,6 @@ export function AppHeader({
             prefix={<Search size={16} />}
           />
           <Button
-            theme="solid"
             icon={<ArrowRight size={16} />}
             iconPosition="right"
             disabled={!quickInput.trim()}
@@ -131,7 +130,7 @@ export function AppHeader({
                   <div className="flex items-start gap-3 p-4">
                     <TriangleAlert className="mt-0.5 size-4 shrink-0 text-danger" />
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-fg">{t("失败队列")}</div>
+                      <div className="text-sm font-semibold text-fg">{t("失败队列")}</div>
                       <p className="mt-1 mb-3 text-xs text-fg-muted">
                         {t("{{count}} 条待处理", { count: failedTweetCount })}
                       </p>

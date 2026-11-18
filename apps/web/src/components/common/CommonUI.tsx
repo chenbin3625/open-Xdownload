@@ -248,7 +248,7 @@ export function CopyButton({ value, label }: { value: string; label: string }) {
       <Button
         theme="borderless"
         type={copied ? "primary" : "tertiary"}
-        icon={copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
+        icon={copied ? <Check className="size-4 text-success" /> : <Copy className="size-4" />}
         onClick={handleCopy}
         aria-label={label}
       />

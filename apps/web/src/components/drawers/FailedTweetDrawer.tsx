@@ -26,7 +26,7 @@ export function FailedTweetDrawer({
         <div className="flex items-center gap-2">
           <AlertCircle className="size-4 text-danger shrink-0" />
           <span className="font-semibold text-fg">{t("失败推文队列")}</span>
-          <Tag tone="danger" className="font-mono">
+          <Tag tone="danger" size="sm" className="tabular-nums">
             {total}
           </Tag>
         </div>

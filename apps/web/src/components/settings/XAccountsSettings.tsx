@@ -347,9 +347,9 @@ export function XAccountsSettings() {
     {
       key: "requests",
       title: t("今日请求数"),
-      width: 96,
+      width: 112,
       align: "right",
-      render: (account) => <span className="font-mono">{account.requestsToday}</span>,
+      render: (account) => <span className="tabular-nums">{account.requestsToday}</span>,
     },
     {
       key: "lastUsed",
@@ -377,7 +377,7 @@ export function XAccountsSettings() {
               <Button
                 theme="borderless"
                 type="tertiary"
-                icon={<RefreshCw className={cn("size-3.5", checkPendingId === account.id && "animate-spin")} />}
+                icon={<RefreshCw className={cn("size-4", checkPendingId === account.id && "animate-spin")} />}
                 aria-label={`${t("检测")} ${label}`}
                 loading={checkPendingId === account.id}
                 disabled={checkOne.isPending}
@@ -401,7 +401,7 @@ export function XAccountsSettings() {
               <Button
                 theme="borderless"
                 type="tertiary"
-                icon={<Star className={cn("size-3.5", account.isPrimary && "fill-current")} />}
+                icon={<Star className={cn("size-4", account.isPrimary && "fill-current")} />}
                 aria-label={`${t("设为主账号")} ${label}`}
                 disabled={account.isPrimary || busy}
                 onClick={() => update.mutate({ id: account.id, patch: { isPrimary: true } })}
@@ -411,7 +411,7 @@ export function XAccountsSettings() {
               <Button
                 theme="borderless"
                 type="tertiary"
-                icon={<Pencil className="size-3.5" />}
+                icon={<Pencil className="size-4" />}
                 aria-label={`${t("编辑")} ${label}`}
                 disabled={busy}
                 onClick={() => openEdit(account)}
@@ -422,7 +422,7 @@ export function XAccountsSettings() {
                 <Button
                   theme="borderless"
                   type="tertiary"
-                  icon={<Unlock className="size-3.5" />}
+                  icon={<Unlock className="size-4" />}
                   aria-label={`${t("解锁")} ${label}`}
                   loading={unlockPendingId === account.id}
                   disabled={unlock.isPending}
@@ -436,7 +436,7 @@ export function XAccountsSettings() {
                   <Button
                     theme="borderless"
                     type="danger"
-                    icon={<Trash2 className="size-3.5" />}
+                    icon={<Trash2 className="size-4" />}
                     aria-label={`${t("删除")} ${label}`}
                     title={t("环境变量账号为只读，不能删除")}
                     disabled
@@ -455,7 +455,7 @@ export function XAccountsSettings() {
                 <Button
                   theme="borderless"
                   type="danger"
-                  icon={<Trash2 className="size-3.5" />}
+                  icon={<Trash2 className="size-4" />}
                   aria-label={`${t("删除")} ${label}`}
                   loading={deletePendingId === account.id}
                   disabled={remove.isPending}
@@ -522,7 +522,7 @@ export function XAccountsSettings() {
           type="error"
           message={t("加载账号列表失败")}
           description={getErrorMessage(query.error)}
-          action={<Button onClick={() => void query.refetch()}>{t("重试")}</Button>}
+          action={<Button type="tertiary" onClick={() => void query.refetch()}>{t("重试")}</Button>}
         />
       ) : (
         <Table<XAccountView>
@@ -530,8 +530,8 @@ export function XAccountsSettings() {
           data={accounts}
           rowKey={(account) => account.id}
           loading={query.isLoading}
-          minWidth={1040}
-          className="x-accounts-table"
+          minWidth={1056}
+          className="x-accounts-table data-table"
           emptyText={
             <Empty
               description={
@@ -551,8 +551,8 @@ export function XAccountsSettings() {
                 <ul className="x-account-request-list">
                   {account.requestsByQueue.map((item) => (
                     <li key={item.queue}>
-                      <span className="font-mono">{queueLabel(item.queue)}</span>
-                      <span>{item.requests}</span>
+                      <span className="font-mono text-xs">{queueLabel(item.queue)}</span>
+                      <span className="tabular-nums">{item.requests}</span>
                     </li>
                   ))}
                 </ul>
@@ -629,13 +629,13 @@ export function XAccountsSettings() {
               />
               {importResult.issues.length > 0 && (
                 <div className="x-account-import-issues">
-                  <p className="text-xs font-medium text-fg-body">
+                  <p className="text-xs font-semibold text-fg-body">
                     {t("以下 {{value0}} 个条目未导入：", { value0: importResult.issues.length })}
                   </p>
                   <ul>
                     {importResult.issues.map((issue) => (
                       <li key={`${issue.index}-${issue.reason}`}>
-                        <span className="font-medium">
+                        <span className="font-semibold">
                           {t("第 {{value0}} 条", { value0: issue.index + 1 })}
                         </span>
                         <span>{issue.reason}</span>

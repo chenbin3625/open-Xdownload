@@ -358,6 +358,8 @@
   "人": "users",
   "每轮 {{value0}} 人": "{{value0}} users per run",
   "修改密码失败": "Failed to change password",
+  "退出登录": "Log out",
+  "退出登录失败": "Failed to log out",
   "账号安全": "Account security",
   "修改密码": "Change password",
   "修改成功后需重新登录。": "Sign in again after changing your password.",
