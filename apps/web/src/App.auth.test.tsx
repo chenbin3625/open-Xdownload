@@ -71,12 +71,13 @@ it("keeps login across reloads and clears it after a password change", async () 
   await userEvent.type(screen.getByLabelText("密码"), "initial-password");
   await userEvent.click(screen.getByRole("button", { name: "登录" }));
   await screen.findByRole("heading", { name: "账号安全" });
-  expect(Object.values(localStorage)).toContain("permanent-token");
+  expect(Object.values(localStorage)).not.toContain("permanent-token");
   first.unmount();
   renderApp();
   await screen.findByRole("heading", { name: "账号安全" });
   const lastStatus = fetchMock.mock.calls.filter(([path]) => path === "/api/auth/session").at(-1);
-  expect(new Headers(lastStatus?.[1]?.headers).get("Authorization")).toBe("Bearer permanent-token");
+  expect(new Headers(lastStatus?.[1]?.headers).get("Authorization")).toBeNull();
+  expect(lastStatus?.[1]?.credentials).toBe("same-origin");
   expect(screen.queryByLabelText("当前密码")).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "修改密码" }));
   await userEvent.type(screen.getByLabelText("当前密码"), "initial-password");
@@ -137,5 +138,19 @@ it("ignores a session check that finishes after a newer login", async () => {
   await screen.findByRole("heading", { name: "账号安全" });
   await act(async () => { finishCheck(json({ configured: true, authenticated: false })); });
   expect(screen.getByRole("heading", { name: "账号安全" })).toBeTruthy();
-  expect(Object.values(localStorage)).toContain("newer-token");
+  expect(Object.values(localStorage)).not.toContain("newer-token");
+});
+
+it("logs out on the server and clears protected data", async () => {
+  const fetchMock = vi.fn(async (path: string) => {
+    if (path === "/api/auth/session") return json({ configured: true, authenticated: true, username: "owner" });
+    if (path === "/api/auth/logout") return json({ ok: true });
+    return protectedResponse(path);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  renderApp();
+  await screen.findByRole("heading", { name: "账号安全" });
+  await userEvent.click(screen.getByRole("button", { name: "退出登录" }));
+  expect(await screen.findByRole("heading", { name: "登录" })).toBeTruthy();
+  expect(fetchMock.mock.calls.some(([path]) => path === "/api/auth/logout")).toBe(true);
 });

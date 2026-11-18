@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -106,6 +107,7 @@ func (s *Server) Routes() http.Handler {
 	read("/api/auth/session", s.sessionStatus)
 	r.Post("/api/auth/setup", s.setupAccount)
 	r.Post("/api/auth/login", s.login)
+	r.Post("/api/auth/logout", s.logout)
 	r.Put("/api/auth/password", s.changePassword)
 	read("/api/config", s.getConfig)
 	read("/api/storage", s.getStorage)
@@ -985,6 +987,9 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			return false
 		default:
 		}
+		if account, err := s.requestAccount(r); err != nil || account == nil {
+			return false
+		}
 		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 		if _, err := w.Write(data); err != nil {
@@ -1144,37 +1149,25 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	videoPath, archiveRoot, err := s.resolveDownloadPath(r.Context(), cfg.DownloadDir, record.FilePath)
+	archive, video, videoName, err := s.openDownloadFile(r.Context(), cfg.DownloadDir, record.FilePath)
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	if _, err := os.Stat(videoPath); err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+	defer archive.Close()
+	defer video.Close()
+	if storage.IsLibraryMediaPath(videoName) && !isVideoURL(videoName) {
+		serveOpenedMedia(w, r, video)
 		return
 	}
-	if storage.IsLibraryMediaPath(videoPath) && !isVideoURL(videoPath) {
-		http.ServeFile(w, r, videoPath)
+	posterName := videoName + ".preview.jpg"
+	posterPath := filepath.Join(archive.Name(), posterName)
+	if poster, err := archive.Open(posterName); err == nil {
+		defer poster.Close()
+		serveOpenedMedia(w, r, poster)
 		return
-	}
-	posterPath := videoPath + ".preview.jpg"
-	if !withinAllowedRoot(posterPath, []string{archiveRoot}) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("预览图路径不在允许目录内"))
-		return
-	}
-	// Resolve symlinks on the poster path to prevent serving files outside
-	// the download directory via a symlink escape.
-	resolvedPoster, err := filepath.EvalSymlinks(posterPath)
-	if err == nil && !withinAllowedRoot(resolvedPoster, []string{archiveRoot}) {
-		writeError(w, http.StatusForbidden, fmt.Errorf("预览图路径不在允许目录内"))
-		return
-	}
-	servePath := posterPath
-	if err == nil {
-		servePath = resolvedPoster
-	}
-	if info, stErr := os.Stat(servePath); stErr == nil && !info.IsDir() {
-		http.ServeFile(w, r, servePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("预览图不可访问"))
 		return
 	}
 	posterURL := record.PreviewURL
@@ -1203,7 +1196,7 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
 	defer cancel()
 	err = posterFetchGroup.Do(r.Context(), posterPath, func() error {
-		return fetchRemotePoster(fetchCtx, client, posterFetchLimiter, posterURL, posterPath, maxPosterBytes)
+		return fetchRemotePoster(fetchCtx, client, posterFetchLimiter, posterURL, posterPath, maxPosterBytes, archive)
 	})
 	if err != nil {
 		status, message := posterFailureStatus(err)
@@ -1216,7 +1209,13 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	posterFailures.remove(posterPath)
-	http.ServeFile(w, r, posterPath)
+	poster, err := archive.Open(posterName)
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+	defer poster.Close()
+	serveOpenedMedia(w, r, poster)
 }
 
 // posterFailureStatus 把回源错误映射为 HTTP 状态：上游明确的 4xx/格式错误原样
@@ -1336,7 +1335,22 @@ func (e *posterStatusError) Error() string { return e.message }
 // fetchRemotePoster 回源下载海报并原子发布到 posterPath。并发名额覆盖整个下载过程（含
 // 读取 body），否则首屏几十张卡片的 body 仍会同时下载。超过 maxBytes 时报错且不发布：
 // 截断的图片一旦落盘，之后会被当作有效缓存永久返回。
-func fetchRemotePoster(ctx context.Context, client *http.Client, limiter countingSemaphore, posterURL string, posterPath string, maxBytes int64) error {
+func fetchRemotePoster(ctx context.Context, client *http.Client, limiter countingSemaphore, posterURL string, posterPath string, maxBytes int64, archives ...*os.Root) error {
+	var archive *os.Root
+	if len(archives) > 0 {
+		archive = archives[0]
+	} else {
+		var err error
+		archive, err = os.OpenRoot(filepath.Dir(posterPath))
+		if err != nil {
+			return err
+		}
+		defer archive.Close()
+	}
+	relative, err := filepath.Rel(archive.Name(), posterPath)
+	if err != nil || !filepath.IsLocal(relative) {
+		return errFileOutsideDownloadDir
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, posterURL, nil)
 	if err != nil {
 		return &posterStatusError{status: http.StatusNotFound, message: "预览图地址无效"}
@@ -1362,22 +1376,20 @@ func fetchRemotePoster(ctx context.Context, client *http.Client, limiter countin
 	if contentTypeErr != nil || !strings.EqualFold(strings.SplitN(contentType, "/", 2)[0], "image") {
 		return &posterStatusError{status: http.StatusUnsupportedMediaType, message: "视频预览图格式无效"}
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(posterPath), ".preview-*.jpg")
+	temporaryPath := filepath.Join(filepath.Dir(relative), ".preview-"+rand.Text()+".jpg")
+	temporary, err := archive.OpenFile(temporaryPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	temporaryPath := temporary.Name()
+	defer archive.Remove(temporaryPath)
 	if _, err := httpx.CopyLimited(temporary, response.Body, maxBytes); err != nil {
 		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
 		return err
 	}
 	if err := temporary.Close(); err != nil {
-		_ = os.Remove(temporaryPath)
 		return err
 	}
-	if err := os.Rename(temporaryPath, posterPath); err != nil {
-		_ = os.Remove(temporaryPath)
+	if err := archive.Rename(temporaryPath, relative); err != nil {
 		return err
 	}
 	return nil
@@ -1513,6 +1525,47 @@ func (s *Server) resolveDownloadPath(ctx context.Context, currentRoot, requested
 	return "", "", lastErr
 }
 
+func (s *Server) openDownloadFile(ctx context.Context, currentRoot, requested string) (*os.Root, *os.File, string, error) {
+	path, root, err := s.resolveDownloadPath(ctx, currentRoot, requested)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	archive, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil || !filepath.IsLocal(relative) {
+		archive.Close()
+		return nil, nil, "", errFileOutsideDownloadDir
+	}
+	file, err := archive.Open(relative)
+	if err == nil {
+		var info os.FileInfo
+		info, err = file.Stat()
+		if err == nil && !info.Mode().IsRegular() {
+			err = os.ErrNotExist
+		}
+	}
+	if err != nil {
+		if file != nil {
+			file.Close()
+		}
+		archive.Close()
+		return nil, nil, "", err
+	}
+	return archive, file, relative, nil
+}
+
+func serveOpenedMedia(w http.ResponseWriter, r *http.Request, file *os.File) {
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
+		return
+	}
+	http.ServeContent(w, r, filepath.Base(file.Name()), info.ModTime(), file)
+}
+
 // serveLibraryFile exposes media files saved under the download directory
 // (including unregistered/orphan files referenced by the gallery). The
 // extension whitelist keeps the endpoint from turning into an arbitrary file
@@ -1535,17 +1588,14 @@ func (s *Server) serveLibraryFile(w http.ResponseWriter, r *http.Request) {
 	// 与 /api/library/downloads/{id}/file 保持同一套多根语义：改过下载目录之后，
 	// 旧目录里的孤儿文件（画廊用 ?path= 打开的条目）也应该继续可读，否则同一份
 	// 文件"有记录能播、没记录 404"。
-	filePath, _, err := s.resolveDownloadPath(r.Context(), cfg.DownloadDir, pathValue)
+	archive, file, _, err := s.openDownloadFile(r.Context(), cfg.DownloadDir, pathValue)
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	info, err := os.Stat(filePath)
-	if err != nil || info.IsDir() {
-		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
-		return
-	}
-	http.ServeFile(w, r, filePath)
+	defer archive.Close()
+	defer file.Close()
+	serveOpenedMedia(w, r, file)
 }
 
 // serveDownloadFile exposes only files recorded by the local filestore and
@@ -1573,17 +1623,14 @@ func (s *Server) serveDownloadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	filePath, _, err := s.resolveDownloadPath(r.Context(), cfg.DownloadDir, record.FilePath)
+	archive, file, _, err := s.openDownloadFile(r.Context(), cfg.DownloadDir, record.FilePath)
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	info, err := os.Stat(filePath)
-	if err != nil || info.IsDir() {
-		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
-		return
-	}
-	http.ServeFile(w, r, filePath)
+	defer archive.Close()
+	defer file.Close()
+	serveOpenedMedia(w, r, file)
 }
 
 func (s *Server) listFailedMedia(w http.ResponseWriter, r *http.Request) {

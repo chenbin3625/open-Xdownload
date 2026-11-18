@@ -42,7 +42,11 @@ func testSession(t *testing.T, s *Server) string {
 			t.Fatal(err)
 		}
 	}
-	return signSession(account.SessionKey)
+	token := signSession(account.SessionKey)
+	if err := s.store.CreateSession(context.Background(), token, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 func authenticatedRoutes(t *testing.T, s *Server) http.Handler {

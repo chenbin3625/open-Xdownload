@@ -19,7 +19,7 @@ import (
 )
 
 const sessionCookieName = "open_xdownload_session"
-const sessionCookieMaxAge = 400 * 24 * 60 * 60
+const sessionCookieMaxAge = int(storage.SessionLifetime / time.Second)
 
 type authContextKey struct{}
 
@@ -79,6 +79,10 @@ func (s *Server) requestAccount(r *http.Request) (*storage.Account, error) {
 	if account == nil || !validSession(token, account.SessionKey) {
 		return nil, nil
 	}
+	active, err := s.store.SessionValid(r.Context(), token, time.Now())
+	if err != nil || !active {
+		return nil, err
+	}
 	return account, nil
 }
 
@@ -128,8 +132,12 @@ func (s *Server) requireLogin(next http.Handler) http.Handler {
 func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	s.authMu.RLock()
 	account, err := s.store.GetAccount(r.Context())
-	token, _ := requestToken(r)
-	authenticated := err == nil && account != nil && validSession(token, account.SessionKey)
+	var authenticated bool
+	if err == nil && account != nil {
+		var current *storage.Account
+		current, err = s.requestAccount(r)
+		authenticated = current != nil && err == nil
+	}
 	s.authMu.RUnlock()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -138,8 +146,6 @@ func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{"configured": account != nil, "authenticated": authenticated}
 	if authenticated {
 		result["username"] = account.Username
-		// Renew browser cookie storage while the underlying token has no expiry.
-		setSessionCookie(w, r, token)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -247,8 +253,33 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) respondLogin(w http.ResponseWriter, r *http.Request, account storage.Account, status int) {
 	token := signSession(account.SessionKey)
+	if err := s.store.CreateSession(r.Context(), token, time.Now()); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	setSessionCookie(w, r, token)
-	writeJSON(w, status, map[string]any{"username": account.Username, "token": token})
+	result := map[string]any{"username": account.Username}
+	if r.Header.Get("X-XDownload-Request") != "1" {
+		result["token"] = token
+	}
+	writeJSON(w, status, result)
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	token, _ := requestToken(r)
+	s.authMu.Lock()
+	err := s.store.DeleteSession(r.Context(), token)
+	if err == nil {
+		close(s.authChanged)
+		s.authChanged = make(chan struct{})
+	}
+	s.authMu.Unlock()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	setSessionCookie(w, r, "")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {

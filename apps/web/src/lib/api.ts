@@ -1,5 +1,5 @@
 import { t } from "./i18n";
-import { invalidateSession, readSessionToken } from "./session";
+import { invalidateSession, sessionRevision } from "./session";
 
 export type JobStatus =
   | "pending"
@@ -477,7 +477,7 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
   const { timeoutMs = DEFAULT_TIMEOUT_MS, ...requestInit } = init ?? {};
   const method = (requestInit.method ?? "GET").toUpperCase();
   const composed = createRequestSignal(requestInit.signal, timeoutMs);
-  const token = readSessionToken();
+  const revision = sessionRevision();
   try {
     const response = await fetch(path, {
       ...requestInit,
@@ -485,12 +485,11 @@ export async function api<T>(path: string, init?: ApiInit): Promise<T> {
       signal: composed.signal,
       headers: {
         ...(method !== "GET" && method !== "HEAD" ? { "Content-Type": "application/json", "X-XDownload-Request": "1" } : {}),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(requestInit.headers ?? {}),
       },
     });
     if (!response.ok) {
-      if (response.status === 401 && path !== "/api/auth/login" && token === readSessionToken()) {
+      if (response.status === 401 && path !== "/api/auth/login" && revision === sessionRevision()) {
         invalidateSession();
       }
       const payload: { error?: string } | null = await response.json().catch(() => null);
@@ -528,10 +527,11 @@ export interface LoginSession {
 
 export interface LoginResult {
   username: string;
-  token: string;
+  token?: string;
 }
 
 export const getLoginSession = () => api<LoginSession>("/api/auth/session");
+export const logoutAccount = () => api<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
 export const loginAccount = (username: string, password: string, setup: boolean) =>
   api<LoginResult>(setup ? "/api/auth/setup" : "/api/auth/login", {
     method: "POST", body: JSON.stringify({ username, password }),

@@ -117,7 +117,8 @@ const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout
 // v10: x_accounts / x_account_locks / x_account_stats（twscrape 风格账号池）。
 // v11: jobs.batch_size（定时全文归档每轮最多用户数）。
 // v12: users.avatar_url（归档库按用户浏览时显示头像）。
-const schemaVersion = 12
+// v13: app_sessions adds absolute expiry, idle expiry and per-session logout.
+const schemaVersion = 13
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -276,6 +277,12 @@ func (s *Store) migrate() error {
 			username TEXT NOT NULL,
 			password_hash BLOB NOT NULL,
 			session_key BLOB NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS app_sessions (
+			token_hash BLOB PRIMARY KEY,
+			created_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
 		);
 
 		-- max_concurrency 字段保留只为兼容旧库/API：串行执行（=1）是产品决策，

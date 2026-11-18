@@ -175,7 +175,7 @@ func TestSingleUserAuthenticationLifecycle(t *testing.T) {
 	if w := authRequest(handler, "PUT", "/api/auth/password", `{"currentPassword":"wrong","newPassword":"replacement-password"}`, token); w.Code != http.StatusBadRequest {
 		t.Fatalf("wrong current password accepted: %d %s", w.Code, w.Body.String())
 	}
-	// There is no token expiry; persisted account keys keep tokens valid across restarts.
+	// Unexpired sessions remain valid across restarts.
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}

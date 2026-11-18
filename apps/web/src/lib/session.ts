@@ -1,18 +1,21 @@
 export const sessionTokenKey = "open-xdownload-session";
 export const sessionInvalidatedEvent = "open-xdownload-session-invalidated";
+export const sessionChangedKey = "open-xdownload-session-changed";
+let revision = 0;
 
-export function readSessionToken(): string | null {
-  try { return localStorage.getItem(sessionTokenKey); } catch { return null; }
-}
+try { localStorage.removeItem(sessionTokenKey); } catch { /* Storage may be unavailable. */ }
 
-export function saveSessionToken(token: string | null) {
+export function sessionRevision() { return revision; }
+
+export function noteSessionChange(broadcast = true) {
+  revision += 1;
   try {
-    if (token) localStorage.setItem(sessionTokenKey, token);
-    else localStorage.removeItem(sessionTokenKey);
-  } catch { /* HttpOnly cookie authentication remains available. */ }
+    localStorage.removeItem(sessionTokenKey);
+    if (broadcast) localStorage.setItem(sessionChangedKey, `${Date.now()}:${revision}`);
+  } catch { /* Cookie authentication does not require localStorage. */ }
 }
 
 export function invalidateSession() {
-  saveSessionToken(null);
+  noteSessionChange();
   if (typeof window !== "undefined") window.dispatchEvent(new Event(sessionInvalidatedEvent));
 }

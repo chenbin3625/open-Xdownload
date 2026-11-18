@@ -302,7 +302,7 @@ downloads/
 
 open-Xdownload uses a single local account. On first use, create a username and password in the web UI. Existing installations also enter account setup after upgrading to this version; their tasks, settings, and media records are preserved. Passwords require at least 8 characters and at most 72 bytes and are stored as bcrypt hashes.
 
-Login tokens have no server-side expiry and survive service restarts. The browser saves the token and renews a persistent HttpOnly cookie used for media and realtime events. Changing the password under Settings > Account Security invalidates every existing token and requires signing in again. Clearing browser storage also removes the saved login. Scripts can use the token returned by `POST /api/auth/login` as `Authorization: Bearer <token>`; create the account with `POST /api/auth/setup` first. Both endpoints accept JSON `username` and `password` fields.
+Sessions survive service restarts, expire after 30 days, and expire after 7 days without activity. The browser uses an HttpOnly cookie and does not store a bearer token in localStorage. Settings > Account Security offers per-session logout; changing the password invalidates every session. Scripts can use the token returned by `POST /api/auth/login` as `Authorization: Bearer <token>` and revoke it with `POST /api/auth/logout`; create the account with `POST /api/auth/setup` first. Both login endpoints accept JSON `username` and `password` fields. Upgrading to this version requires signing in again because older tokens have no persisted session record.
 
 Access by domain name, IP address, and reverse proxy works without a Host allowlist or Origin/Host comparison. The service binds to `127.0.0.1:8787` by default; use `-addr 0.0.0.0:8787` or `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` for LAN access. Docker listens on `0.0.0.0` for port mapping. Complete account setup before exposing a new or upgraded instance and use HTTPS for remote access.
 
@@ -622,7 +622,7 @@ downloads/
 
 open-Xdownload 使用单用户账号。首次使用时在网页创建用户名和密码；旧版本升级到此版本后也会进入创建账号流程，原有任务、配置和媒体记录保留。密码至少 8 个字符、最多 72 字节，以 bcrypt 哈希存储。
 
-登录 token 在服务端没有过期时间，重启服务后继续有效。浏览器保存 token，并续期用于媒体和实时事件的持久化 HttpOnly Cookie。在「设置 > 账号安全」修改密码后，所有旧 token 立即失效，需要重新登录；清理浏览器存储也会移除已保存的登录状态。脚本可使用 `POST /api/auth/login` 返回的 token，通过 `Authorization: Bearer <token>` 调用 API；首次建号使用 `POST /api/auth/setup`，两个接口均提交包含 `username` 和 `password` 的 JSON。
+会话可跨服务重启保留，最长 30 天、连续 7 天未使用后失效。浏览器仅使用 HttpOnly Cookie，不再将 Bearer token 保存到 localStorage。「设置 > 账号安全」可退出当前会话；修改密码会使所有会话失效。脚本可使用 `POST /api/auth/login` 返回的 token，通过 `Authorization: Bearer <token>` 调用 API，并用 `POST /api/auth/logout` 撤销；首次建号仍使用 `POST /api/auth/setup`，两个登录接口均提交包含 `username` 和 `password` 的 JSON。升级后旧 token 没有会话记录，需要重新登录。
 
 域名、IP 和反向代理访问均无需配置 Host 白名单，也不再比较 Origin 与 Host。默认监听 `127.0.0.1:8787`；局域网访问可通过 `-addr 0.0.0.0:8787` 或 `OPEN_XDOWNLOAD_ADDR=0.0.0.0:8787` 放开，Docker 镜像为端口映射默认监听 `0.0.0.0`。新安装或升级后请先完成账号创建，再开放外部访问；远程访问请使用 HTTPS。
 

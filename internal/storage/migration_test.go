@@ -810,7 +810,7 @@ func init() {
 		"users(friends_count,id,media_count,name,protected,screen_name,updated_at)",
 		"users(avatar_url,friends_count,id,media_count,name,protected,screen_name,updated_at)", 1)
 	schemaColumnsForVersion[12] = v12
-
+	schemaColumnsForVersion[13] = strings.Replace(v12, ";archive_media(", ";app_sessions(created_at,expires_at,last_seen_at,token_hash);archive_media(", 1)
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {

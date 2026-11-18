@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api, formatBytes } from "./api";
+import { noteSessionChange, sessionRevision } from "./session";
 
 describe("formatBytes", () => {
   it("formats zero", () => {
@@ -29,6 +30,18 @@ describe("api error handling", () => {
   function stubResponse(body: string, init: ResponseInit) {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, init)));
   }
+
+  it("keeps a newer login when an older request returns 401", async () => {
+    let finish!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(resolve => { finish = resolve; })));
+    const pending = api("/api/jobs");
+    const rejected = expect(pending).rejects.toBeInstanceOf(ApiError);
+    noteSessionChange();
+    const revision = sessionRevision();
+    finish(new Response(JSON.stringify({ error: "expired" }), { status: 401 }));
+    await rejected;
+    expect(sessionRevision()).toBe(revision);
+  });
 
   async function caught(promise: Promise<unknown>) {
     try {

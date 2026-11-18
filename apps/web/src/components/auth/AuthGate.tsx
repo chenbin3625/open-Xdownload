@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { LogIn, RefreshCw, UserPlus } from "lucide-react";
 import React, { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getLoginSession, loginAccount, type LoginSession } from "../../lib/api";
-import { saveSessionToken, sessionInvalidatedEvent, sessionTokenKey } from "../../lib/session";
+import { noteSessionChange, sessionChangedKey, sessionInvalidatedEvent } from "../../lib/session";
 import { Button } from "@douyinfe/semi-ui";
 import { Field, Input } from "../semi";
 import { Spinner } from "../semi";
@@ -25,7 +25,6 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       const current = await getLoginSession();
       if (check !== sessionCheck.current) return;
       if (!current.authenticated) {
-        saveSessionToken(null);
         queryClient.clear();
       }
       setSession(current);
@@ -45,7 +44,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       setNotice(t("登录已失效，请重新登录"));
     };
     const storageChanged = (event: StorageEvent) => {
-      if (event.key === sessionTokenKey) void checkSession();
+      if (event.key === sessionChangedKey) {
+        noteSessionChange(false);
+        void checkSession();
+      }
     };
     window.addEventListener(sessionInvalidatedEvent, invalidated);
     window.addEventListener("storage", storageChanged);
@@ -67,21 +69,21 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       <div className="w-full max-w-sm">
         <div className="mb-8 flex items-center gap-3">
           <img src="/icon.svg" alt="" className="size-10 shrink-0" />
-          <span className="min-w-0 break-words text-2xl font-bold text-fg">open-Xdownload</span>
+          <span className="min-w-0 break-words text-2xl font-semibold text-fg">open-Xdownload</span>
         </div>
         {loadError ? (
           <div className="space-y-4">
             <p role="alert" className="break-words text-sm text-danger-strong">{loadError}</p>
-            <Button icon={<RefreshCw className="size-4" />} onClick={() => void checkSession()}>{t("重试")}</Button>
+            <Button type="tertiary" icon={<RefreshCw className="size-4" />} onClick={() => void checkSession()}>{t("重试")}</Button>
           </div>
         ) : session ? (
           <LoginForm
             setup={!session.configured}
             notice={notice}
             onConfigured={() => setSession({ configured: true, authenticated: false })}
-            onLogin={(username, token) => {
+            onLogin={(username) => {
               sessionCheck.current += 1;
-              saveSessionToken(token);
+              noteSessionChange();
               queryClient.clear();
               setNotice("");
               setSession({ configured: true, authenticated: true, username });
@@ -96,7 +98,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 function LoginForm({ setup, notice, onLogin, onConfigured }: {
   setup: boolean;
   notice: string;
-  onLogin: (username: string, token: string) => void;
+  onLogin: (username: string) => void;
   onConfigured: () => void;
 }) {
   useTranslation();
@@ -117,7 +119,7 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
     setPending(true);
     try {
       const result = await loginAccount(username.trim(), password, setup);
-      onLogin(result.username, result.token);
+      onLogin(result.username);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) onConfigured();
       setError(error instanceof Error ? error.message : t("登录失败"));
