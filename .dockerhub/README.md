@@ -2,7 +2,7 @@
 
 open-Xdownload is a local-first X / Twitter media downloader with a built-in Web UI and background task queue. It is built for people who want to archive posts, user media timelines, lists, and followed accounts to their own disk — running it as a container on a home server or NAS, with your own cookies and your own storage.
 
-![Workbench task list](https://raw.githubusercontent.com/chenbin3625/open-Xdownload/main/docs/screenshots/workbench.png)
+![Task center](https://raw.githubusercontent.com/chenbin3625/open-Xdownload/main/docs/screenshots/task-center.png)
 
 ## Quick Start
 
@@ -153,7 +153,7 @@ Please make sure you have the right to download and keep the content, and comply
 
 open-Xdownload 是一个本地优先的 X / Twitter 媒体下载器，内置 Web 界面与后台任务队列。它面向希望把推文、用户媒体时间线、列表和关注账号归档到自己磁盘上的用户，适合以容器方式运行在家庭服务器或 NAS 上，使用自己的 Cookie 和自己的存储。
 
-![工作台任务列表](https://raw.githubusercontent.com/chenbin3625/open-Xdownload/main/docs/screenshots/workbench.png)
+![任务中心](https://raw.githubusercontent.com/chenbin3625/open-Xdownload/main/docs/screenshots/task-center.png)
 
 ## 快速开始
 
