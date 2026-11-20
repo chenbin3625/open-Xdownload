@@ -20,8 +20,6 @@ import {
   mergeNewerJobs,
   useDashboardEvents,
 } from "./lib/useDashboardEvents";
-import { jobStatusBucket } from "./lib/jobStatus";
-import { useDebouncedValue } from "./lib/useDebouncedValue";
 import { useBreakpointUp } from "./lib/useMediaQuery";
 import { useRouteState, type SectionKey } from "./lib/useRouteState";
 
@@ -35,10 +33,12 @@ import { FailedTweetDrawer } from "./components/drawers/FailedTweetDrawer";
 import { GlobalLoadingBar } from "./components/common/GlobalLoadingBar";
 
 import { TaskCenterPage } from "./pages/TaskCenterPage";
-import { SchedulesPage } from "./pages/SchedulesPage";
-import { GalleryPage } from "./pages/GalleryPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { TweetsPage } from "./pages/TweetsPage";
+
+// 任务中心是首屏，保持静态；其余页面按路由懒加载，减小首屏 bundle。
+const SchedulesPage = React.lazy(() => import("./pages/SchedulesPage").then(module => ({ default: module.SchedulesPage })));
+const GalleryPage = React.lazy(() => import("./pages/GalleryPage").then(module => ({ default: module.GalleryPage })));
+const SettingsPage = React.lazy(() => import("./pages/SettingsPage").then(module => ({ default: module.SettingsPage })));
+const TweetsPage = React.lazy(() => import("./pages/TweetsPage").then(module => ({ default: module.TweetsPage })));
 import { AuthGate } from "./components/auth/AuthGate";
 
 // 侧边栏的 overview / workbench / tasks 都指向任务调度中心这一个页面。
@@ -72,7 +72,6 @@ function Workbench() {
     handleGalleryChange,
     syncServerPage,
   } = useRouteState();
-  const debouncedJobSearch = useDebouncedValue(jobSearch, 300);
 
   const handleSectionChange = (section: SectionKey) => {
     if (section !== activeSection && !window.dispatchEvent(new Event("settings:before-navigate", { cancelable: true })) && !window.confirm(t("放弃未保存的修改？"))) return;
@@ -108,26 +107,20 @@ function Workbench() {
 
   // 任务分页 Query
   const jobs = useQuery({
-    queryKey: [...jobsQueryRoot, jobPage, jobPageSize, jobStatus, jobKind, debouncedJobSearch],
+    queryKey: [...jobsQueryRoot, jobPage, jobPageSize, jobStatus, jobKind, jobSearch],
     queryFn: async ({ queryKey, signal }) => {
-      const page = await getJobsPage({ page: jobPage, pageSize: jobPageSize, status: jobStatus, kind: jobKind, search: debouncedJobSearch, signal });
+      const page = await getJobsPage({ page: jobPage, pageSize: jobPageSize, status: jobStatus, kind: jobKind, search: jobSearch, signal });
       // 请求期间可能已有更新的 SSE 补丁落库，逐条比较 updatedAt，别把进度写回旧值。
       // 已筛选页必须以服务端成员集合为准，避免状态变更后把不匹配的旧任务插回来。
-      return jobStatus === "all" && jobKind === "all" && !debouncedJobSearch
+      return jobStatus === "all" && jobKind === "all" && !jobSearch
         ? mergeNewerJobs(queryClient.getQueryData<JobsPage>(queryKey), page)
         : page;
     },
     placeholderData: (previousData) => previousData,
     staleTime: 15_000,
     enabled: isWorkbenchActive,
-    refetchInterval: (query) => {
-      // 用全局 meta 统计判断是否有活跃任务，避免新建任务尚未被轮询拉到时漏掉刷新。
-      const metaData = queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot);
-      if (metaData) return metaData.stats.active > 0 ? 5_000 : 30_000;
-      // meta 从未成功过（首屏 meta 挂了）：退回"本页是否有活跃任务"，避免列表彻底不轮询。
-      const page = query.state.data as JobsPage | undefined;
-      return page?.items.some((job) => jobStatusBucket(job.status) === "active") ? 5_000 : 30_000;
-    },
+    // SSE 已连接时进度由事件推送，轮询只做兜底；断线才回到 5s。
+    refetchInterval: () => (sseConnected ? 30_000 : 5_000),
   });
 
   // 统计与计数 Query
@@ -137,10 +130,7 @@ function Workbench() {
     placeholderData: (previousData) => previousData,
     staleTime: 15_000,
     enabled: isWorkbenchActive,
-    refetchInterval: (query) => {
-      const data = query.state.data as DashboardMeta | undefined;
-      return data && data.stats.active > 0 ? 5_000 : 30_000;
-    },
+    refetchInterval: () => (sseConnected ? 30_000 : 5_000),
   });
 
   // 定时计划 Query
@@ -161,7 +151,7 @@ function Workbench() {
 
   // 分页边界校验
   useEffect(() => {
-    if (jobs.isPlaceholderData || !jobs.data || debouncedJobSearch !== jobSearch) return;
+    if (jobs.isPlaceholderData || !jobs.data) return;
     const total = jobs.data.total ?? (jobStatus === "all" && jobKind === "all" && !jobSearch ? meta.data?.stats.total ?? 0 : 0);
     const totalPages = total
       ? Math.ceil(total / jobPageSize)
@@ -169,7 +159,7 @@ function Workbench() {
     if (jobPage > totalPages) {
       syncServerPage(totalPages);
     }
-  }, [jobPage, jobPageSize, jobStatus, jobKind, jobSearch, debouncedJobSearch, jobs.data, jobs.isPlaceholderData, meta.data, syncServerPage]);
+  }, [jobPage, jobPageSize, jobStatus, jobKind, jobSearch, jobs.data, jobs.isPlaceholderData, meta.data, syncServerPage]);
 
   function handleManualRefresh() {
     setManualRefreshPending(true);
@@ -300,7 +290,7 @@ function Workbench() {
                 stats={currentStats}
                 failedTweetCount={failedTweetCount}
                 pagination={currentPagination}
-                tableLoading={jobs.isPlaceholderData || debouncedJobSearch !== jobSearch}
+                tableLoading={jobs.isPlaceholderData}
                 onPageChange={handleJobPageChange}
                 onPageSizeChange={handleJobPageSizeChange}
                 statusFilter={jobStatus}
@@ -316,18 +306,26 @@ function Workbench() {
             )}
 
             {activeSection === "schedules" && (
+              <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
               <SchedulesPage
                 schedules={schedules.data ?? []}
                 loading={schedules.isLoading}
                 error={schedules.isError ? schedules.error.message : undefined}
                 onOpenCreateModal={() => openCreateModal("", "schedule")}
               />
+              </React.Suspense>
             )}
 
             {activeSection === "gallery" && (
-              <GalleryPage filter={gallery} onFilterChange={handleGalleryChange} />
+              <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
+                <GalleryPage filter={gallery} onFilterChange={handleGalleryChange} />
+              </React.Suspense>
             )}
-            {activeSection === "tweets" && <TweetsPage />}
+            {activeSection === "tweets" && (
+              <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
+                <TweetsPage realtimeConnected={sseConnected} />
+              </React.Suspense>
+            )}
 
             {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
             {activeSection === "settings" && config.isLoading && (
@@ -335,11 +333,13 @@ function Workbench() {
             )}
 
             {activeSection === "settings" && config.data && (
-              <SettingsPage
-                config={config.data}
-                onRefresh={handleManualRefresh}
-                refreshPending={manualRefreshPending}
-              />
+              <React.Suspense fallback={<ListSkeleton rows={8} avatar={false} />}>
+                <SettingsPage
+                  config={config.data}
+                  onRefresh={handleManualRefresh}
+                  refreshPending={manualRefreshPending}
+                />
+              </React.Suspense>
             )}
           </div>
         </main>

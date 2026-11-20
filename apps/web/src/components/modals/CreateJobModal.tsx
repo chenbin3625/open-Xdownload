@@ -200,6 +200,109 @@ export function parseBatchInput(raw: string, kind: JobKind): BatchInputSummary {
   return { items, recognized, pendingValidation, duplicates, invalid, lines };
 }
 
+
+type BatchTabMeta = ReturnType<typeof getBatchTabs>[number];
+
+function BatchTabContent({ tab, summary, value, onValueChange, onRemoveLine }: {
+  tab: BatchTabMeta;
+  summary: ReturnType<typeof parseBatchInput>;
+  value: string;
+  onValueChange: (value: string) => void;
+  onRemoveLine: (kind: BatchKind, lineNumber: number) => void;
+}) {
+  useTranslation();
+  return (
+    <div className="space-y-3 pt-1">
+      <div className="flex items-center justify-between text-xs text-fg-muted">
+        <span>{tab.hint}</span>
+        <span className="shrink-0 whitespace-nowrap font-semibold text-brand-600 tabular-nums">
+          {t("待校验目标")} {summary.items.length} {t(" 个")}</span>
+      </div>
+      {(summary.recognized > 0 || summary.pendingValidation > 0 || summary.duplicates > 0 || summary.invalid > 0) && (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-subtle tabular-nums" aria-live="polite">
+          {summary.recognized > 0 && <span>{t("格式有效")} {summary.recognized}</span>}
+          {summary.pendingValidation > 0 && <span>{t("待后端校验")} {summary.pendingValidation}</span>}
+          {summary.duplicates > 0 && <span className="text-warning-strong">{t("重复目标")} {summary.duplicates}</span>}
+          {summary.invalid > 0 && <span className="text-danger">{t("无效格式")} {summary.invalid}</span>}
+        </div>
+      )}
+      <Textarea
+        rows={6}
+        aria-label={tab.label}
+        value={value}
+        onChange={(e) => onValueChange(e.target.value)}
+        placeholder={tab.placeholder}
+        className="font-mono text-xs"
+      />
+      {summary.lines.length > 0 && (
+        <div className="space-y-1.5" aria-label={t("逐行校验结果")}>
+          {summary.lines.map(line => (
+            <div key={`${tab.kind}-${line.lineNumber}`} className="flex min-w-0 items-center gap-2 text-xs">
+              <span className="w-12 shrink-0 text-fg-subtle tabular-nums">{t("第 {{value0}} 行", { value0: line.lineNumber })}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-fg-muted" title={line.raw}>{line.normalized || line.raw}</span>
+              {line.status === "valid" && <Tag tone="success" size="sm">{t("格式有效")}</Tag>}
+              {line.status === "pending" && <Tag tone="warning" size="sm">{t("待后端校验")}</Tag>}
+              {line.status === "invalid" && <Tag tone="danger" size="sm">{t("无效格式，已忽略")}</Tag>}
+              {line.status === "duplicate" && <><Tag tone="danger" size="sm">{t("与第 {{value0}} 行重复，已忽略", { value0: line.duplicateOf })}</Tag><Button type="tertiary" size="small" onClick={() => onRemoveLine(tab.kind, line.lineNumber)}>{t("移除重复行")}</Button></>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TweetLinkTabContent({ value, onChange, onParse, parsePending, parsedTweet }: {
+  value: string;
+  onChange: (value: string) => void;
+  onParse: () => void;
+  parsePending: boolean;
+  parsedTweet: TweetData | null;
+}) {
+  useTranslation();
+  return (
+    <div className="space-y-3 pt-1">
+      <div className="flex gap-2">
+        <Input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onPressEnter={onParse}
+          placeholder="https://x.com/username/status/1234567890"
+        />
+        <Button
+          theme="solid"
+          disabled={!value.trim() || parsePending}
+          loading={parsePending}
+          aria-busy={parsePending}
+          onClick={onParse}
+          className="shrink-0"
+        >
+          {t("解析推文")}</Button>
+      </div>
+
+      {parsedTweet && (
+        <div className="rounded-card border border-line bg-surface-muted/60 p-3.5 space-y-2 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="min-w-0 break-all font-semibold text-fg">
+              @{parsedTweet.author.screenName} ({parsedTweet.author.name})
+            </span>
+            <span className="font-semibold text-success tabular-nums">
+              {parsedTweet.media.length} {t(" 个可用媒体")}</span>
+          </div>
+          <p className="line-clamp-2 text-fg-body">
+            {parsedTweet.text || t("无正文")}
+          </p>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
+            <span>{t("推文 ID: ")}{parsedTweet.id}</span>
+            <span>·</span>
+            <span>{t("发布于: ")}{parsedTweet.createdAt || t("未知")}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CreateJobModal({
   open,
   onClose,
@@ -353,6 +456,7 @@ export function CreateJobModal({
     parseMutation.mutate({ url: trimmed, sequence: parseSequence.current });
   };
 
+  // 关闭时只保留标签，内容组件不构建也不挂载；Semi Tabs 自身只挂载当前 tab 的内容。
   const tabItems: TabItem[] = [
     ...getBatchTabs().map((tab) => ({
       key: tab.kind,
@@ -362,47 +466,15 @@ export function CreateJobModal({
           <span>{tab.label}</span>
         </span>
       ),
-      children: (
-        <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between text-xs text-fg-muted">
-            <span>{tab.hint}</span>
-            <span className="shrink-0 whitespace-nowrap font-semibold text-brand-600 tabular-nums">
-              {t("待校验目标")} {currentBatchItems.length} {t(" 个")}</span>
-          </div>
-          {(currentBatchSummary.recognized > 0 || currentBatchSummary.pendingValidation > 0 || currentBatchSummary.duplicates > 0 || currentBatchSummary.invalid > 0) && (
-            <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-subtle tabular-nums" aria-live="polite">
-              {currentBatchSummary.recognized > 0 && <span>{t("格式有效")} {currentBatchSummary.recognized}</span>}
-              {currentBatchSummary.pendingValidation > 0 && <span>{t("待后端校验")} {currentBatchSummary.pendingValidation}</span>}
-              {currentBatchSummary.duplicates > 0 && <span className="text-warning-strong">{t("重复目标")} {currentBatchSummary.duplicates}</span>}
-              {currentBatchSummary.invalid > 0 && <span className="text-danger">{t("无效格式")} {currentBatchSummary.invalid}</span>}
-            </div>
-          )}
-          <Textarea
-            rows={6}
-            aria-label={tab.label}
-            value={batchInputs[tab.kind] ?? ""}
-            onChange={(e) =>
-              setBatchInputs((current) => ({ ...current, [tab.kind]: e.target.value }))
-            }
-            placeholder={tab.placeholder}
-            className="font-mono text-xs"
-          />
-          {currentBatchSummary.lines.length > 0 && (
-            <div className="space-y-1.5" aria-label={t("逐行校验结果")}>
-              {currentBatchSummary.lines.map(line => (
-                <div key={`${tab.kind}-${line.lineNumber}`} className="flex min-w-0 items-center gap-2 text-xs">
-                  <span className="w-12 shrink-0 text-fg-subtle tabular-nums">{t("第 {{value0}} 行", { value0: line.lineNumber })}</span>
-                  <span className="min-w-0 flex-1 truncate font-mono text-fg-muted" title={line.raw}>{line.normalized || line.raw}</span>
-                  {line.status === "valid" && <Tag tone="success" size="sm">{t("格式有效")}</Tag>}
-                  {line.status === "pending" && <Tag tone="warning" size="sm">{t("待后端校验")}</Tag>}
-                  {line.status === "invalid" && <Tag tone="danger" size="sm">{t("无效格式，已忽略")}</Tag>}
-                  {line.status === "duplicate" && <><Tag tone="danger" size="sm">{t("与第 {{value0}} 行重复，已忽略", { value0: line.duplicateOf })}</Tag><Button type="tertiary" size="small" onClick={() => removeBatchLine(tab.kind, line.lineNumber)}>{t("移除重复行")}</Button></>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ),
+      children: open ? (
+        <BatchTabContent
+          tab={tab}
+          summary={currentBatchSummary}
+          value={batchInputs[tab.kind] ?? ""}
+          onValueChange={value => setBatchInputs(current => ({ ...current, [tab.kind]: value }))}
+          onRemoveLine={removeBatchLine}
+        />
+      ) : null,
     })),
     {
       key: "tweet_link",
@@ -412,51 +484,15 @@ export function CreateJobModal({
           <span>{t("单条推文")}</span>
         </span>
       ),
-      children: (
-        <div className="space-y-3 pt-1">
-          <div className="flex gap-2">
-            <Input
-              value={tweetUrl}
-              onChange={(e) => {
-                parseSequence.current += 1;
-                setTweetUrl(e.target.value);
-                setParsedTweet(null);
-              }}
-              onPressEnter={handleParseTweet}
-              placeholder="https://x.com/username/status/1234567890"
-            />
-            <Button
-              theme="solid"
-              disabled={!tweetUrl.trim() || parseMutation.isPending}
-              loading={parseMutation.isPending}
-              aria-busy={parseMutation.isPending}
-              onClick={handleParseTweet}
-              className="shrink-0"
-            >
-              {t("解析推文")}</Button>
-          </div>
-
-          {parsedTweet && (
-            <div className="rounded-card border border-line bg-surface-muted/60 p-3.5 space-y-2 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="min-w-0 break-all font-semibold text-fg">
-                  @{parsedTweet.author.screenName} ({parsedTweet.author.name})
-                </span>
-                <span className="font-semibold text-success tabular-nums">
-                  {parsedTweet.media.length} {t(" 个可用媒体")}</span>
-              </div>
-              <p className="line-clamp-2 text-fg-body">
-                {parsedTweet.text || t("无正文")}
-              </p>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
-                <span>{t("推文 ID: ")}{parsedTweet.id}</span>
-                <span>·</span>
-                <span>{t("发布于: ")}{parsedTweet.createdAt || t("未知")}</span>
-              </div>
-            </div>
-          )}
-        </div>
-      ),
+      children: open ? (
+        <TweetLinkTabContent
+          value={tweetUrl}
+          onChange={value => { parseSequence.current += 1; setTweetUrl(value); setParsedTweet(null); }}
+          onParse={handleParseTweet}
+          parsePending={parseMutation.isPending}
+          parsedTweet={parsedTweet}
+        />
+      ) : null,
     },
   ];
 

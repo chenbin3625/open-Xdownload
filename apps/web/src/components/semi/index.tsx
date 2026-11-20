@@ -1,5 +1,5 @@
 import "@douyinfe/semi-ui/react19-adapter";
-import React, { createContext, forwardRef, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import React, { createContext, forwardRef, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Avatar as SAvatar, Badge, Banner, Button as SButton,
   Checkbox as SCheckbox, ConfigProvider, Descriptions as SDescriptions,
@@ -149,15 +149,23 @@ export interface TableColumn<T> { key: string; title: React.ReactNode; width?: n
 export function Table<T extends object>({ columns, data, rowKey, loading, minWidth, expandedRowRender, emptyText, footer, className }: { columns: TableColumn<T>[]; data: T[]; rowKey: (record: T) => string | number; loading?: boolean; minWidth?: number; expandedRowRender?: (record: T) => React.ReactNode; emptyText?: React.ReactNode; footer?: React.ReactNode; className?: string }) {
   const [expanded, setExpanded] = useState<(string | number)[]>([]);
   const id = useId();
-  const semiColumns = columns.map(col => ({ key: col.key, title: col.title, width: col.width, align: col.align, render: (_text: unknown, record: T) => col.render(record) }));
-  if (expandedRowRender) semiColumns.unshift({ key: "expand", title: "", width: 56, align: "center", render: (_text: unknown, record: T) => { const key = String(rowKey(record)); const open = expanded.includes(key); return <SButton theme="borderless" type="tertiary" aria-label={t(open ? "收起详情" : "展开详情")} aria-expanded={open} aria-controls={`${id}-${key}`} icon={<ChevronRight size={16} className={open ? "rotate-90" : undefined} />} onClick={() => setExpanded(current => open ? current.filter(v => v !== key) : [...current, key])} />; } });
+  // 列定义保持引用稳定，避免父组件每次渲染都把整张 Semi 表格的列重建一遍。
+  const semiColumns = useMemo(() => {
+    const next = columns.map(col => ({ key: col.key, title: col.title, width: col.width, align: col.align, render: (_text: unknown, record: T) => col.render(record) }));
+    if (expandedRowRender) next.unshift({ key: "expand", title: "", width: 56, align: "center", render: (_text: unknown, record: T) => { const key = String(rowKey(record)); const open = expanded.includes(key); return <SButton theme="borderless" type="tertiary" aria-label={t(open ? "收起详情" : "展开详情")} aria-expanded={open} aria-controls={`${id}-${key}`} icon={<ChevronRight size={16} className={open ? "rotate-90" : undefined} />} onClick={() => setExpanded(current => open ? current.filter(v => v !== key) : [...current, key])} />; } });
+    return next;
+  }, [columns, expanded, expandedRowRender, id, rowKey]);
   return <STable<T> className={className} columns={semiColumns} dataSource={data} rowKey={record => record ? String(rowKey(record)) : ""} loading={loading} pagination={false} scroll={minWidth ? { x: minWidth } : undefined} expandedRowRender={expandedRowRender ? (record => record && expanded.includes(String(rowKey(record))) ? <div id={`${id}-${rowKey(record)}`}>{expandedRowRender(record)}</div> : null) : undefined} hideExpandedColumn expandIcon={false} expandedRowKeys={expanded} keepDOM={false} empty={emptyText ?? t("暂无数据")} footer={footer ? () => footer : undefined} size="small" />;
 }
 export function Pagination({ page, pageSize, total, onPageChange, onPageSizeChange, pageSizeOptions = [10, 20, 50, 100], totalLabel, className }: { page: number; pageSize: number; total: number; onPageChange: (v: number) => void; onPageSizeChange?: (v: number) => void; pageSizeOptions?: number[]; totalLabel?: (n: number) => React.ReactNode; size?: "sm" | "md"; className?: string }) {
   const size = Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 1; const count = Number.isFinite(total) && total > 0 ? total : 0;
   const root = useRef<HTMLElement>(null); const labelId = useId(); const { i18n } = useTranslation();
+  const labelControlsRef = useRef<() => void>(() => {});
+  // MutationObserver 只随界面语言 / labelId 重建；页码与总数变化时单独同步一次标签，
+  // 避免翻页时反复创建观察器。标签修正逻辑本身保持不变。
   useLayoutEffect(() => {
-    function labelControls() {
+    const rootNode = root.current;
+    const labelControls = () => {
     for (const item of root.current?.querySelectorAll<HTMLElement>(".semi-page-item") ?? []) {
       const label = item.classList.contains("semi-page-prev") ? t("上一页") : item.classList.contains("semi-page-next") ? t("下一页") : /^\d+$/.test(item.textContent?.trim() ?? "") ? t("第 {{value0}} 页", { value0: Number(item.textContent) }) : undefined;
       if (!label) continue;
@@ -169,12 +177,17 @@ export function Pagination({ page, pageSize, total, onPageChange, onPageSizeChan
     }
     const select = root.current?.querySelector('[role="combobox"]');
     if (select && select.getAttribute("aria-labelledby") !== labelId) select.setAttribute("aria-labelledby", labelId);
-    }
+    };
+    labelControlsRef.current = labelControls;
     labelControls();
     const observer = new MutationObserver(labelControls);
-    if (root.current) observer.observe(root.current, { childList: true, subtree: true, attributes: true, attributeFilter: ["role", "aria-label", "aria-disabled", "class"] });
-    return () => observer.disconnect();
-  }, [page, size, count, labelId, i18n.resolvedLanguage]);
+    if (rootNode) observer.observe(rootNode, { childList: true, subtree: true, attributes: true, attributeFilter: ["role", "aria-label", "aria-disabled", "class"] });
+    return () => {
+      observer.disconnect();
+      if (labelControlsRef.current === labelControls) labelControlsRef.current = () => {};
+    };
+  }, [labelId, i18n.resolvedLanguage]);
+  useLayoutEffect(() => { labelControlsRef.current(); }, [page, size, count]);
   return <nav ref={root} aria-label={t("分页")} className={cn("semi-pagination-bar", className)} onKeyDown={e => { if (["Enter", " "].includes(e.key) && (e.target as HTMLElement).getAttribute("role") === "button") { e.preventDefault(); (e.target as HTMLElement).click(); } }}><span>{totalLabel?.(count) ?? t("共 {{value0}} 条", { value0: count })}</span><span className="sr-only" id={labelId}>{t("每页条数")}</span><SPagination currentPage={Math.max(1, Math.min(Number.isFinite(page) ? page : 1, Math.max(1, Math.ceil(count / size))))} pageSize={size} total={Math.max(1, count)} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} showSizeChanger={!!onPageSizeChange} pageSizeOpts={pageSizeOptions} /></nav>;
 }
 export function buildPageItems(current: number, total: number): (number | "gap")[] { const items: (number | "gap")[] = []; let previous = 0; for (let n = 1; n <= total; n++) { if (total > 7 && n !== 1 && n !== total && Math.abs(n - current) > 1) continue; if (previous && n - previous > 1) items.push("gap"); items.push(n); previous = n; } return items; }

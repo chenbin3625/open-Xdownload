@@ -182,3 +182,23 @@ export function resolveTweetDisplay(tweet: TweetData): TweetDisplay {
     missingRepostId: tweet.retweetedTweetId && !original ? tweet.retweetedTweetId : undefined,
   };
 }
+
+const TWIMG_IMAGE_HOSTS = new Set(["pbs.twimg.com", "video.twimg.com"]);
+
+/**
+ * 把 X 图床 URL 的 `name` 参数改写为 `small`，用于网格/卡片缩略图。
+ * 只处理 twimg 主机的图片地址：其它域名、非法 URL 与视频文件原样返回 undefined。
+ */
+export function smallTwimgUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (!TWIMG_IMAGE_HOSTS.has(parsed.hostname.toLowerCase())) return undefined;
+  if (/\.(mp4|m4v|mov|webm|ogv)$/i.test(parsed.pathname)) return undefined;
+  parsed.searchParams.set("name", "small");
+  return parsed.toString();
+}

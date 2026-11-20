@@ -17,7 +17,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Checkbox, Input, Progress, RadioGroup, Select, Typography } from "@douyinfe/semi-ui";
 import { getJobProgressDisplay, parseAggregatedErrors } from "../lib/jobErrors";
 import {
@@ -53,6 +53,7 @@ import {
 } from "../lib/jobStatus";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 import { useBreakpointUp } from "../lib/useMediaQuery";
+import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { Drawer, Tabs } from "../components/semi";
 import { Alert, Empty } from "../components/semi";
 import { Tooltip } from "../components/semi";
@@ -145,7 +146,7 @@ export function TaskCenterPage({
   onSearchKeywordChange,
   filterCounts,
 }: TaskCenterPageProps) {
-  useTranslation();
+  const { i18n } = useTranslation();
   const queryClient = useQueryClient();
   const isMobile = !useBreakpointUp("xl");
   const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilterType>("all");
@@ -161,23 +162,48 @@ export function TaskCenterPage({
   const kindFilter = controlledKindFilter ?? localKindFilter;
   const searchKeyword = controlledSearchKeyword ?? localSearchKeyword;
   const serverFiltering = controlledKindFilter !== undefined || controlledSearchKeyword !== undefined;
+  // 输入框即时回显；300ms 防抖后才把关键词交给父组件（URL / 服务端查询）。
+  const [searchInput, setSearchInput] = useState(searchKeyword);
+  const debouncedSearchInput = useDebouncedValue(searchInput, 300);
+  const lastSyncedSearchRef = useRef(searchKeyword);
+  // 未受控时本页直接按输入过滤，保留原有"本页筛选"的即时体验。
+  const filterKeyword = controlledSearchKeyword === undefined ? searchInput : searchKeyword;
   const changeKindFilter = (kind: string) => {
     if (controlledKindFilter === undefined) setLocalKindFilter(kind);
     onKindFilterChange?.(kind);
     if (pagination.page > 1) onPageChange(1);
   };
+  // 程序化改动（清除筛选等）立即生效，不经过防抖。
   const changeSearchKeyword = (keyword: string) => {
+    lastSyncedSearchRef.current = keyword;
+    setSearchInput(keyword);
     if (controlledSearchKeyword === undefined) setLocalSearchKeyword(keyword);
     onSearchKeywordChange?.(keyword);
     if (pagination.page > 1) onPageChange(1);
   };
+
+  // 外部值（URL 回退、清除筛选）变化时同步回输入框；自己防抖发出的值不回灌，
+  // 避免 flush 时覆盖用户已经继续输入的新内容。
+  useEffect(() => {
+    if (searchKeyword === lastSyncedSearchRef.current) return;
+    lastSyncedSearchRef.current = searchKeyword;
+    setSearchInput(searchKeyword);
+  }, [searchKeyword]);
+
+  useEffect(() => {
+    if (debouncedSearchInput === lastSyncedSearchRef.current) return;
+    lastSyncedSearchRef.current = debouncedSearchInput;
+    if (controlledSearchKeyword === undefined) setLocalSearchKeyword(debouncedSearchInput);
+    onSearchKeywordChange?.(debouncedSearchInput);
+    if (pagination.page > 1) onPageChange(1);
+  }, [debouncedSearchInput, controlledSearchKeyword, onSearchKeywordChange, onPageChange, pagination.page]);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [retryCreatedJobId, setRetryCreatedJobId] = useState<number | null>(null);
   const [selectedJobIds, setSelectedJobIds] = useState<Set<number>>(new Set());
   const detailJob = jobs.find(job => job.id === detailId);
-  const openJobDetails = (id: number) => { setRetryCreatedJobId(null); setDetailId(id); };
+  const openJobDetails = useCallback((id: number) => { setRetryCreatedJobId(null); setDetailId(id); }, []);
 
-  useEffect(() => { setSelectedJobIds(new Set()); }, [pagination.page, pagination.pageSize, statusFilter, kindFilter, searchKeyword]);
+  useEffect(() => { setSelectedJobIds(new Set()); }, [pagination.page, pagination.pageSize, statusFilter, kindFilter, filterKeyword]);
   useEffect(() => {
     setSelectedJobIds(current => {
       const visible = new Set(jobs.map(job => job.id));
@@ -299,7 +325,7 @@ export function TaskCenterPage({
   });
 
   const filteredJobs = useMemo(() => {
-    const keyword = searchKeyword.trim().toLowerCase();
+    const keyword = filterKeyword.trim().toLowerCase();
     if (serverFiltering) return jobs;
     return jobs.filter((job) => {
       if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
@@ -325,10 +351,10 @@ export function TaskCenterPage({
         (job.message || "").toLowerCase().includes(keyword)
       );
     });
-  }, [jobs, statusFilter, kindFilter, searchKeyword, serverFiltering]);
+  }, [jobs, statusFilter, kindFilter, filterKeyword, serverFiltering]);
 
   const hasActiveFilter =
-    statusFilter !== "all" || kindFilter !== "all" || searchKeyword.trim() !== "";
+    statusFilter !== "all" || kindFilter !== "all" || filterKeyword.trim() !== "";
 
   const bucketCounts = useMemo(() => {
     const counts = { active: 0, completed: 0, failed: 0 };
@@ -355,20 +381,23 @@ export function TaskCenterPage({
   const cancelableSelectedIds = selectedJobs.filter(job => cancelableStatuses.includes(job.status)).map(job => job.id);
   const retryableSelectedIds = selectedJobs.filter(job => retryableStatuses.includes(job.status)).map(job => job.id);
   const allVisibleSelected = filteredJobs.length > 0 && filteredJobs.every(job => selectedJobIds.has(job.id));
-  const toggleSelected = (id: number, checked: boolean) => {
+  const filteredJobsRef = useRef(filteredJobs);
+  filteredJobsRef.current = filteredJobs;
+  const toggleSelected = useCallback((id: number, checked: boolean) => {
     setSelectedJobIds(current => {
       const next = new Set(current);
       if (checked) next.add(id); else next.delete(id);
       return next;
     });
-  };
-  const toggleAllVisible = (checked: boolean) => {
+  }, []);
+  const toggleAllVisible = useCallback((checked: boolean) => {
     setSelectedJobIds(current => {
       const next = new Set(current);
-      filteredJobs.forEach(job => checked ? next.add(job.id) : next.delete(job.id));
+      filteredJobsRef.current.forEach(job => checked ? next.add(job.id) : next.delete(job.id));
       return next;
     });
-  };
+  }, []);
+  const jobRowKey = useCallback((job: Job) => job.id, []);
 
   const displayStats = {
     active: stats ? stats.active : bucketCounts.active,
@@ -377,7 +406,12 @@ export function TaskCenterPage({
     total: stats ? stats.total : pagination.total,
   };
 
-  const renderJobActions = (record: Job, includeDetails = false) => (
+  // 把 mutation 的瞬时状态收敛成标量，列定义不必随 useMutation 返回的新对象每次重建。
+  const cancelPendingId = cancel.isPending ? cancel.variables : undefined;
+  const retryPendingId = retry.isPending ? retry.variables : undefined;
+  const removePendingId = removeJob.isPending ? removeJob.variables : undefined;
+
+  const renderJobActions = useCallback((record: Job, includeDetails = false) => (
     <div className="flex items-center justify-end gap-1.5">
       {includeDetails && (
         <Button
@@ -393,9 +427,9 @@ export function TaskCenterPage({
       {cancelableStatuses.includes(record.status) && (
         <Button
           type="danger"
-          loading={cancel.isPending && cancel.variables === record.id}
-          disabled={cancel.isPending && cancel.variables === record.id}
-          aria-busy={cancel.isPending && cancel.variables === record.id}
+          loading={cancelPendingId === record.id}
+          disabled={cancelPendingId === record.id}
+          aria-busy={cancelPendingId === record.id}
           onClick={() => cancel.mutate(record.id)}
         >
           {t("取消")}</Button>
@@ -403,9 +437,9 @@ export function TaskCenterPage({
       {retryableStatuses.includes(record.status) && (
         <Button
           type="tertiary"
-          loading={retry.isPending && retry.variables === record.id}
-          aria-busy={retry.isPending && retry.variables === record.id}
-          disabled={retry.isPending}
+          loading={retryPendingId === record.id}
+          aria-busy={retryPendingId === record.id}
+          disabled={retryPendingId !== undefined}
           onClick={() => retry.mutate(record.id)}
         >
           {t("重试")}</Button>
@@ -422,17 +456,17 @@ export function TaskCenterPage({
             theme="borderless"
             type="danger"
             icon={<Trash2 className="size-4 text-danger" />}
-            loading={removeJob.isPending && removeJob.variables === record.id}
-            disabled={removeJob.isPending && removeJob.variables === record.id}
-            aria-busy={removeJob.isPending && removeJob.variables === record.id}
+            loading={removePendingId === record.id}
+            disabled={removePendingId === record.id}
+            aria-busy={removePendingId === record.id}
             aria-label={t("删除任务")}
           />
         </Popconfirm>
       )}
     </div>
-  );
+  ), [cancelPendingId, cancel.mutate, openJobDetails, removeJob.mutate, removePendingId, retry.mutate, retryPendingId]);
 
-  const columns: TableColumn<Job>[] = [
+  const columns = useMemo<TableColumn<Job>[]>(() => [
     {
       key: "select",
       title: (
@@ -455,31 +489,13 @@ export function TaskCenterPage({
     {
       key: "title",
       title: t("任务目标 / 描述"),
-      render: (record) => (
-        <div className="flex min-w-0 items-center gap-2.5 py-0.5">
-          <Avatar>
-            <JobKindIcon kind={record.kind} className="size-4" />
-          </Avatar>
-          <div className="min-w-0 flex-1">
-            <button type="button" className="task-title-link" onClick={() => openJobDetails(record.id)} title={record.title || kindLabel(record.kind)}>
-              {record.title || kindLabel(record.kind)}
-            </button>
-            <div className="truncate text-xs text-fg-muted" title={record.input}>
-              {t("目标: ")}{record.input} · #JOB-{record.id}
-            </div>
-          </div>
-        </div>
-      ),
+      render: (record) => <JobTitleCell job={record} onOpenDetails={openJobDetails} />,
     },
     {
       key: "kind",
       title: t("类型"),
       width: 120,
-      render: (record) => (
-        <Tag tone="default" icon={<JobKindIcon kind={record.kind} />}>
-          {kindLabel(record.kind)}
-        </Tag>
-      ),
+      render: (record) => <JobKindCell job={record} />,
     },
     {
       key: "status",
@@ -491,11 +507,7 @@ export function TaskCenterPage({
       key: "updatedAt",
       title: t("更新时间"),
       width: 140,
-      render: (record) => (
-        <span className="text-xs text-fg-subtle tabular-nums">
-          {formatDateTime(record.updatedAt)}
-        </span>
-      ),
+      render: (record) => <JobUpdatedCell updatedAt={record.updatedAt} />,
     },
     {
       key: "action",
@@ -505,7 +517,7 @@ export function TaskCenterPage({
       align: "right",
       render: record => renderJobActions(record, true),
     },
-  ];
+  ], [allVisibleSelected, i18n.resolvedLanguage, openJobDetails, renderJobActions, selectedJobIds, toggleAllVisible, toggleSelected]);
 
   const summaryLabel = hasActiveFilter
     ? serverFiltering
@@ -665,8 +677,8 @@ export function TaskCenterPage({
             prefix={<Search size={16} />}
             aria-label={t("按标题、用户名、错误信息或 ID 搜索...")}
             placeholder={t("搜索本页任务、用户名或错误...")}
-            value={searchKeyword}
-            onChange={changeSearchKeyword}
+            value={searchInput}
+            onChange={setSearchInput}
             showClear
             className="toolbar-search"
           />
@@ -742,7 +754,7 @@ export function TaskCenterPage({
           <Table<Job>
             columns={columns}
             data={filteredJobs}
-            rowKey={(r) => r.id}
+            rowKey={jobRowKey}
             loading={tableLoading}
             className="task-table data-table"
             emptyText={hasActiveFilter ? t(serverFiltering ? "没有匹配的任务" : "本页没有匹配的任务") : t("暂无任务")}
@@ -760,7 +772,45 @@ export function TaskCenterPage({
   );
 }
 
-function JobProgress({ job }: { job: Job }) {
+// 每个单元格自己 useTranslation()：语言切换会通过 context 触发重渲染，
+// React.memo 只拦住"任务对象没变"的普通列表刷新。
+const JobTitleCell = React.memo(function JobTitleCell({ job, onOpenDetails }: { job: Job; onOpenDetails: (id: number) => void }) {
+  useTranslation();
+  return (
+    <div className="flex min-w-0 items-center gap-2.5 py-0.5">
+      <Avatar>
+        <JobKindIcon kind={job.kind} className="size-4" />
+      </Avatar>
+      <div className="min-w-0 flex-1">
+        <button type="button" className="task-title-link" onClick={() => onOpenDetails(job.id)} title={job.title || kindLabel(job.kind)}>
+          {job.title || kindLabel(job.kind)}
+        </button>
+        <div className="truncate text-xs text-fg-muted" title={job.input}>
+          {t("目标: ")}{job.input} · #JOB-{job.id}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const JobKindCell = React.memo(function JobKindCell({ job }: { job: Job }) {
+  useTranslation();
+  return (
+    <Tag tone="default" icon={<JobKindIcon kind={job.kind} />}>
+      {kindLabel(job.kind)}
+    </Tag>
+  );
+});
+
+const JobUpdatedCell = React.memo(function JobUpdatedCell({ updatedAt }: { updatedAt: string }) {
+  return (
+    <span className="text-xs text-fg-subtle tabular-nums">
+      {formatDateTime(updatedAt)}
+    </span>
+  );
+});
+
+const JobProgress = React.memo(function JobProgress({ job }: { job: Job }) {
   useTranslation();
   const percent = clampPercent(job.progress);
   const meta = getJobStatusPresentation(job.status);
@@ -782,7 +832,7 @@ function JobProgress({ job }: { job: Job }) {
       </div>
     </Tooltip>
   );
-}
+});
 
 function MobileJobCard({
   job,

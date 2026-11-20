@@ -152,6 +152,10 @@ export function mergeNewerJobs(cached: JobsPage | undefined, fetched: JobsPage):
 // 统一 refetch"，既不丢失效语义（期间新挂载的查询仍会自己拉），也把请求压到一次。
 export const TERMINAL_REFRESH_DEBOUNCE_MS = 300;
 
+// job.updated 在批量归档时每秒可达数条；逐条写缓存会让整页跟着重渲染。
+// 同一任务 id 只保留最新一条，最多每 250ms 合并应用一次。
+export const JOB_UPDATE_FLUSH_MS = 250;
+
 function isUnfilteredJobsQuery(query: { queryKey: readonly unknown[] }) {
   const [, , , status, kind, search] = query.queryKey;
   return status === undefined || status === "all" && kind === "all" && search === "";
@@ -414,6 +418,62 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
       }, 800);
     };
 
+    const handleEventResult = (result: ApplyDashboardEventResult) => {
+      switch (result) {
+        case "refresh-workbench":
+          scheduleRefresh();
+          return;
+        case "refresh-meta":
+        case "refresh-files-meta":
+          scheduleMetaRefresh();
+          return;
+        default:
+          return;
+      }
+    };
+
+    // 缓冲按任务 id 合并，只保留最新的 payload；迟到的旧事件不覆盖已缓冲的新状态，
+    // 但它附带的 meta 仍然要留下。flush 时逐条走原来的 applyDashboardEvent，
+    // stale 判断、needsFullRefresh 与终态失效去抖都保持原样。
+    const jobUpdates = new Map<number, DashboardEvent>();
+    let jobUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushJobUpdates = () => {
+      if (jobUpdateTimer) {
+        clearTimeout(jobUpdateTimer);
+        jobUpdateTimer = null;
+      }
+      if (jobUpdates.size === 0) return;
+      const pending = [...jobUpdates.values()];
+      jobUpdates.clear();
+      for (const event of pending) {
+        if (disposed) return;
+        handleEventResult(applyDashboardEvent(queryClient, event));
+      }
+    };
+
+    const enqueueJobUpdate = (event: DashboardEvent) => {
+      const job = event.payload as Job;
+      const previous = jobUpdates.get(job.id);
+      if (previous && isDashboardJobPayload(previous.payload)) {
+        if (isStaleJobUpdate(previous.payload, job)) {
+          if (event.meta && !previous.meta) jobUpdates.set(job.id, { ...previous, meta: event.meta });
+          return;
+        }
+        jobUpdates.set(job.id, previous.meta && !event.meta ? { ...event, meta: previous.meta } : event);
+      } else {
+        jobUpdates.set(job.id, event);
+      }
+      // 终态决定媒体库失效/文件列表刷新，不能等 250ms。
+      if (isJobTerminal(job.status)) {
+        flushJobUpdates();
+        return;
+      }
+      if (!jobUpdateTimer) {
+        jobUpdateTimer = setTimeout(flushJobUpdates, JOB_UPDATE_FLUSH_MS);
+      }
+    };
+
     events.onopen = () => {
       setSseConnected(true);
       retryDelayRef.current = sseRetryBaseDelay;
@@ -445,19 +505,11 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
         scheduleRefresh();
         return;
       }
-      switch (applyDashboardEvent(queryClient, event)) {
-        case "refresh-workbench":
-          scheduleRefresh();
-          return;
-        case "refresh-meta":
-          scheduleMetaRefresh();
-          return;
-        case "refresh-files-meta":
-          scheduleMetaRefresh();
-          return;
-        default:
-          return;
+      if (event.type === "job.updated" && isDashboardJobPayload(event.payload)) {
+        enqueueJobUpdate(event);
+        return;
       }
+      handleEventResult(applyDashboardEvent(queryClient, event));
     };
 
     return () => {
@@ -466,6 +518,8 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
       if (timer) clearTimeout(timer);
       if (metaTimer) clearTimeout(metaTimer);
       if (retryTimer) clearTimeout(retryTimer);
+      if (jobUpdateTimer) clearTimeout(jobUpdateTimer);
+      jobUpdates.clear();
       metaController?.abort();
       cancelScheduledTerminalRefresh(queryClient);
     };

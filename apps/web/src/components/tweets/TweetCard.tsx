@@ -6,7 +6,7 @@ import { t } from "../../lib/i18n";
 import { copyToClipboard, formatDateTime } from "../common/CommonUI";
 import { Button } from "@douyinfe/semi-ui";
 import { Avatar, Tag, Tooltip } from "../semi";
-import { formatTweetTime, highlightToken, mediaOfRecord, resolveTweetDisplay, splitRelatedDownloads, tokenizeTweetText } from "../../lib/tweetDisplay";
+import { formatTweetTime, highlightToken, mediaOfRecord, resolveTweetDisplay, smallTwimgUrl, splitRelatedDownloads, tokenizeTweetText } from "../../lib/tweetDisplay";
 
 const avatarColors = ["blue", "cyan", "green", "indigo", "orange", "pink", "purple", "teal", "violet", "amber"] as const;
 function avatarColor(seed: string) {
@@ -67,7 +67,11 @@ function MediaTile({ tweet, owner, record, overflow = 0, onOpen }: {
 }) {
   const type = recordType(tweet, record);
   const video = type === "video" || type === "animated_gif" || videoFile.test(record.filePath);
-  const src = record.fileUrl ?? `/api/library/downloads/${record.id}/file`;
+  const localSrc = record.fileUrl ?? `/api/library/downloads/${record.id}/file`;
+  // 网格/卡片里优先用 X 图床的小图变体，失败再回退本地原文件。
+  const remoteSrc = useMemo(() => smallTwimgUrl(record.previewUrl), [record.previewUrl]);
+  const [imageSrc, setImageSrc] = useState(remoteSrc ?? localSrc);
+  useEffect(() => { setImageSrc(remoteSrc ?? localSrc); }, [remoteSrc, localSrc]);
   const posterCandidates = useMemo(() => {
     const list: { url: string; remote: boolean }[] = [];
     if (record.assetUrls?.thumbnail) {
@@ -80,7 +84,7 @@ function MediaTile({ tweet, owner, record, overflow = 0, onOpen }: {
       }
     }
     if (record.previewUrl && !videoFile.test(record.previewUrl.split(/[?#]/)[0])) {
-      list.push({ url: record.previewUrl, remote: true });
+      list.push({ url: smallTwimgUrl(record.previewUrl) ?? record.previewUrl, remote: true });
     }
     return list;
   }, [record.assetUrls?.thumbnail, record.id, record.previewUrl]);
@@ -103,7 +107,13 @@ function MediaTile({ tweet, owner, record, overflow = 0, onOpen }: {
           <span className="flex h-full w-full items-center justify-center bg-media-bg" aria-hidden="true" />
         )
       ) : (
-        <img src={src} loading="lazy" alt={`${owner.screenName} · ${owner.id}`} />
+        <img
+          src={imageSrc}
+          loading="lazy"
+          decoding="async"
+          onError={() => { if (imageSrc !== localSrc) setImageSrc(localSrc); }}
+          alt={`${owner.screenName} · ${owner.id}`}
+        />
       )}
       {video && <span className="tweet-play-icon" aria-hidden="true"><Play size={20} fill="currentColor" /></span>}
       {type === "animated_gif" && <span className="tweet-media-badge" aria-hidden="true">GIF</span>}
@@ -154,14 +164,14 @@ function QuoteCard({ quote, quoteDownloads, compact, highlight, onOpen }: {
   </div>;
 }
 
-export function TweetCard({ tweet, compact, highlight, onFilterAuthor, onOpenDetail, onOpenMedia, onMoreMedia, onRetry, retryPending }: {
+export const TweetCard = React.memo(function TweetCard({ tweet, compact, highlight, onFilterAuthor, onOpenDetail, onOpenMedia, onMoreMedia, onRetry, retryPending }: {
   tweet: ArchivedTweet;
   compact: boolean;
   highlight: string;
   onFilterAuthor: (screenName: string) => void;
-  onOpenDetail: () => void;
-  onOpenMedia: (record: DownloadRecord) => void;
-  onMoreMedia: () => void;
+  onOpenDetail: (tweetId: string) => void;
+  onOpenMedia: (tweetId: string, record: DownloadRecord) => void;
+  onMoreMedia: (tweetId: string) => void;
   onRetry: (id: string) => void;
   retryPending: boolean;
 }) {
@@ -192,15 +202,15 @@ export function TweetCard({ tweet, compact, highlight, onFilterAuthor, onOpenDet
           <div className="tweet-copy">
             {display.missingRepostId && <a className="tweet-note" href={`/tweets?id=${encodeURIComponent(display.missingRepostId)}`}>{t("archive.retweetUnavailable", { id: display.missingRepostId })}</a>}
             <TweetText text={shown.text} compact={compact} highlight={highlight} />
-            {display.quotes.map(quote => <QuoteCard key={quote.id} quote={quote} quoteDownloads={byRelated.get(quote.id) ?? []} compact={compact} highlight={highlight} onOpen={onOpenMedia} />)}
+            {display.quotes.map(quote => <QuoteCard key={quote.id} quote={quote} quoteDownloads={byRelated.get(quote.id) ?? []} compact={compact} highlight={highlight} onOpen={record => onOpenMedia(tweet.id, record)} />)}
             {display.missingQuoteId && <a className="tweet-note" href={`/tweets?id=${encodeURIComponent(display.missingQuoteId)}`}>{t("archive.quoteUnavailable", { id: display.missingQuoteId })}</a>}
             {shown.media.length > 0 && main.length === 0 && tweet.mediaStatus !== "not_requested" && <Tag tone="warning">{t("archive.mediaMissing")}</Tag>}
             {tweet.mediaError && <p className="tweet-media-error">{tweet.mediaError}</p>}
           </div>
-          {main.length > 0 && <MediaGrid tweet={shown} owner={owner} records={main} compact={compact} onOpen={onOpenMedia} onMore={onMoreMedia} />}
+          {main.length > 0 && <MediaGrid tweet={shown} owner={owner} records={main} compact={compact} onOpen={record => onOpenMedia(tweet.id, record)} onMore={() => onMoreMedia(tweet.id)} />}
         </div>
         <div className="tweet-toolbar" role="group" aria-label={t("archive.actions")}>
-          <Tooltip content={t("查看归档详情")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<FileText size={16} />} aria-label={t("查看归档详情")} onClick={onOpenDetail} /></Tooltip>
+          <Tooltip content={t("查看归档详情")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<FileText size={16} />} aria-label={t("查看归档详情")} onClick={() => onOpenDetail(tweet.id)} /></Tooltip>
           <Tooltip content={t("复制正文")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<Copy size={16} />} aria-label={t("复制正文")} onClick={() => void copyToClipboard(shown.text, t("正文"))} /></Tooltip>
           <Tooltip content={t("archive.original")}><a className="tweet-action tweet-original semi-button semi-button-borderless semi-button-tertiary semi-button-with-icon-only" aria-label={t("archive.original")} href={shown.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a></Tooltip>
           {retryable && <Button className="tweet-retry" size="small" theme="borderless" type="tertiary" icon={<RefreshCw size={14} />} loading={retryPending} disabled={retryPending} aria-busy={retryPending} onClick={() => onRetry(tweet.id)}>{t("archive.retryMedia")}</Button>}
@@ -210,4 +220,4 @@ export function TweetCard({ tweet, compact, highlight, onFilterAuthor, onOpenDet
       </div>
     </div>
   </article>;
-}
+});

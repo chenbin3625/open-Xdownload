@@ -31,6 +31,7 @@ import {
   type LibraryUserSummary,
 } from "../lib/api";
 import { copyToClipboard, formatDateTime, getErrorMessage } from "../components/common/CommonUI";
+import { smallTwimgUrl } from "../lib/tweetDisplay";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import {
   defaultGalleryFilter,
@@ -108,7 +109,7 @@ function VideoPoster({
       list.push({ url: `/api/library/downloads/${item.id}/preview`, remote: false });
     }
     if (item.previewUrl && !hasExtension(item.previewUrl, VIDEO_EXTENSIONS)) {
-      list.push({ url: item.previewUrl, remote: true });
+      list.push({ url: smallTwimgUrl(item.previewUrl) ?? item.previewUrl, remote: true });
     }
     return list;
   }, [item.previewUrl, item.id]);
@@ -162,8 +163,15 @@ const GalleryCard = React.memo(function GalleryCard({
   const fileName = displayFileName(item);
   const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
   const previewURL = fileURL(item);
+  // 缩略图优先走图床小图，失败再回退未登记文件或本地接口；下载链接仍指向原文件。
+  const remoteThumbnail = useMemo(() => smallTwimgUrl(item.previewUrl), [item.previewUrl]);
+  const localThumbnail = item.id > 0 ? `/api/library/downloads/${item.id}/file` : previewURL;
+  const [imageSource, setImageSource] = useState(remoteThumbnail ?? localThumbnail);
   const [imageFailed, setImageFailed] = useState(false);
-  useEffect(() => setImageFailed(false), [previewURL]);
+  useEffect(() => {
+    setImageFailed(false);
+    setImageSource(remoteThumbnail ?? localThumbnail);
+  }, [remoteThumbnail, localThumbnail]);
 
   return (
     <Card
@@ -196,11 +204,11 @@ const GalleryCard = React.memo(function GalleryCard({
                     <span className="text-xs text-fg-subtle">{ext}</span>
                   </div>
                   <img
-                    src={previewURL}
+                    src={imageSource}
                     alt={fileName}
                     loading="lazy"
                     decoding="async"
-                    onError={() => setImageFailed(true)}
+                    onError={() => { if (imageSource !== localThumbnail) setImageSource(localThumbnail); else setImageFailed(true); }}
                     className={`relative z-10 h-full w-full ${thumbnailFit === "cover" ? "object-cover" : "object-contain"}`}
                   />
                 </button>
