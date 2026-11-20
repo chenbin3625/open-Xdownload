@@ -82,6 +82,10 @@ type Store struct {
 	// 同步失效，见 library_page.go。
 	librarySnapMu sync.RWMutex
 	librarySnap   *librarySnapshot
+	// libraryStale 表示缓存已被写入标记为过期，但真正的失效推迟到下一次读取时执行。
+	// 归档期间每条下载记录都落一次，若在写路径上直接清缓存（持锁 + 丢大切片引用），
+	// 会在没有读者的情况下产生大量无意义的 GC 压力。
+	libraryStale atomic.Bool
 }
 
 const libraryDownloadsCacheTTL = 5 * time.Minute
@@ -122,7 +126,7 @@ const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout
 // v11: jobs.batch_size（定时全文归档每轮最多用户数）。
 // v12: users.avatar_url（归档库按用户浏览时显示头像）。
 // v13: app_sessions adds absolute expiry, idle expiry and per-session logout.
-const schemaVersion = 13
+const schemaVersion = 14
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -333,6 +337,15 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs (status, created_a
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs (created_at DESC, id DESC);
 -- job_checkpoints 保存长任务的分段进度（用户边界等）。payload 为 JSON，随任务删除。
 CREATE TABLE IF NOT EXISTS job_checkpoints (
+	job_id INTEGER PRIMARY KEY,
+	payload TEXT NOT NULL,
+	updated_at DATETIME NOT NULL,
+	FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+-- job_checkpoint_tasks 单独保存检查点里的任务快照（列表/关注的用户任务表）。
+-- 任务表在一个切片生命周期内不变，而进度（next/stats）每个用户都要写一次；
+-- 放在同一行会让每次进度写入都重写整张任务表（O(用户数²) 写放大）。
+CREATE TABLE IF NOT EXISTS job_checkpoint_tasks (
 	job_id INTEGER PRIMARY KEY,
 	payload TEXT NOT NULL,
 	updated_at DATETIME NOT NULL,
@@ -1263,6 +1276,14 @@ func (s *Store) addMissingIndexes() error {
 	-- 媒体库分页按 file_path 去重分组（ROW_NUMBER PARTITION BY + GROUP BY）。
 	CREATE INDEX IF NOT EXISTS idx_downloads_file_path
 	ON downloads (file_path);
+	-- 归档循环里每条成功推文都会 DeleteFailedTweetsByTweetID；没有该索引时是
+	-- 全表扫描 + 写锁持有。job_id 供按任务统计失败数。
+	CREATE INDEX IF NOT EXISTS idx_failed_tweets_tweet_id
+	ON failed_tweets (tweet_id);
+	CREATE INDEX IF NOT EXISTS idx_failed_tweets_job_id
+	ON failed_tweets (job_id);
+	CREATE INDEX IF NOT EXISTS idx_failed_media_media_url
+	ON failed_media (media_url);
 	`)
 	return err
 }
@@ -1697,7 +1718,12 @@ func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, err
 		_, kept := keepSet[clean]
 		if !kept {
 			prefix := strings.TrimRight(clean, `/\`) + string(filepath.Separator)
-			if err := s.db.GetContext(ctx, &kept, `SELECT EXISTS(SELECT 1 FROM downloads WHERE substr(file_path,1,?)=?)`, utf8.RuneCountInString(prefix), prefix); err != nil {
+			// 用前缀区间而不是 substr(file_path,...)：后者无法使用
+			// idx_downloads_file_path，每个历史根都要全表扫描一次。
+			// 上界取"前缀最后一个字节 +1"：BINARY 排序下所有以 prefix 开头的字符串
+			// 都落在 [prefix, 上界) 内，且不会误伤兄弟目录（/data 与 /data2）。
+			upper := prefix[:len(prefix)-1] + string(prefix[len(prefix)-1]+1)
+			if err := s.db.GetContext(ctx, &kept, `SELECT EXISTS(SELECT 1 FROM downloads WHERE file_path >= ? AND file_path < ?)`, prefix, upper); err != nil {
 				return 0, err
 			}
 		}
@@ -2624,7 +2650,7 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 	RETURNING *`,
 			record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.ContentHash, record.PreviewURL, record.FilePath, record.Bytes, now)
 		if err == nil {
-			s.invalidateLibraryDownloadsCache()
+			s.markLibraryDownloadsCacheStale()
 		}
 		return record, err
 	}
@@ -2642,7 +2668,7 @@ ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
 RETURNING *`,
 		record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.ContentHash, record.PreviewURL, record.FilePath, record.Bytes, now)
 	if err == nil {
-		s.invalidateLibraryDownloadsCache()
+		s.markLibraryDownloadsCacheStale()
 	}
 	return record, err
 }
@@ -2672,6 +2698,7 @@ func (s *Store) ListLibraryDownloadsWithStatus(ctx context.Context, limit int) (
 	if limit <= 0 || limit > MaxLibraryDownloadsLimit {
 		limit = MaxLibraryDownloadsLimit
 	}
+	s.invalidateStaleLibraryDownloadsCache()
 	// Only cache misses wait for the builder; recheck after acquiring its lock.
 	for attempt := 0; attempt < 2; attempt++ {
 		s.libraryCacheMu.RLock()
@@ -2806,6 +2833,7 @@ func collectOrphanLibraryFiles(ctx context.Context, root string, known map[strin
 // 与媒体列表页保持一致：按 file_path 去重，归属沿用 attributeLibraryUsers（含目录前缀推断），
 // 并随 libraryCacheGen 统一失效。
 func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, error) {
+	s.invalidateStaleLibraryDownloadsCache()
 	s.libraryCacheMu.RLock()
 	if s.libraryUsersCacheOK && time.Since(s.libraryUsersCacheAt) < libraryDownloadsCacheTTL {
 		cached := append([]LibraryUserSummary(nil), s.libraryUsersCache...)
@@ -2814,20 +2842,14 @@ func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, err
 	}
 	s.libraryCacheMu.RUnlock()
 
-	generation := s.libraryCacheGen.Load()
-	items := []DownloadRecord{}
-	if err := s.db.SelectContext(ctx, &items, `
-SELECT d.*, COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
-FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id
-WHERE d.id IN (
-	SELECT MAX(id) FROM downloads
-	GROUP BY CASE WHEN file_path <> '' THEN file_path ELSE 'record:' || id END
-)`); err != nil {
+	// 复用媒体库快照：它已经流式扫描过 downloads 并按 file_path 去重、按目录前缀补全
+	// 归属。此前这里再做一次全表查询 + Go 聚合（10 万条约 0.5s）。
+	snap, err := s.librarySnapshot(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.attributeLibraryUsers(ctx, items); err != nil {
-		return nil, err
-	}
+	generation := snap.gen
+	items := snap.entries
 
 	users := []User{}
 	if err := s.db.SelectContext(ctx, &users, `SELECT * FROM users`); err != nil {
@@ -2965,6 +2987,7 @@ func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int, truncat
 }
 
 func (s *Store) invalidateLibraryDownloadsCache() {
+	s.libraryStale.Store(false)
 	s.libraryCacheGen.Add(1)
 	s.libraryCacheMu.Lock()
 	s.libraryCache = nil
@@ -2976,6 +2999,19 @@ func (s *Store) invalidateLibraryDownloadsCache() {
 	s.libraryUsersCacheAt = time.Time{}
 	s.libraryUsersCacheOK = false
 	s.libraryCacheMu.Unlock()
+}
+
+// markLibraryDownloadsCacheStale 标记缓存待失效。真正的失效在读取路径上执行
+// （见 invalidateStaleLibraryDownloadsCache），因此下一次读取一定看到新数据。
+func (s *Store) markLibraryDownloadsCacheStale() {
+	s.libraryStale.Store(true)
+}
+
+// invalidateStaleLibraryDownloadsCache 在读取路径上执行写路径推迟的失效。
+func (s *Store) invalidateStaleLibraryDownloadsCache() {
+	if s.libraryStale.Swap(false) {
+		s.invalidateLibraryDownloadsCache()
+	}
 }
 
 // IsLibraryMediaPath reports whether path has a media extension that the
@@ -3063,7 +3099,7 @@ func (s *Store) UpdateDownloadPreviewURL(ctx context.Context, id int64, previewU
 		return err
 	}
 	if changed, _ := result.RowsAffected(); changed > 0 {
-		s.invalidateLibraryDownloadsCache()
+		s.markLibraryDownloadsCacheStale()
 	}
 	return nil
 }
@@ -3971,7 +4007,9 @@ func (s *Store) ListFailedTweetViewsPage(ctx context.Context, limit int, offset 
 	if offset < 0 {
 		offset = 0
 	}
-	rows := []failedTweetViewPageRow{}
+	rows := []FailedTweetView{}
+	// COUNT(*) OVER() 会强制先对四表 join 的全部结果求值再输出 LIMIT：失败表有几万行时
+	// 每页都要全量连接 + 临时排序。总数直接取触发器维护的物化计数器。
 	err := s.db.SelectContext(ctx, &rows, `
 SELECT
 	ft.id, ft.job_id, ft.entity_id, ft.tweet_id, ft.error, ft.created_at, ft.updated_at,
@@ -3980,8 +4018,7 @@ SELECT
 	COALESCE(ue.parent_dir, '') AS entity_parent_dir,
 	COALESCE(u.id, '') AS user_id,
 	COALESCE(u.screen_name, '') AS user_screen_name,
-	COALESCE(u.name, '') AS user_name,
-	COUNT(*) OVER() AS total_count
+	COALESCE(u.name, '') AS user_name
 FROM failed_tweets ft
 LEFT JOIN jobs j ON j.id = ft.job_id
 LEFT JOIN user_entities ue ON ue.id = ft.entity_id
@@ -3991,19 +4028,14 @@ LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(rows) == 0 {
-		total, err := s.CountFailedTweets(ctx)
-		if err != nil {
-			return nil, 0, err
-		}
-		return []FailedTweetView{}, total, nil
+	total, err := s.CountFailedTweets(ctx)
+	if err != nil {
+		return nil, 0, err
 	}
-	items := make([]FailedTweetView, 0, len(rows))
-	for _, row := range rows {
-		items = append(items, row.FailedTweetView)
+	if rows == nil {
+		rows = []FailedTweetView{}
 	}
-	total := rows[0].Total
-	return items, total, nil
+	return rows, total, nil
 }
 
 func (s *Store) CountFailedTweets(ctx context.Context) (int, error) {

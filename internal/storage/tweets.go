@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS tweets (
 );
 CREATE INDEX IF NOT EXISTS idx_tweets_date ON tweets(published_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_tweets_author ON tweets(author_id, published_at DESC);
+-- 全文归档重放按 author_id 过滤、按 id 排序翻页；idx_tweets_author 的
+-- 第二列是 published_at，无法避免临时排序。索引必须建在 tweets 表之后
+-- （addMissingIndexes 早于本迁移执行）。
+CREATE INDEX IF NOT EXISTS idx_tweets_author_id ON tweets(author_id, id);
 CREATE TABLE IF NOT EXISTS tweet_relations (
  tweet_id TEXT NOT NULL REFERENCES tweets(id), relation TEXT NOT NULL, related_id TEXT NOT NULL,
  PRIMARY KEY(tweet_id,relation,related_id)
@@ -219,7 +223,7 @@ ON CONFLICT(tweet_id,job_id) DO UPDATE SET
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.invalidateLibraryDownloadsCache()
+	s.markLibraryDownloadsCacheStale()
 	return nil
 }
 
@@ -424,7 +428,10 @@ SELECT
   COALESCE((SELECT media_error FROM tweet_jobs WHERE tweet_id=? AND (?=0 OR job_id=?) ORDER BY job_id DESC LIMIT 1), '')`, id, id, jobID, jobID, id, jobID, jobID).Scan(&result.BodyStatus, &result.MediaStatus, &result.MediaError); err != nil {
 		return result, err
 	}
-	if err := s.db.SelectContext(ctx, &result.Downloads, `SELECT d.*, '' AS user_screen_name, '' AS user_name FROM downloads d WHERE tweet_id=? ORDER BY id`, id); err != nil {
+	// 必须写出部分索引谓词 tweet_id <> ''：idx_downloads_tweet_media_unique 是
+	// `WHERE tweet_id <> ''` 的部分索引，只写 tweet_id=? 时 SQLite 无法证明谓词成立，
+	// 会退化为整表扫描（10 万行约 8ms/次，而 ListTweets 与资产下载路径都会逐条调用）。
+	if err := s.db.SelectContext(ctx, &result.Downloads, `SELECT d.*, '' AS user_screen_name, '' AS user_name FROM downloads d WHERE tweet_id=? AND tweet_id<>'' ORDER BY id`, id); err != nil {
 		return result, err
 	}
 	return result, nil

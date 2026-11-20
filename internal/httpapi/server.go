@@ -959,6 +959,10 @@ func (s *Server) retryJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
+// sseAuthRecheckInterval 是长连接上重新校验会话的频率；注销/改密由 revoked 通道
+// 即时通知，无需每条事件都查库。
+const sseAuthRecheckInterval = 30 * time.Second
+
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(authContextKey{}).(authenticatedSession)
 	if s.eventBus == nil {
@@ -981,14 +985,20 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	// ResponseController 兼容 HTTP/1.1、HTTP/2 与 HTTP/3：不依赖 http.Flusher
 	// 类型断言（quic-go / 中间件包装的 ResponseWriter 常常没有该接口）。
 	rc := http.NewResponseController(w)
+	lastAuthCheck := time.Now()
 	write := func(data []byte) bool {
 		select {
 		case <-session.revoked:
 			return false
 		default:
 		}
-		if account, err := s.requestAccountReadOnly(r); err != nil || account == nil {
-			return false
+		// 每条事件都回查会话意味着每个 SSE 事件 2 次 SQLite 读；注销/改密已经通过
+		// session.revoked 即时断开，这里只需低频兜底（会话过期、被清理）。
+		if time.Since(lastAuthCheck) >= sseAuthRecheckInterval {
+			lastAuthCheck = time.Now()
+			if account, err := s.requestAccountReadOnly(r); err != nil || account == nil {
+				return false
+			}
 		}
 		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
@@ -1602,6 +1612,10 @@ func serveOpenedMedia(w http.ResponseWriter, r *http.Request, file *os.File) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("文件不存在"))
 		return
 	}
+	// 媒体文件不可变（下载后不会原地修改）：允许浏览器私有缓存一小时，画廊滚动时
+	// 不必为每张图反复回源。与 /api/assets/{id} 的缓存策略一致；Range/304 仍由
+	// ServeContent 按 Last-Modified 处理。
+	w.Header().Set("Cache-Control", "private, max-age=3600")
 	http.ServeContent(w, r, filepath.Base(file.Name()), info.ModTime(), file)
 }
 

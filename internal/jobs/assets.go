@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -28,14 +29,24 @@ func newAssetID() (string, error) {
 	return hex.EncodeToString(bytes[:]), nil
 }
 
-func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.StorageDocument, kind config.AssetKind, tweet parser.TweetData, media parser.Media, index int, source string) (storage.Asset, error) {
+// assetInput 是待写入资产的源文件。Hash/Size 已知时（下载器在写盘时已经算过、
+// 或复制源文件时边拷边算）跳过 filestore.AssetHash 的整文件重读。
+type assetInput struct {
+	path string
+	hash string
+	size int64
+}
+
+func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.StorageDocument, kind config.AssetKind, tweet parser.TweetData, media parser.Media, index int, source assetInput) (storage.Asset, error) {
 	rule, target, err := document.Rule(kind)
 	if err != nil {
 		return storage.Asset{}, err
 	}
-	hash, size, err := filestore.AssetHash(ctx, source)
-	if err != nil {
-		return storage.Asset{}, err
+	hash, size := source.hash, source.size
+	if hash == "" || size <= 0 {
+		if hash, size, err = filestore.AssetHash(ctx, source.path); err != nil {
+			return storage.Asset{}, err
+		}
 	}
 	if existing, err := m.store.FindAssetHash(ctx, hash, kind, target, document.Version); err != nil {
 		return storage.Asset{}, err
@@ -49,7 +60,7 @@ func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.Storag
 		if err != nil {
 			return storage.Asset{}, err
 		}
-		restoredKey, err := filestore.PutAsset(ctx, target, existing.Key, source, existing.ContentType, id)
+		restoredKey, err := filestore.PutAsset(ctx, target, existing.Key, source.path, existing.ContentType, id)
 		if err != nil {
 			return storage.Asset{}, err
 		}
@@ -64,7 +75,7 @@ func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.Storag
 	if err != nil {
 		return storage.Asset{}, err
 	}
-	ext := strings.TrimPrefix(filepath.Ext(source), ".")
+	ext := strings.TrimPrefix(filepath.Ext(source.path), ".")
 	if ext == "jpeg" {
 		ext = "jpg"
 	}
@@ -76,7 +87,7 @@ func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.Storag
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	key, err = filestore.PutAsset(ctx, target, key, source, contentType, id)
+	key, err = filestore.PutAsset(ctx, target, key, source.path, contentType, id)
 	if err != nil {
 		return storage.Asset{}, err
 	}
@@ -136,7 +147,7 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 		return mediaDownloadResult{}, err
 	}
 	defer os.RemoveAll(tempDir)
-	var source string
+	source := assetInput{}
 	skipped := asset != nil
 	if asset != nil {
 		prior, err := m.store.GetStorageVersion(saveCtx, asset.PolicyVersion)
@@ -163,7 +174,7 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 				source, err = m.copyAssetToTemp(ctx, *asset, tempDir)
 				if err != nil {
 					asset = nil
-					source = ""
+					source = assetInput{}
 				} else {
 					asset = nil
 					skipped = false
@@ -172,7 +183,7 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 		}
 	}
 	if asset == nil {
-		if source == "" {
+		if source.path == "" {
 			result, downloadErr := m.downloader.DownloadWithOptions(ctx, mediaURL, tempDir, "source", downloader.Options{ModTime: published, LargePhoto: photo, ProxyURL: cfg.ProxyURL, MaxFilenameLength: 120})
 			if downloadErr != nil {
 				if isPermanentlyUnavailableMediaError(downloadErr) {
@@ -191,7 +202,8 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 				}
 				return mediaDownloadResult{}, downloadErr
 			}
-			source = result.Path
+			// 下载器写盘时已经流过 sha256 并统计了字节数，直接复用，避免再整文件读一遍。
+			source = assetInput{path: result.Path, hash: result.ContentHash, size: result.Bytes}
 		}
 		created, err := m.saveAsset(ctx, saveCtx, document, kind, tweet, media, index, source)
 		if err != nil {
@@ -236,10 +248,10 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	return mediaDownloadResult{skipped: skipped}, nil
 }
 
-func (m *Manager) copyAssetToTemp(ctx context.Context, asset storage.Asset, dir string) (string, error) {
+func (m *Manager) copyAssetToTemp(ctx context.Context, asset storage.Asset, dir string) (assetInput, error) {
 	document, err := m.store.GetStorageVersion(ctx, asset.PolicyVersion)
 	if err != nil {
-		return "", err
+		return assetInput{}, err
 	}
 	var target config.StorageTarget
 	for _, t := range document.Targets {
@@ -250,21 +262,24 @@ func (m *Manager) copyAssetToTemp(ctx context.Context, asset storage.Asset, dir 
 	}
 	source, _, err := filestore.OpenAsset(ctx, target, asset.Key)
 	if err != nil {
-		return "", err
+		return assetInput{}, err
 	}
 	defer source.Close()
 	filename := filepath.Join(dir, "source"+path.Ext(asset.Key))
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", err
+		return assetInput{}, err
 	}
-	_, err = io.Copy(file, &migrationReader{ctx: ctx, source: source})
+	// 复制时顺便算哈希：随后 saveAsset 不必再把整个文件读一遍。
+	hasher := sha256.New()
+	size, err := io.Copy(io.MultiWriter(file, hasher), &migrationReader{ctx: ctx, source: source})
 	closeErr := file.Close()
 	if err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		_ = os.Remove(filename)
+		return assetInput{}, err
 	}
-	return filename, err
+	return assetInput{path: filename, hash: hex.EncodeToString(hasher.Sum(nil)), size: size}, nil
 }

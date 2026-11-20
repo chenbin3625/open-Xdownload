@@ -2,11 +2,14 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
@@ -32,6 +35,10 @@ func (m *Manager) processAssetMigration(ctx, saveCtx context.Context, job storag
 		m.fail(saveCtx, job, "", err)
 		return
 	}
+	// 进度行每处理一条都要写（崩溃后从 LastID 继续）；但 job 行更新会顺带发布一次
+	// SSE，逐条发布在大批量迁移时既抢写锁又刷爆前端事件流，按 progressWriteInterval
+	// 节流即可，终态仍即时写入。
+	lastProgressWrite := time.Time{}
 	for {
 		records, err := m.store.AssetMigrationDownloads(saveCtx, progress.LastID, progress.MaxID)
 		if err != nil {
@@ -63,10 +70,13 @@ func (m *Manager) processAssetMigration(ctx, saveCtx context.Context, job storag
 				m.fail(saveCtx, job, "", err)
 				return
 			}
-			job.Status = storage.JobDownloading
-			job.Progress = float64(progress.Processed) / float64(max(1, progress.Total))
-			job.Message = fmt.Sprintf("历史资源迁移：已处理 %d/%d，失败 %d", progress.Processed, progress.Total, progress.Failed)
-			m.save(saveCtx, job)
+			if now := time.Now(); now.Sub(lastProgressWrite) >= progressWriteInterval {
+				lastProgressWrite = now
+				job.Status = storage.JobDownloading
+				job.Progress = float64(progress.Processed) / float64(max(1, progress.Total))
+				job.Message = fmt.Sprintf("历史资源迁移：已处理 %d/%d，失败 %d", progress.Processed, progress.Total, progress.Failed)
+				m.save(saveCtx, job)
+			}
 		}
 	}
 	job.Status, job.Progress, job.Error = storage.JobCompleted, 1, ""
@@ -105,7 +115,7 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 		return err
 	}
 	defer os.RemoveAll(dir)
-	var source string
+	source := assetInput{}
 	var original storage.Asset
 	if id := links[kind]; id != "" {
 		original, err = m.store.GetAsset(saveCtx, id)
@@ -115,11 +125,11 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 		source, err = m.copyAssetToTemp(ctx, original, dir)
 		if err != nil {
 			original = storage.Asset{}
-			source = ""
+			source = assetInput{}
 			err = nil
 		}
 	}
-	if source == "" {
+	if source.path == "" {
 		// Only registered legacy download roots are eligible as migration sources.
 		for _, rootPath := range roots {
 			relative, relErr := filepath.Rel(rootPath, record.FilePath)
@@ -141,21 +151,27 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 				file.Close()
 				return fmt.Errorf("历史文件不是普通文件")
 			}
-			source = filepath.Join(dir, "source"+ext)
-			out, createErr := os.OpenFile(source, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			path := filepath.Join(dir, "source"+ext)
+			out, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 			if createErr != nil {
 				file.Close()
 				return createErr
 			}
-			_, err = io.Copy(out, &migrationReader{ctx: ctx, source: file})
+			// 复制时顺便算哈希/字节数，后面的 saveAsset 不必再整文件读一遍。
+			hasher := sha256.New()
+			size, copyErr := io.Copy(io.MultiWriter(out, hasher), &migrationReader{ctx: ctx, source: file})
 			closeErr := out.Close()
 			file.Close()
+			if copyErr == nil {
+				copyErr = closeErr
+			}
+			err = copyErr
 			if err == nil {
-				err = closeErr
+				source = assetInput{path: path, hash: hex.EncodeToString(hasher.Sum(nil)), size: size}
 			}
 			break
 		}
-		if source == "" {
+		if source.path == "" {
 			return fmt.Errorf("历史文件不在可信目录内或不可读取")
 		}
 	}

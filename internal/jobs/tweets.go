@@ -174,7 +174,8 @@ func (m *Manager) replayArchivedTweetMedia(ctx, saveCtx context.Context, job sto
 			state.AfterID = local[len(local)-1].ID
 		}
 		state.Complete = len(local) < 100
-		payload, err := json.Marshal(cp)
+		// 只写进度部分：任务表可能已单独持久化，不能把整张表塞回进度 payload。
+		payload, err := json.Marshal(cp.progress())
 		if err != nil {
 			return stats, err
 		}

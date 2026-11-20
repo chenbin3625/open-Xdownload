@@ -135,7 +135,11 @@ func (t *queryIDTable) refreshFor404(ctx context.Context, e *Engine, proxy strin
 	t.done = done
 	t.mu.Unlock()
 
-	ids, err := discoverQueryIDs(ctx, e, proxy)
+	// 发现过程会抓首页和最多 24 个脚本；调用方 ctx 可能没有截止时间（任务上下文），
+	// 必须自带超时，否则一次挂起的请求会卡住所有等待该单飞结果的调用方。
+	discoveryCtx, cancel := context.WithTimeout(ctx, queryDiscoveryTimeout)
+	defer cancel()
+	ids, err := discoverQueryIDs(discoveryCtx, e, proxy)
 	t.merge(ids)
 	t.mu.Lock()
 	t.discovering = false
@@ -220,6 +224,10 @@ func discoverQueryIDs(ctx context.Context, e *Engine, proxy string) (map[string]
 
 	ids := map[string]string{}
 	scanQueryIDs(reply.payload, ids)
+	// 首页内联脚本通常已包含全部 operation；此时跳过后续脚本抓取（每个最多 16MiB）。
+	if allQueryIDsFound(ids) {
+		return ids, nil
+	}
 
 	scripts := scriptURLs(reply.payload, homeURL)
 	for index, script := range scripts {
@@ -234,8 +242,21 @@ func discoverQueryIDs(ctx context.Context, e *Engine, proxy string) (map[string]
 			continue
 		}
 		scanQueryIDs(body, ids)
+		if allQueryIDsFound(ids) {
+			break
+		}
 	}
 	return ids, nil
+}
+
+// allQueryIDsFound 报告内置表里的每个 operation 是否都已找到 queryId。
+func allQueryIDsFound(ids map[string]string) bool {
+	for operation := range builtinQueryIDs {
+		if ids[operation] == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // scriptURLs 提取首页引用的脚本，只保留 X/Twitter 静态资源主机上的 .js。

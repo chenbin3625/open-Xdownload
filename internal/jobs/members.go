@@ -89,7 +89,8 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 			state.SeenCursors = append(state.SeenCursors, page.Cursor)
 			seenCursors[page.Cursor] = true
 		}
-		payload, err := json.Marshal(cp)
+		// 只写进度部分：任务表可能已单独持久化，不能把整张表塞回进度 payload。
+		payload, err := json.Marshal(cp.progress())
 		if err != nil {
 			return nil, err
 		}

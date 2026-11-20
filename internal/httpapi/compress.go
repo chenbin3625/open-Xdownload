@@ -71,6 +71,10 @@ func compressJSON(next http.Handler) http.Handler {
 		// 但会让响应出现重复头，也让缓存/调试输出产生噪声）。
 		w.Header().Add("Vary", "Accept-Encoding")
 		encoding := httpx.NegotiateEncoding(r.Header.Get("Accept-Encoding"), httpx.EncodingBrotli, httpx.EncodingGzip)
+		// identity 请求同样走缓冲：包装层的 panic 恢复依赖"尚未写出任何字节"才能
+		// 换成干净的 500 JSON，否则客户端会拿到半截 JSON + 200（见
+		// TestCompressJSONRecoversWithoutPublishingPartialJSON）。缓冲的代价只落在
+		// 非流式 JSON 上，体量有限。
 		writer := newSniffCompressWriter(w, encoding)
 		// HEAD 与 GET 走完全相同的路径：只读端点同时注册 GET/HEAD（见 Routes），
 		// net/http 会丢弃 HEAD 的 body 并按实际写入量推导 Content-Length，因此

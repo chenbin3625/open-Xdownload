@@ -93,6 +93,7 @@ type libraryCounts struct {
 type librarySnapshot struct {
 	gen            uint64
 	at             time.Time
+	entries        []DownloadRecord // 去重后的下载记录（已按目录前缀补全归属），最多 MaxLibraryDownloadsLimit 条
 	orphans        []DownloadRecord // 无下载记录的磁盘媒体文件，按 CreatedAt 降序
 	prefixes       []libraryEntityPrefix
 	prefixIndex    map[string]int // 实体前缀 -> prefixes 下标（取 id 最小者）
@@ -123,55 +124,13 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	if err != nil {
 		return LibraryPage{}, err
 	}
-	query := buildLibraryQuery(filter, snap)
-	query.sort = opts.Sort
+	// 过滤、排序、分页全部在快照上进行：快照重建时已经流式扫描过 downloads 全表，
+	// 分页请求不再执行第二次 ROW_NUMBER 全表查询（10 万条约 0.8s/页）。
+	entries := filterLibraryEntries(snap.entries, filter, snap)
+	sort.SliceStable(entries, func(i, j int) bool { return libraryEntryLess(entries[i], entries[j], opts.Sort) })
 	orphans := filterLibraryOrphans(snap.orphans, filter)
 	sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], opts.Sort) })
-
-	var dbTotal int
-	var dbItems []DownloadRecord
-	cappedNeed := func(targetPage int) int {
-		if targetPage < 1 {
-			targetPage = 1
-		}
-		maxPages := (MaxLibraryDownloadsLimit + pageSize - 1) / pageSize
-		if targetPage >= maxPages {
-			return MaxLibraryDownloadsLimit
-		}
-		need := targetPage * pageSize
-		if need > MaxLibraryDownloadsLimit {
-			return MaxLibraryDownloadsLimit
-		}
-		return need
-	}
-	switch {
-	case query.noMatch:
-		// 条件不可能匹配任何记录（未知 kind、或用户没有任何实体目录）。
-	case query.userUnknown:
-		// 归属只能在 Go 侧逐条判定；扫描时顺带统计满足条件的无归属总数。
-		dbItems, dbTotal, err = s.scanUnknownLibraryEntries(ctx, query, snap, cappedNeed(page))
-		if err != nil {
-			return LibraryPage{}, err
-		}
-	default:
-		if dbTotal, err = s.countLibraryEntries(ctx, query); err != nil {
-			return LibraryPage{}, err
-		}
-		previewTotal := dbTotal + len(orphans)
-		if previewTotal > MaxLibraryDownloadsLimit {
-			previewTotal = MaxLibraryDownloadsLimit
-		}
-		effectivePage := page
-		previewPages := max(1, (previewTotal+pageSize-1)/pageSize)
-		if effectivePage > previewPages {
-			effectivePage = previewPages
-		}
-		if need := cappedNeed(effectivePage); need > 0 && dbTotal > 0 {
-			if dbItems, err = s.queryLibraryEntries(ctx, query, need, 0); err != nil {
-				return LibraryPage{}, err
-			}
-		}
-	}
+	dbItems, dbTotal := entries, len(entries)
 
 	total := dbTotal + len(orphans)
 	truncated := total > MaxLibraryDownloadsLimit
@@ -243,76 +202,6 @@ func normalizeLibraryFilter(filter LibraryFilter) LibraryFilter {
 	return filter
 }
 
-// libraryQuery 是记录过滤条件在 SQL 侧的表示。
-type libraryQuery struct {
-	where       string // "" 或 "WHERE ..."
-	entryWhere  string // Applied after deduplication so older records cannot reappear.
-	sort        string
-	args        []any
-	userUnknown bool // User=="unknown"：缺少归档作者时，在 Go 侧补做目录归属判定
-	noMatch     bool // 条件不可能匹配任何记录
-}
-
-func buildLibraryQuery(filter LibraryFilter, snap *librarySnapshot) libraryQuery {
-	args := make([]any, 0, 6)
-	kindSQL, kindArgs, kindOK := libraryKindSQL("d.file_path", filter.Kind)
-	if !kindOK {
-		return libraryQuery{noMatch: true}
-	}
-	result := libraryQuery{}
-	result.args = args
-	var entryConds []string
-	if kindSQL != "" {
-		entryConds = append(entryConds, strings.ReplaceAll(kindSQL, "d.file_path", "file_path"))
-		result.args = append(result.args, kindArgs...)
-	}
-	if filter.Search != "" {
-		entryConds = append(entryConds, "(instr(lower(file_path), ?) > 0 OR instr(lower(media_url), ?) > 0 OR instr(lower(tweet_id), ?) > 0)")
-		result.args = append(result.args, filter.Search, filter.Search, filter.Search)
-	}
-	if filter.User != libraryKindAll {
-		if filter.User == libraryUserUnknown {
-			// 目录前缀可能很多，无作者记录的目录归属留到 Go 侧逐条判定。
-			result.userUnknown = true
-		} else {
-			user := strings.TrimPrefix(filter.User, "@")
-			prefixes := snap.prefixesForUser(user)
-			parts := make([]string, 0, len(prefixes))
-			userSQL := "lower(user_screen_name) = lower(?)"
-			result.args = append(result.args, user)
-			for _, prefix := range prefixes {
-				parts = append(parts, "instr(lower(replace(file_path, char(92), '/')), ?) = 1")
-				result.args = append(result.args, prefix)
-			}
-			if len(parts) > 0 {
-				userSQL += " OR (user_screen_name = '' AND (" + strings.Join(parts, " OR ") + "))"
-			}
-			// 先按文件去重，再筛选作者，避免同一文件的旧下载记录重新出现。
-			entryConds = append(entryConds, "("+userSQL+")")
-		}
-	}
-	if !filter.From.IsZero() {
-		entryConds = append(entryConds, "julianday(replace(created_at, ' +0000 UTC', 'Z')) >= julianday(?)")
-		result.args = append(result.args, filter.From.UTC().Format(time.RFC3339Nano))
-	}
-	if !filter.To.IsZero() {
-		entryConds = append(entryConds, "julianday(replace(created_at, ' +0000 UTC', 'Z')) < julianday(?)")
-		result.args = append(result.args, filter.To.UTC().Format(time.RFC3339Nano))
-	}
-	if filter.MinBytes != nil {
-		entryConds = append(entryConds, "bytes >= ?")
-		result.args = append(result.args, *filter.MinBytes)
-	}
-	if filter.MaxBytes != nil {
-		entryConds = append(entryConds, "bytes <= ?")
-		result.args = append(result.args, *filter.MaxBytes)
-	}
-	if len(entryConds) > 0 {
-		result.entryWhere = " AND " + strings.Join(entryConds, " AND ")
-	}
-	return result
-}
-
 func libraryKindExts(kind string) ([]string, bool) {
 	switch kind {
 	case libraryKindAll:
@@ -326,24 +215,6 @@ func libraryKindExts(kind string) ([]string, bool) {
 	default:
 		return nil, false
 	}
-}
-
-// libraryKindSQL 返回对单个路径列的分类过滤 SQL；第三个返回值告诉调用方 kind 是否合法。
-func libraryKindSQL(column, kind string) (string, []any, bool) {
-	exts, ok := libraryKindExts(kind)
-	if !ok {
-		return "", nil, false
-	}
-	if exts == nil {
-		return "", nil, true
-	}
-	parts := make([]string, 0, len(exts))
-	args := make([]any, 0, len(exts))
-	for _, ext := range exts {
-		parts = append(parts, "lower("+column+") LIKE ?")
-		args = append(args, "%"+ext)
-	}
-	return "(" + strings.Join(parts, " OR ") + ")", args, true
 }
 
 // libraryKindMatches 报告路径是否属于 kind 分类；未知 kind 返回 false（与旧 HTTP 层
@@ -388,7 +259,10 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
-func libraryEntriesSQL(query libraryQuery) string {
+// libraryEntriesSQL 返回"每个 file_path 只保留最新一条下载记录"的去重查询。
+// 过滤/排序/分页全部在 Go 侧基于快照完成（见 filterLibraryEntries），SQL 只负责
+// 一次全表流式扫描。
+func libraryEntriesSQL() string {
 	return `
 WITH filtered AS (
 	SELECT d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes,
@@ -397,7 +271,6 @@ WITH filtered AS (
 		CASE WHEN d.file_path = '' THEN 'record:' || d.id ELSE d.file_path END AS entry_key
 	FROM downloads d
 	LEFT JOIN tweets t ON t.id = d.tweet_id
-	` + query.where + `
 ), ranked AS (
 	SELECT filtered.*, ROW_NUMBER() OVER (PARTITION BY entry_key ORDER BY created_at DESC, id DESC) AS rn
 	FROM filtered
@@ -405,78 +278,7 @@ WITH filtered AS (
 SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash,
 	user_screen_name, user_name
 FROM ranked
-WHERE rn = 1` + query.entryWhere
-}
-
-func (s *Store) queryLibraryEntries(ctx context.Context, query libraryQuery, limit, offset int) ([]DownloadRecord, error) {
-	if query.noMatch || limit <= 0 {
-		return nil, nil
-	}
-	items := []DownloadRecord{}
-	args := append(append([]any{}, query.args...), limit, offset)
-	order := "created_at DESC, id DESC"
-	switch query.sort {
-	case "date_asc":
-		order = "created_at ASC, id DESC"
-	case "size_desc":
-		order = "bytes DESC, created_at DESC, id DESC"
-	case "size_asc":
-		order = "bytes ASC, created_at DESC, id DESC"
-	}
-	err := s.db.SelectContext(ctx, &items, libraryEntriesSQL(query)+" ORDER BY "+order+" LIMIT ? OFFSET ?", args...)
-	return items, err
-}
-
-func (s *Store) countLibraryEntries(ctx context.Context, query libraryQuery) (int, error) {
-	if query.noMatch {
-		return 0, nil
-	}
-	var total int
-	sqlText := "SELECT COUNT(*) FROM (" + libraryEntriesSQL(query) + ")"
-	err := s.db.GetContext(ctx, &total, sqlText, query.args...)
-	return total, err
-}
-
-// scanUnknownLibraryEntries 对缺少归档作者的记录在 Go 侧补做目录归属判定：
-// 返回前 need 条无归属记录，并统计满足过滤条件的无归属总数。仅用于 user=="unknown"
-// （该过滤值在正常前端里很少被选中，扫描成本可接受）。
-func (s *Store) scanUnknownLibraryEntries(ctx context.Context, query libraryQuery, snap *librarySnapshot, need int) ([]DownloadRecord, int, error) {
-	if query.noMatch {
-		return nil, 0, nil
-	}
-	const chunkSize = 512
-	items := make([]DownloadRecord, 0, need)
-	total := 0
-	scanOffset := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
-		}
-		batch, err := s.queryLibraryEntries(ctx, query, chunkSize, scanOffset)
-		if err != nil {
-			return nil, 0, err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		for _, item := range batch {
-			if item.UserScreenName != "" {
-				continue
-			}
-			if _, ok := snap.matchUser(item.FilePath); ok {
-				continue
-			}
-			total++
-			if len(items) < need {
-				items = append(items, item)
-			}
-		}
-		scanOffset += len(batch)
-		if len(batch) < chunkSize {
-			break
-		}
-	}
-	return items, total, nil
+WHERE rn = 1`
 }
 
 // matchUser 按"目录前缀逐级上溯、取 id 最小的实体"判定路径归属（与
@@ -498,14 +300,48 @@ func (snap *librarySnapshot) matchUser(path string) (libraryEntityPrefix, bool) 
 	return snap.prefixes[best], true
 }
 
-func (snap *librarySnapshot) prefixesForUser(user string) []string {
-	prefixes := make([]string, 0, 2)
-	for _, prefix := range snap.prefixes {
-		if prefix.screen == user {
-			prefixes = append(prefixes, prefix.prefix)
-		}
+// filterLibraryEntries 在快照的去重条目上应用与旧 SQL 等价的筛选（分类、关键词、
+// 作者、时间与体积）。归属已在快照构建时按目录前缀补全，因此 user=unknown 与具体
+// 用户名都可以直接比较，不再需要在 Go 侧分块重跑全表查询。
+func filterLibraryEntries(entries []DownloadRecord, filter LibraryFilter, snap *librarySnapshot) []DownloadRecord {
+	if _, ok := libraryKindExts(filter.Kind); !ok {
+		return nil
 	}
-	return prefixes
+	items := make([]DownloadRecord, 0, len(entries))
+	user := ""
+	if filter.User != libraryKindAll && filter.User != libraryUserUnknown {
+		user = strings.ToLower(strings.TrimPrefix(filter.User, "@"))
+	}
+	for _, item := range entries {
+		if !libraryKindMatches(item.FilePath, filter.Kind) {
+			continue
+		}
+		if filter.Search != "" &&
+			!strings.Contains(strings.ToLower(item.FilePath), filter.Search) &&
+			!strings.Contains(strings.ToLower(item.MediaURL), filter.Search) &&
+			!strings.Contains(strings.ToLower(item.TweetID), filter.Search) {
+			continue
+		}
+		switch filter.User {
+		case libraryKindAll:
+		case libraryUserUnknown:
+			if item.UserScreenName != "" {
+				continue
+			}
+		default:
+			if !strings.EqualFold(item.UserScreenName, user) {
+				continue
+			}
+		}
+		if (!filter.From.IsZero() && item.CreatedAt.Before(filter.From)) || (!filter.To.IsZero() && !item.CreatedAt.Before(filter.To)) {
+			continue
+		}
+		if (filter.MinBytes != nil && item.Bytes < *filter.MinBytes) || (filter.MaxBytes != nil && item.Bytes > *filter.MaxBytes) {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 func filterLibraryOrphans(orphans []DownloadRecord, filter LibraryFilter) []DownloadRecord {
@@ -629,6 +465,7 @@ func libraryEntityPrefixPath(parentDir, name string) string {
 // librarySnapshot 返回当前快照；失效（代数变化）或超过 TTL 时重建。重建由
 // libraryBuildMu 串行化，避免画廊并发请求同时扫描全表/全目录。
 func (s *Store) librarySnapshot(ctx context.Context) (*librarySnapshot, error) {
+	s.invalidateStaleLibraryDownloadsCache()
 	if snap := s.peekLibrarySnapshot(s.libraryCacheGen.Load()); snap != nil {
 		return snap, nil
 	}
@@ -711,7 +548,7 @@ ORDER BY ue.id`); err != nil {
 	// 流式扫描每个文件的最新下载记录，作者和去重规则与分页结果保持一致。
 	known := make(map[string]struct{})
 	pathVariants := make(map[string][]string)
-	rows, err := s.db.QueryxContext(ctx, libraryEntriesSQL(libraryQuery{}))
+	rows, err := s.db.QueryxContext(ctx, libraryEntriesSQL()+" ORDER BY created_at DESC, id DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -744,9 +581,16 @@ ORDER BY ue.id`); err != nil {
 		if item.UserScreenName != "" {
 			addUser(item.UserScreenName, item.UserName)
 		} else if prefix, ok := snap.matchUser(filePath); ok {
+			item.UserScreenName = prefix.screen
+			item.UserName = prefix.name
 			addUser(prefix.screen, prefix.name)
 		} else {
 			snap.unknownEntries++
+		}
+		// 快照里保留去重后的条目，供分页、unknown 筛选与用户卡片复用。超过上限时
+		// 按 created_at 降序截断（与接口 10 万条的 total 上限一致）。
+		if len(snap.entries) < MaxLibraryDownloadsLimit {
+			snap.entries = append(snap.entries, item)
 		}
 	}
 	rowsErr := rows.Err()

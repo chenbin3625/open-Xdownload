@@ -70,16 +70,27 @@ func (s *Store) CreateSession(ctx context.Context, token string, now time.Time) 
 	return tx.Commit()
 }
 
+// sessionTouchInterval 是刷新 last_seen_at 的最小间隔。每个已认证请求（包括每张媒体
+// 图片、每条 SSE 事件与心跳）都落一次 UPDATE 会把读操作变成 SQLite 写事务，与下载
+// worker 争用唯一写锁。空闲超时是 7 天粒度，10 分钟的刷新间隔完全够用。
+const sessionTouchInterval = 10 * time.Minute
+
 func (s *Store) SessionValid(ctx context.Context, token string, now time.Time) (bool, error) {
 	hash := sha256.Sum256([]byte(token))
+	// 只有 last_seen_at 已超过刷新间隔时才写；其余请求走只读校验。
 	result, err := s.db.ExecContext(ctx, `UPDATE app_sessions SET last_seen_at=MAX(last_seen_at,?)
-		WHERE token_hash=? AND created_at<=? AND expires_at>? AND last_seen_at>?`,
-		now.UnixMilli(), hash[:], now.UnixMilli(), now.UnixMilli(), now.Add(-SessionIdleTimeout).UnixMilli())
+		WHERE token_hash=? AND created_at<=? AND expires_at>? AND last_seen_at>? AND last_seen_at<=?`,
+		now.UnixMilli(), hash[:], now.UnixMilli(), now.UnixMilli(),
+		now.Add(-SessionIdleTimeout).UnixMilli(), now.Add(-sessionTouchInterval).UnixMilli())
 	if err != nil {
 		return false, err
 	}
-	count, err := result.RowsAffected()
-	return count == 1 && err == nil, err
+	if count, err := result.RowsAffected(); err != nil {
+		return false, err
+	} else if count == 1 {
+		return true, nil
+	}
+	return s.SessionValidReadOnly(ctx, token, now)
 }
 
 // SessionValidReadOnly 校验会话是否有效且未超期，但不刷新 last_seen_at。

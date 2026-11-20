@@ -64,6 +64,19 @@ type Manager struct {
 	// autoRetryFailedUntil 是自动重试任务本轮失败后的退避截止时间：任务行会被
 	// ReserveAutomaticRetryJob 复用重置，没有这个窗口就会每 30s 重试一次失败任务。
 	autoRetryFailedUntil time.Time
+	// checkpointTasksMu 保护 checkpointTasksCache：任务快照只在任务表重建时变化，
+	// 缓存命中时每次进度写入不必重新序列化整张表。
+	checkpointTasksMu    sync.Mutex
+	checkpointTasksCache checkpointTasksSnapshot
+}
+
+// checkpointTasksSnapshot 记录已写入检查点的任务快照身份（切片首元素指针 + 长度）。
+// 任务表在一个切片生命周期内不会原地修改，指针相同即可认为内容未变。
+type checkpointTasksSnapshot struct {
+	jobID  int64
+	first  *archiveUserTask
+	count  int
+	loaded bool
 }
 
 const (
@@ -1496,11 +1509,26 @@ type archiveCheckpointTask struct {
 // archiveCheckpoint 保存列表/关注归档的分段进度。Tasks 只在首次建立时排序一次，
 // 后续切片按同一顺序继续，避免每次重新排序导致已处理用户被重排/重复。
 type archiveCheckpoint struct {
-	Tasks   []archiveCheckpointTask `json:"tasks"`
+	// Tasks 只用于兼容旧检查点（任务表与进度同 payload）。新写入走
+	// archiveCheckpointProgress，任务快照单独存 job_checkpoint_tasks。
+	Tasks   []archiveCheckpointTask `json:"tasks,omitempty"`
 	Next    int                     `json:"next"`
 	Stats   archiveStats            `json:"stats"`
 	Members *memberCheckpoint       `json:"members,omitempty"`
 	Replay  *tweetMediaReplay       `json:"replay,omitempty"`
+}
+
+// archiveCheckpointProgress 是每个用户边界写入的进度部分（完整检查点状态的全部
+// 可变字段，不含任务表）。
+type archiveCheckpointProgress struct {
+	Next    int               `json:"next"`
+	Stats   archiveStats      `json:"stats"`
+	Members *memberCheckpoint `json:"members,omitempty"`
+	Replay  *tweetMediaReplay `json:"replay,omitempty"`
+}
+
+func (cp archiveCheckpoint) progress() archiveCheckpointProgress {
+	return archiveCheckpointProgress{Next: cp.Next, Stats: cp.Stats, Members: cp.Members, Replay: cp.Replay}
 }
 
 func checkpointTasks(tasks []archiveUserTask) []archiveCheckpointTask {
@@ -1533,17 +1561,38 @@ func (cp archiveCheckpoint) userTasks() []archiveUserTask {
 
 func (m *Manager) loadArchiveCheckpoint(ctx context.Context, jobID int64) (archiveCheckpoint, bool, error) {
 	payload, ok, err := m.store.LoadJobCheckpoint(ctx, jobID)
-	if err != nil || !ok {
+	if err != nil {
 		return archiveCheckpoint{}, false, err
 	}
-	var cp archiveCheckpoint
-	if err := json.Unmarshal(payload, &cp); err != nil {
-		// 检查点损坏不能阻塞任务：丢弃后从头开始（媒体去重保证不会产生重复文件）。
-		log.Printf("job %d: discard corrupt archive checkpoint: %v", jobID, err)
-		_ = m.store.DeleteJobCheckpoint(ctx, jobID)
+	tasksPayload, tasksOK, err := m.store.LoadJobCheckpointTasks(ctx, jobID)
+	if err != nil {
+		return archiveCheckpoint{}, false, err
+	}
+	if !ok && !tasksOK {
 		return archiveCheckpoint{}, false, nil
 	}
+	var cp archiveCheckpoint
+	if ok {
+		if err := json.Unmarshal(payload, &cp); err != nil {
+			return m.discardCorruptCheckpoint(ctx, jobID, err)
+		}
+	}
+	if tasksOK {
+		// 任务表单独存储；进度 payload 里不再带 tasks（旧检查点仍可能带，作为回退）。
+		var tasks []archiveCheckpointTask
+		if err := json.Unmarshal(tasksPayload, &tasks); err != nil {
+			return m.discardCorruptCheckpoint(ctx, jobID, err)
+		}
+		cp.Tasks = tasks
+	}
 	return cp, true, nil
+}
+
+// discardCorruptCheckpoint 丢弃损坏的检查点后从头开始（媒体去重保证不会产生重复文件）。
+func (m *Manager) discardCorruptCheckpoint(ctx context.Context, jobID int64, cause error) (archiveCheckpoint, bool, error) {
+	log.Printf("job %d: discard corrupt archive checkpoint: %v", jobID, cause)
+	_ = m.store.DeleteJobCheckpoint(ctx, jobID)
+	return archiveCheckpoint{}, false, nil
 }
 
 func (m *Manager) saveArchiveCheckpoint(ctx context.Context, jobID int64, tasks []archiveUserTask, next int, stats archiveStats) error {
@@ -1557,16 +1606,48 @@ func (m *Manager) saveArchiveCheckpoint(ctx context.Context, jobID int64, tasks 
 	if err != nil {
 		return err
 	}
-	cp.Tasks, cp.Next, cp.Stats = checkpointTasks(tasks), next, stats
+	cp.Next, cp.Stats = next, stats
 	cp.Members = nil
+	cp.Tasks = nil
 	if cp.Replay != nil && (next == len(tasks) || cp.Replay.UserID != tasks[next].user.ID) {
 		cp.Replay = nil
 	}
-	payload, err := json.Marshal(cp)
+	if err := m.persistCheckpointTasks(ctx, jobID, tasks); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(cp.progress())
 	if err != nil {
 		return err
 	}
 	return m.store.SaveJobCheckpoint(ctx, jobID, payload)
+}
+
+// persistCheckpointTasks 写入任务表快照；同一任务切片只序列化/写入一次。
+// 列表/关注归档每完成一个用户都会调用 saveArchiveCheckpoint，而任务切片在整轮
+// 归档中不变——重复重写整张表是 O(用户数²) 的写放大。
+func (m *Manager) persistCheckpointTasks(ctx context.Context, jobID int64, tasks []archiveUserTask) error {
+	m.checkpointTasksMu.Lock()
+	cached := m.checkpointTasksCache
+	m.checkpointTasksMu.Unlock()
+	if cached.loaded && cached.jobID == jobID && cached.count == len(tasks) &&
+		(len(tasks) == 0 || &tasks[0] == cached.first) {
+		return nil
+	}
+	payload, err := json.Marshal(checkpointTasks(tasks))
+	if err != nil {
+		return err
+	}
+	if err := m.store.SaveJobCheckpointTasks(ctx, jobID, payload); err != nil {
+		return err
+	}
+	var first *archiveUserTask
+	if len(tasks) > 0 {
+		first = &tasks[0]
+	}
+	m.checkpointTasksMu.Lock()
+	m.checkpointTasksCache = checkpointTasksSnapshot{jobID: jobID, first: first, count: len(tasks), loaded: true}
+	m.checkpointTasksMu.Unlock()
+	return nil
 }
 
 // yieldJob 在安全边界把任务放回队列并立即允许再次领取。刷新 enqueued_at 让其他

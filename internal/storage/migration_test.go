@@ -811,6 +811,11 @@ func init() {
 		"users(avatar_url,friends_count,id,media_count,name,protected,screen_name,updated_at)", 1)
 	schemaColumnsForVersion[12] = v12
 	schemaColumnsForVersion[13] = strings.Replace(v12, ";archive_media(", ";app_sessions(created_at,expires_at,last_seen_at,token_hash);archive_media(", 1)
+
+	// v14 在 v13 基础上新增 job_checkpoint_tasks：检查点的任务快照与逐用户进度分表，
+	// 避免每完成一个用户就重写整张任务表。
+	schemaColumnsForVersion[14] = strings.Replace(schemaColumnsForVersion[13],
+		";job_checkpoints(", ";job_checkpoint_tasks(job_id,payload,updated_at);job_checkpoints(", 1)
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {

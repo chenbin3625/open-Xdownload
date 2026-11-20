@@ -41,8 +41,35 @@ func (s *Store) LoadJobCheckpoint(ctx context.Context, jobID int64) ([]byte, boo
 	return []byte(payload), true, nil
 }
 
+// SaveJobCheckpointTasks 覆盖写入检查点里的任务快照。任务表在一个切片生命周期内
+// 不变，只有重建任务时才写；进度（next/stats）走 SaveJobCheckpoint 的小 payload。
+func (s *Store) SaveJobCheckpointTasks(ctx context.Context, jobID int64, payload []byte) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO job_checkpoint_tasks (job_id, payload, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(job_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
+		jobID, string(payload), time.Now().UTC())
+	return err
+}
+
+// LoadJobCheckpointTasks 读取检查点里的任务快照；不存在时返回 (nil, false, nil)。
+func (s *Store) LoadJobCheckpointTasks(ctx context.Context, jobID int64) ([]byte, bool, error) {
+	var payload string
+	err := s.db.GetContext(ctx, &payload, `SELECT payload FROM job_checkpoint_tasks WHERE job_id = ?`, jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return []byte(payload), true, nil
+}
+
 // DeleteJobCheckpoint 删除任务检查点（任务完成或永久失败时调用）。
 func (s *Store) DeleteJobCheckpoint(ctx context.Context, jobID int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM job_checkpoints WHERE job_id = ?`, jobID)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM job_checkpoints WHERE job_id = ?`, jobID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM job_checkpoint_tasks WHERE job_id = ?`, jobID)
 	return err
 }
