@@ -30,6 +30,48 @@ var assetTokens = regexp.MustCompile(`\{([^{}]+)\}`)
 var windowsReservedAssetName = regexp.MustCompile(`^(COM|LPT)[1-9]$`)
 var s3AssetWrites [64]sync.Mutex
 
+// TemplateUserDir 只渲染资产目录模板里依赖 {kind} 与 {username} 的部分，用于把
+// 归档用户的实体目录与媒体落盘目录对齐（默认 {kind}/{username} 即 image/<handle>、
+// video/<handle>）。模板依赖推文级变量（{tweet_id}/{year}/{text} 等）时无法在仅有
+// 用户信息的情况下确定目录，返回 ok=false，调用方应退回旧的归档目录布局。
+func TemplateUserDir(rule config.AssetRule, kind config.AssetKind, screenName string) (string, bool) {
+	if err := config.ValidateAssetTemplate(rule.DirectoryTemplate, false); err != nil {
+		return "", false
+	}
+	supported := true
+	directory := assetTokens.ReplaceAllStringFunc(rule.DirectoryTemplate, func(token string) string {
+		switch token {
+		case "{kind}":
+			return safeAssetSegment(string(kind))
+		case "{username}":
+			return safeAssetSegment(screenName)
+		default:
+			supported = false
+			return token
+		}
+	})
+	if !supported {
+		return "", false
+	}
+	if rule.SeparateFolder != nil && *rule.SeparateFolder && !strings.Contains(rule.DirectoryTemplate, "{kind}") {
+		directory = path.Join(safeAssetSegment(string(kind)), directory)
+	}
+	parts := []string{}
+	for _, part := range strings.Split(path.Join(rule.Prefix, directory), "/") {
+		if part != "" && part != "." {
+			parts = append(parts, safeAssetSegment(part))
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	key := path.Join(parts...)
+	if !validAssetKey(key) {
+		return "", false
+	}
+	return key, true
+}
+
 func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.TweetData, media parser.Media, index int, ext string) (string, error) {
 	if err := config.ValidateAssetTemplate(rule.DirectoryTemplate, false); err != nil {
 		return "", err

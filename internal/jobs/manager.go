@@ -1765,11 +1765,6 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 // archiveUserTasks 过滤/去重待归档用户，返回任务列表、被跳过的用户数以及跳过的原因
 // 条目（blocked/muted 以前被静默丢弃，现在计入 SkippedUsers + Issues，便于排障）。
 func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, users []xapi.User) ([]archiveUserTask, int, []string, error) {
-	target, err := filestore.New(cfg)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	parent := target.Join(target.Root(), "users")
 	seen := map[string]struct{}{}
 	tasks := make([]archiveUserTask, 0, len(users))
 	userIDs := make([]string, 0, len(users))
@@ -1798,15 +1793,15 @@ func (m *Manager) archiveUserTasks(ctx context.Context, cfg config.AppConfig, us
 		})
 		userIDs = append(userIDs, user.ID)
 	}
-	existingEntities, err := m.store.LocateUserEntities(ctx, userIDs, parent)
+	mediaCounts, err := m.store.UserEntityMediaCounts(ctx, userIDs)
 	if err != nil {
 		return nil, skipped, issues, err
 	}
 	for index := range tasks {
 		user := tasks[index].user
 		missingMedia := user.MediaCount
-		if existing, ok := existingEntities[user.ID]; ok && existing.MediaCount.Valid {
-			missingMedia = max(0, user.MediaCount-int(existing.MediaCount.Int64))
+		if archived, ok := mediaCounts[user.ID]; ok {
+			missingMedia = max(0, user.MediaCount-archived)
 		}
 		tasks[index].missingMedia = missingMedia
 		tasks[index].primaryOnly = user.Protected && user.Following
@@ -2563,46 +2558,134 @@ func (m *Manager) ensureUserEntity(ctx context.Context, cfg config.AppConfig, us
 	return m.ensureUserEntityWithStore(ctx, target, user)
 }
 
+// userEntityPlan 是一个需要登记的用户实体目录：parent 为父目录绝对路径，name 为目录名，
+// kind 是该目录对应的媒体类型，primary 标记承载增量游标与统计的那一行，managed 表示
+// 目录由媒体存储规则决定（而非归档功能自建的 users 目录）。
+type userEntityPlan struct {
+	parent  string
+	name    string
+	kind    config.AssetKind
+	primary bool
+	managed bool
+}
+
+// userEntityPlans 计算归档用户需要登记与创建的目录。媒体存储启用、且目录模板只依赖
+// {kind}/{username} 时，实体目录直接与媒体落盘目录一致（默认模板即 <root>/image/<handle>
+// 与 <root>/video/<handle>），不再生成额外的 users/ 层级。模板依赖推文级变量、或存储
+// 未启用时，退回旧的 <root>/users/<显示名(handle)> 布局。
+func (m *Manager) userEntityPlans(ctx context.Context, target filestore.Store, user xapi.User) ([]userEntityPlan, error) {
+	if user.ScreenName != "" {
+		document, err := m.store.GetStorageDocument(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if document.Enabled {
+			plans := make([]userEntityPlan, 0, len(config.AssetKinds))
+			for _, kind := range config.AssetKinds {
+				rule, _, err := document.Rule(kind)
+				if err != nil {
+					plans = nil
+					break
+				}
+				rel, ok := filestore.TemplateUserDir(rule, kind, user.ScreenName)
+				if !ok {
+					plans = nil
+					break
+				}
+				plans = append(plans, userEntityPlan{
+					parent:  target.Join(target.Root(), path.Dir(rel)),
+					name:    path.Base(rel),
+					kind:    kind,
+					primary: kind == config.AssetImage,
+					managed: true,
+				})
+			}
+			if len(plans) > 0 {
+				// 模板不含 {kind} 时多个资源类型会渲染到同一目录，只保留一行。
+				dedup := plans[:0]
+				seen := make(map[string]bool, len(plans))
+				for _, plan := range plans {
+					key := plan.parent + "\x00" + plan.name
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+					dedup = append(dedup, plan)
+				}
+				plans = dedup
+				hasPrimary := false
+				for _, plan := range plans {
+					hasPrimary = hasPrimary || plan.primary
+				}
+				if !hasPrimary {
+					plans[0].primary = true
+				}
+				return plans, nil
+			}
+		}
+	}
+	return []userEntityPlan{{
+		parent:  target.Join(target.Root(), "users"),
+		name:    userDirectoryName(user),
+		primary: true,
+	}}, nil
+}
+
 // ensureUserEntityWithStore 复用调用方已创建的 Store：列表归档会为每个成员依次
 // 调用，Store 的构造（filepath.Abs + 代理校验）不必重复执行。
+// 返回主实体（承载增量游标）与主目录。
 func (m *Manager) ensureUserEntityWithStore(ctx context.Context, target filestore.Store, user xapi.User) (storage.UserEntity, string, error) {
-	parent := target.Join(target.Root(), "users")
-	name := userDirectoryName(user)
-	existing, err := m.store.LocateUserEntity(ctx, user.ID, parent)
+	plans, err := m.userEntityPlans(ctx, target, user)
 	if err != nil {
 		return storage.UserEntity{}, "", err
 	}
-	shared, err := m.store.UserEntityDirectoryShared(ctx, user.ID, parent, name)
-	if err != nil {
-		return storage.UserEntity{}, "", err
-	}
-	if shared {
-		return storage.UserEntity{}, "", fmt.Errorf("归档目录 %s 已属于其他账号，需先分离已有文件", target.Join(parent, name))
-	}
-	if existing != nil && existing.Name != "" && existing.Name != name {
-		shared, err := m.store.UserEntityDirectoryShared(ctx, user.ID, existing.ParentDir, existing.Name)
+	var primary storage.UserEntity
+	var primaryDir string
+	for _, plan := range plans {
+		shared, err := m.store.UserEntityDirectoryShared(ctx, user.ID, plan.parent, plan.name)
 		if err != nil {
 			return storage.UserEntity{}, "", err
 		}
 		if shared {
-			return storage.UserEntity{}, "", fmt.Errorf("归档目录 %s 被多个账号共用，需先分离已有文件", target.Join(existing.ParentDir, existing.Name))
+			return storage.UserEntity{}, "", fmt.Errorf("归档目录 %s 已属于其他账号，需先分离已有文件", target.Join(plan.parent, plan.name))
 		}
-		if name, err = m.renameEntityDir(ctx, target, existing.ParentDir, existing.Name, name); err != nil {
+		existing, err := m.store.LocateUserEntity(ctx, user.ID, plan.parent)
+		if err != nil {
 			return storage.UserEntity{}, "", err
 		}
+		name := plan.name
+		if existing != nil && existing.Name != "" && existing.Name != name && !plan.managed {
+			// 旧 users 布局的目录由归档功能自己创建，改名时可以整目录迁移并重写
+			// downloads.file_path。新布局的目录由存储策略管理、文件名同样记录在
+			// media_assets.key 里，直接改目录会让既有资产记录 404，因此只更新实体名，
+			// 磁盘上的旧目录留给用户自行处理。
+			shared, err := m.store.UserEntityDirectoryShared(ctx, user.ID, existing.ParentDir, existing.Name)
+			if err != nil {
+				return storage.UserEntity{}, "", err
+			}
+			if shared {
+				return storage.UserEntity{}, "", fmt.Errorf("归档目录 %s 被多个账号共用，需先分离已有文件", target.Join(existing.ParentDir, existing.Name))
+			}
+			if name, err = m.renameEntityDir(ctx, target, existing.ParentDir, existing.Name, name); err != nil {
+				return storage.UserEntity{}, "", err
+			}
+		}
+		entity, err := m.store.EnsureUserEntity(ctx, user.ID, plan.parent, name)
+		if err != nil {
+			return storage.UserEntity{}, "", err
+		}
+		dir := target.Join(entity.ParentDir, entity.Name)
+		if err := target.MkdirAll(ctx, dir); err != nil {
+			return storage.UserEntity{}, "", err
+		}
+		if plan.primary {
+			primary, primaryDir = entity, dir
+		}
 	}
-	entity, err := m.store.EnsureUserEntity(ctx, user.ID, parent, name)
-	if err != nil {
+	if err := m.refreshUserLinks(ctx, target, user.ID, primary.Name, primaryDir); err != nil {
 		return storage.UserEntity{}, "", err
 	}
-	dir := target.Join(entity.ParentDir, entity.Name)
-	if err := target.MkdirAll(ctx, dir); err != nil {
-		return storage.UserEntity{}, "", err
-	}
-	if err := m.refreshUserLinks(ctx, target, user.ID, entity.Name, dir); err != nil {
-		return storage.UserEntity{}, "", err
-	}
-	return entity, dir, nil
+	return primary, primaryDir, nil
 }
 
 // renameEntityDir 把实体目录从 oldName 改名为 newName，并同步改写 downloads.file_path，

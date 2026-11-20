@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -519,6 +520,11 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return err
 	}
 	if err := s.runMigrationOnce("drop_unique_users_screen_name", s.dropUniqueUsersScreenName); err != nil {
+		return err
+	}
+	// 归档用户的实体目录改为跟随媒体存储规则（默认 <root>/image/<handle>、
+	// <root>/video/<handle>），旧库里的 <root>/users 行需要改写到新目录并保留游标。
+	if err := s.runMigrationOnce("user_entities_kind_dirs", s.migrateUserEntitiesToKindDirs); err != nil {
 		return err
 	}
 	// user_previous_names 只被触发器写入、全仓库没有任何读取方（死表），删除以停止
@@ -1059,6 +1065,139 @@ func (s *Store) dropUniqueUsersScreenName(exec migrationExecutor) error {
 DROP INDEX IF EXISTS idx_users_screen_name;
 CREATE INDEX IF NOT EXISTS idx_users_screen_name ON users (screen_name);`)
 	return err
+}
+
+// migrateUserEntitiesToKindDirs 把旧版归档实体目录（<root>/users/<显示名(handle)>）
+// 迁移到媒体存储的按类型目录（默认 <root>/image/<handle>、<root>/video/<handle>），
+// 保留增量游标与媒体计数，避免升级后所有用户重新全量扫描。仅在存储策略启用、且目录
+// 模板按资源类型分目录时迁移；无法确定目标目录时保持原样。磁盘上的旧 users 目录不会
+// 被删除，由用户自行清理。
+func (s *Store) migrateUserEntitiesToKindDirs(exec migrationExecutor) error {
+	var root string
+	if err := exec.Get(&root, `SELECT download_dir FROM app_config WHERE id = 1`); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	var raw string
+	if err := exec.Get(&raw, `SELECT document FROM storage_versions ORDER BY version DESC LIMIT 1`); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	var document config.StorageDocument
+	if err := json.Unmarshal([]byte(raw), &document); err != nil || !document.Enabled {
+		return nil
+	}
+
+	type kindDir struct {
+		parent string
+		name   string
+	}
+	renderDirs := func(screen string) ([]kindDir, bool) {
+		dirs := make([]kindDir, 0, len(config.AssetKinds))
+		for _, kind := range config.AssetKinds {
+			rule, _, err := document.Rule(kind)
+			if err != nil {
+				return nil, false
+			}
+			rel, ok := renderUserKindDir(rule, kind, screen)
+			if !ok {
+				return nil, false
+			}
+			full := filepath.Join(root, filepath.FromSlash(rel))
+			dirs = append(dirs, kindDir{parent: filepath.Dir(full), name: filepath.Base(full)})
+		}
+		return dirs, len(dirs) > 0
+	}
+
+	type oldEntity struct {
+		ID              int64         `db:"id"`
+		UserID          string        `db:"user_id"`
+		ScreenName      string        `db:"screen_name"`
+		LatestRelease   sql.NullTime  `db:"latest_release_time"`
+		MediaCount      sql.NullInt64 `db:"media_count"`
+		LastSeenTweetID string        `db:"last_seen_tweet_id"`
+		LastFullScanAt  sql.NullTime  `db:"last_full_scan_at"`
+	}
+	now := time.Now().UTC()
+	oldParent := filepath.Join(root, "users")
+	lastID := int64(0)
+	for {
+		rows := []oldEntity{}
+		if err := exec.Select(&rows, `
+SELECT ue.id, ue.user_id, COALESCE(u.screen_name, '') AS screen_name,
+	ue.latest_release_time, ue.media_count, ue.last_seen_tweet_id, ue.last_full_scan_at
+FROM user_entities ue LEFT JOIN users u ON u.id = ue.user_id
+WHERE ue.parent_dir = ? AND ue.id > ?
+ORDER BY ue.id
+LIMIT 1000`, oldParent, lastID); err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			lastID = row.ID
+			if row.ScreenName == "" {
+				continue
+			}
+			dirs, ok := renderDirs(row.ScreenName)
+			if !ok {
+				continue
+			}
+			primary := dirs[0]
+			// 旧行升级为主目录行；若目标目录已有行（升级中途曾被新代码写过），删掉旧的
+			// 重复行，保留目标行里可能更新的游标。
+			if _, err := exec.Exec(`DELETE FROM user_entities WHERE user_id = ? AND parent_dir = ? AND id <> ?`, row.UserID, primary.parent, row.ID); err != nil {
+				return err
+			}
+			if _, err := exec.Exec(`UPDATE user_entities SET parent_dir = ?, name = ? WHERE id = ?`, primary.parent, primary.name, row.ID); err != nil {
+				return err
+			}
+			for _, extra := range dirs[1:] {
+				if _, err := exec.Exec(`
+INSERT OR IGNORE INTO user_entities
+	(user_id, name, parent_dir, latest_release_time, media_count, last_seen_tweet_id, last_full_scan_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					row.UserID, extra.name, extra.parent, row.LatestRelease, row.MediaCount, row.LastSeenTweetID, row.LastFullScanAt, now); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// renderUserKindDir 渲染只依赖 {kind}/{username} 的资产目录模板。模板含推文级变量
+// 时返回 ok=false，让迁移保持旧布局。
+func renderUserKindDir(rule config.AssetRule, kind config.AssetKind, screen string) (string, bool) {
+	template := strings.ReplaceAll(rule.DirectoryTemplate, "{kind}", string(kind))
+	template = strings.ReplaceAll(template, "{username}", screen)
+	if strings.ContainsAny(template, "{}") {
+		return "", false
+	}
+	separate := rule.SeparateFolder != nil && *rule.SeparateFolder && !strings.Contains(rule.DirectoryTemplate, "{kind}")
+	if !separate && !strings.Contains(rule.DirectoryTemplate, "{kind}") {
+		return "", false
+	}
+	if separate {
+		template = path.Join(string(kind), template)
+	}
+	cleaned := path.Join(rule.Prefix, template)
+	if cleaned == "" || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return "", false
+	}
+	return cleaned, true
 }
 
 func (s *Store) dropSMBWebDAVConfigColumns(exec migrationExecutor) error {
@@ -3414,6 +3553,52 @@ WHERE parent_dir = ? AND user_id IN (?)`, parentDir, uniqueIDs[start:end])
 		}
 	}
 	return entities, nil
+}
+
+// UserEntityMediaCounts returns the archived media count per user. A user may own
+// several entity rows once archive directories follow the storage policy
+// (image/<handle>, video/<handle>); only rows with a recorded count participate and
+// the largest value wins, which matches the previous single-row behaviour.
+func (s *Store) UserEntityMediaCounts(ctx context.Context, userIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(userIDs))
+	uniqueIDs := make([]string, 0, len(userIDs))
+	seen := make(map[string]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == "" {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, userID)
+	}
+	if len(uniqueIDs) == 0 {
+		return counts, nil
+	}
+	type row struct {
+		UserID     string `db:"user_id"`
+		MediaCount int    `db:"media_count"`
+	}
+	const batchSize = 500
+	for start := 0; start < len(uniqueIDs); start += batchSize {
+		end := min(start+batchSize, len(uniqueIDs))
+		query, args, err := sqlx.In(`
+SELECT user_id, MAX(media_count) AS media_count FROM user_entities
+WHERE media_count IS NOT NULL AND user_id IN (?)
+GROUP BY user_id`, uniqueIDs[start:end])
+		if err != nil {
+			return nil, err
+		}
+		items := []row{}
+		if err := s.db.SelectContext(ctx, &items, s.db.Rebind(query), args...); err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			counts[item.UserID] = item.MediaCount
+		}
+	}
+	return counts, nil
 }
 
 func (s *Store) EnsureUserEntity(ctx context.Context, userID string, parentDir string, name string) (UserEntity, error) {

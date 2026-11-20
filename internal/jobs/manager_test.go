@@ -931,6 +931,7 @@ func TestArchiveUsersDeduplicatesOnSerialPath(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1132,6 +1133,7 @@ func TestRefreshUserLinksSkipsLegacyFollowingLinks(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 
 	ctx := context.Background()
 	root := t.TempDir()
@@ -2072,6 +2074,7 @@ func TestEnsureUserEntityRenameRewritesDownloadPaths(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	root := t.TempDir()
 	cfg := config.AppConfig{DownloadDir: root}
@@ -2124,6 +2127,7 @@ func TestEnsureUserEntityKeepsOldNameWhenRenameFails(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	root := t.TempDir()
 	cfg := config.AppConfig{DownloadDir: root}
@@ -2597,6 +2601,7 @@ func TestEnsureUserEntityRecoversFromCrashMidRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	root := t.TempDir()
 	cfg := config.AppConfig{DownloadDir: root, StorageType: config.StorageLocal}

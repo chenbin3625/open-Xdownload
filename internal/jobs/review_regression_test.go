@@ -71,6 +71,7 @@ func TestLongUserDisplayNamesKeepDistinctDirectoriesAndLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	cfg := config.AppConfig{DownloadDir: t.TempDir()}
 	manager := NewManager(store, nil, NewEventBus())
@@ -108,6 +109,7 @@ func TestEnsureUserEntityRejectsRenamingSharedLegacyDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	useLegacyStorage(t, store)
 	ctx := context.Background()
 	cfg := config.AppConfig{DownloadDir: t.TempDir()}
 	parent := filepath.Join(cfg.DownloadDir, "users")
@@ -164,6 +166,7 @@ func TestEnsureUserEntityRejectsDirectoryOwnedByAnotherUser(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer store.Close()
+			useLegacyStorage(t, store)
 			ctx := context.Background()
 			cfg := config.AppConfig{DownloadDir: t.TempDir()}
 			parent := filepath.Join(cfg.DownloadDir, "users")
