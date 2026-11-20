@@ -207,8 +207,6 @@ function Workbench() {
 
   const sidebarProps = {
     activeSection,
-    storageType: config.data?.storageType || "local",
-    storagePath: config.data?.downloadDir || "/downloads",
   };
 
   return (

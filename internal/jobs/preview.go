@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -109,7 +110,9 @@ func fetchPosterImage(ctx context.Context, client *http.Client, rawURL string, d
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("HTTP %d", response.StatusCode)
 	}
-	if contentType := response.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "image/") {
+	contentType := response.Header.Get("Content-Type")
+	mediaType, _, parseErr := mime.ParseMediaType(contentType)
+	if parseErr != nil || !strings.HasPrefix(strings.ToLower(mediaType), "image/") {
 		return fmt.Errorf("内容类型无效: %s", contentType)
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(destPath), ".preview-*.jpg")

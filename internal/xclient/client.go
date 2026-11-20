@@ -246,14 +246,10 @@ func (p *Pool) FollowUserAsPrimary(ctx context.Context, user User) error {
 	return client.FollowUser(ctx, user)
 }
 
-// FetchTweet 实现 xapi.Source：经 Pool 选号后请求，遵守账号限流/轮换与临时禁用。
+// FetchTweet 实现 xapi.Source：经 Pool.GraphQL 请求，支持账号限流/失败轮换与临时禁用。
 // 池内客户端必然带 Cookie，因此 loggedIn 为 true。
 func (p *Pool) FetchTweet(ctx context.Context, id string, options parser.ParseOptions) (parser.TweetData, error) {
-	client, err := p.Select(ctx, xapi.TweetResultPath())
-	if err != nil {
-		return parser.TweetData{}, err
-	}
-	return xapi.FetchTweet(ctx, client, id, true, options)
+	return xapi.FetchTweet(ctx, p, id, true, options)
 }
 
 // maxPoolSelectWait 限制 Select 因"所有客户端限流"而阻塞等待的总时长。X GraphQL

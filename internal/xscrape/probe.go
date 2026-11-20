@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 	"github.com/tidwall/gjson"
 )
@@ -244,15 +245,15 @@ func twidUserID(extraCookies map[string]string) string {
 // addAccountCookies 把主 Cookie 与 extra_cookies 追加到请求。cookie 值只出现在
 // 请求里，不会写入日志或数据库。extra 中重复的 auth_token/ct0 会被跳过。
 func addAccountCookies(request *http.Request, authToken, csrfToken string, extra map[string]string) {
-	if authToken != "" {
+	if authToken != "" && !strings.ContainsAny(authToken, ";\r\n") {
 		request.AddCookie(&http.Cookie{Name: "auth_token", Value: authToken})
 	}
-	if csrfToken != "" {
+	if csrfToken != "" && !strings.ContainsAny(csrfToken, ";\r\n") {
 		request.AddCookie(&http.Cookie{Name: "ct0", Value: csrfToken})
 	}
 	names := make([]string, 0, len(extra))
-	for name := range extra {
-		if name == "auth_token" || name == "ct0" {
+	for name, value := range extra {
+		if name == "auth_token" || name == "ct0" || value == "" || !config.IsValidCookieName(name) || strings.ContainsAny(value, ";\r\n") {
 			continue
 		}
 		names = append(names, name)

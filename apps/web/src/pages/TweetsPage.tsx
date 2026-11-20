@@ -75,7 +75,7 @@ export function TweetsPage() {
   }, [author, authors.data]);
   const newRecords = !tweets.isPlaceholderData && snapshot?.key === queryIdentity ? (tweets.data?.items ?? []).filter(item => !snapshot.page.items.some(previous => previous.id === item.id)).length : 0;
   const detail = detailId ? page?.items.find(tweet => tweet.id === detailId) ?? detailSnapshot : null;
-  const detailReposted = detail?.related?.find(related => related.id === detail.retweetedTweetId && related.text);
+  const detailReposted = detail?.related?.find(related => related.id === detail.retweetedTweetId && Boolean(related.text || related.media?.length || related.author?.screenName));
   function openMedia(tweet: ArchivedTweet, record: ArchivedTweet["downloads"][number]) {
     setPreview({ tweet, index: Math.max(0, tweet.downloads.findIndex(item => item.id === record.id)) });
   }

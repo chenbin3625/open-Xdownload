@@ -127,8 +127,11 @@ func (c cubicCurve) value(t float64) float64 {
 		}
 		return 1 + endGradient*(t-1)
 	}
-	for start < end {
+	for i := 0; i < 64 && start < end; i++ {
 		mid = (start + end) / 2
+		if mid == start || mid == end {
+			break
+		}
 		xEst := cubicCalculate(c.curves[0], c.curves[2], mid)
 		if math.Abs(t-xEst) < 0.00001 {
 			return cubicCalculate(c.curves[1], c.curves[3], mid)

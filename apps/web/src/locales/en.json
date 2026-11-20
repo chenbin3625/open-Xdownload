@@ -740,5 +740,21 @@
   "代理": "Proxy",
   "环境变量账号的 Cookie 由环境变量提供，不能在这里替换。": "Environment account cookies come from environment variables and cannot be replaced here.",
   "替换 Cookie（留空则不修改）": "Replace cookie (leave blank to keep the current one)",
-  "替换 Cookie": "Replace cookie"
+  "替换 Cookie": "Replace cookie",
+  "查看 @{{value0}} 的媒体": "View media for @{{value0}}",
+  "{{value0}} 个媒体 · {{value1}}": "{{value0}} media · {{value1}}",
+  "浏览方式": "Browse mode",
+  "媒体": "Media",
+  "按账号": "By account",
+  "还没有可浏览的账号": "No accounts to browse yet",
+  "任务已删除": "Task deleted",
+  "删除任务": "Delete task",
+  "确定删除任务 #JOB-{{value0}}？该任务的下载索引会一并移除，磁盘上的媒体文件不受影响。": "Delete task #JOB-{{value0}}? Its download index will be removed, while files on disk remain untouched.",
+  "本页匹配 {{value0}} 条（共 {{value1}} 个任务）": "{{value0}} matches on this page ({{value1}} tasks in total)",
+  "括号内为当前页的任务计数": "Counts in parentheses apply to the current page",
+  "已取消 {{value0}} 个任务，{{value1}} 个失败": "Canceled {{value0}} tasks, {{value1}} failed",
+  "已创建 {{value0}} 个重试任务，{{value1}} 个失败": "Created {{value0}} retry tasks, {{value1}} failed",
+  "扩展名": "Extension",
+  "隐藏": "Hide",
+  "显示": "Show"
 }

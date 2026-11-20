@@ -8,10 +8,11 @@ import {
   getDashboardMeta,
   jobFilesQueryRoot,
   libraryDownloadsQueryRoot,
+  libraryUsersQueryRoot,
   jobsQueryRoot,
 } from "./api";
 import { isDashboardMeta } from "./bootstrap";
-import { tweetAuthorsQueryKey } from "./archive";
+import { tweetAuthorsQueryKey, tweetsQueryKey } from "./archive";
 import {
   dashboardStatsWithJobStatusChange,
   isJobTerminal,
@@ -25,7 +26,10 @@ export function invalidateWorkbenchQueries(queryClient: QueryClient) {
     queryClient.invalidateQueries({ queryKey: jobsQueryRoot }),
     queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot }),
     queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot }),
+    queryClient.invalidateQueries({ queryKey: libraryUsersQueryRoot }),
     queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot }),
+    queryClient.invalidateQueries({ queryKey: tweetsQueryKey }),
+    queryClient.invalidateQueries({ queryKey: tweetAuthorsQueryKey }),
   ]);
 }
 
@@ -167,8 +171,10 @@ function terminalTimersFor(queryClient: QueryClient): TerminalRefreshTimers {
 
 export function scheduleTerminalDataRefresh(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot, refetchType: "none" });
+  void queryClient.invalidateQueries({ queryKey: libraryUsersQueryRoot, refetchType: "none" });
   void queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot, refetchType: "none" });
   void queryClient.invalidateQueries({ queryKey: archiveScheduleQueryRoot, refetchType: "none" });
+  void queryClient.invalidateQueries({ queryKey: tweetsQueryKey, refetchType: "none" });
   void queryClient.invalidateQueries({ queryKey: tweetAuthorsQueryKey, refetchType: "none" });
   void queryClient.invalidateQueries({ queryKey: jobsQueryRoot, predicate: query => !isUnfilteredJobsQuery(query), refetchType: "none" });
   const timers = terminalTimersFor(queryClient);
@@ -176,8 +182,10 @@ export function scheduleTerminalDataRefresh(queryClient: QueryClient) {
   timers.timer = setTimeout(() => {
     timers.timer = null;
     void queryClient.refetchQueries({ queryKey: libraryDownloadsQueryRoot, type: "active" });
+    void queryClient.refetchQueries({ queryKey: libraryUsersQueryRoot, type: "active" });
     void queryClient.refetchQueries({ queryKey: failedTweetQueryRoot, type: "active" });
     void queryClient.refetchQueries({ queryKey: archiveScheduleQueryRoot, type: "active" });
+    void queryClient.refetchQueries({ queryKey: tweetsQueryKey, type: "active" });
     void queryClient.refetchQueries({ queryKey: tweetAuthorsQueryKey, type: "active" });
     void queryClient.refetchQueries({ queryKey: jobsQueryRoot, predicate: query => !isUnfilteredJobsQuery(query), type: "active" });
   }, TERMINAL_REFRESH_DEBOUNCE_MS);
@@ -222,7 +230,20 @@ export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Jo
 
     const items = [...current.items];
     items[jobIndex] = updatedJob;
-    return { ...current, items };
+    let counts = current.counts;
+    const prevBucket = jobStatusBucket(previousJob.status);
+    const nextBucket = jobStatusBucket(updatedJob.status);
+    if (counts && prevBucket !== nextBucket) {
+      const nextCounts = { ...counts };
+      if (prevBucket === "active") nextCounts.active = Math.max(0, nextCounts.active - 1);
+      if (prevBucket === "completed") nextCounts.completed = Math.max(0, nextCounts.completed - 1);
+      if (prevBucket === "failed") nextCounts.failed = Math.max(0, nextCounts.failed - 1);
+      if (nextBucket === "active") nextCounts.active += 1;
+      if (nextBucket === "completed") nextCounts.completed += 1;
+      if (nextBucket === "failed") nextCounts.failed += 1;
+      counts = nextCounts;
+    }
+    return { ...current, items, counts };
   });
 
   if (found && previousStatus) {

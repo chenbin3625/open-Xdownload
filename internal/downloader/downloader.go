@@ -842,7 +842,7 @@ func truncateUTF8Bytes(value string, maxBytes int) string {
 
 // staleTempFilePatterns 匹配下载器与海报回填写出的临时文件（见 DownloadWithOptions 与
 // jobs/preview.go）。它们正常情况下会被重命名或删除，只有进程在写入中途被杀才会残留。
-var staleTempFilePatterns = []string{".xdl-*.part", ".preview-*.jpg"}
+var staleTempFilePatterns = []string{".xdl-*.part", ".asset-*.part", ".preview-*.jpg"}
 
 // RemoveStaleTempFiles 删除 root 下修改时间早于 olderThan 的残留临时文件，返回删除数量。
 //

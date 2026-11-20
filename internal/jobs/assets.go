@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"mime"
 	"os"
@@ -91,6 +92,13 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	if release != nil {
 		defer release()
 	}
+	_, unavailable, err := m.store.GetMediaDownloadState(saveCtx, tweetID, mediaURL)
+	if err != nil {
+		return mediaDownloadResult{}, err
+	}
+	if unavailable {
+		return mediaDownloadResult{skipped: true, unavailable: true}, nil
+	}
 	kind := config.AssetVideo
 	mediaType := parser.MediaVideo
 	if photo {
@@ -109,7 +117,8 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	media := parser.Media{ID: key, Type: mediaType, BestURL: mediaURL}
 	index := 0
 	for i, item := range tweet.Media {
-		if parser.MediaDownloadURL(item) == mediaURL {
+		itemURL := parser.MediaDownloadURL(item)
+		if itemURL == mediaURL || (key != "" && downloader.MediaIdentity(itemURL) == key) {
 			media = item
 			index = i
 			break
@@ -164,8 +173,22 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	}
 	if asset == nil {
 		if source == "" {
-			result, downloadErr := m.downloader.DownloadWithOptions(ctx, mediaURL, tempDir, "source", downloader.Options{LargePhoto: photo, ProxyURL: cfg.ProxyURL, MaxFilenameLength: 120})
+			result, downloadErr := m.downloader.DownloadWithOptions(ctx, mediaURL, tempDir, "source", downloader.Options{ModTime: published, LargePhoto: photo, ProxyURL: cfg.ProxyURL, MaxFilenameLength: 120})
 			if downloadErr != nil {
+				if isPermanentlyUnavailableMediaError(downloadErr) {
+					previouslyFailed, _ := m.store.HasFailedMediaForURL(saveCtx, mediaURL)
+					if previouslyFailed {
+						if markErr := m.store.UpsertUnavailableMedia(saveCtx, storage.UnavailableMedia{
+							MediaURL: mediaURL,
+							TweetID:  tweetID,
+							Error:    downloadErr.Error(),
+						}); markErr != nil {
+							return mediaDownloadResult{}, fmt.Errorf("记录永久不可用媒体失败: %v: %w", markErr, downloadErr)
+						}
+						_, _ = m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: downloadErr.Error()})
+						return mediaDownloadResult{skipped: true, unavailable: true}, nil
+					}
+				}
 				return mediaDownloadResult{}, downloadErr
 			}
 			source = result.Path
@@ -184,6 +207,7 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 		preview = previewURLs[0]
 	}
 	filePath := "asset:" + asset.ID + "/" + path.Base(asset.Key)
+	isLocalTarget := false
 	prior, err := m.store.GetStorageVersion(saveCtx, asset.PolicyVersion)
 	if err != nil {
 		return mediaDownloadResult{}, err
@@ -191,7 +215,11 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	for _, t := range prior.Targets {
 		if t.ID == asset.TargetID && t.Type != "s3" {
 			filePath = filepath.Join(t.Root, filepath.FromSlash(asset.Key))
+			isLocalTarget = true
 		}
+	}
+	if isLocalTarget && !published.IsZero() && !skipped {
+		_ = os.Chtimes(filePath, published, published)
 	}
 	record, err := m.store.CreateDownload(saveCtx, storage.DownloadRecord{JobID: job.ID, TweetID: tweetID, MediaURL: mediaURL, PreviewURL: preview, FilePath: filePath, Bytes: asset.Size, ContentHash: asset.ContentHash})
 	if err != nil {
@@ -199,6 +227,11 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	}
 	if err := m.store.LinkDownloadAsset(saveCtx, record.ID, kind, asset.ID); err != nil {
 		return mediaDownloadResult{}, err
+	}
+	if isLocalTarget && !photo {
+		if localStore, storeErr := filestore.New(cfg); storeErr == nil {
+			m.ensureVideoPoster(ctx, cfg, localStore, &record, preview)
+		}
 	}
 	return mediaDownloadResult{skipped: skipped}, nil
 }

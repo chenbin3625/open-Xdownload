@@ -188,8 +188,7 @@ export function TaskCenterPage({
 
   const isJobFailed = (job: Job) =>
     job.status === "failed" ||
-    job.status === "completed_with_errors" ||
-    Boolean(job.error);
+    job.status === "completed_with_errors";
 
   const cancel = useMutation({
     mutationFn: cancelJob,
@@ -211,28 +210,68 @@ export function TaskCenterPage({
   });
 
   const bulkCancel = useMutation({
-    mutationFn: (ids: number[]) => Promise.all(ids.map(id => cancelJob(id))),
-    onSuccess: (_jobs, ids) => {
-      setSelectedJobIds(current => {
-        const next = new Set(current);
-        ids.forEach(id => next.delete(id));
-        return next;
-      });
-      toast.success({ message: t("已取消 {{value0}} 个任务", { value0: ids.length }) });
+    mutationFn: async (ids: number[]) => {
+      const results = await Promise.allSettled(ids.map(async (id) => ({ id, job: await cancelJob(id) })));
+      const succeeded: number[] = [];
+      const errors: string[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") succeeded.push(result.value.id);
+        else errors.push(getErrorMessage(result.reason));
+      }
+      return { succeeded, errors };
+    },
+    onSuccess: ({ succeeded, errors }) => {
+      if (succeeded.length > 0) {
+        setSelectedJobIds(current => {
+          const next = new Set(current);
+          succeeded.forEach(id => next.delete(id));
+          return next;
+        });
+      }
+      if (errors.length === 0) {
+        toast.success({ message: t("已取消 {{value0}} 个任务", { value0: succeeded.length }) });
+      } else if (succeeded.length > 0) {
+        toast.warning({
+          message: t("已取消 {{value0}} 个任务，{{value1}} 个失败", { value0: succeeded.length, value1: errors.length }),
+          description: errors[0],
+        });
+      } else {
+        toast.error({ message: t("批量取消失败"), description: errors[0] });
+      }
     },
     onError: notifyError(t("批量取消失败")),
     onSettled: () => { void invalidateWorkbenchQueries(queryClient); },
   });
 
   const bulkRetry = useMutation({
-    mutationFn: (ids: number[]) => Promise.all(ids.map(id => retryJob(id))),
-    onSuccess: (created, ids) => {
-      setSelectedJobIds(current => {
-        const next = new Set(current);
-        ids.forEach(id => next.delete(id));
-        return next;
-      });
-      toast.success({ message: t("已创建 {{value0}} 个重试任务", { value0: created.length }) });
+    mutationFn: async (ids: number[]) => {
+      const results = await Promise.allSettled(ids.map(async (id) => ({ id, job: await retryJob(id) })));
+      const succeeded: number[] = [];
+      const errors: string[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") succeeded.push(result.value.id);
+        else errors.push(getErrorMessage(result.reason));
+      }
+      return { succeeded, errors };
+    },
+    onSuccess: ({ succeeded, errors }) => {
+      if (succeeded.length > 0) {
+        setSelectedJobIds(current => {
+          const next = new Set(current);
+          succeeded.forEach(id => next.delete(id));
+          return next;
+        });
+      }
+      if (errors.length === 0) {
+        toast.success({ message: t("已创建 {{value0}} 个重试任务", { value0: succeeded.length }) });
+      } else if (succeeded.length > 0) {
+        toast.warning({
+          message: t("已创建 {{value0}} 个重试任务，{{value1}} 个失败", { value0: succeeded.length, value1: errors.length }),
+          description: errors[0],
+        });
+      } else {
+        toast.error({ message: t("批量重试失败"), description: errors[0] });
+      }
     },
     onError: notifyError(t("批量重试失败")),
     onSettled: () => { void invalidateWorkbenchQueries(queryClient); },
@@ -266,7 +305,7 @@ export function TaskCenterPage({
       if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
         return false;
       }
-      if (statusFilter === "completed" && (job.status !== "completed" || Boolean(job.error))) {
+      if (statusFilter === "completed" && job.status !== "completed") {
         return false;
       }
       if (statusFilter === "failed" && !isJobFailed(job)) {
@@ -990,7 +1029,7 @@ function ExpandedJobDetails({
       itemName={t("个文件")}
       emptyDescription={t("暂无下载文件记录")}
       renderItem={(item) => {
-        const fileName = item.filePath.split("/").pop() || item.filePath;
+        const fileName = item.filePath.split(/[\\/]/).pop() || item.filePath;
         const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
         return (
           <div className="flex items-center justify-between gap-3 text-xs">

@@ -39,11 +39,26 @@ func (r accountRequester) GraphQL(ctx context.Context, path string, values url.V
 }
 
 func (s *source) doPinned(ctx context.Context, account storage.XAccount, method, path string, query, form url.Values) ([]byte, error) {
-	_, release, _, err := s.engine.slots.acquire(ctx, account.ID)
+	queue := queueForPath(path)
+	if locked, until, err := s.engine.accountLockUntil(ctx, account.ID, queue); err != nil {
+		return nil, err
+	} else if locked {
+		return nil, &xapi.RateLimitedError{Path: queue, RetryAt: until, PoolExhausted: true}
+	}
+	_, release, waited, err := s.engine.slots.acquire(ctx, account.ID)
 	if err != nil {
 		return nil, err
 	}
-	return s.executeAccountRequest(ctx, account, release, queueForPath(path), method, path, query, form, true)
+	if waited {
+		if locked, until, err := s.engine.accountLockUntil(ctx, account.ID, queue); err != nil {
+			release()
+			return nil, err
+		} else if locked {
+			release()
+			return nil, &xapi.RateLimitedError{Path: queue, RetryAt: until, PoolExhausted: true}
+		}
+	}
+	return s.executeAccountRequest(ctx, account, release, queue, method, path, query, form, true)
 }
 
 func (s *source) GetUserByInput(ctx context.Context, input string) (xapi.User, error) {

@@ -45,6 +45,7 @@ func (s *source) graphQLWithAccount(ctx context.Context, path string, values url
 	failed := map[int64]bool{}
 	var lastErr error
 	var lastAccount storage.XAccount
+	anyRateLimited := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, storage.XAccount{}, err
@@ -57,6 +58,15 @@ func (s *source) graphQLWithAccount(ctx context.Context, path string, values url
 				if xapi.IsAllClientsRateLimited(err) {
 					return nil, lastAccount, fmt.Errorf("%w: %w", err, lastErr)
 				}
+				if anyRateLimited {
+					excludedIDs := make([]int64, 0, len(excluded))
+					for id := range excluded {
+						excludedIDs = append(excludedIDs, id)
+					}
+					if until, found, unlockErr := s.engine.store.EarliestXAccountUnlock(ctx, queue, excludedIDs, s.engine.now()); unlockErr == nil && found {
+						return nil, lastAccount, &xapi.RateLimitedError{Path: queue, RetryAt: until, Cause: lastErr, PoolExhausted: true}
+					}
+				}
 				return nil, lastAccount, lastErr
 			}
 			return nil, storage.XAccount{}, err
@@ -68,14 +78,13 @@ func (s *source) graphQLWithAccount(ctx context.Context, path string, values url
 		}
 		lastErr = err
 		failed[account.ID] = true
+		if xapi.IsRateLimitError(err) || xapi.IsAllClientsRateLimited(err) {
+			anyRateLimited = true
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, account, err
 		}
 		if !shouldSwitchAccount(err) {
-			return nil, account, err
-		}
-		active, countErr := s.engine.activeAccountCount(ctx)
-		if countErr == nil && len(failed)+len(excluded) >= active {
 			return nil, account, err
 		}
 	}
@@ -216,17 +225,27 @@ func appendUnique(ids []int64, id int64) []int64 {
 	return append(ids, id)
 }
 
-func (e *Engine) accountLocked(ctx context.Context, id int64, queue string) (bool, error) {
+func (e *Engine) accountLockUntil(ctx context.Context, id int64, queue string) (bool, time.Time, error) {
 	locks, err := e.store.ListXAccountLocks(ctx, e.now())
 	if err != nil {
-		return false, err
+		return false, time.Time{}, err
 	}
+	var latest time.Time
+	locked := false
 	for _, lock := range locks {
 		if lock.AccountID == id && (lock.Queue == queue || lock.Queue == "*") {
-			return true, nil
+			locked = true
+			if lock.Until.After(latest) {
+				latest = lock.Until
+			}
 		}
 	}
-	return false, nil
+	return locked, latest, nil
+}
+
+func (e *Engine) accountLocked(ctx context.Context, id int64, queue string) (bool, error) {
+	locked, _, err := e.accountLockUntil(ctx, id, queue)
+	return locked, err
 }
 
 func (e *Engine) activeAccountCount(ctx context.Context) (int, error) {

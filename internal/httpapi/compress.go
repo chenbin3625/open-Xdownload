@@ -50,10 +50,10 @@ const minCompressJSON = 1024
 // The JSON list endpoint /api/library/downloads is deliberately NOT excluded:
 // it is still JSON and benefits from compression.
 func isStreamingPath(path string) bool {
-	if strings.HasPrefix(path, "/api/events") {
+	if strings.HasPrefix(path, "/api/events") || strings.HasPrefix(path, "/api/assets/") {
 		return true
 	}
-	return strings.HasPrefix(path, "/api/library/") && path != "/api/library/downloads"
+	return strings.HasPrefix(path, "/api/library/") && path != "/api/library/downloads" && path != "/api/library/users"
 }
 
 // compressJSON wraps the API router so every JSON response is served compressed

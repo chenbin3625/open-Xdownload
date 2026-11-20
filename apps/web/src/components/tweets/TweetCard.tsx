@@ -68,11 +68,43 @@ function MediaTile({ tweet, owner, record, overflow = 0, onOpen }: {
   const type = recordType(tweet, record);
   const video = type === "video" || type === "animated_gif" || videoFile.test(record.filePath);
   const src = record.fileUrl ?? `/api/library/downloads/${record.id}/file`;
-  const poster = record.assetUrls?.thumbnail ?? `/api/library/downloads/${record.id}/preview`;
+  const posterCandidates = useMemo(() => {
+    const list: { url: string; remote: boolean }[] = [];
+    if (record.assetUrls?.thumbnail) {
+      list.push({ url: record.assetUrls.thumbnail, remote: false });
+    }
+    if (record.id > 0) {
+      const localPreview = `/api/library/downloads/${record.id}/preview`;
+      if (!list.some(item => item.url === localPreview)) {
+        list.push({ url: localPreview, remote: false });
+      }
+    }
+    if (record.previewUrl && !videoFile.test(record.previewUrl.split(/[?#]/)[0])) {
+      list.push({ url: record.previewUrl, remote: true });
+    }
+    return list;
+  }, [record.assetUrls?.thumbnail, record.id, record.previewUrl]);
+  const [posterIndex, setPosterIndex] = useState(0);
+  useEffect(() => { setPosterIndex(0); }, [record.id, record.assetUrls?.thumbnail, record.previewUrl]);
+  const currentPoster = posterIndex < posterCandidates.length ? posterCandidates[posterIndex] : undefined;
   const label = `${video ? t("播放视频") : t("archive.openImage")} · @${owner.screenName} · ${owner.id} · ${record.id}`;
   return <div className="tweet-media-item">
     <button type="button" aria-label={label} onClick={() => onOpen(record)}>
-      <img src={video ? poster : src} loading="lazy" alt={`${owner.screenName} · ${owner.id}`} />
+      {video ? (
+        currentPoster ? (
+          <img
+            src={currentPoster.url}
+            loading="lazy"
+            referrerPolicy={currentPoster.remote ? "no-referrer" : undefined}
+            onError={() => setPosterIndex(current => current + 1)}
+            alt={`${owner.screenName} · ${owner.id}`}
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center bg-media-bg" aria-hidden="true" />
+        )
+      ) : (
+        <img src={src} loading="lazy" alt={`${owner.screenName} · ${owner.id}`} />
+      )}
       {video && <span className="tweet-play-icon" aria-hidden="true"><Play size={20} fill="currentColor" /></span>}
       {type === "animated_gif" && <span className="tweet-media-badge" aria-hidden="true">GIF</span>}
       {overflow > 0 && <span className="tweet-media-count" aria-hidden="true">+{overflow}</span>}
@@ -158,10 +190,10 @@ export function TweetCard({ tweet, compact, highlight, onFilterAuthor, onOpenDet
           : display.replyToId ? <a className="tweet-reply-context" href={`/tweets?id=${encodeURIComponent(display.replyToId)}`}><CornerUpLeft size={14} aria-hidden="true" /><span>{t("archive.replyingToUnknown")}</span></a> : null}
         <div className={`tweet-content${main.length ? " tweet-has-media" : ""}`}>
           <div className="tweet-copy">
-            {display.missingRepostId && <a className="tweet-note" href={`/tweets?id=${encodeURIComponent(display.missingRepostId)}`}>{t("archive.retweetUnavailable")} {display.missingRepostId}</a>}
+            {display.missingRepostId && <a className="tweet-note" href={`/tweets?id=${encodeURIComponent(display.missingRepostId)}`}>{t("archive.retweetUnavailable", { id: display.missingRepostId })}</a>}
             <TweetText text={shown.text} compact={compact} highlight={highlight} />
             {display.quotes.map(quote => <QuoteCard key={quote.id} quote={quote} quoteDownloads={byRelated.get(quote.id) ?? []} compact={compact} highlight={highlight} onOpen={onOpenMedia} />)}
-            {display.missingQuoteId && <a className="tweet-note" href={`/tweets?id=${encodeURIComponent(display.missingQuoteId)}`}>{t("archive.quoteUnavailable")} {display.missingQuoteId}</a>}
+            {display.missingQuoteId && <a className="tweet-note" href={`/tweets?id=${encodeURIComponent(display.missingQuoteId)}`}>{t("archive.quoteUnavailable", { id: display.missingQuoteId })}</a>}
             {shown.media.length > 0 && main.length === 0 && tweet.mediaStatus !== "not_requested" && <Tag tone="warning">{t("archive.mediaMissing")}</Tag>}
             {tweet.mediaError && <p className="tweet-media-error">{tweet.mediaError}</p>}
           </div>

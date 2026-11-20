@@ -20,7 +20,14 @@ const (
 )
 
 var AssetKinds = []AssetKind{AssetImage, AssetVideo}
-var credentialEnvName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+var credentialEnvName = regexp.MustCompile(`^OPEN_XDOWNLOAD_S3_[A-Z0-9_]+$`)
+
+// IsAllowedS3CredentialEnvName reports whether name is a permitted S3 credential
+// environment variable name. Restricting to the OPEN_XDOWNLOAD_S3_ prefix prevents
+// arbitrary process environment variables from being exfiltrated via SigV4 headers.
+func IsAllowedS3CredentialEnvName(name string) bool {
+	return credentialEnvName.MatchString(name)
+}
 
 var legacyAssetKinds = []AssetKind{AssetThumbnail, AssetVideoCover}
 
@@ -156,8 +163,8 @@ func (d StorageDocument) Validate() error {
 			return fmt.Errorf("不支持的存储类型: %s", t.Type)
 		}
 		for _, key := range []string{t.AccessKeyEnv, t.SecretKeyEnv} {
-			if key != "" && !credentialEnvName.MatchString(key) {
-				return fmt.Errorf("凭据环境变量名称无效")
+			if key != "" && !IsAllowedS3CredentialEnvName(key) {
+				return fmt.Errorf("凭据环境变量名称无效（仅允许 OPEN_XDOWNLOAD_S3_ 前缀）")
 			}
 		}
 	}
@@ -214,13 +221,18 @@ func MergeStorageSecrets(next, old StorageDocument) (StorageDocument, error) {
 				break
 			}
 		}
+		sameOrigin := prior.ID != "" && prior.Type == t.Type && (t.Type != "s3" || SameURLAuthority(prior.Endpoint, t.Endpoint))
 		for _, pair := range []struct {
 			value *string
 			old   string
 		}{{&t.AccessKey, prior.AccessKey}, {&t.SecretKey, prior.SecretKey}, {&t.SessionToken, prior.SessionToken}} {
 			switch *pair.value {
 			case "", SecretPlaceholder:
-				*pair.value = pair.old
+				if sameOrigin {
+					*pair.value = pair.old
+				} else {
+					*pair.value = ""
+				}
 			case ClearSentinel:
 				*pair.value = ""
 			}

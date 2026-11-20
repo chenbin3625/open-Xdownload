@@ -130,20 +130,26 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 
 	var dbTotal int
 	var dbItems []DownloadRecord
-	need := 0
-	if !query.noMatch {
-		// 为与孤儿文件合并后再取窗口，DB 侧至少取到 offset+pageSize。
-		need = (page-1)*pageSize + pageSize
-		if need > MaxLibraryDownloadsLimit {
-			need = MaxLibraryDownloadsLimit
+	cappedNeed := func(targetPage int) int {
+		if targetPage < 1 {
+			targetPage = 1
 		}
+		maxPages := (MaxLibraryDownloadsLimit + pageSize - 1) / pageSize
+		if targetPage >= maxPages {
+			return MaxLibraryDownloadsLimit
+		}
+		need := targetPage * pageSize
+		if need > MaxLibraryDownloadsLimit {
+			return MaxLibraryDownloadsLimit
+		}
+		return need
 	}
 	switch {
 	case query.noMatch:
 		// 条件不可能匹配任何记录（未知 kind、或用户没有任何实体目录）。
 	case query.userUnknown:
 		// 归属只能在 Go 侧逐条判定；扫描时顺带统计满足条件的无归属总数。
-		dbItems, dbTotal, err = s.scanUnknownLibraryEntries(ctx, query, snap, need)
+		dbItems, dbTotal, err = s.scanUnknownLibraryEntries(ctx, query, snap, cappedNeed(page))
 		if err != nil {
 			return LibraryPage{}, err
 		}
@@ -151,7 +157,16 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 		if dbTotal, err = s.countLibraryEntries(ctx, query); err != nil {
 			return LibraryPage{}, err
 		}
-		if need > 0 {
+		previewTotal := dbTotal + len(orphans)
+		if previewTotal > MaxLibraryDownloadsLimit {
+			previewTotal = MaxLibraryDownloadsLimit
+		}
+		effectivePage := page
+		previewPages := max(1, (previewTotal+pageSize-1)/pageSize)
+		if effectivePage > previewPages {
+			effectivePage = previewPages
+		}
+		if need := cappedNeed(effectivePage); need > 0 && dbTotal > 0 {
 			if dbItems, err = s.queryLibraryEntries(ctx, query, need, 0); err != nil {
 				return LibraryPage{}, err
 			}
@@ -263,7 +278,7 @@ func buildLibraryQuery(filter LibraryFilter, snap *librarySnapshot) libraryQuery
 			user := strings.TrimPrefix(filter.User, "@")
 			prefixes := snap.prefixesForUser(user)
 			parts := make([]string, 0, len(prefixes))
-			userSQL := "user_screen_name = ?"
+			userSQL := "lower(user_screen_name) = lower(?)"
 			result.args = append(result.args, user)
 			for _, prefix := range prefixes {
 				parts = append(parts, "instr(lower(replace(file_path, char(92), '/')), ?) = 1")

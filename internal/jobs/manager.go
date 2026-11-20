@@ -332,6 +332,9 @@ func (m *Manager) RunArchiveScheduleNow(ctx context.Context, id int64) ([]storag
 	}
 	jobs, err := m.store.CreateJobsForArchiveSchedule(ctx, schedule, time.Now().UTC())
 	if err != nil {
+		if errors.Is(err, storage.ErrArchiveScheduleAlreadyClaimed) {
+			return nil, &storage.UserFacingError{Status: http.StatusConflict, Message: "定时归档计划已被其他运行领取", Cause: err}
+		}
 		return nil, err
 	}
 	m.publishJobsCreated(ctx, jobs)
@@ -1967,8 +1970,8 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 		return stats, err
 	}
 	stopID := opts.StopAtTweetID
-	if state.StopID != stopID {
-		// 全量/增量边界变化后旧页码不再有意义（全量必须从顶部开始）。
+	if state.StopID != stopID || state.Status == "completed" {
+		// 全量/增量边界变化或上一轮已完成时，新一轮从顶部重新计数。
 		state.Cursor = ""
 		state.StopID = stopID
 		state.Count = 0

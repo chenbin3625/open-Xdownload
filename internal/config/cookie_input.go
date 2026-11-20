@@ -164,7 +164,9 @@ func parseCookieInputLines(raw string) ([]CookieInput, []CookieInputIssue) {
 
 func parseCookieInputLine(line string) (CookieInput, string) {
 	line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
-	line = strings.TrimSpace(strings.TrimPrefix(line, "Cookie:"))
+	if len(line) >= len("cookie:") && strings.EqualFold(line[:len("cookie:")], "cookie:") {
+		line = strings.TrimSpace(line[len("cookie:"):])
+	}
 	authToken, csrfToken := "", ""
 	extra := make(map[string]string)
 
@@ -213,6 +215,9 @@ func buildCookieInput(authToken, csrfToken string, extra map[string]string) (Coo
 	}
 	if len(missing) > 0 {
 		return CookieInput{}, "缺少 " + strings.Join(missing, " 和 ")
+	}
+	if strings.ContainsAny(authToken, ";\r\n") || strings.ContainsAny(csrfToken, ";\r\n") {
+		return CookieInput{}, "Cookie 值包含非法字符"
 	}
 	input := CookieInput{AuthToken: authToken, CSRFToken: csrfToken}
 	if len(extra) > 0 {

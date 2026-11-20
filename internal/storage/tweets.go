@@ -180,7 +180,9 @@ author_name=excluded.author_name,body=excluded.body,published_at=excluded.publis
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO tweet_jobs(tweet_id,job_id,body_status,media_status) VALUES(?,?,?,?)
-ON CONFLICT(tweet_id,job_id) DO NOTHING`, tweet.ID, jobID, bodyStatus, mediaStatus); err != nil {
+ON CONFLICT(tweet_id,job_id) DO UPDATE SET
+	body_status = CASE WHEN tweet_jobs.body_status = 'not_requested' THEN excluded.body_status ELSE tweet_jobs.body_status END,
+	media_status = CASE WHEN tweet_jobs.media_status = 'not_requested' THEN excluded.media_status ELSE tweet_jobs.media_status END`, tweet.ID, jobID, bodyStatus, mediaStatus); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM tweet_relations WHERE tweet_id=?`, tweet.ID); err != nil {

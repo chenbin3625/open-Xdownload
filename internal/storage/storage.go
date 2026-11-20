@@ -71,6 +71,9 @@ type Store struct {
 	libraryCacheOK        bool
 	libraryCacheLimit     int
 	libraryCacheTruncated bool
+	libraryUsersCache     []LibraryUserSummary
+	libraryUsersCacheAt   time.Time
+	libraryUsersCacheOK   bool
 	// libraryCacheGen 每次失效递增；回填缓存前校验代数未变，避免查询期间新写入触发
 	// 的失效被随后到期的旧数据覆盖（脏缓存最长持续一个 TTL）。
 	libraryCacheGen atomic.Uint64
@@ -1650,8 +1653,8 @@ func (s *Store) ListJobsPageFiltered(ctx context.Context, limit int, page int, f
 	result := JobListPage{Items: []Job{}, Page: page, PageSize: limit, Counts: JobListCounts{}}
 	countSQL := fmt.Sprintf(`SELECT COUNT(*),
 	COALESCE(SUM(CASE WHEN status IN (%s) THEN 1 ELSE 0 END), 0),
-	COALESCE(SUM(CASE WHEN status = '%s' AND COALESCE(error, '') = '' THEN 1 ELSE 0 END), 0),
-	COALESCE(SUM(CASE WHEN status IN (%s) OR COALESCE(error, '') <> '' THEN 1 ELSE 0 END), 0)
+	COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN status IN (%s) THEN 1 ELSE 0 END), 0)
 	FROM jobs WHERE `+countWhere, activeJobStatusesSQL, JobCompleted, failedJobStatusesSQL)
 	if err := s.db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&result.Counts.All, &result.Counts.Active, &result.Counts.Completed, &result.Counts.Failed); err != nil {
 		return JobListPage{}, err
@@ -1686,10 +1689,10 @@ func jobListWhere(filter JobListFilter, ignoreStatus bool) (string, []any) {
 		case "active":
 			where = append(where, "status IN ("+activeJobStatusesSQL+")")
 		case "completed":
-			where = append(where, "status = ? AND COALESCE(error, '') = ''")
+			where = append(where, "status = ?")
 			args = append(args, string(JobCompleted))
 		case "failed":
-			where = append(where, "(status IN ("+failedJobStatusesSQL+") OR COALESCE(error, '') <> '')")
+			where = append(where, "status IN ("+failedJobStatusesSQL+")")
 		}
 	}
 	if filter.Kind != "" {
@@ -1846,6 +1849,26 @@ func (s *Store) DeleteJob(ctx context.Context, id int64) error {
 	if !isTerminalJobStatus(status) {
 		return ErrJobActive
 	}
+	// 若其他任务仍有下载记录引用同一 asset_id，则把 media_assets.job_id 转移过去，
+	// 避免删除单个历史任务时抹掉仍在使用的去重索引。
+	if _, err := tx.ExecContext(ctx, `
+UPDATE media_assets
+SET job_id = (
+	SELECT d.job_id
+	FROM download_assets da
+	JOIN downloads d ON d.id = da.download_id
+	WHERE da.asset_id = media_assets.asset_id AND d.job_id <> ?
+	ORDER BY d.id DESC
+	LIMIT 1
+)
+WHERE job_id = ? AND EXISTS (
+	SELECT 1
+	FROM download_assets da
+	JOIN downloads d ON d.id = da.download_id
+	WHERE da.asset_id = media_assets.asset_id AND d.job_id <> ?
+)`, id, id, id); err != nil {
+		return err
+	}
 	for _, stmt := range []string{
 		`DELETE FROM downloads WHERE job_id = ?`,
 		`DELETE FROM failed_media WHERE job_id = ?`,
@@ -1863,7 +1886,11 @@ func (s *Store) DeleteJob(ctx context.Context, id int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateLibraryDownloadsCache()
+	return nil
 }
 
 func isTerminalJobStatus(status JobStatus) bool {
@@ -2573,10 +2600,16 @@ ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit+1)
 			known[filepath.Clean(path)] = struct{}{}
 		}
 	}
+	beforeOrphans := len(items)
 	items, err = collectOrphanLibraryFiles(ctx, root, known, items)
 	if err != nil {
 		// 请求被取消：不完整的结果不能写进缓存。
 		return nil, false, err
+	}
+	if len(items) > beforeOrphans {
+		if err := s.attributeLibraryUsers(ctx, items[beforeOrphans:]); err != nil {
+			return nil, false, err
+		}
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
 	truncated := len(items) > limit
@@ -2631,13 +2664,26 @@ func collectOrphanLibraryFiles(ctx context.Context, root string, known map[strin
 }
 
 // ListLibraryUsers 按归档账号聚合已下载媒体，供归档库的用户卡片视图使用。
-// 归属沿用媒体列表页的 attributeLibraryUsers（含按目录前缀推断的旧记录），
-// 保证卡片上的账号和筛选下拉里的一致。
+// 与媒体列表页保持一致：按 file_path 去重，归属沿用 attributeLibraryUsers（含目录前缀推断），
+// 并随 libraryCacheGen 统一失效。
 func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, error) {
+	s.libraryCacheMu.RLock()
+	if s.libraryUsersCacheOK && time.Since(s.libraryUsersCacheAt) < libraryDownloadsCacheTTL {
+		cached := append([]LibraryUserSummary(nil), s.libraryUsersCache...)
+		s.libraryCacheMu.RUnlock()
+		return cached, nil
+	}
+	s.libraryCacheMu.RUnlock()
+
+	generation := s.libraryCacheGen.Load()
 	items := []DownloadRecord{}
 	if err := s.db.SelectContext(ctx, &items, `
 SELECT d.*, COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
-FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id`); err != nil {
+FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id
+WHERE d.id IN (
+	SELECT MAX(id) FROM downloads
+	GROUP BY CASE WHEN file_path <> '' THEN file_path ELSE 'record:' || id END
+)`); err != nil {
 		return nil, err
 	}
 	if err := s.attributeLibraryUsers(ctx, items); err != nil {
@@ -2650,10 +2696,11 @@ FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id`); err != nil {
 	}
 	byScreenName := make(map[string]User, len(users))
 	for _, user := range users {
-		byScreenName[user.ScreenName] = user
+		byScreenName[strings.ToLower(user.ScreenName)] = user
 	}
 
 	type aggregate struct {
+		screenName  string
 		mediaCount  int
 		totalBytes  int64
 		latestAt    time.Time
@@ -2664,10 +2711,11 @@ FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id`); err != nil {
 		if item.UserScreenName == "" {
 			continue
 		}
-		entry := aggregates[item.UserScreenName]
+		key := strings.ToLower(item.UserScreenName)
+		entry := aggregates[key]
 		if entry == nil {
-			entry = &aggregate{}
-			aggregates[item.UserScreenName] = entry
+			entry = &aggregate{screenName: item.UserScreenName}
+			aggregates[key] = entry
 		}
 		entry.mediaCount++
 		entry.totalBytes += item.Bytes
@@ -2680,8 +2728,12 @@ FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id`); err != nil {
 	}
 
 	summaries := make([]LibraryUserSummary, 0, len(aggregates))
-	for screenName, entry := range aggregates {
-		user := byScreenName[screenName]
+	for key, entry := range aggregates {
+		user := byScreenName[key]
+		screenName := entry.screenName
+		if user.ScreenName != "" {
+			screenName = user.ScreenName
+		}
 		displayName := user.Name
 		if displayName == "" {
 			displayName = entry.displayName
@@ -2698,6 +2750,14 @@ FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id`); err != nil {
 	sort.Slice(summaries, func(i, j int) bool {
 		return summaries[i].LatestAt.After(summaries[j].LatestAt)
 	})
+
+	s.libraryCacheMu.Lock()
+	if s.libraryCacheGen.Load() == generation {
+		s.libraryUsersCache = append([]LibraryUserSummary(nil), summaries...)
+		s.libraryUsersCacheAt = time.Now()
+		s.libraryUsersCacheOK = true
+	}
+	s.libraryCacheMu.Unlock()
 	return summaries, nil
 }
 
@@ -2773,6 +2833,9 @@ func (s *Store) invalidateLibraryDownloadsCache() {
 	s.libraryCacheOK = false
 	s.libraryCacheLimit = 0
 	s.libraryCacheTruncated = false
+	s.libraryUsersCache = nil
+	s.libraryUsersCacheAt = time.Time{}
+	s.libraryUsersCacheOK = false
 	s.libraryCacheMu.Unlock()
 }
 

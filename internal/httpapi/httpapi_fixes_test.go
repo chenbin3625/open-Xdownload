@@ -331,7 +331,12 @@ func TestPosterFailureCacheHonoursTTL(t *testing.T) {
 	if _, ok := cache.lookup(key); ok {
 		t.Fatal("entry survived remove")
 	}
-	cache.entries.Store(key, posterFailureEntry{status: 502, message: "x", expiresAt: time.Now().Add(-time.Second)})
+	cache.mu.Lock()
+	if cache.entries == nil {
+		cache.entries = make(map[string]posterFailureEntry)
+	}
+	cache.entries[key] = posterFailureEntry{status: 502, message: "x", expiresAt: time.Now().Add(-time.Second)}
+	cache.mu.Unlock()
 	if _, ok := cache.lookup(key); ok {
 		t.Fatal("expired entry still reported as cached")
 	}

@@ -71,6 +71,14 @@ func validSession(token string, key []byte) bool {
 }
 
 func (s *Server) requestAccount(r *http.Request) (*storage.Account, error) {
+	return s.requestAccountMode(r, true)
+}
+
+func (s *Server) requestAccountReadOnly(r *http.Request) (*storage.Account, error) {
+	return s.requestAccountMode(r, false)
+}
+
+func (s *Server) requestAccountMode(r *http.Request, touch bool) (*storage.Account, error) {
 	account, err := s.store.GetAccount(r.Context())
 	if err != nil {
 		return nil, err
@@ -79,11 +87,25 @@ func (s *Server) requestAccount(r *http.Request) (*storage.Account, error) {
 	if account == nil || !validSession(token, account.SessionKey) {
 		return nil, nil
 	}
-	active, err := s.store.SessionValid(r.Context(), token, time.Now())
+	var active bool
+	if touch {
+		active, err = s.store.SessionValid(r.Context(), token, time.Now())
+	} else {
+		active, err = s.store.SessionValidReadOnly(r.Context(), token, time.Now())
+	}
 	if err != nil || !active {
 		return nil, err
 	}
 	return account, nil
+}
+
+func (s *Server) acquireBcryptSem(ctx context.Context) bool {
+	select {
+	case s.bcryptSem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
@@ -197,7 +219,10 @@ func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errors.New("账号已创建，请登录"))
 		return
 	}
-	s.bcryptSem <- struct{}{}
+	if !s.acquireBcryptSem(r.Context()) {
+		writeError(w, http.StatusRequestTimeout, r.Context().Err())
+		return
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	<-s.bcryptSem
 	if err != nil {
@@ -234,7 +259,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 用户名不匹配时仍跑一次 bcrypt，防止时序枚举。
-	s.bcryptSem <- struct{}{}
+	if !s.acquireBcryptSem(r.Context()) {
+		writeError(w, http.StatusRequestTimeout, r.Context().Err())
+		return
+	}
 	if account == nil || strings.TrimSpace(req.Username) != account.Username {
 		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(req.Password))
 		<-s.bcryptSem
@@ -283,6 +311,15 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	if !s.checkLoginRate(w, r) {
+		return
+	}
+	succeeded := false
+	defer func() {
+		if succeeded {
+			s.clearLoginFailures(r)
+		}
+	}()
 	var req struct{ CurrentPassword, NewPassword string }
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -293,14 +330,20 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := r.Context().Value(authContextKey{}).(authenticatedSession)
-	s.bcryptSem <- struct{}{}
+	if !s.acquireBcryptSem(r.Context()) {
+		writeError(w, http.StatusRequestTimeout, r.Context().Err())
+		return
+	}
 	err := bcrypt.CompareHashAndPassword(session.account.PasswordHash, []byte(req.CurrentPassword))
 	<-s.bcryptSem
 	if err != nil {
 		writeError(w, http.StatusBadRequest, storage.ErrValidation("当前密码错误"))
 		return
 	}
-	s.bcryptSem <- struct{}{}
+	if !s.acquireBcryptSem(r.Context()) {
+		writeError(w, http.StatusRequestTimeout, r.Context().Err())
+		return
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	<-s.bcryptSem
 	if err != nil {
@@ -320,6 +363,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	setSessionCookie(w, r, "")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	succeeded = true
 }
 
 // dummyBcryptHash 用于用户名不匹配时跑一次假 hash，防止时序差异泄漏"用户名是否存在"。

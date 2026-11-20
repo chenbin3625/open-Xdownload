@@ -591,6 +591,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           </>}
         </div>
       </div>
+      {viewMode === "media" && <>
       <div className="page-toolbar gallery-toolbar">
         <div className="toolbar-status" role="radiogroup" aria-label={t("类型")}>
           <RadioGroup
@@ -694,7 +695,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           { key: "kind", label: filter.kind !== "all" ? filter.kind === "images" ? t("图片") : filter.kind === "videos" ? t("视频") : t("动图") : "", patch: { kind: "all" as const } },
           { key: "user", label: filter.user !== "all" ? filter.user : "", patch: { user: "all" } },
           { key: "dates", label: filter.from || filter.to ? `${filter.from || t("不限")} ~ ${filter.to || t("不限")}` : "", patch: { from: "", to: "" } },
-          { key: "bytes", label: filter.minBytes || filter.maxBytes ? `${formatBytes(Number(filter.minBytes))} ~ ${filter.maxBytes ? formatBytes(Number(filter.maxBytes)) : t("不限")}` : "", patch: { minBytes: "", maxBytes: "" } },
+          { key: "bytes", label: filter.minBytes || filter.maxBytes ? `${filter.minBytes ? formatBytes(Number(filter.minBytes)) : t("不限")} ~ ${filter.maxBytes ? formatBytes(Number(filter.maxBytes)) : t("不限")}` : "", patch: { minBytes: "", maxBytes: "" } },
         ].filter(item => item.label).map(item => <Button className="filter-chip" size="small" type="tertiary" icon={<X size={12} />} iconPosition="right" key={item.key} onClick={() => updateFilter({ ...item.patch, page: 1 })} aria-label={`${t("移除筛选")} ${item.label}`}>{item.label}</Button>)}
       </div>}
       <div className="gallery-result-bar">
@@ -708,6 +709,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       {libraryQuery.data?.truncated && (
         <Alert type="warning" message={t("媒体库索引已达上限，当前仅显示最近的记录")} />
       )}
+      </>}
 
       {/* 按账号浏览：头像 + 名字的卡片网格，点卡片回到该账号的媒体列表 */}
       {viewMode === "users" ? (
@@ -725,6 +727,24 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               </Card>
             ))}
           </div>
+        ) : usersQuery.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            message={t("加载账号列表失败")}
+            description={getErrorMessage(usersQuery.error)}
+            action={
+              <Button
+                type="tertiary"
+                loading={usersQuery.isFetching}
+                disabled={usersQuery.isFetching}
+                aria-busy={usersQuery.isFetching}
+                onClick={() => void usersQuery.refetch()}
+              >
+                {t("重试")}
+              </Button>
+            }
+          />
         ) : (usersQuery.data?.items.length ?? 0) === 0 ? (
           <Empty description={t("还没有可浏览的账号")} />
         ) : (
@@ -840,7 +860,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               <div className="gallery-preview-frame relative flex items-center justify-center bg-black/95 p-2 overflow-hidden">
                 {isVideo ? (
                   <video
-                    key={item.id}
+                    key={entryKey(item)}
                     src={previewURL}
                     controls
                     autoPlay

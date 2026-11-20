@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/filestore"
@@ -32,6 +34,26 @@ func (s *Server) updateStorage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err)
 		return
 	}
+	stored, err := s.store.GetConfig(r.Context())
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	existing, err := s.store.GetStorageDocument(r.Context())
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	allowedRoots := storageAllowedRoots(stored, existing)
+	for _, target := range document.Targets {
+		if target.Type != "local" && target.Type != "nas" {
+			continue
+		}
+		if err := validateDownloadDir(target.Root, allowedRoots); err != nil {
+			writeError(w, http.StatusBadRequest, storage.ErrValidation(err.Error()))
+			return
+		}
+	}
 	d, err := s.store.SaveStorageDocument(r.Context(), document)
 	if err != nil {
 		var validation *storage.UserFacingError
@@ -43,6 +65,24 @@ func (s *Server) updateStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, d.Redacted())
+}
+
+func storageAllowedRoots(stored config.AppConfig, existing config.StorageDocument) []string {
+	roots := localDirectoryAllowedRoots(stored)
+	for _, target := range existing.Targets {
+		if (target.Type == "local" || target.Type == "nas") && strings.TrimSpace(target.Root) != "" && !unsafeDownloadRoot(target.Root) {
+			roots = append(roots, target.Root)
+		}
+	}
+	if extra := strings.TrimSpace(os.Getenv("OPEN_XDOWNLOAD_ALLOWED_STORAGE_ROOTS")); extra != "" {
+		for _, root := range filepath.SplitList(extra) {
+			root = strings.TrimSpace(root)
+			if root != "" && filepath.IsAbs(root) && !unsafeDownloadRoot(root) {
+				roots = append(roots, root)
+			}
+		}
+	}
+	return roots
 }
 func (s *Server) previewStoragePath(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -166,9 +206,6 @@ func (s *Server) serveDownloadAsset(w http.ResponseWriter, r *http.Request, id i
 			}
 		}
 	}
-	if preview && assets[config.AssetImage] != "" {
-		return s.serveAssetIDResult(w, r, assets[config.AssetImage], false)
-	}
 	return false
 }
 func (s *Server) enrichAssetURLs(r *http.Request, records []storage.DownloadRecord) {
@@ -212,11 +249,26 @@ func (s *Server) migrateStorage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, fmt.Errorf("请先启用分类存储"))
 		return
 	}
-	job, err := s.store.CreateJob(r.Context(), storage.JobKindAssetMigration, "historical-assets", "历史资源迁移")
+	created, err := s.store.CreateJobs(r.Context(), []storage.JobDraft{{
+		Kind:   storage.JobKindAssetMigration,
+		Input:  "historical-assets",
+		Title:  "历史资源迁移",
+		Source: storage.JobSourceMaintenance,
+	}})
 	if err != nil {
+		var validation *storage.UserFacingError
+		if errors.As(err, &validation) {
+			writeError(w, validation.Status, err)
+			return
+		}
 		writeError(w, 500, err)
 		return
 	}
+	if len(created) == 0 {
+		writeError(w, http.StatusConflict, &storage.UserFacingError{Status: http.StatusConflict, Message: "历史资源迁移任务已在队列中"})
+		return
+	}
+	job := created[0]
 	s.manager.Notify()
 	s.publish(s.withMeta(r.Context(), jobs.Event{Type: "job.created", JobID: job.ID, Payload: job}))
 	writeJSON(w, 201, job)

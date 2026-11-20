@@ -146,10 +146,14 @@ export interface TweetDisplay {
   missingRepostId?: string;
 }
 
+function hasArchivedContent(item: TweetData): boolean {
+  return Boolean(item.text || (Array.isArray(item.media) && item.media.length > 0) || item.author?.screenName);
+}
+
 /** 把归档记录解析成 X 时间线的展示结构：原推、转推来源、回复父级与引用卡片。 */
 export function resolveTweetDisplay(tweet: TweetData): TweetDisplay {
   const related = Array.isArray(tweet.related) ? tweet.related : [];
-  const original = tweet.retweetedTweetId ? related.find(item => item.id === tweet.retweetedTweetId && item.text) : undefined;
+  const original = tweet.retweetedTweetId ? related.find(item => item.id === tweet.retweetedTweetId && hasArchivedContent(item)) : undefined;
   const shown = original ?? tweet;
   const pool: TweetData[] = [];
   const seen = new Set<string>([shown.id]);
@@ -159,13 +163,13 @@ export function resolveTweetDisplay(tweet: TweetData): TweetDisplay {
     pool.push(item);
   }
   const replyToId = shown.replyToId || tweet.replyToId;
-  const replyTo = replyToId ? pool.find(item => item.id === replyToId && item.text) : undefined;
+  const replyTo = replyToId ? pool.find(item => item.id === replyToId && hasArchivedContent(item)) : undefined;
   const quoteId = shown.quotedTweetId || tweet.quotedTweetId;
-  const quote = quoteId && quoteId !== shown.id ? pool.find(item => item.id === quoteId && item.text) : undefined;
+  const quote = quoteId && quoteId !== shown.id ? pool.find(item => item.id === quoteId && hasArchivedContent(item)) : undefined;
   const quotes: TweetData[] = [];
   if (quote) quotes.push(quote);
   for (const item of pool) {
-    if (!item.text || item.id === replyTo?.id || quotes.some(existing => existing.id === item.id)) continue;
+    if (!hasArchivedContent(item) || item.id === replyTo?.id || quotes.some(existing => existing.id === item.id)) continue;
     quotes.push(item);
   }
   return {

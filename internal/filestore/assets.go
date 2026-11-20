@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -21,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -138,10 +138,20 @@ func S3Client(target config.StorageTarget) (*minio.Client, error) {
 	}
 	access, secret := target.AccessKey, target.SecretKey
 	if target.AccessKeyEnv != "" {
+		if !config.IsAllowedS3CredentialEnvName(target.AccessKeyEnv) {
+			return nil, fmt.Errorf("凭据环境变量名称无效（仅允许 OPEN_XDOWNLOAD_S3_ 前缀）")
+		}
 		access = os.Getenv(target.AccessKeyEnv)
 	}
 	if target.SecretKeyEnv != "" {
+		if !config.IsAllowedS3CredentialEnvName(target.SecretKeyEnv) {
+			return nil, fmt.Errorf("凭据环境变量名称无效（仅允许 OPEN_XDOWNLOAD_S3_ 前缀）")
+		}
 		secret = os.Getenv(target.SecretKeyEnv)
+	}
+	transport, err := httpx.Transport("")
+	if err != nil {
+		return nil, err
 	}
 	key := s3ClientKey{endpoint: u.Host, region: target.Region, access: access, secret: secret, sessionToken: target.SessionToken, secure: u.Scheme == "https"}
 	s3Clients.Lock()
@@ -149,7 +159,7 @@ func S3Client(target config.StorageTarget) (*minio.Client, error) {
 	if client, ok := s3Clients.byKey[key]; ok {
 		return client, nil
 	}
-	client, err := minio.New(u.Host, &minio.Options{Creds: credentials.NewStaticV4(access, secret, target.SessionToken), Secure: key.secure, Region: target.Region, Transport: http.DefaultTransport})
+	client, err := minio.New(u.Host, &minio.Options{Creds: credentials.NewStaticV4(access, secret, target.SessionToken), Secure: key.secure, Region: target.Region, Transport: transport})
 	if err != nil {
 		return nil, err
 	}

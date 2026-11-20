@@ -75,10 +75,30 @@ function getBatchTabs(): {
   ];
 }
 
-// 可选协议 / www. / mobile.，x.com 或 twitter.com，可选 @，1-15 位用户名，其后只能是 / ? # 或结尾。
+// 可选协议 / www. / mobile.，x.com 或 twitter.com，支持 /i/user/<id>、@handle、纯 handle 与 1-20 位数字 ID。
+const userIdLinkPattern =
+  /^(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x|twitter)\.com\/i\/user\/(\d{1,20})(?:[/?#]|$)/i;
 const profileLinkPattern =
   /^(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x|twitter)\.com\/@?([A-Za-z0-9_]{1,15})(?:[/?#]|$)/i;
+const plainUserIdPattern = /^(\d{1,20})$/;
 const plainHandlePattern = /^@?([A-Za-z0-9_]{1,15})$/;
+const reservedProfilePaths = new Set([
+  "i",
+  "home",
+  "explore",
+  "search",
+  "notifications",
+  "messages",
+  "settings",
+  "lists",
+  "hashtag",
+  "compose",
+  "login",
+  "logout",
+  "signup",
+  "tos",
+  "privacy",
+]);
 const xLinkPattern = /^(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x|twitter)\.com(?:[/?#]|$)/i;
 const tweetStatusPattern = /\/status\/\d+/;
 const listLinkPattern = /(?:^|\/)(?:i\/)?lists\/\d+/;
@@ -88,11 +108,19 @@ function normalizeTweetURL(input: string) {
   return xLinkPattern.test(trimmed) && !/^https?:\/\//i.test(trimmed) ? `https://${trimmed}` : trimmed;
 }
 
-// 从主页链接、@handle 或纯 handle 中取出用户名；无法识别时返回 null。
+// 从主页链接、/i/user/<id>、@handle、纯 handle 或最长 20 位数字 ID 中取出用户标识；无法识别时返回 null。
 export function parseScreenName(input: string): string | null {
   const trimmed = input.trim();
-  const match = trimmed.match(profileLinkPattern) ?? trimmed.match(plainHandlePattern);
-  return match ? match[1] : null;
+  const userIdLink = trimmed.match(userIdLinkPattern);
+  if (userIdLink) return userIdLink[1];
+  const profileLink = trimmed.match(profileLinkPattern);
+  if (profileLink) {
+    return reservedProfilePaths.has(profileLink[1].toLowerCase()) ? null : profileLink[1];
+  }
+  const plainUserId = trimmed.match(plainUserIdPattern);
+  if (plainUserId) return plainUserId[1];
+  const plainHandle = trimmed.match(plainHandlePattern);
+  return plainHandle ? plainHandle[1] : null;
 }
 
 // 顶部快捷输入框的分流：推文链接 → 单条推文，列表链接/纯数字 → 列表，其余 → 用户。

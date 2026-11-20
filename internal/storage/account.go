@@ -82,6 +82,20 @@ func (s *Store) SessionValid(ctx context.Context, token string, now time.Time) (
 	return count == 1 && err == nil, err
 }
 
+// SessionValidReadOnly 校验会话是否有效且未超期，但不刷新 last_seen_at。
+// 供 SSE 心跳/推送等被动连接使用，避免后台保活无限延长空闲会话或造成 SQLite 写竞争。
+func (s *Store) SessionValidReadOnly(ctx context.Context, token string, now time.Time) (bool, error) {
+	hash := sha256.Sum256([]byte(token))
+	var exists int
+	err := s.db.GetContext(ctx, &exists, `SELECT 1 FROM app_sessions
+		WHERE token_hash=? AND created_at<=? AND expires_at>? AND last_seen_at>?`,
+		hash[:], now.UnixMilli(), now.UnixMilli(), now.Add(-SessionIdleTimeout).UnixMilli())
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return exists == 1 && err == nil, err
+}
+
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	hash := sha256.Sum256([]byte(token))
 	_, err := s.db.ExecContext(ctx, `DELETE FROM app_sessions WHERE token_hash=?`, hash[:])

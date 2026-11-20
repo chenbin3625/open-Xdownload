@@ -204,6 +204,7 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 	cursor, head := options.Cursor, options.HeadID
 	seen := map[string]bool{}
 	seenCursors := map[string]bool{}
+	consecutiveEmpty := 0
 	for page := 0; page < 1000; page++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -276,7 +277,12 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 		}
 		batch.HeadID = head
 		batch.Cursor = next
-		batch.Complete = reached || next == ""
+		if len(batch.Tweets) == 0 {
+			consecutiveEmpty++
+		} else {
+			consecutiveEmpty = 0
+		}
+		batch.Complete = reached || next == "" || consecutiveEmpty >= MaxConsecutiveEmptyPages
 		if !batch.Complete && (next == cursor || seenCursors[next]) {
 			// 服务端走到时间线末尾时会返回"0 条目 + 原样 Bottom cursor"（没有空 next，
 			// 也没有 TimelineTerminateTimeline）。把它当成失败会让每个全量归档都卡在

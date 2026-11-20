@@ -311,7 +311,7 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 	if !instructions.IsArray() {
 		return nil, "", fmt.Errorf("timeline instructions 不是数组（%s, type=%s）", instructionsPath, instructions.Type.String())
 	}
-	entries := gjson.Result{}
+	var allEntries []gjson.Result
 	// 累积所有 TimelineAddToModule 的条目，而不是只保留最后一个。
 	allModuleItems := []gjson.Result{}
 	recognized := false
@@ -319,7 +319,7 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 		switch instruction.Get("type").String() {
 		case "TimelineAddEntries":
 			recognized = true
-			entries = instruction.Get("entries")
+			allEntries = append(allEntries, instruction.Get("entries").Array()...)
 		case "TimelineAddToModule":
 			recognized = true
 			for _, item := range instruction.Get("moduleItems").Array() {
@@ -353,23 +353,21 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 		return nil, "", fmt.Errorf("无法识别 timeline 结构（instructions 无已知类型，path=%s）", instructionsPath)
 	}
 	items := []gjson.Result{}
-	if entries.IsArray() {
-		for _, entry := range entries.Array() {
-			if entry.Get("content.entryType").String() == "TimelineTimelineCursor" {
-				continue
-			}
-			content := entry.Get("content")
-			switch content.Get("entryType").String() {
-			case "TimelineTimelineModule":
-				for _, item := range content.Get("items").Array() {
-					if itemContent := item.Get("item.itemContent"); itemContent.Exists() {
-						items = append(items, itemContent)
-					}
-				}
-			case "TimelineTimelineItem":
-				if itemContent := content.Get("itemContent"); itemContent.Exists() {
+	for _, entry := range allEntries {
+		if entry.Get("content.entryType").String() == "TimelineTimelineCursor" {
+			continue
+		}
+		content := entry.Get("content")
+		switch content.Get("entryType").String() {
+		case "TimelineTimelineModule":
+			for _, item := range content.Get("items").Array() {
+				if itemContent := item.Get("item.itemContent"); itemContent.Exists() {
 					items = append(items, itemContent)
 				}
+			}
+		case "TimelineTimelineItem":
+			if itemContent := content.Get("itemContent"); itemContent.Exists() {
+				items = append(items, itemContent)
 			}
 		}
 	}
@@ -378,11 +376,10 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 			items = append(items, itemContent)
 		}
 	}
-	return items, BottomCursor(entries), nil
+	return items, bottomCursorFromEntries(allEntries), nil
 }
 
-func BottomCursor(entries gjson.Result) string {
-	array := entries.Array()
+func bottomCursorFromEntries(array []gjson.Result) string {
 	for i := len(array) - 1; i >= 0; i-- {
 		if array[i].Get("content.entryType").String() == "TimelineTimelineCursor" &&
 			array[i].Get("content.cursorType").String() == "Bottom" {
@@ -390,6 +387,10 @@ func BottomCursor(entries gjson.Result) string {
 		}
 	}
 	return ""
+}
+
+func BottomCursor(entries gjson.Result) string {
+	return bottomCursorFromEntries(entries.Array())
 }
 
 // MaxTweetID 返回两个推文 ID 中数值较大的一个；任一无法解析为数字时退回字符串

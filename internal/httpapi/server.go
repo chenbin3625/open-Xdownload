@@ -987,7 +987,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			return false
 		default:
 		}
-		if account, err := s.requestAccount(r); err != nil || account == nil {
+		if account, err := s.requestAccountReadOnly(r); err != nil || account == nil {
 			return false
 		}
 		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -1200,8 +1200,13 @@ func (s *Server) serveDownloadPreview(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		status, message := posterFailureStatus(err)
-		if r.Context().Err() != nil && status == http.StatusBadGateway {
-			status, message = http.StatusServiceUnavailable, "预览图抓取已取消"
+		if r.Context().Err() != nil {
+			// 客户端自身取消请求：不写入全局负缓存，避免污染仍在回源的 leader 或后续正常请求。
+			if status == http.StatusBadGateway {
+				status, message = http.StatusServiceUnavailable, "预览图抓取已取消"
+			}
+			writeError(w, status, &posterStatusError{status: status, message: message})
+			return
 		}
 		log.Printf("poster fetch %s: %v", posterURL, err)
 		posterFailures.store(posterPath, status, message)
@@ -1237,8 +1242,10 @@ func posterFailureStatus(err error) (int, string) {
 
 // posterFailureCache 记住短时间内的回源失败，避免同一张缺图在画廊每次刷新时
 // 反复回源（无鉴权部署下也是向外网的放大面）。成功写入磁盘后会删除对应条目。
+// 限制最大容量并定期清理过期条目，避免长期运行导致内存无界增长。
 type posterFailureCache struct {
-	entries sync.Map // map[string]posterFailureEntry
+	mu      sync.Mutex
+	entries map[string]posterFailureEntry
 }
 
 type posterFailureEntry struct {
@@ -1252,31 +1259,63 @@ type posterFailureEntry struct {
 const (
 	posterFailureTTL          = 10 * time.Minute
 	posterTransientFailureTTL = time.Minute
+	maxPosterFailureEntries   = 2048
 )
 
 func (c *posterFailureCache) store(key string, status int, message string) {
+	now := time.Now()
 	ttl := posterFailureTTL
 	if status >= http.StatusInternalServerError {
 		ttl = posterTransientFailureTTL
 	}
-	c.entries.Store(key, posterFailureEntry{status: status, message: message, expiresAt: time.Now().Add(ttl)})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]posterFailureEntry)
+	}
+	if len(c.entries) >= maxPosterFailureEntries {
+		for k, entry := range c.entries {
+			if now.After(entry.expiresAt) {
+				delete(c.entries, k)
+			}
+		}
+		if len(c.entries) >= maxPosterFailureEntries {
+			// 仍满时淘汰最早过期的条目。
+			var oldestKey string
+			var oldestTime time.Time
+			for k, entry := range c.entries {
+				if oldestKey == "" || entry.expiresAt.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = entry.expiresAt
+				}
+			}
+			if oldestKey != "" {
+				delete(c.entries, oldestKey)
+			}
+		}
+	}
+	c.entries[key] = posterFailureEntry{status: status, message: message, expiresAt: now.Add(ttl)}
 }
 
 func (c *posterFailureCache) lookup(key string) (posterFailureEntry, bool) {
-	value, ok := c.entries.Load(key)
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
 	if !ok {
 		return posterFailureEntry{}, false
 	}
-	entry := value.(posterFailureEntry)
-	if time.Now().After(entry.expiresAt) {
-		c.entries.Delete(key)
+	if now.After(entry.expiresAt) {
+		delete(c.entries, key)
 		return posterFailureEntry{}, false
 	}
 	return entry, true
 }
 
 func (c *posterFailureCache) remove(key string) {
-	c.entries.Delete(key)
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
 }
 
 var posterFailures = &posterFailureCache{}
@@ -1990,7 +2029,7 @@ func addIfSafeDownloadRoot(add func(string), dir string) {
 func unsafeDownloadRoot(dir string) bool {
 	resolved, err := resolvePathForCheck(dir)
 	if err != nil {
-		return false
+		return true
 	}
 	if isFilesystemRoot(resolved) || isHomeDirectory(resolved) {
 		return true

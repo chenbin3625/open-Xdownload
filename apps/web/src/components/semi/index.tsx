@@ -155,7 +155,7 @@ export function Table<T extends object>({ columns, data, rowKey, loading, minWid
 }
 export function Pagination({ page, pageSize, total, onPageChange, onPageSizeChange, pageSizeOptions = [10, 20, 50, 100], totalLabel, className }: { page: number; pageSize: number; total: number; onPageChange: (v: number) => void; onPageSizeChange?: (v: number) => void; pageSizeOptions?: number[]; totalLabel?: (n: number) => React.ReactNode; size?: "sm" | "md"; className?: string }) {
   const size = Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 1; const count = Number.isFinite(total) && total > 0 ? total : 0;
-  const root = useRef<HTMLElement>(null); const labelId = useId(); useTranslation();
+  const root = useRef<HTMLElement>(null); const labelId = useId(); const { i18n } = useTranslation();
   useLayoutEffect(() => {
     function labelControls() {
     for (const item of root.current?.querySelectorAll<HTMLElement>(".semi-page-item") ?? []) {
@@ -174,7 +174,7 @@ export function Pagination({ page, pageSize, total, onPageChange, onPageSizeChan
     const observer = new MutationObserver(labelControls);
     if (root.current) observer.observe(root.current, { childList: true, subtree: true, attributes: true, attributeFilter: ["role", "aria-label", "aria-disabled", "class"] });
     return () => observer.disconnect();
-  });
+  }, [page, size, count, labelId, i18n.resolvedLanguage]);
   return <nav ref={root} aria-label={t("分页")} className={cn("semi-pagination-bar", className)} onKeyDown={e => { if (["Enter", " "].includes(e.key) && (e.target as HTMLElement).getAttribute("role") === "button") { e.preventDefault(); (e.target as HTMLElement).click(); } }}><span>{totalLabel?.(count) ?? t("共 {{value0}} 条", { value0: count })}</span><span className="sr-only" id={labelId}>{t("每页条数")}</span><SPagination currentPage={Math.max(1, Math.min(Number.isFinite(page) ? page : 1, Math.max(1, Math.ceil(count / size))))} pageSize={size} total={Math.max(1, count)} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange} showSizeChanger={!!onPageSizeChange} pageSizeOpts={pageSizeOptions} /></nav>;
 }
 export function buildPageItems(current: number, total: number): (number | "gap")[] { const items: (number | "gap")[] = []; let previous = 0; for (let n = 1; n <= total; n++) { if (total > 7 && n !== 1 && n !== total && Math.abs(n - current) > 1) continue; if (previous && n - previous > 1) items.push("gap"); items.push(n); previous = n; } return items; }

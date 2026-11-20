@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -133,8 +134,27 @@ func (s *Store) SaveStorageDocument(ctx context.Context, next config.StorageDocu
 	if err != nil {
 		return next, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO storage_versions(version,document,created_at) VALUES(?,?,?)`, next.Version, string(encoded), time.Now().UTC()); err != nil {
+	now := time.Now().UTC()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO storage_versions(version,document,created_at) VALUES(?,?,?)`, next.Version, string(encoded), now); err != nil {
 		return next, err
+	}
+	for _, target := range next.Targets {
+		if target.Type != "local" && target.Type != "nas" {
+			continue
+		}
+		if strings.TrimSpace(target.Root) == "" {
+			continue
+		}
+		if err := validateTrustedDownloadRoot(target.Root); err != nil {
+			continue
+		}
+		abs, absErr := filepath.Abs(target.Root)
+		if absErr != nil {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO download_roots(path, last_seen_at) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, filepath.Clean(abs), now); err != nil {
+			return next, err
+		}
 	}
 	return next, tx.Commit()
 }
