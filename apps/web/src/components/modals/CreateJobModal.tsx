@@ -24,13 +24,13 @@ import {
 } from "../../lib/api";
 import { formatIntervalMinutes, notifyError } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
-import { Button, RadioGroup } from "@douyinfe/semi-ui";
-import { Checkbox, Tabs, type TabItem } from "../semi";
-import { Input, NumberInput, Textarea } from "../semi";
-import { Modal } from "../semi";
-import { Spinner } from "../semi";
-import { toast } from "../semi";
-import { Field, Select, Tag } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import RadioGroup from "@douyinfe/semi-ui/lib/es/radio/radioGroup";
+import { Checkbox, Tabs, type TabItem, Field, Input, NumberInput, Select, Textarea } from "../semi/controls";
+import { Modal } from "../semi/overlays";
+import { Spinner } from "../semi/feedback";
+import { Tag } from "../semi/data";
+import { toast } from "../semi/toast";
 
 export interface CreateJobModalProps {
   open: boolean;

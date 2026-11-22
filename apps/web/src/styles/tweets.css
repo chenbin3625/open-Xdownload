@@ -63,6 +63,8 @@
   flex-direction: column;
   gap: 8px;
   padding: 16px 18px;
+  content-visibility: auto;
+  contain-intrinsic-size: 420px;
   transition: background-color 0.15s ease;
 }
 

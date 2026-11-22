@@ -267,8 +267,39 @@
 /* ---------------- ≤639.98px：手机 ---------------- */
 
 @media (max-width: 639.98px) {
-  .task-center .toolbar-status .semi-radioGroup {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* 状态四项在 360px 以上放得下一行（极窄屏规则仍回退为两列），省掉一整行高度。 */
+
+  /* 工具栏：搜索框与类型下拉同一行，媒体库的用户 / 排序 / 日期 / 体积按钮合成一行。 */
+  .task-center .toolbar-filters {
+    flex-wrap: nowrap;
+  }
+
+  .task-center .toolbar-search {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .task-center .toolbar-select {
+    flex: 0 0 132px;
+    width: 132px;
+  }
+
+  .gallery-toolbar .toolbar-filters {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  }
+
+  .gallery-toolbar .toolbar-search {
+    grid-column: 1 / -1;
+  }
+
+  .gallery-toolbar .toolbar-user-select,
+  .gallery-toolbar .toolbar-select {
+    width: auto;
+  }
+
+  .gallery-toolbar .toolbar-options {
+    flex-wrap: nowrap;
   }
 
   /* 设置页 */

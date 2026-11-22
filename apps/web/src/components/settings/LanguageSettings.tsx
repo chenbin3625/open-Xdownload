@@ -1,7 +1,7 @@
 import { Languages } from "lucide-react";
 import { useState } from "react";
 import { readLanguagePreference, setLanguagePreference, useTranslation, type LanguagePreference } from "../../lib/i18n";
-import { Select } from "@douyinfe/semi-ui";
+import Select from "@douyinfe/semi-ui/lib/es/select";
 
 export function LanguageSettings() {
   const { t } = useTranslation();

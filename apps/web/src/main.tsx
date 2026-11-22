@@ -6,8 +6,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ApiError } from "./lib/api";
-import { TooltipProvider } from "./components/semi";
-import { Toaster } from "./components/semi";
+import { TooltipProvider } from "./components/semi/provider";
+import { Toaster } from "./components/semi/toast";
 import { hydrateAppQueries, takeAppBootstrap } from "./lib/bootstrap";
 import { readRouteState } from "./lib/useRouteState";
 

@@ -1,7 +1,12 @@
 import { t, useTranslation } from "../../lib/i18n";
 import { ArrowRight, Bell, Menu, RefreshCw, Search, TriangleAlert, WifiOff } from "lucide-react";
 import React, { useState } from "react";
-import { Badge, Button, Input, Popover, Tag, Tooltip } from "@douyinfe/semi-ui";
+import Badge from "@douyinfe/semi-ui/lib/es/badge";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Input from "@douyinfe/semi-ui/lib/es/input";
+import Popover from "@douyinfe/semi-ui/lib/es/popover";
+import Tag from "@douyinfe/semi-ui/lib/es/tag";
+import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 
 export interface AppHeaderProps {
   refreshPending: boolean;
@@ -16,7 +21,7 @@ export interface AppHeaderProps {
   onReconnectRealtime?: () => void;
 }
 
-export function AppHeader({
+export const AppHeader = React.memo(function AppHeader({
   refreshPending,
   onRefresh,
   onQuickSubmit,
@@ -162,4 +167,4 @@ export function AppHeader({
       </div>
     </header>
   );
-}
+});

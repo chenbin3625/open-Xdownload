@@ -63,6 +63,18 @@ function precompress(): Plugin {
   };
 }
 
+// 日期选择器只在推文归档页动态加载，避免它的样式阻塞首屏 CSS。
+function deferDatePickerStyles(): Plugin {
+  return {
+    name: "defer-date-picker-styles",
+    apply: "build",
+    enforce: "post",
+    transformIndexHtml(html) {
+      return html.replace(/\n[ \t]*<link rel="stylesheet"[^>]*href="[^"]*datePicker-[^"]+\.css"[^>]*>\n/g, "\n");
+    },
+  };
+}
+
 // 后端默认监听 127.0.0.1:8787；dev / preview 都把 /api 代理过去，
 // 这样两种本地预览方式都能直接连真实后端（preview 之前只有静态壳，看不到数据）。
 const API_PROXY_TARGET = "http://127.0.0.1:8787";
@@ -71,7 +83,7 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(webPackage.version),
   },
-  plugins: [tailwindcss(), react(), precompress()],
+  plugins: [tailwindcss(), react(), deferDatePickerStyles(), precompress()],
   build: {
     target: "es2020",
     // 保持现状不产出 sourcemap：发布物由 Go embed 进二进制，体积优先。
@@ -79,6 +91,13 @@ export default defineConfig({
     sourcemap: false,
     modulePreload: {
       polyfill: false,
+      // 日期筛选只在推文归档页使用；保留动态 import，避免入口 HTML 预加载这块大依赖。
+      resolveDependencies(filename, deps, context) {
+        if (context.hostType === "html") {
+          return deps.filter(dep => !dep.includes("/datePicker-"));
+        }
+        return deps;
+      },
     },
     rollupOptions: {
       output: {
@@ -87,8 +106,11 @@ export default defineConfig({
           if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) return "react";
           if (id.includes("/@tanstack/")) return "query";
           if (id.includes("/lucide-react/")) return "icons";
-          if (id.includes("/@douyinfe/")) return "semi";
-          return "vendor";
+          // 组件按页面入口自然分块；把整套 Semi 合成一个共享 chunk 会把设置/归档专用控件提前带入首屏。
+          if (id.includes("/@douyinfe/")) return undefined;
+          // 只把首屏必需的基础库合并；date-fns、dnd-kit、react-window 等跟着用到它们的页面/组件按需分块。
+          if (/\/node_modules\/(i18next|react-i18next|tailwind-merge|clsx|classnames|prop-types|@babel\/runtime|use-sync-external-store|lodash|lodash-es)\//.test(id)) return "vendor";
+          return undefined;
         },
       },
     },

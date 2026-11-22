@@ -24,6 +24,10 @@
   min-width: 0;
 }
 
+.gallery-entry-selected .gallery-card {
+  box-shadow: 0 0 0 2px var(--semi-color-primary);
+}
+
 .gallery-entry > .gallery-entry-checkbox {
   position: absolute;
   top: 10px;
@@ -118,6 +122,8 @@
 
 .gallery-card {
   overflow: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: 320px;
 }
 
 .gallery-card-body {

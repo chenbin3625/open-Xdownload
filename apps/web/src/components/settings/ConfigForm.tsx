@@ -12,9 +12,10 @@ import {
   type AppConfig,
 } from "../../lib/api";
 import { notifyError } from "../common/CommonUI";
-import { Button } from "@douyinfe/semi-ui";
-import { Popconfirm, Tag, Tooltip } from "../semi";
-import { toast } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import { Popconfirm, Tooltip } from "../semi/overlays";
+import { Tag } from "../semi/data";
+import { toast } from "../semi/toast";
 import { XAccountsSettings } from "./XAccountsSettings";
 import { readEnvOverridden } from "./EnvOverrideNote";
 import { DownloadSettingsFields } from "./DownloadSettings";

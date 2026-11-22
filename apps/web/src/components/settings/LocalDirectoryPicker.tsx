@@ -8,13 +8,15 @@ import {
   type LocalDirectoryListing,
 } from "../../lib/api";
 import { getErrorMessage, notifyError } from "../common/CommonUI";
-import { Button, Card, Empty, Typography } from "@douyinfe/semi-ui";
-import { Alert } from "../semi";
-import { Input } from "../semi";
-import { Tooltip } from "../semi";
-import { Spinner } from "../semi";
-import { toast } from "../semi";
-import { Tree, type TreeNode } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Card from "@douyinfe/semi-ui/lib/es/card";
+import Empty from "@douyinfe/semi-ui/lib/es/empty";
+import Typography from "@douyinfe/semi-ui/lib/es/typography";
+import { Alert, Spinner } from "../semi/feedback";
+import { Input } from "../semi/controls";
+import { Tooltip } from "../semi/overlays";
+import { toast } from "../semi/toast";
+import { Tree, type TreeNode } from "../semi/Tree";
 
 export type DirectoryTreeNode = TreeNode & {
   path: string;

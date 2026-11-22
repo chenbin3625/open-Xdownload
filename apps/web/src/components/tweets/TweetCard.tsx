@@ -4,8 +4,9 @@ import type { DownloadRecord, Media, TweetData } from "../../lib/api";
 import type { ArchivedTweet } from "../../lib/archive";
 import { t } from "../../lib/i18n";
 import { copyToClipboard, formatDateTime } from "../common/CommonUI";
-import { Button } from "@douyinfe/semi-ui";
-import { Avatar, Tag, Tooltip } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import { Avatar, Tag } from "../semi/data";
+import { Tooltip } from "../semi/overlays";
 import { formatTweetTime, highlightToken, mediaOfRecord, resolveTweetDisplay, smallTwimgUrl, splitRelatedDownloads, tokenizeTweetText } from "../../lib/tweetDisplay";
 
 const avatarColors = ["blue", "cyan", "green", "indigo", "orange", "pink", "purple", "teal", "violet", "amber"] as const;

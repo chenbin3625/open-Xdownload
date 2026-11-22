@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { Button } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { t } from "../../lib/i18n";
-import { Select, Tooltip } from "../semi";
+import { Select } from "../semi/controls";
+import { Tooltip } from "../semi/overlays";
 
 export function FilenameStrategy({ value, onChange, disabled, labelPrefix }: {
   value: string;

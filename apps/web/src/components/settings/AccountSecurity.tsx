@@ -4,9 +4,9 @@ import React, { useContext, useId, useState } from "react";
 import { changeAccountPassword, logoutAccount } from "../../lib/api";
 import { invalidateSession } from "../../lib/session";
 import { AccountContext } from "../auth/AuthGate";
-import { Button } from "@douyinfe/semi-ui";
-import { Field, Input } from "../semi";
-import { Modal } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import { Field, Input } from "../semi/controls";
+import { Modal } from "../semi/overlays";
 
 export function AccountSecurity({ compact = false }: { compact?: boolean }) {
   useTranslation();

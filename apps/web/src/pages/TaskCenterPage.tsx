@@ -18,7 +18,14 @@ import {
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Checkbox, Input, Progress, RadioGroup, Select, Typography } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Card from "@douyinfe/semi-ui/lib/es/card";
+import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
+import Input from "@douyinfe/semi-ui/lib/es/input";
+import Progress from "@douyinfe/semi-ui/lib/es/progress";
+import RadioGroup from "@douyinfe/semi-ui/lib/es/radio/radioGroup";
+import Select from "@douyinfe/semi-ui/lib/es/select";
+import Typography from "@douyinfe/semi-ui/lib/es/typography";
 import { getJobProgressDisplay, parseAggregatedErrors } from "../lib/jobErrors";
 import {
   cancelJob,
@@ -54,15 +61,12 @@ import {
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
 import { useBreakpointUp } from "../lib/useMediaQuery";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
-import { Drawer, Tabs } from "../components/semi";
-import { Alert, Empty } from "../components/semi";
-import { Tooltip } from "../components/semi";
-import { Pagination } from "../components/semi";
-import { LoadingOverlay, Spinner } from "../components/semi";
-import { Table, type TableColumn } from "../components/semi";
-import { Avatar, Tag, type Tone } from "../components/semi";
-import { toast } from "../components/semi";
-import { Popconfirm } from "../components/semi";
+import { Drawer, Tooltip, Popconfirm } from "../components/semi/overlays";
+import { Alert, Empty, LoadingOverlay, Spinner } from "../components/semi/feedback";
+import { Pagination, Avatar, Tag, type Tone } from "../components/semi/data";
+import { Table, type TableColumn } from "../components/semi/table";
+import { Tabs } from "../components/semi/controls";
+import { toast } from "../components/semi/toast";
 import { cn } from "../lib/cn";
 
 export type StatusFilterType = "all" | "active" | "completed" | "failed";
@@ -128,7 +132,7 @@ function getJobStatusPresentation(status: Job["status"]) {
   return jobStatusPresentation[status] ?? unknownStatusPresentation;
 }
 
-export function TaskCenterPage({
+export const TaskCenterPage = React.memo(function TaskCenterPage({
   jobs,
   stats,
   failedTweetCount,
@@ -740,9 +744,9 @@ export function TaskCenterPage({
                     key={job.id}
                     job={job}
                     selected={selectedJobIds.has(job.id)}
-                    onSelect={checked => toggleSelected(job.id, checked)}
-                    actions={renderJobActions(job)}
-                    onOpenDetails={() => openJobDetails(job.id)}
+                    onSelect={toggleSelected}
+                    renderActions={renderJobActions}
+                    onOpenDetails={openJobDetails}
                   />
                 ))}
               </ul>
@@ -770,7 +774,7 @@ export function TaskCenterPage({
       </Drawer>
     </div>
   );
-}
+});
 
 // 每个单元格自己 useTranslation()：语言切换会通过 context 触发重渲染，
 // React.memo 只拦住"任务对象没变"的普通列表刷新。
@@ -834,18 +838,18 @@ const JobProgress = React.memo(function JobProgress({ job }: { job: Job }) {
   );
 });
 
-function MobileJobCard({
+const MobileJobCard = React.memo(function MobileJobCard({
   job,
   selected,
   onSelect,
-  actions,
+  renderActions,
   onOpenDetails,
 }: {
   job: Job;
   selected: boolean;
-  onSelect: (checked: boolean) => void;
-  actions: React.ReactNode;
-  onOpenDetails: () => void;
+  onSelect: (id: number, checked: boolean) => void;
+  renderActions: (job: Job, includeDetails?: boolean) => React.ReactNode;
+  onOpenDetails: (id: number) => void;
 }) {
   useTranslation();
   return (
@@ -855,7 +859,7 @@ function MobileJobCard({
           <Checkbox
             aria-label={t("选择任务 #{{value0}}", { value0: job.id })}
             checked={selected}
-            onChange={event => onSelect(event.target.checked === true)}
+            onChange={event => onSelect(job.id, event.target.checked === true)}
           />
           <div className="min-w-0 flex-1">
             <h2 className="break-words text-sm font-semibold text-fg">{job.title || kindLabel(job.kind)}</h2>
@@ -873,17 +877,17 @@ function MobileJobCard({
             theme="borderless"
             type="tertiary"
             aria-label={t("查看任务详情")}
-            onClick={onOpenDetails}
+            onClick={() => onOpenDetails(job.id)}
             icon={<FolderCheck className="size-4" />}
           >
             {t("查看详情")}
           </Button>
-          {actions}
+          {renderActions(job)}
         </div>
       </div>
     </li>
   );
-}
+});
 
 function JobErrorAlert({ job }: { job: Job }) {
   const { i18n } = useTranslation();

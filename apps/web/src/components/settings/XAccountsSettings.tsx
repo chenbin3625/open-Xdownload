@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
 import {
   checkAllXAccounts,
   checkXAccount,
@@ -29,21 +29,12 @@ import {
   type XAccountView,
 } from "../../lib/api";
 import { formatDateTime, getErrorMessage, notifyError } from "../common/CommonUI";
-import {
-  Alert,
-  Empty,
-  Field,
-  Input,
-  Modal,
-  Popconfirm,
-  Switch,
-  Table,
-  Tag,
-  Textarea,
-  Tooltip,
-  toast,
-  type TableColumn,
-} from "../semi";
+import { Alert, Empty } from "../semi/feedback";
+import { Field, Input, Switch, Textarea } from "../semi/controls";
+import { Modal, Popconfirm, Tooltip } from "../semi/overlays";
+import { Tag } from "../semi/data";
+import { Table, type TableColumn } from "../semi/table";
+import { toast } from "../semi/toast";
 import { cn } from "../../lib/cn";
 
 function accountLabel(account: XAccountView) {

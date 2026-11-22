@@ -2,7 +2,11 @@ import { t, useTranslation } from "../lib/i18n";
 import { Clock, Pencil, Play, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
-import { Button, Input, InputNumber, Select, Switch } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Input from "@douyinfe/semi-ui/lib/es/input";
+import InputNumber from "@douyinfe/semi-ui/lib/es/inputNumber";
+import Select from "@douyinfe/semi-ui/lib/es/select";
+import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import {
   deleteArchiveSchedule,
   runArchiveSchedule,
@@ -16,18 +20,11 @@ import {
   notifyError,
 } from "../components/common/CommonUI";
 import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
-import {
-  Alert,
-  Drawer,
-  Empty,
-  Field,
-  ListSkeleton,
-  Modal,
-  Popconfirm,
-  Tag,
-  Tooltip,
-  toast,
-} from "../components/semi";
+import { Alert, Empty, ListSkeleton } from "../components/semi/feedback";
+import { Field } from "../components/semi/controls";
+import { Drawer, Modal, Popconfirm, Tooltip } from "../components/semi/overlays";
+import { Tag } from "../components/semi/data";
+import { toast } from "../components/semi/toast";
 
 function localTimeZone() {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }

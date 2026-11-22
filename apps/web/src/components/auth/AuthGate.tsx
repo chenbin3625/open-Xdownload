@@ -4,9 +4,9 @@ import { LogIn, RefreshCw, UserPlus } from "lucide-react";
 import React, { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getLoginSession, loginAccount, type LoginSession } from "../../lib/api";
 import { noteSessionChange, sessionChangedKey, sessionInvalidatedEvent } from "../../lib/session";
-import { Button } from "@douyinfe/semi-ui";
-import { Field, Input } from "../semi";
-import { Spinner } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import { Field, Input } from "../semi/controls";
+import { Spinner } from "../semi/feedback";
 
 export const AccountContext = createContext("");
 

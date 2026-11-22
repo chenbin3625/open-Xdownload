@@ -11,6 +11,13 @@
   width: 100%;
 }
 
+/* Semi 只给自家图标组件加 prefix-icon 间距；lucide 的 SVG 前缀会贴着输入文字，这里补上同样的 8px。 */
+.semi-input-prefix:has(> svg:only-child),
+.semi-input-suffix:has(> svg:only-child) {
+  color: var(--semi-color-text-2);
+  margin: 0 8px;
+}
+
 .semi-pagination-bar {
   display: flex;
   align-items: center;

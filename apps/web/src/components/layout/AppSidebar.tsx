@@ -7,7 +7,8 @@ import {
   FileText,
 } from "lucide-react";
 import React, { useLayoutEffect, useRef } from "react";
-import { Button, Nav } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Nav from "@douyinfe/semi-ui/lib/es/navigation";
 import type { SectionKey } from "../../lib/useRouteState";
 
 export interface AppSidebarProps {
@@ -26,7 +27,7 @@ const navigationItems = [
   { key: "settings", icon: Settings, label: "系统配置" },
 ] as const;
 
-export function AppSidebar({
+export const AppSidebar = React.memo(function AppSidebar({
   activeSection,
   onSectionChange,
 }: AppSidebarProps) {
@@ -59,9 +60,9 @@ export function AppSidebar({
 
     </aside>
   );
-}
+});
 
-export function AppMobileNavigation({ activeSection, onSectionChange }: AppSidebarProps) {
+export const AppMobileNavigation = React.memo(function AppMobileNavigation({ activeSection, onSectionChange }: AppSidebarProps) {
   useTranslation();
   const currentKey = taskCenterSections.includes(activeSection) ? "tasks" : activeSection;
 
@@ -83,4 +84,4 @@ export function AppMobileNavigation({ activeSection, onSectionChange }: AppSideb
       ))}
     </nav>
   );
-}
+});

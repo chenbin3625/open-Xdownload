@@ -1,7 +1,7 @@
 import { t, useTranslation } from "../../lib/i18n";
 import React from "react";
 import type { AppConfig } from "../../lib/api";
-import { Field, Input, Switch } from "../semi";
+import { Field, Input, Switch } from "../semi/controls";
 import { EnvOverrideNote } from "./EnvOverrideNote";
 
 export function DownloadSettingsFields({

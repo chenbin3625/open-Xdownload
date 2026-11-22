@@ -3,12 +3,12 @@ import { Check, Copy, FolderSync, HelpCircle, Image as ImageIcon, Link as LinkIc
 import React, { useEffect, useRef, useState } from "react";
 import type { JobKind } from "../../lib/api";
 import { cn } from "../../lib/cn";
-import { Button, Empty } from "@douyinfe/semi-ui";
-import { ListSkeleton as UiListSkeleton } from "../semi";
-import { Tooltip } from "../semi";
-import { Pagination as UiPagination } from "../semi";
-import { LoadingOverlay } from "../semi";
-import { toast } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Empty from "@douyinfe/semi-ui/lib/es/empty";
+import { ListSkeleton as UiListSkeleton, LoadingOverlay } from "../semi/feedback";
+import { Tooltip } from "../semi/overlays";
+import { Pagination as UiPagination } from "../semi/data";
+import { toast } from "../semi/toast";
 
 export const fullWidthStyle: React.CSSProperties = { width: "100%" };
 

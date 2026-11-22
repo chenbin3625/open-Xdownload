@@ -289,6 +289,24 @@ func TestWalkUserTweetsEmptyCursorCompletes(t *testing.T) {
 	}
 }
 
+func TestFullTimelineItemsSkipsUnavailableTweetPlaceholder(t *testing.T) {
+	payload := fullTweetPage(`[{
+		"__typename":"TimelineAddEntries",
+		"entries":[
+			{"content":{"__typename":"TimelineTimelineItem","content":{"__typename":"TimelineTweet","tweet_results":{"id":"VHdlZXRSZXN1bHRzOjE5ODkzNzEzNzU5ODgxOTUzNDU=","rest_id":"1989371375988195345"}}}},
+			` + fullTweetEntry("103", "42") + `,
+			{"content":{"__typename":"TimelineTimelineCursor","cursor_type":"Bottom","value":"page-2"}}
+		]
+	} ]`)
+	items, next, err := FullTimelineItems([]byte(payload))
+	if err != nil {
+		t.Fatalf("FullTimelineItems: %v", err)
+	}
+	if next != "page-2" || len(items) != 1 || TweetResultID(items[0].Result) != "103" {
+		t.Fatalf("items = %+v next = %q", items, next)
+	}
+}
+
 func TestWalkUserTweetsPinnedBoundaryAndHead(t *testing.T) {
 	requester := &fakeRequester{pages: []string{
 		fullTweetPage(`[{"__typename":"TimelinePinEntry","entry":` + fullTweetEntry("20", "42") + `},{"__typename":"TimelineAddEntries","entries":[` + fullTweetEntry("103", "42") + `,` + fullTweetEntry("102", "42") + `,` + fullTweetEntry("104", "other") + `,{"content":{"__typename":"TimelineTimelineCursor","cursor_type":"Bottom","value":"page-2"}}]}]`),

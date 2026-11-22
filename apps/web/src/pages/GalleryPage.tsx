@@ -20,7 +20,13 @@ import {
 } from "lucide-react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Card, Checkbox, Input, InputNumber, RadioGroup, Select } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Card from "@douyinfe/semi-ui/lib/es/card";
+import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
+import Input from "@douyinfe/semi-ui/lib/es/input";
+import InputNumber from "@douyinfe/semi-ui/lib/es/inputNumber";
+import RadioGroup from "@douyinfe/semi-ui/lib/es/radio/radioGroup";
+import Select from "@douyinfe/semi-ui/lib/es/select";
 import {
   formatBytes,
   getLibraryDownloadsPage,
@@ -39,10 +45,10 @@ import {
   type GalleryRouteState,
   type GallerySort,
 } from "../lib/useRouteState";
-import { Alert, Empty, Skeleton } from "../components/semi";
-import { MediaModal, SimplePopover, Tooltip } from "../components/semi";
-import { Pagination } from "../components/semi";
-import { SearchSelect } from "../components/semi";
+import { Alert, Empty, Skeleton } from "../components/semi/feedback";
+import { MediaModal, SimplePopover, Tooltip } from "../components/semi/overlays";
+import { Pagination } from "../components/semi/data";
+import { SearchSelect } from "../components/semi/controls";
 
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".avif"];
@@ -457,7 +463,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   }, [libraryQuery.data, libraryQuery.isPlaceholderData, debouncedSearch, filter.search, filter.page, totalPages, updateFilter]);
 
   const visibleEntries = indexedDownloads;
-  const selectedEntries = visibleEntries.filter(({ item }) => selected.has(entryKey(item)));
+  const selectedEntries = useMemo(
+    () => visibleEntries.filter(({ item }) => selected.has(entryKey(item))),
+    [selected, visibleEntries],
+  );
   const selectionDisabled = libraryQuery.isPlaceholderData || Boolean(rangeError) || debouncedSearch !== filter.search;
   const hasActiveFilter =
     filter.kind !== "all" || filter.user !== "all" || filter.search.trim() !== "" ||
@@ -505,6 +514,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
 
   const openPreview = useCallback((nextId: string) => setPreviewId(nextId), []);
+  const openUserMedia = useCallback((screenName: string) => {
+    setViewMode("media");
+    updateFilter({ user: screenName, page: 1 });
+  }, [updateFilter]);
 
   // 跨页切图：走到当前页边界时翻一页，等新页数据落地后再把灯箱定位到首/末项。
   const [pendingPreviewEdge, setPendingPreviewEdge] = useState<"first" | "last" | null>(null);
@@ -761,10 +774,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               <UserCard
                 key={summary.screenName}
                 summary={summary}
-                onOpen={(screenName) => {
-                  setViewMode("media");
-                  updateFilter({ user: screenName, page: 1 });
-                }}
+                onOpen={openUserMedia}
               />
             ))}
           </div>
@@ -812,6 +822,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       ) : (
         <div
           className={`gallery-${view} gallery-density-${density}${libraryQuery.isFetching ? " opacity-60 transition-opacity" : ""}`}
+          aria-busy={libraryQuery.isFetching}
         >
           {visibleEntries.map(({ item, isVideo, isImage, isGif }) => (
             <div key={entryKey(item)} className={`gallery-entry${selected.has(entryKey(item)) ? " gallery-entry-selected" : ""}`}>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { QueryClient } from "@tanstack/react-query";
+import { notifyManager, type QueryClient } from "@tanstack/react-query";
 import type { DashboardMeta, Job, JobsPage } from "./api";
 import {
   archiveScheduleQueryRoot,
@@ -446,10 +446,13 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
       if (jobUpdates.size === 0) return;
       const pending = [...jobUpdates.values()];
       jobUpdates.clear();
-      for (const event of pending) {
-        if (disposed) return;
-        handleEventResult(applyDashboardEvent(queryClient, event));
-      }
+      // 一次 flush 可能写几十条缓存；合并成一次订阅通知，列表只重渲染一遍。
+      notifyManager.batch(() => {
+        for (const event of pending) {
+          if (disposed) return;
+          handleEventResult(applyDashboardEvent(queryClient, event));
+        }
+      });
     };
 
     const enqueueJobUpdate = (event: DashboardEvent) => {

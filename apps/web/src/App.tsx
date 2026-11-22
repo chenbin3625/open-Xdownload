@@ -1,7 +1,7 @@
 import { t, useTranslation } from "./lib/i18n";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useCallback, useEffect, useState } from "react";
-import { Layout } from "@douyinfe/semi-ui";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import Layout from "@douyinfe/semi-ui/lib/es/layout";
 import {
   archiveScheduleQueryRoot,
   configQueryRoot,
@@ -23,22 +23,22 @@ import {
 import { useBreakpointUp } from "./lib/useMediaQuery";
 import { useRouteState, type SectionKey } from "./lib/useRouteState";
 
-import { Alert, ListSkeleton } from "./components/semi";
-import { Drawer } from "./components/semi";
+import { Alert, ListSkeleton } from "./components/semi/feedback";
+import { Drawer } from "./components/semi/overlays";
 
 import { AppMobileNavigation, AppSidebar } from "./components/layout/AppSidebar";
 import { AppHeader } from "./components/layout/AppHeader";
-import { CreateJobModal } from "./components/modals/CreateJobModal";
-import { FailedTweetDrawer } from "./components/drawers/FailedTweetDrawer";
 import { GlobalLoadingBar } from "./components/common/GlobalLoadingBar";
 
 import { TaskCenterPage } from "./pages/TaskCenterPage";
 
 // 任务中心是首屏，保持静态；其余页面按路由懒加载，减小首屏 bundle。
-const SchedulesPage = React.lazy(() => import("./pages/SchedulesPage").then(module => ({ default: module.SchedulesPage })));
-const GalleryPage = React.lazy(() => import("./pages/GalleryPage").then(module => ({ default: module.GalleryPage })));
-const SettingsPage = React.lazy(() => import("./pages/SettingsPage").then(module => ({ default: module.SettingsPage })));
-const TweetsPage = React.lazy(() => import("./pages/TweetsPage").then(module => ({ default: module.TweetsPage })));
+const SchedulesPage = React.lazy(() => import("./pages/SchedulesPage").then(module => ({ default: React.memo(module.SchedulesPage) })));
+const GalleryPage = React.lazy(() => import("./pages/GalleryPage").then(module => ({ default: React.memo(module.GalleryPage) })));
+const SettingsPage = React.lazy(() => import("./pages/SettingsPage").then(module => ({ default: React.memo(module.SettingsPage) })));
+const TweetsPage = React.lazy(() => import("./pages/TweetsPage").then(module => ({ default: React.memo(module.TweetsPage) })));
+const CreateJobModal = React.lazy(() => import("./components/modals/CreateJobModal").then(module => ({ default: module.CreateJobModal })));
+const FailedTweetDrawer = React.lazy(() => import("./components/drawers/FailedTweetDrawer").then(module => ({ default: module.FailedTweetDrawer })));
 import { AuthGate } from "./components/auth/AuthGate";
 
 // 侧边栏的 overview / workbench / tasks 都指向任务调度中心这一个页面。
@@ -73,10 +73,10 @@ function Workbench() {
     syncServerPage,
   } = useRouteState();
 
-  const handleSectionChange = (section: SectionKey) => {
+  const handleSectionChange = useCallback((section: SectionKey) => {
     if (section !== activeSection && !window.dispatchEvent(new Event("settings:before-navigate", { cancelable: true })) && !window.confirm(t("放弃未保存的修改？"))) return;
     navigateSection(section);
-  };
+  }, [activeSection, navigateSection]);
 
   // 模态框与抽屉状态
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -161,31 +161,45 @@ function Workbench() {
     }
   }, [jobPage, jobPageSize, jobStatus, jobKind, jobSearch, jobs.data, jobs.isPlaceholderData, meta.data, syncServerPage]);
 
-  function handleManualRefresh() {
+  const handleManualRefresh = useCallback(() => {
     setManualRefreshPending(true);
     const task =
       activeSection === "settings"
         ? queryClient.invalidateQueries({ queryKey: configQueryRoot })
         : refreshDashboard();
     void task.finally(() => setManualRefreshPending(false));
-  }
+  }, [activeSection, queryClient, refreshDashboard]);
 
-  function openCreateModal(initial = "", kind: JobKind | "schedule" = "user") {
+  const openCreateModal = useCallback((initial = "", kind: JobKind | "schedule" = "user") => {
     setCreateInitialInput(initial);
     setCreateInitialKind(kind);
     setCreateModalOpen(true);
-  }
+  }, []);
+
+  const openFailedDrawer = useCallback(() => setFailedDrawerOpen(true), []);
+  const openMobileMenu = useCallback(() => setMobileMenuOpen(true), []);
+  const closeMobileMenu = useCallback(() => setMobileMenuOpen(false), []);
+  const closeCreateModal = useCallback(() => setCreateModalOpen(false), []);
+  const closeFailedDrawer = useCallback(() => setFailedDrawerOpen(false), []);
+  const handleQuickSubmit = useCallback((input: string) => openCreateModal(input), [openCreateModal]);
+  const openDefaultCreateModal = useCallback(() => openCreateModal(), [openCreateModal]);
+  const openScheduleModal = useCallback(() => openCreateModal("", "schedule"), [openCreateModal]);
+  const handleMobileSectionChange = useCallback((section: SectionKey) => {
+    handleSectionChange(section);
+    setMobileMenuOpen(false);
+  }, [handleSectionChange]);
 
   const jobsData = jobs.data?.items ?? [];
   const filteredTotal = jobs.data?.total ?? (jobStatus === "all" && jobKind === "all" && !jobSearch ? meta.data?.stats.total ?? 0 : 0);
-  const currentPagination = {
-    page: jobs.data?.page ?? jobPage,
-    pageSize: jobs.data?.pageSize ?? jobPageSize,
-    total: filteredTotal,
-    totalPages: filteredTotal
-      ? Math.ceil(filteredTotal / (jobs.data?.pageSize ?? jobPageSize))
-      : 0,
-  };
+  const currentPagination = useMemo(() => {
+    const pageSize = jobs.data?.pageSize ?? jobPageSize;
+    return {
+      page: jobs.data?.page ?? jobPage,
+      pageSize,
+      total: filteredTotal,
+      totalPages: filteredTotal ? Math.ceil(filteredTotal / pageSize) : 0,
+    };
+  }, [filteredTotal, jobPage, jobPageSize, jobs.data?.page, jobs.data?.pageSize]);
 
   const currentStats = meta.data?.stats ?? {
     total: 0,
@@ -195,10 +209,6 @@ function Workbench() {
   };
   const failedTweetCount = meta.data?.failedTweetCount ?? 0;
 
-  const sidebarProps = {
-    activeSection,
-  };
-
   return (
     <Layout hasSider={!isCompact} className="app-shell flex h-dvh w-full overflow-hidden bg-canvas">
       {/* 任意接口请求在途时的全局顶部加载进度条 */}
@@ -207,7 +217,7 @@ function Workbench() {
       {/* 桌面端常驻侧边栏 */}
       {!isCompact && (
         <AppSidebar
-          {...sidebarProps}
+          activeSection={activeSection}
           onSectionChange={handleSectionChange}
         />
       )}
@@ -218,14 +228,11 @@ function Workbench() {
           side="left"
           width="14.5rem"
           open={mobileMenuOpen}
-          onClose={() => setMobileMenuOpen(false)}
+          onClose={closeMobileMenu}
         >
           <AppSidebar
-            {...sidebarProps}
-            onSectionChange={(section) => {
-              handleSectionChange(section);
-              setMobileMenuOpen(false);
-            }}
+            activeSection={activeSection}
+            onSectionChange={handleMobileSectionChange}
           />
         </Drawer>
       )}
@@ -234,11 +241,11 @@ function Workbench() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <AppHeader
           failedTweetCount={failedTweetCount}
-          onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+          onOpenFailedDrawer={openFailedDrawer}
           refreshPending={manualRefreshPending}
           onRefresh={handleManualRefresh}
-          onQuickSubmit={(input) => openCreateModal(input)}
-          onToggleMobileMenu={() => setMobileMenuOpen(true)}
+          onQuickSubmit={handleQuickSubmit}
+          onToggleMobileMenu={openMobileMenu}
           showMenuButton={isCompact}
           realtimeDisconnected={!sseConnected}
           onReconnectRealtime={reconnectEvents}
@@ -300,8 +307,8 @@ function Workbench() {
                 searchKeyword={jobSearch}
                 onSearchKeywordChange={handleJobSearchChange}
                 filterCounts={jobs.data?.counts}
-                onOpenCreateModal={() => openCreateModal()}
-                onOpenFailedDrawer={() => setFailedDrawerOpen(true)}
+                onOpenCreateModal={openDefaultCreateModal}
+                onOpenFailedDrawer={openFailedDrawer}
               />
             )}
 
@@ -311,7 +318,7 @@ function Workbench() {
                 schedules={schedules.data ?? []}
                 loading={schedules.isLoading}
                 error={schedules.isError ? schedules.error.message : undefined}
-                onOpenCreateModal={() => openCreateModal("", "schedule")}
+                onOpenCreateModal={openScheduleModal}
               />
               </React.Suspense>
             )}
@@ -347,19 +354,23 @@ function Workbench() {
       </div>
 
       {/* 统一新建任务/归档模态框 */}
-      <CreateJobModal
-        open={createModalOpen}
-        onClose={() => setCreateModalOpen(false)}
-        initialInput={createInitialInput}
-        initialKind={createInitialKind}
-      />
+      <React.Suspense fallback={null}>
+        <CreateJobModal
+          open={createModalOpen}
+          onClose={closeCreateModal}
+          initialInput={createInitialInput}
+          initialKind={createInitialKind}
+        />
+      </React.Suspense>
 
       {/* 失败推文重试抽屉 */}
-      <FailedTweetDrawer
-        open={failedDrawerOpen}
-        onClose={() => setFailedDrawerOpen(false)}
-        total={failedTweetCount}
-      />
+      <React.Suspense fallback={null}>
+        <FailedTweetDrawer
+          open={failedDrawerOpen}
+          onClose={closeFailedDrawer}
+          total={failedTweetCount}
+        />
+      </React.Suspense>
     </Layout>
   );
 }

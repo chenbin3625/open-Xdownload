@@ -307,6 +307,21 @@ type FullTimelineTweet struct {
 	Pinned bool
 }
 
+func isUnavailableTweetResult(root gjson.Result, paths ...string) bool {
+	for _, path := range paths {
+		result := root.Get(path)
+		if !result.Exists() {
+			continue
+		}
+		for _, identity := range []string{"rest_id", "id"} {
+			if value := result.Get(identity); value.Exists() && strings.TrimSpace(value.String()) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 	root := gjson.ParseBytes(payload)
 	for _, path := range []string{"data.user_result_by_screen_name.result.profile_with_replies_timeline_v2.timeline.instructions", "data.user.result.timeline_v2.timeline.instructions"} {
@@ -356,6 +371,9 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 					if result.Exists() {
 						results = append(results, FullTimelineTweet{Result: result})
 					} else if item.Get("item.content.__typename").String() == "TimelineTweet" || item.Get("item.itemContent.__typename").String() == "TimelineTweet" {
+						if isUnavailableTweetResult(item, "item.content.tweet_results", "item.itemContent.tweet_results", "content.tweet_results") {
+							continue
+						}
 						return nil, "", errors.New("全文模块缺少推文内容")
 					}
 				}
@@ -378,9 +396,13 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 						next = content.Get("value").String()
 					}
 				case "TimelineTimelineItem":
-					if result := content.Get("content.tweet_results.result"); result.Exists() {
+					tweetContent := content.Get("content")
+					if result := tweetContent.Get("tweet_results.result"); result.Exists() {
 						results = append(results, FullTimelineTweet{Result: result, Pinned: kind == "TimelinePinEntry"})
-					} else if content.Get("content.__typename").String() == "TimelineTweet" {
+					} else if tweetContent.Get("__typename").String() == "TimelineTweet" {
+						if isUnavailableTweetResult(tweetContent, "tweet_results") {
+							continue
+						}
 						return nil, "", errors.New("全文条目缺少推文内容")
 					}
 				case "TimelineTimelineModule":
@@ -393,7 +415,10 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 								break
 							}
 						}
-						if !found && item.Get("item.content.__typename").String() == "TimelineTweet" {
+						if !found && (item.Get("item.content.__typename").String() == "TimelineTweet" || item.Get("item.itemContent.__typename").String() == "TimelineTweet") {
+							if isUnavailableTweetResult(item, "item.content.tweet_results", "item.itemContent.tweet_results") {
+								continue
+							}
 							return nil, "", errors.New("全文模块缺少推文内容")
 						}
 					}

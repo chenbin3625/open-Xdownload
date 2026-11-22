@@ -110,10 +110,17 @@
   flex: 1;
 }
 
+/* 小标题已是粗体，字段标签降为常规字重，避免两行粗体叠在一起。 */
+.storage-location .semi-form-field-label,
+.storage-location .semi-form-field-label-text {
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+
 .storage-media-row {
   display: grid;
   grid-template-columns:
-    80px 112px minmax(0, 1fr) minmax(0, 1fr)
+    128px 112px minmax(0, 1fr) minmax(0, 1fr)
     minmax(0, 1.2fr) 144px;
   gap: 12px;
   align-items: start;
@@ -508,13 +515,24 @@
   flex: 1;
 }
 
+/* 收起态只是「继承自默认策略」的说明：弱化颜色，用分隔点代替大间距，避免和可编辑项抢视线。 */
 .storage-inherited-summary {
   grid-column: 3 / -2;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
+  min-height: 32px;
+  gap: 4px 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+  line-height: 20px;
   overflow-wrap: anywhere;
+}
+
+.storage-inherited-summary > span + span::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--line-strong, var(--fg-muted));
 }
 
 /* ---- Flat (non-tabbed) layout ---- */

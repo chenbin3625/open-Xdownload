@@ -14,6 +14,11 @@
   gap: 12px;
 }
 
+.mobile-job-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 180px;
+}
+
 .mobile-job-heading {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) minmax(95px, 38%);
@@ -92,6 +97,17 @@
 
 .data-table .semi-table-tbody > .semi-table-row:last-child > .semi-table-row-cell {
   border-bottom: 0;
+}
+
+/* Semi 表尾默认灰底 + 16px 内边距，与分页条自身的上下间距叠加后像一块空白色块。 */
+.data-table .semi-table-footer {
+  padding: 0 16px;
+  border-top: 1px solid var(--line);
+  background: transparent;
+}
+
+.data-table .semi-table-footer .semi-pagination-bar {
+  padding: 8px 0;
 }
 
 .task-table table {

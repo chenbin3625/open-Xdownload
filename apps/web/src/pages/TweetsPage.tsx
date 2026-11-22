@@ -1,13 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlignJustify, CalendarDays, ChevronLeft, ChevronRight, Copy, ExternalLink, FileText, RefreshCw, Rows3, Search, SlidersHorizontal, X } from "lucide-react";
-import { Button, DatePicker, Input, RadioGroup, Select } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Input from "@douyinfe/semi-ui/lib/es/input";
+import RadioGroup from "@douyinfe/semi-ui/lib/es/radio/radioGroup";
+import Select from "@douyinfe/semi-ui/lib/es/select";
 import { getTweetAuthors, getTweets, retryTweetMedia, tweetAuthorsQueryKey, tweetsQueryKey, type ArchivedTweet, type TweetPage } from "../lib/archive";
 import { t, useTranslation } from "../lib/i18n";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { copyToClipboard, formatDateTime } from "../components/common/CommonUI";
-import { Alert, Drawer, Empty, ListSkeleton, MediaModal, Pagination, toast } from "../components/semi";
+import { Alert, Empty, ListSkeleton } from "../components/semi/feedback";
+import { Drawer, MediaModal } from "../components/semi/overlays";
+import { Pagination } from "../components/semi/data";
+import { toast } from "../components/semi/toast";
 import { TweetCard, TweetText } from "../components/tweets/TweetCard";
+
+const ArchiveDatePicker = lazy(() => import("../components/tweets/ArchiveDatePicker"));
 
 function readFilters() { return new URLSearchParams(window.location.search); }
 
@@ -116,11 +124,11 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
       <label className="sr-only" id="archive-media-label" htmlFor="archive-media">{t("archive.mediaType")}</label><Select className="toolbar-select" id="archive-media" aria-labelledby="archive-media-label" value={filters.get("mediaType") ?? ""} onChange={value => change({ mediaType: String(value) })} optionList={[{ value: "", label: t("全部") }, { value: "text", label: t("archive.textOnly") }, { value: "photo", label: t("图片") }, { value: "video", label: t("视频") }, { value: "animated_gif", label: "GIF" }]} />
       <label className="sr-only" id="archive-sort-label" htmlFor="archive-sort">{t("排序顺序")}</label><Select className="toolbar-select" id="archive-sort" aria-labelledby="archive-sort-label" value={filters.get("sort") === "asc" ? "asc" : "desc"} onChange={value => change({ sort: String(value) })} optionList={[{ value: "desc", label: t("最新发布优先"), showTick: false }, { value: "asc", label: t("最早发布优先"), showTick: false }]} />
       <div className="archive-date">
-        <DatePicker type="dateRange" format="yyyy-MM-dd" onChangeWithDateFirst={false} dropdownClassName="archive-date-picker"
+        <Suspense fallback={<Button type="tertiary" aria-label={t("发布时间")} icon={<CalendarDays size={16} />}>{t("全部时间")}</Button>}><ArchiveDatePicker type="dateRange" format="yyyy-MM-dd" onChangeWithDateFirst={false} dropdownClassName="archive-date-picker"
           value={filters.get("from") && filters.get("to") ? [filters.get("from")!, filters.get("to")!] : []}
           onChange={value => { const dates = Array.isArray(value) ? value : []; change({ from: String(dates[0] ?? ""), to: String(dates[1] ?? "") }); }}
           triggerRender={() => <Button id="archive-date" type={filters.has("from") || filters.has("to") ? "primary" : "tertiary"} aria-label={t("发布时间")} aria-pressed={filters.has("from") || filters.has("to")} icon={<CalendarDays size={16} />}>{filters.has("from") || filters.has("to") ? `${filters.get("from") || t("不限")} ~ ${filters.get("to") || t("不限")}` : t("全部时间")}</Button>}
-          showClear />
+          showClear /></Suspense>
       </div>
       </div>
       </div>

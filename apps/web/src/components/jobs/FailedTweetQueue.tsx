@@ -13,17 +13,17 @@ import {
 import {
   AppPagination,
   CopyButton,
-  ListSkeleton,
   LoadingSurface,
   failedTweetPageSizeOptions,
   formatDateTime,
   notifyError,
 } from "../common/CommonUI";
-import { Button, Empty, Typography } from "@douyinfe/semi-ui";
-import { Popconfirm } from "../semi";
-import { Tag } from "../semi";
-import { Alert } from "../semi";
-import { toast } from "../semi";
+import Button from "@douyinfe/semi-ui/lib/es/button";
+import Typography from "@douyinfe/semi-ui/lib/es/typography";
+import { Popconfirm } from "../semi/overlays";
+import { Tag } from "../semi/data";
+import { Alert, Empty, ListSkeleton } from "../semi/feedback";
+import { toast } from "../semi/toast";
 import { dashboardMetaQueryRoot, failedTweetQueryRoot, jobsQueryRoot } from "../../lib/api";
 
 export function FailedTweetQueue({ total }: { total: number }) {

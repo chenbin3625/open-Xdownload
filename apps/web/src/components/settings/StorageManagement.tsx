@@ -1,11 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Button } from "@douyinfe/semi-ui";
+import Button from "@douyinfe/semi-ui/lib/es/button";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp, Copy, Eye, FolderOpen, HardDrive, RefreshCw, Save } from "lucide-react";
 import { api, type AssetKind, type TweetData } from "../../lib/api";
 import { getStorage, getTweets, migrateStorage, saveStorage, storageQueryKey, type AssetRule, type StorageDocument } from "../../lib/archive";
 import { t, useTranslation } from "../../lib/i18n";
-import { Alert, Field, Input, ListSkeleton, Modal, Popconfirm, Select, Switch, Tag, Tooltip, toast } from "../semi";
+import { Alert, ListSkeleton } from "../semi/feedback";
+import { Field, Input, Select, Switch } from "../semi/controls";
+import { Modal, Popconfirm, Tooltip } from "../semi/overlays";
+import { Tag } from "../semi/data";
+import { toast } from "../semi/toast";
 import { LocalDirectoryPicker } from "./LocalDirectoryPicker";
 import { FilenameStrategy } from "./FilenameStrategy";
 import { copyToClipboard } from "../common/CommonUI";
@@ -110,7 +114,7 @@ export function StorageManagement() {
       {kinds.map(kind => <div className="storage-media-row" role="group" aria-label={t(`storage.kind.${kind}`)} key={kind}>
         <span className="storage-media-name">{t(`storage.kind.${kind}`)}</span>
         <div className="storage-media-mode"><Switch checked={Boolean(draft.rules[kind])} ariaLabel={`${t(`storage.kind.${kind}`)} ${t("单独设置")}`} onChange={custom => { const rules = { ...draft.rules }; if (custom) rules[kind] = { ...draft.default }; else delete rules[kind]; update({ ...draft, rules }); }} /><span>{t(draft.rules[kind] ? "单独设置" : "使用默认")}</span></div>
-        {draft.rules[kind] ? ruleFields(kind, { ...draft.rules[kind]!, separateFolder: draft.rules[kind]?.separateFolder ?? draft.default.separateFolder }) : <div className="storage-inherited-summary"><Tag>{t("使用默认")}</Tag><span>{target?.name || target?.id} · {target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root}</span><span>{directoryOptions().find(option => option.value === draft.default.directoryTemplate)?.label || t("保留现有分类方式")}</span><span>{t("命名策略")}: {draft.default.filenameTemplate.replace(/\{(text|tweet_id|media_id|username|index|ext)\}/g, (_token, field: string) => t(({ text: "正文", tweet_id: "推文编号", media_id: "媒体编号", username: "用户名", index: "媒体序号", ext: "扩展名" } as Record<string, string>)[field]))}</span></div>}
+        {draft.rules[kind] ? ruleFields(kind, { ...draft.rules[kind]!, separateFolder: draft.rules[kind]?.separateFolder ?? draft.default.separateFolder }) : <div className="storage-inherited-summary"><span>{target?.name || target?.id} · {target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root}</span><span>{directoryOptions().find(option => option.value === draft.default.directoryTemplate)?.label || t("保留现有分类方式")}</span><span>{t("命名策略")}: {draft.default.filenameTemplate.replace(/\{(text|tweet_id|media_id|username|index|ext)\}/g, (_token, field: string) => t(({ text: "正文", tweet_id: "推文编号", media_id: "媒体编号", username: "用户名", index: "媒体序号", ext: "扩展名" } as Record<string, string>)[field]))}</span></div>}
         <StoragePathPreview document={draft} kind={kind} tweet={tweets.data?.items[0]} />
       </div>)}
     </div>
