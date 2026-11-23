@@ -642,3 +642,38 @@ it("staggers batch downloads and delays URL.revokeObjectURL by 60s instead of 0m
     revokeURL.mockRestore();
   }
 });
+
+it("supports Shift+Click range selection and click-to-zoom inside the lightbox", async () => {
+  const threeRecords = [
+    { ...records[0], id: 11, filePath: "/downloads/p1.jpg", fileUrl: "/api/library/downloads/11/file" },
+    { ...records[0], id: 12, filePath: "/downloads/p2.jpg", fileUrl: "/api/library/downloads/12/file" },
+    { ...records[0], id: 13, filePath: "/downloads/p3.jpg", fileUrl: "/api/library/downloads/13/file" },
+  ];
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(threeRecords)));
+  renderGallery();
+
+  await screen.findByText("p1.jpg");
+  const cb1 = screen.getByRole("checkbox", { name: "选择文件 p1.jpg" }) as HTMLInputElement;
+  const cb2 = screen.getByRole("checkbox", { name: "选择文件 p2.jpg" }) as HTMLInputElement;
+  const cb3 = screen.getByRole("checkbox", { name: "选择文件 p3.jpg" }) as HTMLInputElement;
+
+  fireEvent.click(cb1);
+  expect(cb1.checked).toBe(true);
+
+  fireEvent.click(cb3, { shiftKey: true });
+  expect(cb1.checked).toBe(true);
+  expect(cb2.checked).toBe(true);
+  expect(cb3.checked).toBe(true);
+
+  await userEvent.click(screen.getByRole("button", { name: "查看图片 p1.jpg" }));
+  const dialog = screen.getByRole("dialog");
+  const previewImg = within(dialog).getByRole("img", { name: "p1.jpg" });
+  const frame = previewImg.closest(".gallery-preview-frame")!;
+  expect(frame.className).not.toContain("gallery-preview-frame-zoomed");
+
+  await userEvent.click(previewImg);
+  expect(frame.className).toContain("gallery-preview-frame-zoomed");
+
+  await userEvent.click(previewImg);
+  expect(frame.className).not.toContain("gallery-preview-frame-zoomed");
+});

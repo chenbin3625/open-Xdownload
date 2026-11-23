@@ -2,6 +2,7 @@ import { t, useTranslation } from "../../lib/i18n";
 import {
   Clock,
   Download,
+  Eraser,
   Link as LinkIcon,
   List as ListIcon,
   Plus,
@@ -21,6 +22,7 @@ import {
   type TweetData,
   type ArchiveMode,
 } from "../../lib/api";
+import { detectQuickInputTab } from "../../lib/quickInput";
 import { formatIntervalMinutes, notifyError } from "../common/CommonUI";
 import { invalidateWorkbenchQueries } from "../../lib/useDashboardEvents";
 import Button from "@douyinfe/semi-ui/lib/es/button";
@@ -29,6 +31,8 @@ import { Checkbox, Tabs, type TabItem, Field, Input, NumberInput, Select, Textar
 import { Modal } from "../semi/overlays";
 import { Tag } from "../semi/data";
 import { toast } from "../semi/toast";
+
+export { detectQuickInputTab };
 
 export interface CreateJobModalProps {
   open: boolean;
@@ -98,8 +102,6 @@ const reservedProfilePaths = new Set([
   "privacy",
 ]);
 const xLinkPattern = /^(?:https?:\/\/)?(?:(?:www|mobile)\.)?(?:x|twitter)\.com(?:[/?#]|$)/i;
-const tweetStatusPattern = /\/status\/\d+/;
-const listLinkPattern = /(?:^|\/)(?:i\/)?lists\/\d+/;
 
 function normalizeTweetURL(input: string) {
   const trimmed = input.trim();
@@ -119,17 +121,6 @@ export function parseScreenName(input: string): string | null {
   if (plainUserId) return plainUserId[1];
   const plainHandle = trimmed.match(plainHandlePattern);
   return plainHandle ? plainHandle[1] : null;
-}
-
-// 顶部快捷输入框的分流：推文链接 → 单条推文，列表链接/纯数字 → 列表，其余 → 用户。
-export function detectQuickInputTab(input: string): "tweet_link" | "list" | "user" {
-  const trimmed = input.trim();
-  if (tweetStatusPattern.test(trimmed)) return "tweet_link";
-  // 纯数字 ID 更常见的是用户 ID（列表 ID 也会走到这里，后端两种都能解析；
-  // 之前的实现判成 list，导致粘贴用户 ID 后必须手动切 tab）。
-  if (/^\d{5,}$/.test(trimmed)) return "user";
-  if (listLinkPattern.test(trimmed)) return "list";
-  return "user";
 }
 
 export interface BatchInputLine {
@@ -201,31 +192,45 @@ export function parseBatchInput(raw: string, kind: JobKind): BatchInputSummary {
 
 type BatchTabMeta = ReturnType<typeof getBatchTabs>[number];
 
-function BatchTabContent({ tab, summary, value, onValueChange, onRemoveLine }: {
+function BatchTabContent({ tab, summary, value, onValueChange, onRemoveLine, onCleanLines }: {
   tab: BatchTabMeta;
   summary: ReturnType<typeof parseBatchInput>;
   value: string;
   onValueChange: (value: string) => void;
   onRemoveLine: (kind: BatchKind, lineNumber: number) => void;
+  onCleanLines: (kind: BatchKind) => void;
 }) {
   useTranslation();
+  const hasProblems = summary.duplicates > 0 || summary.invalid > 0;
   return (
     <div className="space-y-3 pt-1">
-      <div className="flex items-center justify-between text-xs text-fg-muted">
+      <div className="flex items-center justify-between gap-2 text-xs text-fg-muted">
         <span>{tab.hint}</span>
         <span className="shrink-0 whitespace-nowrap font-semibold text-brand-600 tabular-nums">
           {t("待校验目标")} {summary.items.length} {t(" 个")}</span>
       </div>
-      {(summary.recognized > 0 || summary.pendingValidation > 0 || summary.duplicates > 0 || summary.invalid > 0) && (
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-subtle tabular-nums" aria-live="polite">
-          {summary.recognized > 0 && <span>{t("格式有效")} {summary.recognized}</span>}
-          {summary.pendingValidation > 0 && <span>{t("待后端校验")} {summary.pendingValidation}</span>}
-          {summary.duplicates > 0 && <span className="text-warning-strong">{t("重复目标")} {summary.duplicates}</span>}
-          {summary.invalid > 0 && <span className="text-danger">{t("无效格式")} {summary.invalid}</span>}
+      {(summary.recognized > 0 || summary.pendingValidation > 0 || hasProblems) && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-subtle tabular-nums" aria-live="polite">
+            {summary.recognized > 0 && <span>{t("格式有效")} {summary.recognized}</span>}
+            {summary.pendingValidation > 0 && <span>{t("待后端校验")} {summary.pendingValidation}</span>}
+            {summary.duplicates > 0 && <span className="text-warning-strong">{t("重复目标")} {summary.duplicates}</span>}
+            {summary.invalid > 0 && <span className="text-danger">{t("无效格式")} {summary.invalid}</span>}
+          </div>
+          {hasProblems && (
+            <Button
+              size="small"
+              type="tertiary"
+              icon={<Eraser className="size-3.5" />}
+              onClick={() => onCleanLines(tab.kind)}
+            >
+              {t("清理无效与重复行")}
+            </Button>
+          )}
         </div>
       )}
       <Textarea
-        rows={6}
+        rows={5}
         aria-label={tab.label}
         value={value}
         onChange={(e) => onValueChange(e.target.value)}
@@ -233,7 +238,7 @@ function BatchTabContent({ tab, summary, value, onValueChange, onRemoveLine }: {
         className="font-mono text-xs"
       />
       {summary.lines.length > 0 && (
-        <div className="space-y-1.5" aria-label={t("逐行校验结果")}>
+        <div className="create-job-validation-list space-y-1.5" aria-label={t("逐行校验结果")}>
           {summary.lines.map(line => (
             <div key={`${tab.kind}-${line.lineNumber}`} className="flex min-w-0 items-center gap-2 text-xs">
               <span className="w-12 shrink-0 text-fg-subtle tabular-nums">{t("第 {{value0}} 行", { value0: line.lineNumber })}</span>
@@ -388,6 +393,24 @@ export function CreateJobModal({
     });
   }
 
+  function cleanBatchLines(kind: BatchKind) {
+    const raw = batchInputs[kind] ?? "";
+    const parsed = parseBatchInput(raw, kind);
+    const badLineNumbers = new Set(
+      parsed.lines
+        .filter(line => line.status === "invalid" || line.status === "duplicate")
+        .map(line => line.lineNumber),
+    );
+    if (badLineNumbers.size === 0) return;
+    const kept = raw
+      .split(/\r?\n/)
+      .filter((_line, index) => !badLineNumbers.has(index + 1));
+    setBatchInputs(current => ({ ...current, [kind]: kept.join("\n") }));
+    toast.success({
+      message: t("已清理 {{value0}} 行无效或重复目标", { value0: badLineNumbers.size }),
+    });
+  }
+
   const parseMutation = useMutation({
     mutationFn: ({ url }: { url: string; sequence: number }) => parseTweetLink(url),
     onSuccess: (data, request) => {
@@ -503,6 +526,7 @@ export function CreateJobModal({
           value={batchInputs[tab.kind] ?? ""}
           onValueChange={value => setBatchInputs(current => ({ ...current, [tab.kind]: value }))}
           onRemoveLine={removeBatchLine}
+          onCleanLines={cleanBatchLines}
         />
       ) : null,
     })),
@@ -530,6 +554,25 @@ export function CreateJobModal({
     activeTab === "tweet_link"
       ? Boolean(tweetUrl.trim())
       : currentBatchItems.length > 0;
+
+  const submitDisabled =
+    !canSubmit ||
+    createJobsMutation.isPending ||
+    (scheduleMode &&
+      (intervalMinutes === null ||
+        !Number.isInteger(intervalMinutes) ||
+        intervalMinutes < 5 ||
+        intervalMinutes > 43200 ||
+        (archiveMode !== "media" && limitTargets && (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1000))));
+
+  const handleModalKeyDown = (event: React.KeyboardEvent) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing) {
+      if (!submitDisabled) {
+        event.preventDefault();
+        createJobsMutation.mutate();
+      }
+    }
+  };
 
   return (
     <Modal
@@ -564,7 +607,7 @@ export function CreateJobModal({
               {t("取消")}</Button>
             <Button
               theme="solid"
-              disabled={!canSubmit || createJobsMutation.isPending || (scheduleMode && (intervalMinutes === null || !Number.isInteger(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 43200 || (archiveMode !== "media" && limitTargets && (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1000))))}
+              disabled={submitDisabled}
               loading={createJobsMutation.isPending}
               aria-busy={createJobsMutation.isPending}
               onClick={() => createJobsMutation.mutate()}
@@ -580,12 +623,37 @@ export function CreateJobModal({
         </div>
       }
     >
-      <div className="space-y-4 py-1">
-        {activeTab !== "tweet_link" && <RadioGroup aria-label={t("执行方式")} type="button" value={isSchedule ? "schedule" : "once"} onChange={event => setIsSchedule(event.target.value === "schedule")} options={[{ value: "once", label: t("立即执行") }, { value: "schedule", label: t("定时计划") }]} />}
-        <Field label={t("archive.mode")} className="mb-4">
-          <Select value={archiveMode} onChange={value => setArchiveMode(value as ArchiveMode)} ariaLabel={t("archive.mode")} options={[{ value: "both", label: t("archive.both") }, { value: "tweets", label: t("archive.textOnly") }, { value: "media", label: t("archive.mediaOnly") }]} />
-        </Field>
-        {activeTab !== "tweet_link" && archiveMode !== "media" && <div className="mb-4"><Checkbox checked={backfill} onChange={setBackfill} label={t("archive.backfill")} /></div>}
+      <div className="space-y-4 py-1" onKeyDown={handleModalKeyDown}>
+        <div className="create-job-options-bar">
+          {activeTab !== "tweet_link" && (
+            <Field label={t("执行方式")}>
+              <RadioGroup
+                aria-label={t("执行方式")}
+                type="button"
+                value={isSchedule ? "schedule" : "once"}
+                onChange={event => setIsSchedule(event.target.value === "schedule")}
+                options={[{ value: "once", label: t("立即执行") }, { value: "schedule", label: t("定时计划") }]}
+              />
+            </Field>
+          )}
+          <Field label={t("archive.mode")}>
+            <Select
+              value={archiveMode}
+              onChange={value => setArchiveMode(value as ArchiveMode)}
+              ariaLabel={t("archive.mode")}
+              options={[
+                { value: "both", label: t("archive.both") },
+                { value: "tweets", label: t("archive.textOnly") },
+                { value: "media", label: t("archive.mediaOnly") },
+              ]}
+            />
+          </Field>
+        </div>
+        {activeTab !== "tweet_link" && archiveMode !== "media" && (
+          <div>
+            <Checkbox checked={backfill} onChange={setBackfill} label={t("archive.backfill")} />
+          </div>
+        )}
         <Tabs
           value={activeTab}
           onChange={(key) => {

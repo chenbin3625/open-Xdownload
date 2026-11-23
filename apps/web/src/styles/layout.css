@@ -69,12 +69,31 @@
   flex-shrink: 0;
 }
 
+.header-quick-suffix {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+}
+
 .header-actions {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 4px;
   margin-left: auto;
+}
+
+/* ---------------- 登录与初始化卡片 ---------------- */
+
+.auth-card {
+  width: 100%;
+  max-width: 26rem;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-large, var(--semi-border-radius-medium));
+  background: var(--surface);
+  box-shadow: var(--semi-shadow-elevated, 0 4px 14px rgba(0, 0, 0, 0.06));
 }
 
 /* ---------------- 移动端底部导航 ---------------- */

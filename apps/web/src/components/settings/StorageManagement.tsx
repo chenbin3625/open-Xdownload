@@ -99,7 +99,7 @@ export function StorageManagement() {
       <Field label={t("命名策略")} className={kind !== "default" ? "storage-media-field" : undefined}><FilenameStrategy disabled={inherited} labelPrefix={kind === "default" ? "" : t(`storage.kind.${kind}`)} value={rule.filenameTemplate} onChange={filenameTemplate => { if (filenameTemplate !== rule.filenameTemplate) change({ filenameTemplate }); }} /></Field>
     </>;
   }
-  return <section className="semi-settings-section storage-settings">
+  return <section id="settings-storage" className="semi-settings-section storage-settings">
     <div className="settings-section-heading"><h2 className="settings-section-title"><HardDrive size={16} />{t("存储设置")}</h2><div className="flex flex-wrap items-center gap-2">{dirty && <Tag tone="warning">{t("storage.unsaved")}</Tag>}<Button theme="solid" icon={<Save size={16} />} disabled={!dirty || save.isPending} loading={save.isPending} onClick={() => save.mutate(draft)}>{t("保存存储设置")}</Button></div></div>
     <div className="storage-location">
       <h3 className="settings-subsection-title">{t("storage.location")}</h3>

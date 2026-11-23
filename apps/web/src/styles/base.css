@@ -17,6 +17,41 @@ body {
   }
 }
 
+/* 自定义按钮与可点击卡片的统一键盘焦点环 */
+:where(
+  .task-title-link,
+  .task-stat-button,
+  .schedule-summary-btn,
+  .tweet-author,
+  .tweet-detail-file,
+  .tweet-media-item button,
+  .gallery-preview-nav,
+  .settings-jump-link
+):focus-visible {
+  outline: 2px solid var(--semi-color-focus-border, var(--semi-color-primary));
+  outline-offset: 2px;
+  border-radius: var(--semi-border-radius-small);
+}
+
+/* 轻量快捷键提示胶囊 */
+.kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-small);
+  background: var(--canvas);
+  color: var(--fg-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  user-select: none;
+}
+
 /* 顶部全局加载条（GlobalLoadingBar） */
 .global-loading-bar {
   z-index: var(--z-loading);

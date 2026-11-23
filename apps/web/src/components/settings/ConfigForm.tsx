@@ -1,8 +1,10 @@
 import { t, useTranslation } from "../../lib/i18n";
 import {
   Download,
+  HardDrive,
   RefreshCw,
   Save,
+  Users,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -101,6 +103,24 @@ export function ConfigForm({
     onError: notifyError(t("保存失败")),
   });
 
+  const saveHandlerRef = useRef<() => void>(() => {});
+  saveHandlerRef.current = () => {
+    if (!draftDirty || mutation.isPending) return;
+    mutation.mutate(configDiff(draftBase, draft));
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+        if (!draftDirty || mutation.isPending) return;
+        event.preventDefault();
+        saveHandlerRef.current();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [draftDirty, mutation.isPending]);
+
   // 重新加载：丢弃草稿并拉取服务器最新配置。
   // dirty 时由 Popconfirm 二次确认（见下方按钮），避免误点丢掉未保存的修改。
   function reloadConfig() {
@@ -164,12 +184,18 @@ export function ConfigForm({
         </div>
       </div>
 
+      <nav className="settings-jump-nav" aria-label={t("快速跳转")}>
+        <a href="#settings-download" className="settings-jump-link"><Download size={14} />{t("下载与归档")}</a>
+        <a href="#settings-storage" className="settings-jump-link"><HardDrive size={14} />{t("存储设置")}</a>
+        <a href="#settings-x-accounts" className="settings-jump-link"><Users size={14} />{t("X 账号池")}</a>
+      </nav>
+
       <div className="settings-general-bar">
         <LanguageSettings />
         <AccountSecurity compact />
       </div>
 
-      <section className="semi-settings-section settings-download">
+      <section id="settings-download" className="semi-settings-section settings-download">
         <h2 className="settings-section-title"><Download size={16} className="shrink-0" />{t("下载与归档")}</h2>
         <DownloadSettingsFields draft={draft} onChange={updateDraft} envOverridden={envOverridden} />
       </section>

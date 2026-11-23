@@ -125,4 +125,23 @@ describe("AppHeader", () => {
     render(<AppHeader {...baseProps} showMenuButton />);
     expect(screen.getByRole("button", { name: "打开导航菜单" })).not.toBeNull();
   });
+
+  it("支持 / 和 Cmd+K 快捷键聚焦并实时识别目标类型", async () => {
+    const user = userEvent.setup();
+    render(<AppHeader {...baseProps} />);
+    const input = screen.getByLabelText("快速解析输入") as HTMLInputElement;
+    expect(document.activeElement).not.toBe(input);
+
+    await user.keyboard("/");
+    expect(document.activeElement).toBe(input);
+
+    await user.type(input, "@openai");
+    expect(screen.getByText("用户归档")).not.toBeNull();
+
+    await user.keyboard("{Escape}");
+    expect(document.activeElement).not.toBe(input);
+
+    await user.keyboard("{Control>}k{/Control}");
+    expect(document.activeElement).toBe(input);
+  });
 });

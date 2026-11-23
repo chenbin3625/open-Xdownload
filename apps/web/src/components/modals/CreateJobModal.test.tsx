@@ -376,4 +376,18 @@ describe("CreateJobModal", () => {
       author: { id: "OpenAI", screenName: "OpenAI", name: "OpenAI" }, media: [],
     }));
   });
+
+  it("supports one-click cleanup of invalid and duplicate lines in batch textarea", async () => {
+    const user = userEvent.setup();
+    renderModal();
+
+    const textarea = screen.getByPlaceholderText(/elonmusk/) as HTMLTextAreaElement;
+    await user.type(textarea, "alice{Enter}invalid user name!{Enter}@alice{Enter}bob");
+
+    const cleanBtn = screen.getByRole("button", { name: "清理无效与重复行" });
+    await user.click(cleanBtn);
+
+    expect(textarea.value).toBe("alice\nbob");
+    expect(screen.queryByRole("button", { name: "清理无效与重复行" })).toBeNull();
+  });
 });

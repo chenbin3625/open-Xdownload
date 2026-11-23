@@ -425,3 +425,24 @@ it("drops deleted tweets during snapshot merge even when new tweets arrive and c
   });
   await waitFor(() => expect(new URLSearchParams(window.location.search).get("page")).toBeNull());
 });
+
+it("navigates archived tweet media lightbox with ArrowRight and ArrowLeft keys", async () => {
+  const second = { ...tweet.downloads[0], id: 88, filePath: "asset:photo/second.jpg", fileUrl: "/api/assets/second" };
+  vi.mocked(getTweets).mockResolvedValue({
+    items: [{ ...tweet, downloads: [tweet.downloads[0], second] }],
+    pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+  });
+  const user = userEvent.setup();
+  renderArchive();
+  await screen.findByText("Quoted text available offline");
+
+  await user.click(screen.getByRole("button", { name: /查看图片.*alice.*123.*7/ }));
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByRole("img", { name: "@alice · 123" }).getAttribute("src")).toBe("/api/assets/original");
+
+  fireEvent.keyDown(window, { key: "ArrowRight" });
+  expect(within(dialog).getByRole("img", { name: "@alice · 123" }).getAttribute("src")).toBe("/api/assets/second");
+
+  fireEvent.keyDown(window, { key: "ArrowLeft" });
+  expect(within(dialog).getByRole("img", { name: "@alice · 123" }).getAttribute("src")).toBe("/api/assets/original");
+});

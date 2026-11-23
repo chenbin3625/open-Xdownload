@@ -88,11 +88,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <main className="auth-page flex min-h-dvh items-center justify-center bg-canvas px-5 py-10">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 flex items-center gap-3">
+    <main className="auth-page flex min-h-dvh items-center justify-center bg-canvas px-4 py-10">
+      <div className="auth-card">
+        <div className="mb-7 flex items-center gap-3">
           <img src="/icon.svg" alt="" className="size-10 shrink-0" />
-          <span className="min-w-0 break-words text-2xl font-semibold text-fg">open-Xdownload</span>
+          <div className="min-w-0">
+            <span className="block min-w-0 break-words text-xl font-semibold leading-7 text-fg">open-Xdownload</span>
+            <p className="mt-0.5 text-xs text-fg-muted">{t("推文多媒体归档工作台")}</p>
+          </div>
         </div>
         {loadError ? (
           <div className="space-y-4">
@@ -113,7 +116,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               setSession({ configured: true, authenticated: true, username });
             }}
           />
-        ) : <div role="status" aria-label={t("正在检查登录状态")}><Spinner className="size-5 text-brand-500" /></div>}
+        ) : (
+          <div role="status" aria-label={t("正在检查登录状态")} className="flex justify-center py-8">
+            <Spinner className="size-5 text-brand-500" />
+          </div>
+        )}
       </div>
     </main>
   );
@@ -160,8 +167,8 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
 
   return (
     <form onSubmit={submit} className="space-y-5">
-      <h1 className="text-xl font-semibold text-fg">{setup ? t("创建账号") : t("登录")}</h1>
-      {notice && <p role="status" className="text-sm text-fg-muted">{notice}</p>}
+      <h1 className="text-lg font-semibold text-fg">{setup ? t("创建账号") : t("登录")}</h1>
+      {notice && <p role="status" className="rounded-control bg-surface-muted px-3 py-2 text-xs text-fg-muted">{notice}</p>}
       <Field label={t("用户名")}>
         <Input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required maxLength={64} autoFocus disabled={pending} />
       </Field>

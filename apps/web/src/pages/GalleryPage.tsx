@@ -220,7 +220,7 @@ const GalleryCard = React.memo(function GalleryCard({
                     decoding="async"
                     referrerPolicy={imageSource === remoteThumbnail ? "no-referrer" : undefined}
                     onError={() => { if (imageSource !== localThumbnail) setImageSource(localThumbnail); else setImageFailed(true); }}
-                    className={`relative z-10 h-full w-full ${thumbnailFit === "cover" ? "object-cover" : "object-contain"}`}
+                    className={`relative z-10 h-full w-full ${thumbnailFit === "cover" ? "object-cover" : "object-contain"} transition-transform duration-200 group-hover/img:scale-[1.03]`}
                   />
                 </button>
               )}
@@ -367,12 +367,16 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   );
 
   const [previewId, setPreviewId] = useState<string | null>(null);
+  const [previewZoomed, setPreviewZoomed] = useState(false);
   const [view, setView] = useState(() => { try { return localStorage.getItem("gallery-view") === "list" ? "list" : "grid"; } catch { return "grid"; } });
   const [density, setDensity] = useState(() => { try { return localStorage.getItem("gallery-density") === "compact" ? "compact" : "standard"; } catch { return "standard"; } });
   const [thumbnailFit, setThumbnailFit] = useState<"contain" | "cover">(() => { try { return localStorage.getItem("gallery-thumbnail-fit") === "cover" ? "cover" : "contain"; } catch { return "contain"; } });
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const lastSelectedKeyRef = useRef<string | null>(null);
+  const shiftSelectRef = useRef(false);
+  useEffect(() => { setPreviewZoomed(false); }, [previewId]);
   useEffect(() => { try { localStorage.setItem("gallery-view", view); localStorage.setItem("gallery-density", density); localStorage.setItem("gallery-thumbnail-fit", thumbnailFit); } catch { /* Storage may be unavailable in private browsing. */ } }, [view, density, thumbnailFit]);
-  useEffect(() => { setSelected(new Set()); }, [filter.page, filter.kind, filter.user, filter.search, filter.sort, filter.from, filter.to, filter.minBytes, filter.maxBytes]);
+  useEffect(() => { setSelected(new Set()); lastSelectedKeyRef.current = null; }, [filter.page, filter.kind, filter.user, filter.search, filter.sort, filter.from, filter.to, filter.minBytes, filter.maxBytes]);
   const pageSize = galleryPageSize;
   // 输入框即时响应，查询键用 300ms 防抖后的值。
   const debouncedSearch = useDebouncedValue(filter.search, GALLERY_SEARCH_DEBOUNCE_MS);
@@ -765,7 +769,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           { key: "bytes", label: filter.minBytes || filter.maxBytes ? `${filter.minBytes ? formatBytes(Number(filter.minBytes)) : t("不限")} ~ ${filter.maxBytes ? formatBytes(Number(filter.maxBytes)) : t("不限")}` : "", patch: { minBytes: "", maxBytes: "" } },
         ].filter(item => item.label).map(item => <Button className="filter-chip" size="small" type="tertiary" icon={<X size={12} />} iconPosition="right" key={item.key} onClick={() => updateFilter({ ...item.patch, page: 1 })} aria-label={`${t("移除筛选")} ${item.label}`}>{item.label}</Button>)}
       </div>}
-      <div className="gallery-result-bar">
+      <div className={`gallery-result-bar${selectedEntries.length > 0 ? " gallery-result-bar-active" : ""}`}>
         <Checkbox checked={Boolean(visibleEntries.length) && selectedEntries.length === visibleEntries.length} indeterminate={selectedEntries.length > 0 && selectedEntries.length < visibleEntries.length} disabled={selectionDisabled || !visibleEntries.length} onChange={event => setSelected(event.target.checked ? new Set(visibleEntries.map(({ item }) => entryKey(item))) : new Set())}>{t("选择本页")}</Checkbox>
         <span className="text-xs text-fg-muted" aria-live="polite">{rangeError ? `${t("筛选结果")} —` : libraryQuery.isPlaceholderData && libraryQuery.isFetching ? t("正在应用筛选...") : `${t("筛选结果")} ${totalEntries} ${t("项")}`}</span>
         {selectedEntries.length > 0 && <div className="gallery-batch-actions"><span className="text-xs">{t("已选")} {selectedEntries.length}</span><Button size="small" type="tertiary" icon={<Copy size={14} />} disabled={selectionDisabled} onClick={() => void copyToClipboard(selectedEntries.map(({ item }) => item.filePath).join("\n"), t("所选文件路径"))}>{t("复制路径")}</Button><Button size="small" type="tertiary" icon={<Download size={14} />} disabled={selectionDisabled} onClick={downloadSelected}>{t("批量下载")}</Button><Button size="small" type="tertiary" icon={<ExternalLink size={14} />} disabled={selectionDisabled} onClick={exportSelected}>{t("导出清单")}</Button><Button size="small" theme="borderless" type="tertiary" icon={<X size={14} />} aria-label={t("取消选择")} onClick={() => setSelected(new Set())} /></div>}
@@ -867,12 +871,49 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           />
       ) : (
         <div
-          className={`gallery-${view} gallery-density-${density}${libraryQuery.isFetching ? " opacity-60 transition-opacity" : ""}`}
+          className={`gallery-${view} gallery-density-${density}${selectedEntries.length > 0 ? " gallery-selecting" : ""}${libraryQuery.isFetching ? " opacity-60 transition-opacity" : ""}`}
           aria-busy={libraryQuery.isFetching}
         >
-          {visibleEntries.map(({ item, isVideo, isImage, isGif }) => (
-            <div key={entryKey(item)} className={`gallery-entry${selected.has(entryKey(item)) ? " gallery-entry-selected" : ""}`}>
-            <Checkbox className="gallery-entry-checkbox" aria-label={`${t("选择文件")} ${displayFileName(item)}`} checked={selected.has(entryKey(item))} disabled={selectionDisabled} onChange={event => setSelected(current => { const next = new Set(current); if (event.target.checked) next.add(entryKey(item)); else next.delete(entryKey(item)); return next; })} />
+          {visibleEntries.map(({ item, isVideo, isImage, isGif }, index) => {
+            const key = entryKey(item);
+            return (
+            <div
+              key={key}
+              className={`gallery-entry${selected.has(key) ? " gallery-entry-selected" : ""}`}
+              onClickCapture={(e) => { shiftSelectRef.current = e.shiftKey; }}
+            >
+            <Checkbox
+              className="gallery-entry-checkbox"
+              aria-label={`${t("选择文件")} ${displayFileName(item)}`}
+              checked={selected.has(key)}
+              disabled={selectionDisabled}
+              onChange={event => {
+                const checked = Boolean(event.target.checked);
+                const useRange = Boolean((event.nativeEvent as MouseEvent | undefined)?.shiftKey || shiftSelectRef.current);
+                shiftSelectRef.current = false;
+                setSelected(current => {
+                  const next = new Set(current);
+                  const anchorKey = lastSelectedKeyRef.current;
+                  const anchorIndex = useRange && anchorKey
+                    ? visibleEntries.findIndex(entry => entryKey(entry.item) === anchorKey)
+                    : -1;
+                  if (anchorIndex >= 0) {
+                    const [start, end] = anchorIndex < index ? [anchorIndex, index] : [index, anchorIndex];
+                    for (let i = start; i <= end; i += 1) {
+                      const rangeKey = entryKey(visibleEntries[i].item);
+                      if (checked) next.add(rangeKey);
+                      else next.delete(rangeKey);
+                    }
+                  } else if (checked) {
+                    next.add(key);
+                  } else {
+                    next.delete(key);
+                  }
+                  return next;
+                });
+                lastSelectedKeyRef.current = key;
+              }}
+            />
             <GalleryCard
               key={item.id || item.filePath}
               item={item}
@@ -882,7 +923,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               onOpen={openPreview}
             />
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -908,6 +950,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         onClose={() => {
           setPendingPreviewEdge(null);
           setPreviewId(null);
+          setPreviewZoomed(false);
         }}
         title={
           previewEntry
@@ -922,7 +965,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
           return (
             <div className="flex flex-col">
-              <div className="gallery-preview-frame relative flex items-center justify-center bg-black/95 p-2 overflow-hidden">
+              <div className={`gallery-preview-frame relative flex items-center justify-center bg-black/95 p-2${!isVideo && previewZoomed ? " gallery-preview-frame-zoomed" : " overflow-hidden"}`}>
                 {isVideo ? (
                   <video
                     key={entryKey(item)}
@@ -936,7 +979,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                   <img
                     src={previewURL}
                     alt={fileName}
-                    className="h-full w-full min-h-0 min-w-0 object-contain"
+                    onClick={() => setPreviewZoomed(z => !z)}
+                    className={previewZoomed ? "cursor-zoom-out" : "h-full w-full min-h-0 min-w-0 object-contain cursor-zoom-in"}
                   />
                 )}
 
@@ -946,7 +990,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                   aria-label={t("上一个媒体文件")}
                   disabled={filter.page === 1 && previewIndex === 0 || Boolean(pendingPreviewEdge)}
                   onClick={() => stepPreview(-1)}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
+                  className="gallery-preview-nav absolute left-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
                 >
                   <ChevronLeft className="size-5" />
                 </button>
@@ -955,12 +999,12 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                   aria-label={t("下一个媒体文件")}
                   disabled={filter.page === totalPages && previewIndex === visibleEntries.length - 1 || Boolean(pendingPreviewEdge)}
                   onClick={() => stepPreview(1)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
+                  className="gallery-preview-nav absolute right-3 top-1/2 -translate-y-1/2 flex size-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/90 transition-colors cursor-pointer"
                 >
                   <ChevronRight className="size-5" />
                 </button>
               </div>
-              <div className="gallery-preview-details"><span>{pendingPreviewEdge || libraryQuery.isPlaceholderData ? t("加载中...") : `${((libraryQuery.data?.pagination.page ?? filter.page) - 1) * pageSize + previewIndex + 1} / ${totalEntries}`}</span>{item.jobId > 0 && <a href="/tasks">{t("来源任务")} #{item.jobId}</a>}{item.tweetId && <a href={`/tweets?id=${encodeURIComponent(item.tweetId)}`}>{t("archive.title")} <ExternalLink size={12} /></a>}<code title={item.filePath}>{item.filePath}</code></div>
+              <div className="gallery-preview-details"><span className="tabular-nums">{pendingPreviewEdge || libraryQuery.isPlaceholderData ? t("加载中...") : `${((libraryQuery.data?.pagination.page ?? filter.page) - 1) * pageSize + previewIndex + 1} / ${totalEntries}`}</span><span className="text-fg-subtle">{isVideo ? t("按 ← / → 切换") : t("按 ← / → 切换，点击图片缩放")}</span>{item.jobId > 0 && <a href="/tasks">{t("来源任务")} #{item.jobId}</a>}{item.tweetId && <a href={`/tweets?id=${encodeURIComponent(item.tweetId)}`}>{t("archive.title")} <ExternalLink size={12} /></a>}<code title={item.filePath}>{item.filePath}</code></div>
 
               {/* 弹窗底部操作与详情栏 */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface px-4 py-3 text-xs">

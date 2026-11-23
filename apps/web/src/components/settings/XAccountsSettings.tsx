@@ -582,7 +582,7 @@ export function XAccountsSettings() {
   );
 
   return (
-    <section className="semi-settings-section settings-accounts">
+    <section id="settings-x-accounts" className="semi-settings-section settings-accounts">
       {heading}
       <p className="settings-section-description">
         {t("账号只通过导入 Cookie 添加，用于在多个账号间轮换以降低限流概率。")}

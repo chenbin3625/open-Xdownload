@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Search,
   Trash2,
+  X,
   XCircle,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -80,6 +81,19 @@ const jobKindFilterValues = [
   "media_url",
   "asset_migration",
 ] as const;
+
+function jobKindAvatarColor(kind: Job["kind"]) {
+  const map: Record<string, "blue" | "indigo" | "cyan" | "amber" | "red" | "purple" | "green"> = {
+    user: "blue",
+    list: "indigo",
+    following: "cyan",
+    tweet_link: "amber",
+    failed_retry: "red",
+    media_url: "purple",
+    asset_migration: "green",
+  };
+  return map[kind] ?? "blue";
+}
 
 export interface TaskCenterPageProps {
   jobs: Job[];
@@ -719,31 +733,70 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
       </div>
 
       <div className="task-stats">
-        <Card className="task-stat task-stat-active">
-          <div className="task-stat-label">
-            <span>{t("下载中任务")}</span>
-            <Activity size={16} className={displayStats.active > 0 ? "text-brand-700" : "text-fg-subtle"} />
-          </div>
-          <div className="task-stat-value">{displayStats.active}</div>
-        </Card>
-        <Card className="task-stat task-stat-completed">
-          <div className="task-stat-label">
-            <span>{t("已完成")}</span><CheckCircle2 size={16} className="text-success" />
-          </div>
-          <div className="task-stat-value">{displayStats.completed}</div>
-        </Card>
-        <Card className="task-stat task-stat-failed">
-          <div className="task-stat-label">
-            <span>{t("异常 / 失败")}</span><AlertCircle size={16} className="text-danger" />
-          </div>
-          <div className="task-stat-value">{displayStats.failed}</div>
-        </Card>
-        <Card className="task-stat">
-          <div className="task-stat-label">
-            <span>{t("任务总数")}</span><FolderCheck size={16} />
-          </div>
-          <div className="task-stat-value">{displayStats.total}</div>
-        </Card>
+        <button
+          type="button"
+          className="task-stat-button"
+          aria-pressed={statusFilter === "active"}
+          onClick={() => changeStatusFilter(statusFilter === "active" ? "all" : "active")}
+        >
+          <Card className={cn("task-stat task-stat-active", statusFilter === "active" && "task-stat-selected")}>
+            <div className="task-stat-label">
+              <span>{t("下载中任务")}</span>
+              <span className="task-stat-icon bg-brand-50">
+                <Activity size={15} className={displayStats.active > 0 ? "text-brand-700" : "text-fg-subtle"} />
+              </span>
+            </div>
+            <div className="task-stat-value">{displayStats.active}</div>
+          </Card>
+        </button>
+        <button
+          type="button"
+          className="task-stat-button"
+          aria-pressed={statusFilter === "completed"}
+          onClick={() => changeStatusFilter(statusFilter === "completed" ? "all" : "completed")}
+        >
+          <Card className={cn("task-stat task-stat-completed", statusFilter === "completed" && "task-stat-selected")}>
+            <div className="task-stat-label">
+              <span>{t("已完成")}</span>
+              <span className="task-stat-icon bg-success-soft">
+                <CheckCircle2 size={15} className="text-success" />
+              </span>
+            </div>
+            <div className="task-stat-value">{displayStats.completed}</div>
+          </Card>
+        </button>
+        <button
+          type="button"
+          className="task-stat-button"
+          aria-pressed={statusFilter === "failed"}
+          onClick={() => changeStatusFilter(statusFilter === "failed" ? "all" : "failed")}
+        >
+          <Card className={cn("task-stat task-stat-failed", statusFilter === "failed" && "task-stat-selected")}>
+            <div className="task-stat-label">
+              <span>{t("异常 / 失败")}</span>
+              <span className="task-stat-icon bg-danger-soft">
+                <AlertCircle size={15} className="text-danger" />
+              </span>
+            </div>
+            <div className="task-stat-value">{displayStats.failed}</div>
+          </Card>
+        </button>
+        <button
+          type="button"
+          className="task-stat-button"
+          aria-pressed={statusFilter === "all"}
+          onClick={() => changeStatusFilter("all")}
+        >
+          <Card className={cn("task-stat", statusFilter === "all" && "task-stat-selected")}>
+            <div className="task-stat-label">
+              <span>{t("任务总数")}</span>
+              <span className="task-stat-icon bg-surface-muted">
+                <FolderCheck size={15} className="text-fg-muted" />
+              </span>
+            </div>
+            <div className="task-stat-value">{displayStats.total}</div>
+          </Card>
+        </button>
       </div>
 
       {/* 过滤筛选工具栏 */}
@@ -840,6 +893,55 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
         </div>
       </div>
 
+      {hasActiveFilter && (
+        <div className="active-filter-tags">
+          {statusFilter !== "all" && (
+            <Button
+              size="small"
+              type="tertiary"
+              className="filter-chip"
+              icon={<X size={12} />}
+              iconPosition="right"
+              aria-label={`${t("移除筛选")} ${statusFilter === "active" ? t("下载中") : statusFilter === "completed" ? t("已完成") : t("异常 / 失败")}`}
+              onClick={() => changeStatusFilter("all")}
+            >
+              {t("当前状态")}: {statusFilter === "active" ? t("下载中") : statusFilter === "completed" ? t("已完成") : t("异常 / 失败")}
+            </Button>
+          )}
+          {kindFilter !== "all" && (
+            <Button
+              size="small"
+              type="tertiary"
+              className="filter-chip"
+              icon={<X size={12} />}
+              iconPosition="right"
+              aria-label={`${t("移除筛选")} ${kindLabel(kindFilter as Job["kind"])}`}
+              onClick={() => changeKindFilter("all")}
+            >
+              {t("类型")}: {kindLabel(kindFilter as Job["kind"])}
+            </Button>
+          )}
+          {filterKeyword.trim() !== "" && (
+            <Button
+              size="small"
+              type="tertiary"
+              className="filter-chip"
+              icon={<X size={12} />}
+              iconPosition="right"
+              aria-label={`${t("移除筛选")} ${filterKeyword.trim()}`}
+              onClick={() => changeSearchKeyword("")}
+            >
+              {filterKeyword.trim()}
+            </Button>
+          )}
+          {!(isMobile && filteredJobs.length === 0) && (
+            <Button size="small" theme="borderless" type="tertiary" onClick={clearFilters}>
+              {t("清除筛选")}
+            </Button>
+          )}
+        </div>
+      )}
+
       {selectedJobs.length > 0 && (
         <div className="task-bulk-toolbar" role="toolbar" aria-label={t("批量操作")}>
           <span className="text-xs text-fg-muted">{t("已选择 {{value0}} 个任务", { value0: selectedJobs.length })}</span>
@@ -908,7 +1010,9 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
       )}
       <Drawer open={Boolean(detailJob)} onClose={closeJobDetails} width="min(100vw, 860px)" title={detailJob?.title || t("任务详情")} className="task-detail-drawer">
         {detailJob && <>
-          <JobProgress job={detailJob} />
+          <div className="task-detail-summary">
+            <JobProgress job={detailJob} />
+          </div>
           {retryCreatedJobId && <Alert type="success" message={t("重试任务已创建")} action={<a href={`/tasks?q=${retryCreatedJobId}`} className="text-brand-600">{t("查看新任务")}</a>} />}
           <ExpandedJobDetails key={detailJob.id} job={detailJob} onRetry={() => retry.mutate(detailJob.id)} retryingJobId={retry.isPending ? retry.variables : undefined} />
         </>}
@@ -923,7 +1027,7 @@ const JobTitleCell = React.memo(function JobTitleCell({ job, onOpenDetails }: { 
   useTranslation();
   return (
     <div className="flex min-w-0 items-center gap-2.5 py-0.5">
-      <Avatar>
+      <Avatar color={jobKindAvatarColor(job.kind)}>
         <JobKindIcon kind={job.kind} className="size-4" />
       </Avatar>
       <div className="min-w-0 flex-1">

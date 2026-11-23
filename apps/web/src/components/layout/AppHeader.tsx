@@ -1,12 +1,13 @@
 import { t, useTranslation } from "../../lib/i18n";
 import { ArrowRight, Bell, Menu, RefreshCw, Search, TriangleAlert, WifiOff } from "lucide-react";
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Badge from "@douyinfe/semi-ui/lib/es/badge";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Popover from "@douyinfe/semi-ui/lib/es/popover";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
+import { detectQuickInputTab } from "../../lib/quickInput";
 
 export interface AppHeaderProps {
   refreshPending: boolean;
@@ -19,6 +20,13 @@ export interface AppHeaderProps {
   /** SSE 断开时置真：顶部显示"实时更新已断开"，点击可手动重连。 */
   realtimeDisconnected?: boolean;
   onReconnectRealtime?: () => void;
+}
+
+function isEditableElement(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
 export const AppHeader = React.memo(function AppHeader({
@@ -35,11 +43,42 @@ export const AppHeader = React.memo(function AppHeader({
   useTranslation();
   const [quickInput, setQuickInput] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const quickInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.defaultPrevented) return;
+      // 有弹窗或抽屉打开时不抢夺全局快捷键
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
+      const isCmdK = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
+      const isSlash = event.key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditableElement(event.target);
+      if (isCmdK || isSlash) {
+        event.preventDefault();
+        quickInputRef.current?.focus();
+        quickInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const trimmedInput = quickInput.trim();
+  const detectedKind = useMemo(
+    () => (trimmedInput ? detectQuickInputTab(trimmedInput) : null),
+    [trimmedInput],
+  );
+  const detectedLabel =
+    detectedKind === "tweet_link"
+      ? t("单条推文")
+      : detectedKind === "list"
+        ? t("列表归档")
+        : detectedKind === "user"
+          ? t("用户归档")
+          : "";
 
   const handleSubmit = () => {
-    const trimmed = quickInput.trim();
-    if (!trimmed) return;
-    onQuickSubmit(trimmed);
+    if (!trimmedInput) return;
+    onQuickSubmit(trimmedInput);
     setQuickInput("");
   };
 
@@ -64,22 +103,43 @@ export const AppHeader = React.memo(function AppHeader({
 
         <div className="header-quick-submit">
           <Input
+            ref={quickInputRef}
             value={quickInput}
             onChange={setQuickInput}
             onEnterPress={(event) => { if (!event.nativeEvent.isComposing) handleSubmit(); }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !event.nativeEvent.isComposing) {
+                event.currentTarget.blur();
+              }
+            }}
             placeholder={t("粘贴链接、@用户名或列表 ID")}
             aria-label={t("快速解析输入")}
             enterKeyHint="go"
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
+            showClear
             className="min-w-0 flex-1"
             prefix={<Search size={16} />}
+            suffix={
+              trimmedInput ? (
+                <span className="header-quick-suffix hidden sm:inline-flex" title={t("识别为：{{value0}}", { value0: detectedLabel })}>
+                  <Tag size="small" color={detectedKind === "tweet_link" ? "amber" : detectedKind === "list" ? "indigo" : "blue"}>
+                    {detectedLabel}
+                  </Tag>
+                </span>
+              ) : (
+                <span className="header-quick-suffix hidden sm:inline-flex" title={t("快捷键 ⌘K 或 / 聚焦")} aria-hidden="true">
+                  <kbd className="kbd-hint">/</kbd>
+                </span>
+              )
+            }
           />
           <Button
+            theme={trimmedInput ? "solid" : "light"}
             icon={<ArrowRight size={16} />}
             iconPosition="right"
-            disabled={!quickInput.trim()}
+            disabled={!trimmedInput}
             onClick={handleSubmit}
           >
             {t("解析")}

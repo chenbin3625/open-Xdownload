@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Copy, CornerUpLeft, ExternalLink, FileText, Play, RefreshCw, Repeat2 } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, CornerUpLeft, ExternalLink, FileText, Play, RefreshCw, Repeat2 } from "lucide-react";
 import type { DownloadRecord, Media, TweetData } from "../../lib/api";
 import type { ArchivedTweet } from "../../lib/archive";
 import { t, useTranslation } from "../../lib/i18n";
@@ -212,6 +212,11 @@ export const TweetCard = React.memo(function TweetCard({ tweet, compact, highlig
   retryPending: boolean;
 }) {
   useTranslation();
+  const [copiedText, setCopiedText] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+  }, []);
   const display = resolveTweetDisplay(tweet);
   const shown = display.tweet;
   const { main, byRelated } = splitRelatedDownloads(tweet.downloads, display.quotes);
@@ -219,6 +224,16 @@ export const TweetCard = React.memo(function TweetCard({ tweet, compact, highlig
   const hasMedia = shown.media.length > 0 || display.quotes.some(q => q.media.length > 0);
   const retryable = hasMedia && !["completed", "not_requested"].includes(tweet.mediaStatus);
   const safeOriginalUrl = /^https?:\/\//i.test(shown.url ?? "") ? shown.url : undefined;
+  const handleCopyText = () => {
+    void copyToClipboard(shown.text, t("正文")).then(() => {
+      setCopiedText(true);
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => {
+        copiedTimerRef.current = null;
+        setCopiedText(false);
+      }, 1500);
+    });
+  };
   return <article className="tweet-entry">
     {display.repostedBy && <a className="tweet-context" href={`/tweets?id=${encodeURIComponent(tweet.retweetedTweetId ?? "")}`}>
       <Repeat2 size={14} aria-hidden="true" />
@@ -250,7 +265,7 @@ export const TweetCard = React.memo(function TweetCard({ tweet, compact, highlig
         </div>
         <div className="tweet-toolbar" role="group" aria-label={t("archive.actions")}>
           <Tooltip content={t("查看归档详情")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<FileText size={16} />} aria-label={t("查看归档详情")} onClick={() => onOpenDetail(tweet.id)} /></Tooltip>
-          <Tooltip content={t("复制正文")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<Copy size={16} />} aria-label={t("复制正文")} onClick={() => void copyToClipboard(shown.text, t("正文"))} /></Tooltip>
+          <Tooltip content={t("复制正文")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={copiedText ? <Check size={16} className="text-success" /> : <Copy size={16} />} aria-label={t("复制正文")} onClick={handleCopyText} /></Tooltip>
           {safeOriginalUrl ? <Tooltip content={t("archive.original")}><a className="tweet-action tweet-original semi-button semi-button-borderless semi-button-tertiary semi-button-with-icon-only" aria-label={t("archive.original")} href={safeOriginalUrl} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a></Tooltip> : <Button className="tweet-action tweet-original" theme="borderless" type="tertiary" icon={<ExternalLink size={16} />} aria-label={t("archive.original")} disabled />}
           {retryable && <Button className="tweet-retry" size="small" theme="borderless" type="tertiary" icon={<RefreshCw size={14} />} loading={retryPending} disabled={retryPending} aria-busy={retryPending} onClick={() => onRetry(tweet.id)}>{t("archive.retryMedia")}</Button>}
           <div className="tweet-relations">{[["replyToId", "archive.reply"], ["quotedTweetId", "archive.quote"], ["retweetedTweetId", "archive.retweet"]].map(([key, label]) => tweet[key as "replyToId" | "quotedTweetId" | "retweetedTweetId"] ? <a key={key} href={`/tweets?id=${encodeURIComponent(tweet[key as "replyToId"]!)}`}>{t(label)} {tweet[key as "replyToId"]}</a> : null)}</div>

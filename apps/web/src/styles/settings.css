@@ -17,7 +17,8 @@
   z-index: var(--z-sticky);
   top: 0;
   margin-bottom: 0;
-  padding-block: 8px 16px;
+  padding-block: 10px 14px;
+  border-bottom: 1px solid var(--line);
   /* 粘性标题必须有实底，否则滚动时下方内容会透出。 */
   background: var(--canvas);
 }
@@ -26,8 +27,40 @@
   gap: 6px;
 }
 
+.settings-jump-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 0 4px;
+}
+
+.settings-jump-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-full);
+  background: var(--surface);
+  color: var(--fg-body);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.settings-jump-link:hover {
+  border-color: var(--semi-color-primary);
+  background: var(--semi-color-primary-light-default);
+  color: var(--semi-color-primary);
+}
+
 .semi-settings-section {
   padding: 20px 0;
+  scroll-margin-top: 72px;
 }
 
 .settings-page .semi-settings-section {
@@ -281,7 +314,14 @@
 .storage-path-preview {
   display: block;
   margin-top: 12px;
-  padding: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--semi-border-radius-small);
+  background: var(--surface-muted);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 18px;
   overflow-wrap: anywhere;
 }
 

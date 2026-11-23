@@ -26,6 +26,16 @@ function sanitizeDateParam(value: string | null) {
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : "";
 }
 
+function isKeyboardOwnedTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  if (target instanceof HTMLMediaElement) return true;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  const editable = target.closest("[contenteditable]");
+  return editable !== null && editable.getAttribute("contenteditable") !== "false";
+}
+
 const MAX_RELATED_NORMALIZE_DEPTH = 4;
 
 // 旧归档数据（包括嵌套的 related 引用/转推）可能缺少数组字段（后端返回 null）。
@@ -85,8 +95,28 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
     const qs = next.toString();
     window.history[replace ? "replaceState" : "pushState"](null, "", `/tweets${qs ? `?${qs}` : ""}`); setFilters(next);
   }, []);
+  const clearAllFilters = useCallback(() => {
+    setSearch("");
+    setAuthor("");
+    change({ id: "", jobId: "", author: "", from: "", to: "", mediaType: "", search: "", retweets: "" });
+  }, [change]);
   useEffect(() => { if (debounced !== (readFilters().get("search") ?? "")) change({ search: debounced }, true); }, [debounced]);
   useEffect(() => { if (debouncedAuthor !== (readFilters().get("author") ?? "")) change({ author: debouncedAuthor }, true); }, [debouncedAuthor]);
+  useEffect(() => {
+    if (!preview) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isKeyboardOwnedTarget(event.target)) return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setPreview(current => current && current.index > 0 ? { ...current, index: current.index - 1 } : current);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setPreview(current => current && current.index < current.tweet.downloads.length - 1 ? { ...current, index: current.index + 1 } : current);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [preview !== null]);
   const compact = filters.get("view") !== "comfortable";
   const retweets = ["exclude", "only"].includes(filters.get("retweets") ?? "") ? filters.get("retweets")! : "";
   const fromDate = sanitizeDateParam(filters.get("from"));
@@ -215,7 +245,7 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
       </div>
       </div>
     </div>
-    {hasActiveFilters && <div className="archive-active-filters active-filter-tags">{(["id", "jobId", "author", "from", "to", "mediaType", "search", "retweets"] as const).map(key => [key, key === "from" ? fromDate : key === "to" ? toDate : key === "retweets" ? retweets : filters.get(key) ?? ""] as const).filter(([, value]) => Boolean(value)).map(([key, value]) => <Button size="small" type="tertiary" className="filter-chip" icon={<X size={12} />} iconPosition="right" key={key} aria-label={`${t("移除筛选")} ${value}`} onClick={() => { if (key === "search") setSearch(""); if (key === "author") setAuthor(""); change({ [key]: "" }); }}>{t(({ id: "推文 ID", jobId: "来源任务", author: "archive.author", from: "开始日期", to: "结束日期", mediaType: "archive.mediaType", search: "archive.search", retweets: "archive.retweetFilter" } as Record<string, string>)[key])}: {value}</Button>)}<Button size="small" theme="borderless" type="tertiary" onClick={() => { setSearch(""); setAuthor(""); change({ id: "", jobId: "", author: "", from: "", to: "", mediaType: "", search: "", retweets: "" }); }}>{t("archive.clearFilters")}</Button></div>}
+    {hasActiveFilters && <div className="archive-active-filters active-filter-tags">{(["id", "jobId", "author", "from", "to", "mediaType", "search", "retweets"] as const).map(key => [key, key === "from" ? fromDate : key === "to" ? toDate : key === "retweets" ? retweets : filters.get(key) ?? ""] as const).filter(([, value]) => Boolean(value)).map(([key, value]) => <Button size="small" type="tertiary" className="filter-chip" icon={<X size={12} />} iconPosition="right" key={key} aria-label={`${t("移除筛选")} ${value}`} onClick={() => { if (key === "search") setSearch(""); if (key === "author") setAuthor(""); change({ [key]: "" }); }}>{t(({ id: "推文 ID", jobId: "来源任务", author: "archive.author", from: "开始日期", to: "结束日期", mediaType: "archive.mediaType", search: "archive.search", retweets: "archive.retweetFilter" } as Record<string, string>)[key])}: {value}</Button>)}<Button size="small" theme="borderless" type="tertiary" onClick={clearAllFilters}>{t("archive.clearFilters")}</Button></div>}
     <div className="archive-results-bar">
       {page && <span className="archive-result-count" aria-live="polite">{t("archive.total", { count: page.pagination.total })}</span>}
     </div>
@@ -223,7 +253,7 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
     {newRecords > 0 && <Button className="archive-new-records" icon={<RefreshCw size={14} />} onClick={() => { if (tweets.data) setSnapshot({ key: queryIdentity, page: tweets.data }); }}>{t("有 {{count}} 条新记录", { count: newRecords })}</Button>}
     {tweets.isError && <Alert type="error" message={tweets.error.message} action={<Button onClick={() => void tweets.refetch()}>{t("重试")}</Button>} />}
     {!page && tweets.isLoading && <ListSkeleton />}
-    {page?.items.length === 0 && <Empty description={hasActiveFilters ? t("没有匹配的推文") : t("archive.empty")} />}
+    {page?.items.length === 0 && <Empty description={hasActiveFilters ? t("没有匹配的推文") : t("archive.empty")}>{hasActiveFilters && <Button type="tertiary" onClick={clearAllFilters}>{t("archive.clearFilters")}</Button>}</Empty>}
     <div className="tweet-list">{page?.items.map(tweet => (
       <TweetCard
         key={tweet.id}
@@ -239,7 +269,7 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
       />
     ))}</div>
     {page && <Pagination page={page.pagination.page} pageSize={page.pagination.pageSize} total={page.pagination.total} onPageChange={value => change({ page: String(value) })} onPageSizeChange={value => change({ pageSize: String(value) })} />}
-    <Drawer open={Boolean(detail)} onClose={() => setDetailId(null)} title={detail ? `@${detail.author?.screenName ?? ""}` : t("归档详情")} width="44rem">{detail && <div className="space-y-4"><div className="text-xs text-fg-muted">{t("推文 ID")}: {detail.id} · {formatDateTime(detail.createdAt)}</div><TweetText text={detailReposted?.text ?? detail.text} compact={false} highlight={debounced} />{detail.related?.filter(related => related.id !== detailReposted?.id).map(related => <blockquote className="tweet-related" key={related.id}><a href={`/tweets?id=${encodeURIComponent(related.id)}`}>@{related.author?.screenName ?? ""}</a><TweetText text={related.text} compact={false} highlight={debounced} /></blockquote>)}<div className="tweet-archive-meta">{t("归档于")} {formatDateTime(detail.archivedAt)}<span>{t("来源任务")}: {detail.jobIds.map(id => `#${id}`).join(", ") || "—"}</span></div>{detail.downloads.map(record => <button className="tweet-detail-file" key={record.id} onClick={() => setPreview({ tweet: detail, index: Math.max(0, detail.downloads.findIndex(item => item.id === record.id)) })}><FileText size={16} /><span>{record.filePath.split(/[\\/]/).pop()}</span><ExternalLink size={14} /></button>)}<div className="flex gap-2"><Button icon={<Copy size={16} />} onClick={() => void copyToClipboard(detail.url, t("推文链接"))}>{t("复制链接")}</Button>{/^https?:\/\//i.test(detail.url) && <a href={detail.url} target="_blank" rel="noreferrer" className="text-sm text-brand-600">{t("archive.original")}</a>}{detail.downloads[0] && <a href={`/gallery?q=${encodeURIComponent(detail.downloads[0].filePath.split(/[\\/]/).pop() || "")}`} className="text-sm text-brand-600">{t("定位媒体库")}</a>}</div></div>}</Drawer>
-    <MediaModal open={preview !== null} onClose={() => setPreview(null)} title={preview ? `@${preview.tweet.author?.screenName ?? ""} · ${preview.tweet.id}` : ""}>{preview && previewRecord && <div className="space-y-3"><div className="relative flex min-h-[18rem] items-center justify-center bg-black/95 p-2"><Button theme="borderless" type="tertiary" icon={<ChevronLeft size={20} />} aria-label={t("上一个媒体")} disabled={preview.index <= 0} onClick={() => setPreview(current => current && current.index > 0 ? { ...current, index: current.index - 1 } : current)} className="absolute left-2 z-10 text-white" />{previewVideo ? <video key={previewRecord.id} className="max-h-[75dvh] max-w-full mx-auto" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} poster={`/api/library/downloads/${previewRecord.id}/preview`} controls autoPlay playsInline /> : <img className="max-h-[75dvh] max-w-full mx-auto object-contain" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} alt={`@${preview.tweet.author?.screenName ?? ""} · ${preview.tweet.id}`} />}<Button theme="borderless" type="tertiary" icon={<ChevronRight size={20} />} aria-label={t("下一个媒体")} disabled={preview.index >= preview.tweet.downloads.length - 1} onClick={() => setPreview(current => current && current.index < current.tweet.downloads.length - 1 ? { ...current, index: current.index + 1 } : current)} className="absolute right-2 z-10 text-white" /></div><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-fg-muted"><span>{preview.index + 1} / {preview.tweet.downloads.length}</span><a className="text-brand-600" href={`/gallery?q=${encodeURIComponent(previewRecord.filePath.split(/[\\/]/).pop() || "")}`}>{t("定位媒体库")}</a></div></div>}</MediaModal>
+    <Drawer open={Boolean(detail)} onClose={() => setDetailId(null)} title={detail ? `@${detail.author?.screenName ?? ""}` : t("归档详情")} width="44rem">{detail && <div className="space-y-4"><div className="text-xs text-fg-muted">{t("推文 ID")}: {detail.id} · {formatDateTime(detail.createdAt)}</div><TweetText text={detailReposted?.text ?? detail.text} compact={false} highlight={debounced} />{detail.related?.filter(related => related.id !== detailReposted?.id).map(related => <blockquote className="tweet-related" key={related.id}><a href={`/tweets?id=${encodeURIComponent(related.id)}`}>@{related.author?.screenName ?? ""}</a><TweetText text={related.text} compact={false} highlight={debounced} /></blockquote>)}<div className="tweet-archive-meta">{t("归档于")} {formatDateTime(detail.archivedAt)}<span>{t("来源任务")}: {detail.jobIds.map(id => `#${id}`).join(", ") || "—"}</span></div>{detail.downloads.length > 0 && <div className="tweet-detail-files">{detail.downloads.map(record => <button type="button" className="tweet-detail-file" key={record.id} onClick={() => setPreview({ tweet: detail, index: Math.max(0, detail.downloads.findIndex(item => item.id === record.id)) })}><FileText size={16} /><span>{record.filePath.split(/[\\/]/).pop()}</span><ExternalLink size={14} /></button>)}</div>}<div className="tweet-detail-footer"><Button icon={<Copy size={16} />} onClick={() => void copyToClipboard(detail.url, t("推文链接"))}>{t("复制链接")}</Button>{/^https?:\/\//i.test(detail.url) && <a href={detail.url} target="_blank" rel="noreferrer" className="semi-button semi-button-light semi-button-tertiary semi-button-size-default"><ExternalLink size={14} /><span>{t("archive.original")}</span></a>}{detail.downloads[0] && <a href={`/gallery?q=${encodeURIComponent(detail.downloads[0].filePath.split(/[\\/]/).pop() || "")}`} className="semi-button semi-button-light semi-button-tertiary semi-button-size-default"><span>{t("定位媒体库")}</span></a>}</div></div>}</Drawer>
+    <MediaModal open={preview !== null} onClose={() => setPreview(null)} title={preview ? `@${preview.tweet.author?.screenName ?? ""} · ${preview.tweet.id}` : ""}>{preview && previewRecord && <div className="space-y-3"><div className="relative flex min-h-[18rem] items-center justify-center bg-black/95 p-2"><Button theme="borderless" type="tertiary" icon={<ChevronLeft size={20} />} aria-label={t("上一个媒体")} disabled={preview.index <= 0} onClick={() => setPreview(current => current && current.index > 0 ? { ...current, index: current.index - 1 } : current)} className="gallery-preview-nav absolute left-2 z-10 text-white disabled:opacity-30" />{previewVideo ? <video key={previewRecord.id} className="max-h-[75dvh] max-w-full mx-auto" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} poster={`/api/library/downloads/${previewRecord.id}/preview`} controls autoPlay playsInline /> : <img className="max-h-[75dvh] max-w-full mx-auto object-contain" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} alt={`@${preview.tweet.author?.screenName ?? ""} · ${preview.tweet.id}`} />}<Button theme="borderless" type="tertiary" icon={<ChevronRight size={20} />} aria-label={t("下一个媒体")} disabled={preview.index >= preview.tweet.downloads.length - 1} onClick={() => setPreview(current => current && current.index < current.tweet.downloads.length - 1 ? { ...current, index: current.index + 1 } : current)} className="gallery-preview-nav absolute right-2 z-10 text-white disabled:opacity-30" /></div><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-fg-muted"><span className="tabular-nums">{preview.index + 1} / {preview.tweet.downloads.length}</span>{preview.tweet.downloads.length > 1 && <span className="text-fg-subtle">{t("按 ← / → 切换")}</span>}<a className="text-brand-600" href={`/gallery?q=${encodeURIComponent(previewRecord.filePath.split(/[\\/]/).pop() || "")}`}>{t("定位媒体库")}</a></div></div>}</MediaModal>
   </div>;
 }

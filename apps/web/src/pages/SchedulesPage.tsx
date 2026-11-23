@@ -1,5 +1,5 @@
 import { t, useTranslation } from "../lib/i18n";
-import { Clock, Pencil, Play, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Clock, Pencil, Play, Plus, Search, Trash2 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
@@ -79,6 +79,8 @@ export function SchedulesPage({
   const detailRunStatus = runStatusLabel(detail?.lastRunStatus);
   const editingInterval = editing ? parseIntervalMinutes(editing.intervalMinutes) : Number.NaN;
   const editingIntervalValid = isValidIntervalMinutes(editingInterval);
+  const enabledCount = schedules.filter((schedule) => schedule.enabled).length;
+  const pausedCount = schedules.length - enabledCount;
   const filtered = schedules.filter(
     (schedule) =>
       (status === "all" || schedule.enabled === (status === "enabled")) &&
@@ -159,23 +161,32 @@ export function SchedulesPage({
         </Button>
       </div>
       <div className="schedule-summary">
-        <span>
-          <Clock size={16} />
+        <button
+          type="button"
+          className={`schedule-summary-btn${status === "all" ? " schedule-summary-btn-active" : ""}`}
+          aria-pressed={status === "all"}
+          onClick={() => setStatus("all")}
+        >
+          <Clock size={15} />
           {t("全部计划")} <strong>{schedules.length}</strong>
-        </span>
-        <span>
-          {t("已启用")}{" "}
-          <strong>
-            {schedules.filter((schedule) => schedule.enabled).length}
-          </strong>
-        </span>
-        <span>
-          {t("已暂停")}{" "}
-          <strong>
-            {schedules.filter((schedule) => !schedule.enabled).length}
-          </strong>
-        </span>
-        <span className="text-xs text-fg-muted">{t("时区")}: {timeZone}</span>
+        </button>
+        <button
+          type="button"
+          className={`schedule-summary-btn${status === "enabled" ? " schedule-summary-btn-active" : ""}`}
+          aria-pressed={status === "enabled"}
+          onClick={() => setStatus((current) => (current === "enabled" ? "all" : "enabled"))}
+        >
+          {t("已启用")} <strong>{enabledCount}</strong>
+        </button>
+        <button
+          type="button"
+          className={`schedule-summary-btn${status === "paused" ? " schedule-summary-btn-active" : ""}`}
+          aria-pressed={status === "paused"}
+          onClick={() => setStatus((current) => (current === "paused" ? "all" : "paused"))}
+        >
+          {t("已暂停")} <strong>{pausedCount}</strong>
+        </button>
+        <span className="schedule-summary-tz text-xs text-fg-muted">{t("时区")}: {timeZone}</span>
       </div>
       <div className="page-toolbar">
         <div className="toolbar-filters">
@@ -421,19 +432,30 @@ export function SchedulesPage({
                 </a>
               </div>
             )}
-            <Button
-              type="tertiary"
-              icon={<Pencil size={16} />}
-              onClick={() => {
-                setEditing({
-                  ...detail,
-                  items: detail.items.map((item) => ({ ...item })),
-                });
-                setDetailId(null);
-              }}
-            >
-              {t("编辑计划")}
-            </Button>
+            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
+              <Button
+                theme="solid"
+                icon={<Play size={16} />}
+                disabled={run.isPending}
+                loading={run.isPending && run.variables === detail.id}
+                onClick={() => run.mutate(detail.id)}
+              >
+                {t("立即执行")}
+              </Button>
+              <Button
+                type="tertiary"
+                icon={<Pencil size={16} />}
+                onClick={() => {
+                  setEditing({
+                    ...detail,
+                    items: detail.items.map((item) => ({ ...item })),
+                  });
+                  setDetailId(null);
+                }}
+              >
+                {t("编辑计划")}
+              </Button>
+            </div>
           </div>
         )}
       </Drawer>

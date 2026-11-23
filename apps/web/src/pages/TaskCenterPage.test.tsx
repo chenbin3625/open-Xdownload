@@ -886,4 +886,31 @@ describe("TaskCenterPage 回归修复", () => {
       finishCancel({ ...runningJob, status: "canceled" });
     });
   });
+
+  it("点击顶部统计卡片可快速切换状态筛选并显示可移除筛选标签", async () => {
+    const user = userEvent.setup();
+    renderWithClient(
+      <TaskCenterPage
+        jobs={mockJobs}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 3, totalPages: 1 }}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+
+    const failedCard = screen.getByRole("button", { name: /异常 \/ 失败/ });
+    expect(failedCard.getAttribute("aria-pressed")).toBe("false");
+    await user.click(failedCard);
+    expect(failedCard.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByText("推文 123")).toBeNull();
+    expect(screen.getByText("用户 failed_user")).not.toBeNull();
+
+    // 移除筛选标签可恢复全部任务
+    await user.click(screen.getByRole("button", { name: "移除筛选 异常 / 失败" }));
+    expect(failedCard.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText("推文 123")).not.toBeNull();
+  });
 });

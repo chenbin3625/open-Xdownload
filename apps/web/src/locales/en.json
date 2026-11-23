@@ -765,5 +765,13 @@
   "请尝试刷新页面": "Please try reloading the page",
   "刷新页面": "Reload page",
   "调度频率需在 5 至 43200 分钟之间": "Interval must be between 5 and 43,200 minutes",
-  "请填写完整的计划名称和目标": "Please provide a schedule name and valid targets"
+  "请填写完整的计划名称和目标": "Please provide a schedule name and valid targets",
+  "清理无效与重复行": "Clean invalid & duplicate lines",
+  "已清理 {{value0}} 行无效或重复目标": "Removed {{value0}} invalid or duplicate lines",
+  "按 ← / → 切换，点击图片缩放": "Press Left / Right to switch, click image to zoom",
+  "按 ← / → 切换": "Press Left / Right to switch",
+  "遇到受保护账号时自动发送关注请求，需使用已登录的 X 账号。": "Automatically send follow requests for protected accounts using a logged-in X account.",
+  "快速跳转": "Quick jump",
+  "识别为：{{value0}}": "Detected: {{value0}}",
+  "快捷键 ⌘K 或 / 聚焦": "Press Ctrl/Cmd+K or / to focus"
 }
