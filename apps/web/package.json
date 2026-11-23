@@ -23,7 +23,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-i18next": "^17.1.9",
-    "tailwind-merge": "^3.7.0"
+    "tailwind-merge": "^3.7.1"
   },
   "devDependencies": {
     "patch-package": "^8.0.1",
