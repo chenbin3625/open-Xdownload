@@ -57,10 +57,6 @@
   margin-bottom: 0;
 }
 
-.settings-page .settings-section-title {
-  margin-bottom: 16px;
-}
-
 .settings-subsection-title {
   margin: 0 0 8px;
   color: var(--fg);
@@ -144,8 +140,12 @@
   flex-wrap: wrap;
 }
 
-.storage-media-field > div:first-child {
-  display: none;
+.storage-media-field .semi-form-field-label,
+.storage-media-field .semi-form-field-label-text {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
 }
 
 .storage-target-path {
@@ -186,8 +186,7 @@
   flex-shrink: 0;
 }
 
-.storage-filename-strategy,
-.storage-filename-parts {
+.storage-filename-strategy {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -205,9 +204,11 @@
 }
 
 .storage-filename-parts {
+  display: flex;
   flex-direction: row;
   flex-wrap: wrap;
   gap: 4px 8px;
+  min-width: 0;
 }
 
 .storage-filename-parts > .semi-select {
@@ -503,7 +504,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   padding-block: 16px;
 }
 
@@ -513,6 +515,7 @@
 
 .settings-account-shortcut > div {
   flex: 1;
+  min-width: 0;
 }
 
 /* 收起态只是「继承自默认策略」的说明：弱化颜色，用分隔点代替大间距，避免和可编辑项抢视线。 */

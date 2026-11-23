@@ -67,9 +67,16 @@ func (s *Store) LoadJobCheckpointTasks(ctx context.Context, jobID int64) ([]byte
 
 // DeleteJobCheckpoint 删除任务检查点（任务完成或永久失败时调用）。
 func (s *Store) DeleteJobCheckpoint(ctx context.Context, jobID int64) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM job_checkpoints WHERE job_id = ?`, jobID); err != nil {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM job_checkpoint_tasks WHERE job_id = ?`, jobID)
-	return err
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_checkpoints WHERE job_id = ?`, jobID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_checkpoint_tasks WHERE job_id = ?`, jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -1,6 +1,6 @@
 <svg width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc" xmlns="http://www.w3.org/2000/svg">
-  <title>open-Xdownload icon</title>
-  <desc>A dark rounded square with a white X crossed by a blue download arrow.</desc>
+  <title id="title">open-Xdownload icon</title>
+  <desc id="desc">A dark rounded square with a white X crossed by a blue download arrow.</desc>
   <defs>
     <linearGradient id="bg" x1="80" y1="48" x2="432" y2="464" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#111827"/>

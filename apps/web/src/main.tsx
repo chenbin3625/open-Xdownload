@@ -20,7 +20,7 @@ const queryClient = new QueryClient({
       // 后者已触发 session invalidation，重试不会改变结果。
       retry: (failureCount, error) => {
         if (failureCount >= 1) return false;
-        if (error instanceof DOMException && error.name === "AbortError") return false;
+        if (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) return false;
         if (error instanceof ApiError && error.status === 401) return false;
         return true;
       },

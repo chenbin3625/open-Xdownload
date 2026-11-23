@@ -35,6 +35,14 @@ describe("tokenizeTweetText", () => {
   it("ignores email addresses and numeric-only hashtags", () => {
     expect(tokenizeTweetText("mail me at bob@example.com #2026")).toEqual([{ type: "text", value: "mail me at bob@example.com #2026" }]);
   });
+
+  it("tags uppercase HTTP/HTTPS URLs as url tokens rather than hashtags", () => {
+    const tokens = tokenizeTweetText("Visit HTTPS://EXAMPLE.COM/path and HTTP://t.co/abc");
+    expect(tokens.filter(token => token.type !== "text")).toEqual([
+      { type: "url", value: "HTTPS://EXAMPLE.COM/path", href: "HTTPS://EXAMPLE.COM/path" },
+      { type: "url", value: "HTTP://t.co/abc", href: "HTTP://t.co/abc" },
+    ]);
+  });
 });
 
 describe("formatTweetTime", () => {

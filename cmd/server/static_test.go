@@ -625,3 +625,71 @@ func BenchmarkServeHashedJSBrotli(b *testing.B) {
 		}
 	}
 }
+
+func TestRangeRequestOnIndexOrSPARouteDoesNotRedirect(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<!doctype html><html>index</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "index.html"), []byte("<!doctype html><html>sub</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := webAppHandler(http.NotFoundHandler(), http.Dir(dir), nil)
+
+	for _, target := range []string{"/", "/settings", "/sub/index.html"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Range", "bytes=0-10")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code == http.StatusMovedPermanently || res.Code == http.StatusFound {
+			t.Fatalf("Range on %s triggered redirect %d -> %q", target, res.Code, res.Header().Get("Location"))
+		}
+		if res.Code != http.StatusOK {
+			t.Fatalf("Range on %s status = %d, want 200", target, res.Code)
+		}
+	}
+}
+
+func TestInjectedIndexHTMLReturns304OnMatchingETag(t *testing.T) {
+	handler := webAppHandler(http.NotFoundHandler(), testWebFS(), func(_ *http.Request, html []byte) []byte {
+		return append(html, []byte(`<script id="b">{}</script>`)...)
+	})
+	firstReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	firstReq.Header.Set("Accept-Encoding", "gzip")
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, firstReq)
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("missing ETag")
+	}
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	secondReq.Header.Set("Accept-Encoding", "gzip")
+	secondReq.Header.Set("If-None-Match", etag)
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, secondReq)
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", second.Code)
+	}
+	if second.Body.Len() != 0 {
+		t.Fatalf("304 should have empty body, got %d bytes", second.Body.Len())
+	}
+}
+
+func TestZeroByteIdentityFileIsServedAsEmpty200(t *testing.T) {
+	handler := webAppHandler(http.NotFoundHandler(), http.FS(fstest.MapFS{
+		"index.html": {Data: []byte("<!doctype html><html></html>")},
+		"empty.txt":  {Data: []byte{}},
+	}), nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/empty.txt", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("zero-byte file status = %d, want 200", res.Code)
+	}
+	if res.Body.Len() != 0 {
+		t.Fatalf("zero-byte file body = %q", res.Body.String())
+	}
+}

@@ -14,8 +14,10 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/xclient"
 )
 
+const testAuthCheckPath = "/i/api/1.1/account/multi/list.json"
+
 // X 对过期的时间线游标可能返回 401（而不是 400 Invalid cursor）。Cookie 本身通过
-// /home 校验时，不能把它禁用 30 分钟，应丢弃旧游标从顶部重扫。
+// 账号有效性校验时，不能把它禁用 30 分钟，应丢弃旧游标从顶部重扫。
 func TestFullTimelineStaleCursorUnauthorizedRestartsFromTop(t *testing.T) {
 	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -26,8 +28,8 @@ func TestFullTimelineStaleCursorUnauthorizedRestartsFromTop(t *testing.T) {
 	cfg := config.AppConfig{DownloadDir: t.TempDir()}
 	var cursors []string
 	pool := archiveSingleClientPool(t, &cfg, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/home" {
-			fmt.Fprint(w, `{"screen_name":"me"}`)
+		if r.URL.Path == testAuthCheckPath {
+			fmt.Fprint(w, `{"users":[{"user_id":"1","screen_name":"me","is_auth_valid":true}]}`)
 			return
 		}
 		cursor := timelineCursor(t, r)
@@ -79,8 +81,8 @@ func TestArchiveUsersSkipsUserWhenTimelineUnauthorizedButCookieValid(t *testing.
 	ctx := context.Background()
 	cfg := config.AppConfig{DownloadDir: t.TempDir(), StorageType: config.StorageLocal}
 	pool := archiveSingleClientPool(t, &cfg, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/home" {
-			fmt.Fprint(w, `{"screen_name":"me"}`)
+		if r.URL.Path == testAuthCheckPath {
+			fmt.Fprint(w, `{"users":[{"user_id":"1","screen_name":"me","is_auth_valid":true}]}`)
 			return
 		}
 		if strings.Contains(r.URL.Query().Get("variables"), `"screenName":"bad"`) {
@@ -111,7 +113,7 @@ func TestArchiveUsersSkipsUserWhenTimelineUnauthorizedButCookieValid(t *testing.
 	}
 }
 
-// Cookie 真的失效（/home 也 401）时仍要中止任务，避免对后面每个用户重复报错。
+// Cookie 真的失效（账号校验也 401）时仍要中止任务，避免对后面每个用户重复报错。
 func TestArchiveUsersAbortsWhenCookieReallyRejected(t *testing.T) {
 	store, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -122,7 +124,7 @@ func TestArchiveUsersAbortsWhenCookieReallyRejected(t *testing.T) {
 	cfg := config.AppConfig{DownloadDir: t.TempDir(), StorageType: config.StorageLocal}
 	var timelineCalls int
 	pool := archiveSingleClientPool(t, &cfg, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/home" {
+		if r.URL.Path != testAuthCheckPath {
 			timelineCalls++
 		}
 		w.WriteHeader(http.StatusUnauthorized)

@@ -40,8 +40,8 @@ func mergeRefreshedMedia(original, fresh []parser.Media) []parser.Media {
 }
 
 func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, pool xapi.Source, user xapi.User, entity storage.UserEntity, dir string, update func(string), shouldYield func() bool) (archiveStats, error) {
-	stats := archiveStats{Users: 1}
-	cp, _, err := m.loadArchiveCheckpoint(saveCtx, job.ID)
+	stats := archiveStats{}
+	cp, _, err := m.loadArchiveCheckpointProgress(saveCtx, job.ID)
 	if err != nil {
 		return stats, err
 	}
@@ -93,7 +93,9 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 		state.Cursor = page.Cursor
 		state.HeadID = page.HeadID
 		if page.Complete {
-			state.LastID = page.HeadID
+			if newerTweetID(page.HeadID, state.LastID) {
+				state.LastID = page.HeadID
+			}
 			state.Cursor = ""
 			state.HeadID = ""
 			state.Status = "completed"
@@ -106,12 +108,22 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 		}
 		return nil
 	}
+	startCursor := state.Cursor
 	for attempt := 0; attempt < 2; attempt++ {
-		err = pool.WalkUserTweets(ctx, user, xapi.TweetTimelineOptions{Cursor: state.Cursor, StopID: state.LastID, HeadID: state.HeadID, Parse: parseOptions}, savePage)
-		if attempt != 0 || state.Cursor == "" {
+		pagesSaved := 0
+		err = pool.WalkUserTweets(ctx, user, xapi.TweetTimelineOptions{Cursor: state.Cursor, StopID: state.LastID, HeadID: state.HeadID, Parse: parseOptions}, func(page xapi.TweetTimelinePage) error {
+			if saveErr := savePage(page); saveErr != nil {
+				return saveErr
+			}
+			pagesSaved++
+			return nil
+		})
+		if err == nil || attempt != 0 || startCursor == "" || pagesSaved > 0 {
 			break
 		}
-		// X 对失效的深翻页游标有时回 401 而非 400：Cookie 通过 /home 校验就当作游标失效。
+		// 只有带着持久化游标续跑且首页即失效时才清空回第 0 页重扫；
+		// 全新扫描（startCursor == ""）或已翻过深页后出错必须保留当前游标，避免进度被清空。
+		// X 对失效的深翻页游标有时回 401 而非 400：Cookie 通过校验就当作游标失效。
 		staleCursor := xapi.IsInvalidTimelineCursor(err) ||
 			(xapi.IsUnauthorized(err) && pool.RecheckDisabledClients(ctx))
 		if !staleCursor {
@@ -121,10 +133,11 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 		if err := m.store.SaveTweetSync(saveCtx, state); err != nil {
 			return stats, err
 		}
+		startCursor = ""
 	}
 	if err != nil {
 		state.Status = "failed"
-		if ctx.Err() != nil || errors.Is(err, errYieldExecution) {
+		if _, limited := xapi.RateLimitRetryAt(err); ctx.Err() != nil || errors.Is(err, errYieldExecution) || limited {
 			state.Status = "interrupted"
 		}
 		state.Error = err.Error()
@@ -135,6 +148,13 @@ func (m *Manager) archiveFullTimeline(ctx, saveCtx context.Context, job storage.
 	}
 	if job.ArchiveMode == storage.ArchiveBoth {
 		cp.Replay = &tweetMediaReplay{UserID: user.ID, ArchivedBefore: time.Now().UTC()}
+		payload, err := json.Marshal(cp.progress())
+		if err != nil {
+			return stats, err
+		}
+		if err := m.store.SaveJobCheckpoint(saveCtx, job.ID, payload); err != nil {
+			return stats, err
+		}
 		return m.replayArchivedTweetMedia(ctx, saveCtx, job, cfg, user, entity, dir, update, shouldYield, cp, stats, collected)
 	}
 	return stats, nil

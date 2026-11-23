@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import i18n, { browserLanguage, languageStorageKey, readLanguagePreference, setLanguagePreference } from "./i18n";
+import i18n, { browserLanguage, languageStorageKey, readLanguagePreference, resetLanguagePreference, setLanguagePreference, t } from "./i18n";
 import { formatDateTime, formatIntervalMinutes } from "../components/common/CommonUI";
 import { getJobProgressDisplay, parseAggregatedErrors } from "./jobErrors";
 import zh from "../locales/zh-CN.json";
@@ -73,4 +73,36 @@ it("translates frontend error summaries while preserving backend diagnostics", a
   expect(parseAggregatedErrors(backend)[0].reason).toBe("后端原始错误");
   expect(parseAggregatedErrors("另有 3 种其他异常")[0].reason).toBe("Other errors");
   expect(getJobProgressDisplay({ status: "completed", message: "后端原文" } as Job).displayMsg).toBe("后端原文");
+});
+
+it("keeps distinct keys for file media kind and task files tab without duplicate JSON keys", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  for (const name of ["en.json", "zh-CN.json"]) {
+    const raw = fs.readFileSync(path.resolve(import.meta.dirname, "../locales", name), "utf-8");
+    const keys = new Set<string>();
+    JSON.parse(raw, (key, value) => {
+      if (key !== "") {
+        expect(keys.has(key), `duplicate key ${key} in ${name}`).toBe(false);
+        keys.add(key);
+      }
+      return value;
+    });
+  }
+  expect(en["文件"]).toBe("File");
+  expect(en["文件列表"]).toBe("Files");
+  expect(zh["文件列表"]).toBe("文件");
+  expect(en["网络代理 (Proxy)"]).toBe("Network proxy");
+});
+
+it("uses singular and plural English variants for count keys and resets session preference", async () => {
+  await setLanguagePreference("en");
+  expect(t("archive.total", { count: 1 })).toBe("1 tweet");
+  expect(t("archive.total", { count: 2 })).toBe("2 tweets");
+  expect(t("有 {{count}} 条新记录", { count: 1 })).toBe("1 new record");
+  expect(t("有 {{count}} 条新记录", { count: 3 })).toBe("3 new records");
+
+  resetLanguagePreference();
+  localStorage.removeItem(languageStorageKey);
+  expect(readLanguagePreference()).toBe("auto");
 });

@@ -25,19 +25,43 @@ func syncEnvXAccounts(ctx context.Context, store *storage.Store) error {
 	// 之前由环境变量写入、现在已消失的账号要删掉。
 	accounts := make([]storage.EnvXAccount, 0, 1)
 	if authToken != "" && csrfToken != "" {
-		accounts = append(accounts, storage.EnvXAccount{AuthToken: authToken, CSRFToken: csrfToken, Primary: true})
+		if hasInvalidEnvCookieChar(authToken) || hasInvalidEnvCookieChar(csrfToken) {
+			log.Printf("env: OPEN_XDOWNLOAD_AUTH_TOKEN 或 OPEN_XDOWNLOAD_CT0 包含非法字符，忽略这组 Cookie")
+		} else {
+			accounts = append(accounts, storage.EnvXAccount{AuthToken: authToken, CSRFToken: csrfToken, Primary: true})
+		}
 	} else if authToken != "" || csrfToken != "" {
 		// 只配了一半时按"Cookie 不完整"处理：告警后照常同步其余环境变量，
 		// 这组残缺的 Cookie 不会被写成账号。
 		log.Printf("env: OPEN_XDOWNLOAD_AUTH_TOKEN 与 OPEN_XDOWNLOAD_CT0 必须同时设置，忽略这组 Cookie")
 	}
 	for _, cookie := range config.ParseCookiePairs(additional) {
+		auth := strings.TrimSpace(cookie.AuthToken)
+		csrf := strings.TrimSpace(cookie.CSRFToken)
+		if auth == "" || csrf == "" {
+			log.Printf("env: OPEN_XDOWNLOAD_ADDITIONAL_COOKIES 中存在缺少 auth_token 或 ct0 的 Cookie，已跳过")
+			continue
+		}
+		if hasInvalidEnvCookieChar(auth) || hasInvalidEnvCookieChar(csrf) {
+			log.Printf("env: OPEN_XDOWNLOAD_ADDITIONAL_COOKIES 中的 Cookie 包含非法字符，已跳过")
+			continue
+		}
 		accounts = append(accounts, storage.EnvXAccount{
-			AuthToken: cookie.AuthToken,
-			CSRFToken: cookie.CSRFToken,
+			AuthToken: auth,
+			CSRFToken: csrf,
 		})
 	}
 	return store.SyncEnvXAccounts(ctx, accounts)
+}
+
+func hasInvalidEnvCookieChar(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == ';' || b < 0x20 || b == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // envTrimmed 读取环境变量并去掉首尾空白；纯空白视为未设置。

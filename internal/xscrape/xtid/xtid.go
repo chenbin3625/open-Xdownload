@@ -26,7 +26,9 @@ const (
 	additionalRandomNumber = byte(3)
 	timestampEpoch         = int64(1682924400) // x-client-transaction-id 的时钟起点
 
-	cacheTTL = time.Hour
+	cacheTTL       = time.Hour
+	failureBackoff = 30 * time.Second
+	fetchTimeout   = 45 * time.Second
 
 	// 初始化最多抓取的脚本数量，避免在异常页面里无限爬取。
 	maxCrawlChunks = 24
@@ -37,7 +39,8 @@ const (
 
 // Generator 生成 X 的 x-client-transaction-id 请求头。
 //
-// 初始化（抓首页、定位签名脚本、计算动画 key）的结果缓存 1 小时。
+// 初始化（抓首页、定位签名脚本、计算动画 key）的结果缓存 1 小时；
+// 初始化失败时会进入短暂退避，避免每次请求同步阻塞等待超时。
 // 并发调用 Generate 时只会有一个 goroutine 执行初始化。
 type Generator struct {
 	client    *http.Client
@@ -50,6 +53,8 @@ type Generator struct {
 	mu        sync.Mutex
 	cached    *keys
 	fetchedAt time.Time
+	failedAt  time.Time
+	lastErr   error
 	version   uint64
 	init      *initCall
 }
@@ -70,16 +75,13 @@ type options struct {
 	randByte func() byte
 }
 
-// New 创建生成器。client 为 nil 时使用 http.DefaultClient。
+// New 创建生成器。client 为 nil 时使用内置 http.Client。
 // baseURL 为空时使用 https://x.com，userAgent 为空时使用内置的桌面 Chrome UA。
 func New(client *http.Client, baseURL, userAgent string) *Generator {
 	return newWithOptions(client, baseURL, userAgent, options{})
 }
 
 func newWithOptions(client *http.Client, baseURL, userAgent string, opts options) *Generator {
-	if client == nil {
-		client = http.DefaultClient
-	}
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = defaultBaseURL
@@ -95,20 +97,32 @@ func newWithOptions(client *http.Client, baseURL, userAgent string, opts options
 	if randByte == nil {
 		randByte = defaultRandByte
 	}
-	return &Generator{
-		client:    client,
+	g := &Generator{
 		baseURL:   baseURL,
 		userAgent: userAgent,
 		now:       now,
 		randByte:  randByte,
 	}
+	if client == nil {
+		g.client = &http.Client{
+			Timeout:       fetchTimeout,
+			CheckRedirect: g.checkRedirect,
+		}
+	} else {
+		copied := *client
+		copied.CheckRedirect = g.checkRedirect
+		g.client = &copied
+	}
+	return g
 }
 
-// Invalidate 清空缓存，下次 Generate 会重新抓取并计算。
+// Invalidate 清空缓存与失败退避，下次 Generate 会重新抓取并计算。
 func (g *Generator) Invalidate() {
 	g.mu.Lock()
 	g.cached = nil
 	g.fetchedAt = time.Time{}
+	g.failedAt = time.Time{}
+	g.lastErr = nil
 	g.version++
 	// 若已有抓取正在进行，让它自然结束，但结果不再写入缓存。
 	g.init = nil
@@ -152,11 +166,22 @@ func (g *Generator) Generate(ctx context.Context, method, path string) (string, 
 }
 
 func (g *Generator) keys(ctx context.Context) (*keys, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	g.mu.Lock()
-	if g.cached != nil && g.now().Sub(g.fetchedAt) < cacheTTL {
+	now := g.now()
+	if g.cached != nil && now.Sub(g.fetchedAt) < cacheTTL {
 		k := g.cached
 		g.mu.Unlock()
 		return k, nil
+	}
+	if g.lastErr != nil && !g.failedAt.IsZero() {
+		if elapsed := now.Sub(g.failedAt); elapsed >= 0 && elapsed < failureBackoff {
+			err := g.lastErr
+			g.mu.Unlock()
+			return nil, err
+		}
 	}
 	if c := g.init; c != nil {
 		g.mu.Unlock()
@@ -172,20 +197,43 @@ func (g *Generator) keys(ctx context.Context) (*keys, error) {
 	version := g.version
 	g.mu.Unlock()
 
-	k, err := g.fetch(ctx)
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
+	go func() {
+		defer cancel()
+		var k *keys
+		var err error
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("初始化 x-client-transaction-id 异常: %v", r)
+			}
+			g.mu.Lock()
+			if g.version == version {
+				if err == nil {
+					g.cached = k
+					g.fetchedAt = g.now()
+					g.failedAt = time.Time{}
+					g.lastErr = nil
+				} else {
+					g.failedAt = g.now()
+					g.lastErr = err
+				}
+			}
+			if g.init == call {
+				g.init = nil
+			}
+			call.keys, call.err = k, err
+			close(call.done)
+			g.mu.Unlock()
+		}()
+		k, err = g.fetch(fetchCtx)
+	}()
 
-	g.mu.Lock()
-	if err == nil && g.version == version {
-		g.cached = k
-		g.fetchedAt = g.now()
+	select {
+	case <-call.done:
+		return call.keys, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	if g.init == call {
-		g.init = nil
-	}
-	call.keys, call.err = k, err
-	close(call.done)
-	g.mu.Unlock()
-	return k, err
 }
 
 func (g *Generator) fetch(ctx context.Context) (*keys, error) {
@@ -218,28 +266,25 @@ func (g *Generator) fetch(ctx context.Context) (*keys, error) {
 }
 
 func (g *Generator) loadSigningJS(ctx context.Context, page []byte) ([]byte, error) {
-	scripts := extractScriptURLs(string(page), g.baseURL)
+	scripts := extractScriptURLs(string(page))
 	if len(scripts) == 0 {
 		return nil, fmt.Errorf("首页未找到任何 JS 脚本")
 	}
 
-	// 旧版页面直接引用 ondemand.s / sign.o，或可通过 chunk 映射重建出来。
+	// 旧版页面直接引用 ondemand.s / sign.o，或可通过 chunk 映射重建出来；
+	// 将其排在最前并统一经 crawlForIndices 去重和限流爬取。
+	seeds := make([]string, 0, len(scripts))
 	for _, u := range scripts {
 		if matchesIndicesFile(u) {
-			body, err := g.get(ctx, u)
-			if err != nil {
-				continue
-			}
-			if !matchesKeyByteIndices(body) {
-				continue
-			}
-			return body, nil
+			seeds = append(seeds, u)
 		}
 	}
-
-	// 当前 x-web 构建把签名 chunk 藏在 bundle 的动态 import 里，需要顺着
-	// 入口脚本的静态 import 图找过去。
-	return g.crawlForIndices(ctx, scripts)
+	for _, u := range scripts {
+		if !matchesIndicesFile(u) {
+			seeds = append(seeds, u)
+		}
+	}
+	return g.crawlForIndices(ctx, seeds)
 }
 
 func (g *Generator) crawlForIndices(ctx context.Context, seeds []string) ([]byte, error) {
@@ -280,14 +325,21 @@ func (g *Generator) crawlForIndices(ctx context.Context, seeds []string) ([]byte
 		}
 
 		priority, normal := chunkReferences(body, it.url)
-		next := make([]item, 0, len(priority)+len(normal))
-		for _, u := range priority {
-			next = append(next, item{url: u, depth: it.depth + 1})
+		if len(priority) > 0 {
+			next := make([]item, 0, len(priority)+len(queue)+len(normal))
+			for _, u := range priority {
+				next = append(next, item{url: u, depth: it.depth + 1})
+			}
+			next = append(next, queue...)
+			for _, u := range normal {
+				next = append(next, item{url: u, depth: it.depth + 1})
+			}
+			queue = next
+		} else {
+			for _, u := range normal {
+				queue = append(queue, item{url: u, depth: it.depth + 1})
+			}
 		}
-		for _, u := range normal {
-			next = append(next, item{url: u, depth: it.depth + 1})
-		}
-		queue = append(next, queue...)
 	}
 
 	msg := fmt.Sprintf("未能定位签名 JS（ondemand.s/sign.o，已尝试 %d 个脚本）", tried)
@@ -299,7 +351,7 @@ func (g *Generator) crawlForIndices(ctx context.Context, seeds []string) ([]byte
 
 func (g *Generator) get(ctx context.Context, rawURL string) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
-	if err != nil || !g.allowedHost(parsed.Hostname()) {
+	if err != nil || !g.allowedURL(parsed) {
 		return nil, fmt.Errorf("拒绝请求非 X 脚本主机: %s", rawURL)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -314,6 +366,7 @@ func (g *Generator) get(ctx context.Context, rawURL string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return nil, fmt.Errorf("请求 %s 返回 HTTP %d", rawURL, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
@@ -326,13 +379,60 @@ func (g *Generator) get(ctx context.Context, rawURL string) ([]byte, error) {
 	return body, nil
 }
 
+func (g *Generator) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("重定向次数过多")
+	}
+	if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+		return fmt.Errorf("拒绝 HTTPS 降级重定向: %s", req.URL)
+	}
+	if !g.allowedURL(req.URL) {
+		return fmt.Errorf("拒绝重定向到非 X 脚本主机: %s", req.URL)
+	}
+	return nil
+}
+
+func (g *Generator) allowedURL(parsed *url.URL) bool {
+	if parsed == nil || parsed.User != nil {
+		return false
+	}
+	base, err := url.Parse(g.baseURL)
+	if err == nil && sameOrigin(parsed, base) {
+		return true
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") || urlPort(parsed) != "443" {
+		return false
+	}
+	return g.allowedHost(parsed.Hostname())
+}
+
 func (g *Generator) allowedHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 	base, err := url.Parse(g.baseURL)
-	if err == nil && strings.EqualFold(host, base.Hostname()) {
+	if err == nil && strings.EqualFold(host, strings.TrimSuffix(base.Hostname(), ".")) {
 		return true
 	}
 	return host == "x.com" || host == "www.x.com" || host == "abs.twimg.com" || host == "pbs.twimg.com"
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || !strings.EqualFold(a.Scheme, b.Scheme) || !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	return urlPort(a) == urlPort(b)
+}
+
+func urlPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 
 func defaultRandByte() byte {

@@ -91,7 +91,7 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 			}
 			return stats, err
 		}
-		items, next, err := TimelineItems(payload, "data.user.result.timeline_v2.timeline.instructions")
+		items, next, err := timelineItems(payload, "data.user.result.timeline_v2.timeline.instructions")
 		if err != nil {
 			return stats, err
 		}
@@ -114,7 +114,7 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 		lastTweetID := ""
 		pageTweets := []parser.TweetData{}
 		for _, item := range items {
-			result := item.Get("tweet_results.result")
+			result := item.content.Get("tweet_results.result")
 			if !result.Exists() {
 				continue
 			}
@@ -123,15 +123,20 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 			// 时全量重翻页、空耗 X API 配额。
 			id := TweetResultID(result)
 			if id != "" {
-				lastTweetID = id
+				if !item.pinned {
+					lastTweetID = id
+				}
 				stats.LastSeenTweetID = MaxTweetID(stats.LastSeenTweetID, id)
+				if item.pinned && options.StopID != "" && !TweetIDNewerThan(id, options.StopID) {
+					continue
+				}
 				if _, ok := seenTweetIDs[id]; ok {
 					// 翻页边界/置顶重复返回同一条推文：只保留一份。
 					continue
 				}
 				seenTweetIDs[id] = struct{}{}
 			}
-			if options.StopID != "" && !reachedStop && ShouldStopAt(id, options.StopID, page) {
+			if options.StopID != "" && !reachedStop && !item.pinned && ShouldStopAt(id, options.StopID, page) {
 				// 不能立即 return：page 0 的精确命中可能落在置顶推文上——上次归档时它恰为
 				// 最新推文（newestTweetID 游标就是它），而其后仍排着本次新增的推文。继续
 				// 扫完本页，只保留数值更新的项，再根据页尾判断是否继续翻页。
@@ -145,10 +150,10 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 				}
 			}
 			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result, options.Parse)
-			parseCandidates++
 			if errors.Is(err, parser.ErrTweetUnavailable) {
 				continue
 			}
+			parseCandidates++
 			if err != nil {
 				// 单条推文解析失败只跳过并计数：不再让整个用户的时间线归档失败
 				// （否则一条无法解析的推文会让增量游标永远无法推进）。
@@ -176,19 +181,22 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 				complete = true
 			}
 		}
-		batch := UserMediaTimelinePage{Tweets: pageTweets, Cursor: next, Complete: complete}
-		if err := save(batch); err != nil {
-			return stats, err
-		}
 		parsedTweets += len(pageTweets)
 		if complete {
 			// 安全检查：timeline 返回了推文条目但全部被解析失败跳过。这通常意味着 X 改了
 			// 推文结构或 legacy 字段缺失，而非"该用户没有媒体推文"。若当成正常空结果返回，
 			// 上层会推进增量游标，导致这些推文的媒体被永久跳过。
+			// 必须在 save(batch) 之前执行，防止把 Complete: true 持久化后才报错。
 			if parsedTweets == 0 && failedParseCount > 0 && failedParseCount == parseCandidates {
 				return stats, fmt.Errorf("时间线返回了 %d 条推文但全部解析失败（user=%s，跳过的推文: %s）",
 					stats.SkippedTweets, user.ID, strings.Join(stats.SkippedTweetIDs, ", "))
 			}
+		}
+		batch := UserMediaTimelinePage{Tweets: pageTweets, Cursor: next, Complete: complete}
+		if err := save(batch); err != nil {
+			return stats, err
+		}
+		if complete {
 			return stats, nil
 		}
 		seenCursor[next] = struct{}{}
@@ -255,10 +263,6 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 			if tweet.Author.ID != user.ID {
 				continue
 			}
-			if seen[tweet.ID] {
-				continue
-			}
-			seen[tweet.ID] = true
 			if !result.Pinned {
 				lastOwnerID = tweet.ID
 				head = MaxTweetID(head, tweet.ID)
@@ -269,6 +273,11 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 				}
 				continue
 			}
+			if seen[tweet.ID] {
+				continue
+			}
+			seen[tweet.ID] = true
+			head = MaxTweetID(head, tweet.ID)
 			batch.Tweets = append(batch.Tweets, tweet)
 		}
 		// A pinned older post cannot terminate a page that still contains newer posts.
@@ -330,22 +339,14 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 			continue
 		}
 		if path == "data.user.result.timeline_v2.timeline.instructions" {
-			items, next, err := TimelineItems(payload, path)
+			items, next, err := timelineItems(payload, path)
 			if err != nil {
 				return nil, "", err
 			}
-			results := []FullTimelineTweet{}
-			pinned := map[string]bool{}
-			for _, instruction := range instructions.Array() {
-				if instruction.Get("type").String() == "TimelinePinEntry" {
-					if id := TweetResultID(instruction.Get("entry.content.itemContent.tweet_results.result")); id != "" {
-						pinned[id] = true
-					}
-				}
-			}
+			results := make([]FullTimelineTweet, 0, len(items))
 			for _, item := range items {
-				if r := item.Get("tweet_results.result"); r.Exists() {
-					results = append(results, FullTimelineTweet{Result: r, Pinned: pinned[TweetResultID(r)]})
+				if r := item.content.Get("tweet_results.result"); r.Exists() {
+					results = append(results, FullTimelineTweet{Result: r, Pinned: item.pinned})
 				}
 			}
 			return results, next, nil
@@ -564,6 +565,9 @@ func FetchUserPage(ctx context.Context, requester Requester, path, instructions 
 	values := url.Values{"variables": {EncodeVariables(variables)}, "features": {TimelineFeatures}}
 	payload, err := requester.GraphQL(ctx, path, values)
 	if err != nil {
+		if cursor != "" && isInvalidCursorError(err) {
+			return UserPage{}, fmt.Errorf("%w: %v", ErrInvalidTimelineCursor, err)
+		}
 		return UserPage{}, err
 	}
 	items, next, err := TimelineItems(payload, instructions)

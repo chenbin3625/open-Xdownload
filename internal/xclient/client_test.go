@@ -14,6 +14,7 @@ import (
 
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
+	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 	"github.com/tidwall/gjson"
 )
 
@@ -548,7 +549,8 @@ func TestSelfCheckPageChangeDoesNotDisableClient(t *testing.T) {
 
 func TestSuccessfulSelfCheckReenablesClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"screen_name":"owner"}`))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"users":[{"user_id":"1","screen_name":"owner","is_auth_valid":true}]}`))
 	}))
 	defer server.Close()
 	client := &Client{http: server.Client(), baseURL: server.URL}
@@ -903,7 +905,7 @@ func TestClientSendsCookiesCSRFAndBearerHeaders(t *testing.T) {
 		t.Fatalf("graphQL: %v", err)
 	}
 	got := <-requests
-	if got.header.Get("Authorization") != "Bearer "+guestBearer {
+	if got.header.Get("Authorization") != "Bearer "+xapi.GuestBearer() {
 		t.Fatalf("Authorization = %q", got.header.Get("Authorization"))
 	}
 	if got.header.Get("X-Csrf-Token") != "csrf-token-value" {
@@ -1432,5 +1434,125 @@ func TestPoolSharesRetryBudgetAcrossCookies(t *testing.T) {
 	want := int64(requestMaxAttempts)
 	if got := requests.Load(); got != want {
 		t.Fatalf("requests = %d, want unified budget %d", got, want)
+	}
+}
+
+func TestScreenNamePatternDoesNotSpanEmptyQuotes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"users":[{"user_id":"1","screen_name":"invalid_user","is_auth_valid":false},{"user_id":"2","screen_name":"real_owner","is_auth_valid":true}]}`))
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	got, err := client.GetSelfScreenName(context.Background())
+	if err != nil {
+		t.Fatalf("GetSelfScreenName: %v", err)
+	}
+	if got != "real_owner" {
+		t.Fatalf("screen_name = %q, want real_owner", got)
+	}
+}
+
+func TestPoolGraphQLTriesFifthAccountWhenFirstFourFail(t *testing.T) {
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer failSrv.Close()
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+	}))
+	defer okSrv.Close()
+
+	pool := &Pool{clients: []*Client{
+		{http: failSrv.Client(), baseURL: failSrv.URL, retryBackoff: func(int) time.Duration { return 0 }},
+		{http: failSrv.Client(), baseURL: failSrv.URL, retryBackoff: func(int) time.Duration { return 0 }},
+		{http: failSrv.Client(), baseURL: failSrv.URL, retryBackoff: func(int) time.Duration { return 0 }},
+		{http: failSrv.Client(), baseURL: failSrv.URL, retryBackoff: func(int) time.Duration { return 0 }},
+		{http: okSrv.Client(), baseURL: okSrv.URL, retryBackoff: func(int) time.Duration { return 0 }},
+	}}
+	payload, err := pool.graphQL(context.Background(), "/i/api/graphql/x/Test", nil)
+	if err != nil {
+		t.Fatalf("graphQL failed on 5-client pool: %v", err)
+	}
+	if string(payload) != `{"data":{"ok":true}}` {
+		t.Fatalf("payload = %s", payload)
+	}
+}
+
+func TestPoolSelectSkipsExcludedClientInEarliestBlockedWait(t *testing.T) {
+	limExcluded := newRateLimiter()
+	limExcluded.markRateLimitedFor("/p", 5*time.Second)
+	limSelectable := newRateLimiter()
+	limSelectable.markRateLimitedFor("/p", 5*time.Minute)
+
+	cExcluded := &Client{limiter: limExcluded}
+	cSelectable := &Client{limiter: limSelectable}
+	pool := &Pool{clients: []*Client{cExcluded, cSelectable}}
+
+	ctx := WithYieldToScheduler(withExcludedClients(context.Background(), map[*Client]bool{cExcluded: true}))
+	_, err := pool.Select(ctx, "/p")
+	retryAt, ok := RateLimitRetryAt(err)
+	if !ok {
+		t.Fatalf("expected RateLimitedError, got %v", err)
+	}
+	if wait := time.Until(retryAt); wait < 4*time.Minute {
+		t.Fatalf("retryAt wait = %s, want >= 4m from selectable client (not excluded client's 5s)", wait)
+	}
+}
+
+func TestGetSelfScreenNameDistinguishes429FromWAFCooldown(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	client := newHeaderTestClient(server)
+	if _, err := client.GetSelfScreenName(context.Background()); !xapi.IsRateLimitError(err) {
+		t.Fatalf("first call error = %v, want rate limit", err)
+	}
+	_, err := client.GetSelfScreenName(context.Background())
+	if errors.Is(err, ErrWAFChallenge) {
+		t.Fatalf("cooldown after 429 misclassified as ErrWAFChallenge: %v", err)
+	}
+	if !xapi.IsRateLimitError(err) {
+		t.Fatalf("second call error = %v, want RateLimitedError", err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("hits = %d, want 1", hits.Load())
+	}
+}
+
+func TestLookupFetcherReturnsLastAgeRestrictedWhenRemainingDisabled(t *testing.T) {
+	ageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"user":{"result":{"__typename":"UserUnavailable","reason":"Suspended","message":"User is age-restricted"}}}}`))
+	}))
+	defer ageSrv.Close()
+	disabledClient := &Client{}
+	disabledClient.disable(errors.New("disabled"))
+
+	pool := &Pool{clients: []*Client{newHeaderTestClient(ageSrv), disabledClient}}
+	_, err := pool.GetUserByInput(context.Background(), "target")
+	if err == nil || !strings.Contains(err.Error(), "age-restricted") {
+		t.Fatalf("err = %v, want age-restricted error instead of disabled pool error", err)
+	}
+}
+
+func TestGuestBearerUsesEnvDynamically(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("OPEN_XDOWNLOAD_GUEST_BEARER", "rotated-bearer-token")
+	client := newHeaderTestClient(server)
+	if _, err := client.graphQL(context.Background(), "/i/api/graphql/x/Test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer rotated-bearer-token" {
+		t.Fatalf("Authorization = %q, want rotated bearer", gotAuth)
 	}
 }

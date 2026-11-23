@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultGalleryFilter, readRouteState, updateBrowserRoute, useRouteState } from "./useRouteState";
+import { buildRoutePath, defaultGalleryFilter, readRouteState, updateBrowserRoute, useRouteState } from "./useRouteState";
 
 function setUrl(path: string) {
   window.history.replaceState(null, "", path);
@@ -81,10 +81,21 @@ describe("URL 路由状态往返", () => {
     const protect = (event: Event) => event.preventDefault();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     window.addEventListener("settings:before-navigate", protect);
-    act(() => { setUrl("/tasks"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    const pushSpy = vi.spyOn(window.history, "pushState");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    act(() => {
+      setUrl("/tasks");
+      replaceSpy.mockClear();
+      pushSpy.mockClear();
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
     expect(result.current.activeSection).toBe("settings");
     expect(window.location.pathname).toBe("/settings");
     expect(confirm).toHaveBeenCalledTimes(1);
+    expect(pushSpy).toHaveBeenCalledWith(null, "", "/settings");
+    expect(replaceSpy).not.toHaveBeenCalled();
+    pushSpy.mockRestore();
+    replaceSpy.mockRestore();
     confirm.mockReturnValue(true);
     act(() => { setUrl("/tasks"); window.dispatchEvent(new PopStateEvent("popstate")); });
     expect(result.current.activeSection).toBe("tasks");
@@ -92,5 +103,36 @@ describe("URL 路由状态往返", () => {
     act(() => { setUrl("/settings"); window.dispatchEvent(new PopStateEvent("popstate")); });
     expect(result.current.activeSection).toBe("settings");
     confirm.mockRestore();
+  });
+
+  it("preserves query params for /tweets/ with a trailing slash", () => {
+    setUrl("/tweets/?author=alice&sort=asc");
+    expect(buildRoutePath({ section: "tweets" })).toBe("/tweets?author=alice&sort=asc");
+    expect(readRouteState().shouldReplace).toBe(true);
+    updateBrowserRoute({ section: "tweets" }, true);
+    expect(`${window.location.pathname}${window.location.search}`).toBe("/tweets?author=alice&sort=asc");
+  });
+
+  it("clamps gallery search in handleGalleryChange and clears job filters atomically", () => {
+    setUrl("/gallery");
+    const { result: galleryHook } = renderHook(() => useRouteState());
+    act(() => {
+      galleryHook.current.handleGalleryChange({ search: "a".repeat(200), page: 1 });
+    });
+    expect(galleryHook.current.gallery.search).toHaveLength(120);
+    expect(new URLSearchParams(window.location.search).get("q")).toHaveLength(120);
+
+    setUrl("/tasks?page=2&status=failed&kind=user&q=alice");
+    const { result: tasksHook } = renderHook(() => useRouteState());
+    const historyBefore = window.history.length;
+    act(() => {
+      tasksHook.current.clearJobFilters();
+    });
+    expect(tasksHook.current.jobStatus).toBe("all");
+    expect(tasksHook.current.jobKind).toBe("all");
+    expect(tasksHook.current.jobSearch).toBe("");
+    expect(tasksHook.current.jobPage).toBe(1);
+    expect(`${window.location.pathname}${window.location.search}`).toBe("/tasks");
+    expect(window.history.length - historyBefore).toBeLessThanOrEqual(1);
   });
 });

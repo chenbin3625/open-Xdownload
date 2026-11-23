@@ -81,7 +81,7 @@ func ParseAPIError(payload []byte) error {
 		return &APIError{Code: code, Raw: raw}
 	}
 	data := gjson.GetBytes(payload, "data")
-	hasData := data.IsObject() && len(data.Map()) > 0
+	hasData := hasUsableData(data)
 	for _, entry := range errorsResult.Array() {
 		code := -1
 		if value := entry.Get("code"); value.Exists() {
@@ -100,15 +100,42 @@ func ParseAPIError(payload []byte) error {
 	return nil
 }
 
+func hasUsableData(data gjson.Result) bool {
+	if !data.IsObject() {
+		return false
+	}
+	for _, value := range data.Map() {
+		switch value.Type {
+		case gjson.Null:
+			continue
+		case gjson.String:
+			if value.String() != "" {
+				return true
+			}
+		case gjson.JSON:
+			if value.IsObject() && len(value.Map()) == 0 {
+				continue
+			}
+			if value.IsArray() && len(value.Array()) == 0 {
+				continue
+			}
+			return true
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 // isTolerablePartialError 判定 data 非空响应中的单条 GraphQL 错误能否忽略。
-// 容忍范围：无 kind、kind=NonFatal、或没有 code（-1）的**非致命**错误；
-// 限流/锁定/凭证错误与瞬时（0/29/130）错误一律不容忍。
+// 容忍范围：无 kind 或 kind=NonFatal 的**非致命**错误，以及深层子字段的 Validation；
+// 限流/锁定/凭证错误、Fatal 等错误与瞬时（0/29/130）错误一律不容忍。
 func isTolerablePartialError(entry gjson.Result, err *APIError) bool {
 	if IsFatalAPIErrorCode(err.Code) || IsPermanentClientError(err) || IsTransientError(err) {
 		return false
 	}
 	kind := entry.Get("kind").String()
-	if kind == "" || kind == "NonFatal" || err.Code == -1 {
+	if kind == "" || kind == "NonFatal" {
 		return true
 	}
 	// 子字段级别的校验错误（path 深于根字段，如 list.default_banner_media_results.result）
@@ -121,8 +148,16 @@ func LimitedErrorPayload(payload []byte) string {
 		return string(payload)
 	}
 	clipped := payload[:MaxErrorPayloadBytes]
-	for len(clipped) > 0 && !utf8.Valid(clipped) {
-		clipped = clipped[:len(clipped)-1]
+	// 最多回退 3 个字节，只裁掉截断边界处的半个多字节 UTF-8 字符；
+	// 前文若本身含非法字节，不能因此把整个错误载荷清空。
+	for trim := 1; trim <= 3 && trim <= len(clipped); trim++ {
+		tail := clipped[len(clipped)-trim:]
+		if utf8.RuneStart(tail[0]) {
+			if !utf8.FullRune(tail) {
+				clipped = clipped[:len(clipped)-trim]
+			}
+			break
+		}
 	}
 	return fmt.Sprintf("%s... [truncated %d bytes]", string(clipped), len(payload)-len(clipped))
 }
@@ -291,7 +326,24 @@ func NormalizeAvatarURL(raw string) string {
 	return value
 }
 
+type timelineItem struct {
+	content gjson.Result
+	pinned  bool
+}
+
 func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, string, error) {
+	wrapped, next, err := timelineItems(payload, instructionsPath)
+	if err != nil {
+		return nil, "", err
+	}
+	items := make([]gjson.Result, len(wrapped))
+	for i, item := range wrapped {
+		items[i] = item.content
+	}
+	return items, next, nil
+}
+
+func timelineItems(payload []byte, instructionsPath string) ([]timelineItem, string, error) {
 	instructions := gjson.GetBytes(payload, instructionsPath)
 	if !instructions.Exists() {
 		if strings.HasPrefix(instructionsPath, "data.user.") {
@@ -313,7 +365,7 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 	}
 	var allEntries []gjson.Result
 	// 累积所有 TimelineAddToModule 的条目，而不是只保留最后一个。
-	allModuleItems := []gjson.Result{}
+	allModuleItems := []timelineItem{}
 	recognized := false
 	for _, instruction := range instructions.Array() {
 		switch instruction.Get("type").String() {
@@ -323,7 +375,7 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 		case "TimelineAddToModule":
 			recognized = true
 			for _, item := range instruction.Get("moduleItems").Array() {
-				allModuleItems = append(allModuleItems, item)
+				allModuleItems = append(allModuleItems, timelineItem{content: item})
 			}
 		case "TimelinePinEntry":
 			recognized = true
@@ -332,16 +384,18 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 				content := entry.Get("content")
 				if itemContent := content.Get("itemContent"); itemContent.Exists() {
 					// 直接放入下方的 items（不通过 entries 数组，避免干扰 cursor 提取）。
-					allModuleItems = append(allModuleItems, gjson.Parse(`{"item":{"itemContent":`+itemContent.Raw+`}}`))
+					allModuleItems = append(allModuleItems, timelineItem{content: gjson.Parse(`{"item":{"itemContent":` + itemContent.Raw + `}}`), pinned: true})
 				}
 			}
 		case "TimelineReplaceEntry":
 			recognized = true
-			// 替换条目同样可能携带媒体，按与 AddEntries 相同的方式提取。
+			// 替换条目既可能携带媒体，也可能替换分页 Bottom cursor。
 			if entry := instruction.Get("entry"); entry.Exists() {
 				content := entry.Get("content")
-				if itemContent := content.Get("itemContent"); itemContent.Exists() {
-					allModuleItems = append(allModuleItems, gjson.Parse(`{"item":{"itemContent":`+itemContent.Raw+`}}`))
+				if isTimelineCursorContent(content) {
+					allEntries = append(allEntries, entry)
+				} else if itemContent := content.Get("itemContent"); itemContent.Exists() {
+					allModuleItems = append(allModuleItems, timelineItem{content: gjson.Parse(`{"item":{"itemContent":` + itemContent.Raw + `}}`)})
 				}
 			}
 		}
@@ -352,38 +406,50 @@ func TimelineItems(payload []byte, instructionsPath string) ([]gjson.Result, str
 	if !recognized && len(instructions.Array()) > 0 {
 		return nil, "", fmt.Errorf("无法识别 timeline 结构（instructions 无已知类型，path=%s）", instructionsPath)
 	}
-	items := []gjson.Result{}
+	items := []timelineItem{}
 	for _, entry := range allEntries {
-		if entry.Get("content.entryType").String() == "TimelineTimelineCursor" {
+		content := entry.Get("content")
+		if isTimelineCursorContent(content) {
 			continue
 		}
-		content := entry.Get("content")
 		switch content.Get("entryType").String() {
 		case "TimelineTimelineModule":
 			for _, item := range content.Get("items").Array() {
 				if itemContent := item.Get("item.itemContent"); itemContent.Exists() {
-					items = append(items, itemContent)
+					items = append(items, timelineItem{content: itemContent})
 				}
 			}
 		case "TimelineTimelineItem":
 			if itemContent := content.Get("itemContent"); itemContent.Exists() {
-				items = append(items, itemContent)
+				items = append(items, timelineItem{content: itemContent})
 			}
 		}
 	}
 	for _, item := range allModuleItems {
-		if itemContent := item.Get("item.itemContent"); itemContent.Exists() {
-			items = append(items, itemContent)
+		if itemContent := item.content.Get("item.itemContent"); itemContent.Exists() {
+			items = append(items, timelineItem{content: itemContent, pinned: item.pinned})
 		}
 	}
 	return items, bottomCursorFromEntries(allEntries), nil
 }
 
+func isTimelineCursorContent(content gjson.Result) bool {
+	return content.Get("entryType").String() == "TimelineTimelineCursor" ||
+		content.Get("__typename").String() == "TimelineTimelineCursor"
+}
+
 func bottomCursorFromEntries(array []gjson.Result) string {
 	for i := len(array) - 1; i >= 0; i-- {
-		if array[i].Get("content.entryType").String() == "TimelineTimelineCursor" &&
-			array[i].Get("content.cursorType").String() == "Bottom" {
-			return array[i].Get("content.value").String()
+		content := array[i].Get("content")
+		if !isTimelineCursorContent(content) {
+			continue
+		}
+		cursorType := content.Get("cursorType").String()
+		if cursorType == "" {
+			cursorType = content.Get("cursor_type").String()
+		}
+		if strings.EqualFold(cursorType, "Bottom") {
+			return content.Get("value").String()
 		}
 	}
 	return ""

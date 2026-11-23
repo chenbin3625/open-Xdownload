@@ -41,7 +41,7 @@ func ensureDevTLS(dir string, hosts ...string) (certFile string, keyFile string,
 		Subject:      pkix.Name{CommonName: "open-Xdownload", Organization: []string{"open-Xdownload"}},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{"localhost"},
 		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
@@ -67,6 +67,9 @@ func ensureDevTLS(dir string, hosts ...string) (certFile string, keyFile string,
 		return "", "", err
 	}
 	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes}), 0o600); err != nil {
+		return "", "", err
+	}
+	if err := os.Chmod(keyFile, 0o600); err != nil {
 		return "", "", err
 	}
 	return certFile, keyFile, nil
@@ -96,7 +99,7 @@ func validDevTLS(certFile, keyFile string, hosts ...string) bool {
 	}
 	certPublic, ok := cert.PublicKey.(*ecdsa.PublicKey)
 	key, okKey := privateKey.(*ecdsa.PrivateKey)
-	if !ok || !okKey || certPublic == nil || key == nil || certPublic.X.Cmp(key.PublicKey.X) != 0 || certPublic.Y.Cmp(key.PublicKey.Y) != 0 {
+	if !ok || !okKey || certPublic == nil || key == nil || !certPublic.Equal(&key.PublicKey) {
 		return false
 	}
 	now := time.Now()

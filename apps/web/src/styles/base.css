@@ -11,8 +11,10 @@ body {
   margin: 0;
 }
 
-:where(.app-shell, .auth-page) a:not(.semi-button) {
-  color: var(--semi-color-link);
+@layer base {
+  :where(.app-shell, .auth-page) :where(a:not(.semi-button)) {
+    color: var(--semi-color-link);
+  }
 }
 
 /* 顶部全局加载条（GlobalLoadingBar） */

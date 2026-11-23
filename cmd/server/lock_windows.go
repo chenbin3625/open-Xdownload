@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -15,7 +16,10 @@ func acquireDataLock(path string) (*os.File, error) {
 	var overlapped windows.Overlapped
 	if err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("data directory is already in use: %w", err)
+		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return nil, fmt.Errorf("data directory is already in use: %w", err)
+		}
+		return nil, fmt.Errorf("lock data directory: %w", err)
 	}
 	return file, nil
 }

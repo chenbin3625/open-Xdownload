@@ -12,6 +12,11 @@ import (
 const SessionLifetime = 30 * 24 * time.Hour
 const SessionIdleTimeout = 7 * 24 * time.Hour
 
+// MaxActiveSessions caps the number of concurrent active sessions kept for the
+// single app account; oldest/least-recently-seen sessions beyond this cap are
+// evicted on CreateSession so app_sessions cannot grow without bound.
+const MaxActiveSessions = 64
+
 type Account struct {
 	Username     string `db:"username"`
 	PasswordHash []byte `db:"password_hash"`
@@ -42,7 +47,12 @@ func (s *Store) CreateAccount(ctx context.Context, account Account) error {
 }
 
 func (s *Store) UpdateAccountPassword(ctx context.Context, oldKey, passwordHash, sessionKey []byte) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE app_account SET password_hash = ?, session_key = ? WHERE id = 1 AND session_key = ?`, passwordHash, sessionKey, oldKey)
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE app_account SET password_hash = ?, session_key = ? WHERE id = 1 AND session_key = ?`, passwordHash, sessionKey, oldKey)
 	if err != nil {
 		return err
 	}
@@ -51,7 +61,10 @@ func (s *Store) UpdateAccountPassword(ctx context.Context, oldKey, passwordHash,
 	} else if n != 1 {
 		return &UserFacingError{Status: http.StatusUnauthorized, Message: "登录已失效，请重新登录"}
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_sessions`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CreateSession(ctx context.Context, token string, now time.Time) error {
@@ -67,6 +80,11 @@ func (s *Store) CreateSession(ctx context.Context, token string, now time.Time) 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO app_sessions(token_hash,created_at,last_seen_at,expires_at) VALUES(?,?,?,?)`, hash[:], now.UnixMilli(), now.UnixMilli(), now.Add(SessionLifetime).UnixMilli()); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_sessions WHERE rowid NOT IN (
+		SELECT rowid FROM app_sessions ORDER BY last_seen_at DESC, created_at DESC, rowid DESC LIMIT ?
+	)`, MaxActiveSessions); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -77,20 +95,36 @@ const sessionTouchInterval = 10 * time.Minute
 
 func (s *Store) SessionValid(ctx context.Context, token string, now time.Time) (bool, error) {
 	hash := sha256.Sum256([]byte(token))
-	// 只有 last_seen_at 已超过刷新间隔时才写；其余请求走只读校验。
+	nowMS := now.UnixMilli()
+	idleCutoffMS := now.Add(-SessionIdleTimeout).UnixMilli()
+	// 先做只读查询：只有 last_seen_at 已超过刷新间隔时才获取 SQLite 写锁刷新，
+	// 避免每次已认证的读请求都触发一次写事务（即使 0 行匹配也会走写路径）。
+	var lastSeenAt int64
+	err := s.db.GetContext(ctx, &lastSeenAt, `SELECT last_seen_at FROM app_sessions
+		WHERE token_hash=? AND created_at<=? AND expires_at>? AND last_seen_at>?`,
+		hash[:], nowMS, nowMS, idleCutoffMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	touchCutoffMS := now.Add(-sessionTouchInterval).UnixMilli()
+	if lastSeenAt > touchCutoffMS {
+		return true, nil
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE app_sessions SET last_seen_at=MAX(last_seen_at,?)
 		WHERE token_hash=? AND created_at<=? AND expires_at>? AND last_seen_at>? AND last_seen_at<=?`,
-		now.UnixMilli(), hash[:], now.UnixMilli(), now.UnixMilli(),
-		now.Add(-SessionIdleTimeout).UnixMilli(), now.Add(-sessionTouchInterval).UnixMilli())
+		nowMS, hash[:], nowMS, nowMS, idleCutoffMS, touchCutoffMS)
 	if err != nil {
 		return false, err
 	}
 	if count, err := result.RowsAffected(); err != nil {
 		return false, err
-	} else if count == 1 {
-		return true, nil
+	} else if count == 0 {
+		return s.SessionValidReadOnly(ctx, token, now)
 	}
-	return s.SessionValidReadOnly(ctx, token, now)
+	return true, nil
 }
 
 // SessionValidReadOnly 校验会话是否有效且未超期，但不刷新 last_seen_at。

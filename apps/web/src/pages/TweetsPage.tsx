@@ -5,6 +5,7 @@ import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import RadioGroup from "@douyinfe/semi-ui/lib/es/radio/radioGroup";
 import Select from "@douyinfe/semi-ui/lib/es/select";
+import type { TweetData } from "../lib/api";
 import { getTweetAuthors, getTweets, retryTweetMedia, tweetAuthorsQueryKey, tweetsQueryKey, type ArchivedTweet, type TweetPage } from "../lib/archive";
 import { t, useTranslation } from "../lib/i18n";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
@@ -19,12 +20,43 @@ const ArchiveDatePicker = lazy(() => import("../components/tweets/ArchiveDatePic
 
 function readFilters() { return new URLSearchParams(window.location.search); }
 
-// 旧归档数据可能缺少数组字段（后端返回 null）。页面里有大量 .length/.map，
-// 一条坏数据就会让整个页面白屏，这里在渲染前统一补成空数组。
-function normalizeArchivedTweet(tweet: ArchivedTweet): ArchivedTweet {
+function sanitizeDateParam(value: string | null) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : "";
+}
+
+const MAX_RELATED_NORMALIZE_DEPTH = 4;
+
+// 旧归档数据（包括嵌套的 related 引用/转推）可能缺少数组字段（后端返回 null）。
+// 页面里有大量 .length/.map，一条坏数据就会让整个页面白屏，这里递归补成空数组并防环。
+function normalizeTweetData(tweet: TweetData, depth = 0, seen = new Set<TweetData>()): TweetData {
+  if (seen.has(tweet) || depth > MAX_RELATED_NORMALIZE_DEPTH) {
+    return {
+      ...tweet,
+      media: Array.isArray(tweet.media) ? tweet.media : [],
+      related: undefined,
+    };
+  }
+  seen.add(tweet);
+  const related = Array.isArray(tweet.related)
+    ? tweet.related
+        .filter((item): item is TweetData => Boolean(item && typeof item === "object"))
+        .map(item => normalizeTweetData(item, depth + 1, seen))
+    : undefined;
+  seen.delete(tweet);
   return {
     ...tweet,
     media: Array.isArray(tweet.media) ? tweet.media : [],
+    related,
+  };
+}
+
+function normalizeArchivedTweet(tweet: ArchivedTweet): ArchivedTweet {
+  const normalized = normalizeTweetData(tweet);
+  return {
+    ...tweet,
+    ...normalized,
     downloads: Array.isArray(tweet.downloads) ? tweet.downloads : [],
     jobIds: Array.isArray(tweet.jobIds) ? tweet.jobIds : [],
   };
@@ -50,30 +82,80 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
   const change = useCallback((patch: Record<string, string>, replace = false) => {
     const next = readFilters(); for (const [key, value] of Object.entries(patch)) { if (value) next.set(key, value); else next.delete(key); }
     if (!("page" in patch)) next.delete("page");
-    window.history[replace ? "replaceState" : "pushState"](null, "", `/tweets${next.size ? `?${next}` : ""}`); setFilters(next);
+    const qs = next.toString();
+    window.history[replace ? "replaceState" : "pushState"](null, "", `/tweets${qs ? `?${qs}` : ""}`); setFilters(next);
   }, []);
   useEffect(() => { if (debounced !== (readFilters().get("search") ?? "")) change({ search: debounced }, true); }, [debounced]);
   useEffect(() => { if (debouncedAuthor !== (readFilters().get("author") ?? "")) change({ author: debouncedAuthor }, true); }, [debouncedAuthor]);
   const compact = filters.get("view") !== "comfortable";
   const retweets = ["exclude", "only"].includes(filters.get("retweets") ?? "") ? filters.get("retweets")! : "";
-  const query = useMemo(() => { const q = new URLSearchParams(filters); q.delete("view"); q.set("pageSize", ["10", "20", "50", "100"].includes(filters.get("pageSize") ?? "") ? filters.get("pageSize")! : "20"); q.set("sort", filters.get("sort") === "asc" ? "asc" : "desc"); return q; }, [filters]);
+  const fromDate = sanitizeDateParam(filters.get("from"));
+  const toDate = sanitizeDateParam(filters.get("to"));
+  const requestedPage = Math.max(1, Number.parseInt(filters.get("page") ?? "1", 10) || 1);
+  const hasActiveFilters = Boolean(
+    filters.get("id") ||
+    filters.get("jobId") ||
+    filters.get("author") ||
+    fromDate ||
+    toDate ||
+    filters.get("mediaType") ||
+    filters.get("search") ||
+    retweets
+  );
+  const query = useMemo(() => {
+    const q = new URLSearchParams(filters);
+    q.delete("view");
+    if (retweets) q.set("retweets", retweets); else q.delete("retweets");
+    if (fromDate) q.set("from", fromDate); else q.delete("from");
+    if (toDate) q.set("to", toDate); else q.delete("to");
+    q.set("pageSize", ["10", "20", "50", "100"].includes(filters.get("pageSize") ?? "") ? filters.get("pageSize")! : "20");
+    q.set("sort", filters.get("sort") === "asc" ? "asc" : "desc");
+    return q;
+  }, [filters, retweets, fromDate, toDate]);
   // SSE 连接正常时归档事件会推送刷新；轮询降级为低频兜底，断线时再缩短到 30s。
   const tweets = useQuery({ queryKey: [...tweetsQueryKey, query.toString()], queryFn: ({ signal }) => getTweets(query, signal), placeholderData: previous => previous, refetchInterval: realtimeConnected ? 60_000 : 30_000 });
   const authors = useQuery({ queryKey: tweetAuthorsQueryKey, queryFn: ({ signal }) => getTweetAuthors(signal), staleTime: 5 * 60_000 });
   const retry = useMutation({ mutationFn: retryTweetMedia, onSuccess: () => { toast.success({ message: t("archive.retryQueued") }); void client.invalidateQueries({ queryKey: tweetsQueryKey }); }, onError: error => toast.error({ message: t(error.message, { defaultValue: error.message }) }) });
   const queryIdentity = query.toString();
+  const queryIdentityRef = useRef(queryIdentity);
+  queryIdentityRef.current = queryIdentity;
   useEffect(() => {
     if (!tweets.data || tweets.isPlaceholderData) return;
     const incoming = tweets.data;
     setSnapshot(current => {
-      if (current?.key === queryIdentity) {
-        const incomingByID = new Map(incoming.items.map(item => [item.id, item]));
-        const merged = current.page.items.map(item => incomingByID.get(item.id) ?? item);
-        return { key: queryIdentity, page: { ...current.page, items: merged } };
+      if (current?.key === queryIdentity && current.page.items.length > 0 && incoming.items.length > 0) {
+        const currentIds = new Set(current.page.items.map(item => item.id));
+        const addedCount = incoming.items.filter(item => !currentIds.has(item.id)).length;
+        // 仅当有新增记录且总数上升时才暂存当前视口以展示"有 N 条新记录"横幅，
+        // 且仅保留最新响应中仍然存在的条目，绝不滞留已删除推文。
+        if (addedCount > 0 && incoming.pagination.total > current.page.pagination.total) {
+          const incomingByID = new Map(incoming.items.map(item => [item.id, item]));
+          const merged: ArchivedTweet[] = [];
+          for (const item of current.page.items) {
+            const fresh = incomingByID.get(item.id);
+            if (fresh) merged.push(fresh);
+          }
+          if (merged.length > 0) {
+            return { key: queryIdentity, page: { ...incoming, items: merged } };
+          }
+        }
       }
       return { key: queryIdentity, page: incoming };
     });
   }, [tweets.data, tweets.isPlaceholderData, queryIdentity]);
+  // 总页数缩小时收敛页码，避免删除/筛选后停在空页。
+  useEffect(() => {
+    if (!tweets.data || tweets.isPlaceholderData) return;
+    if (search !== debounced || author !== debouncedAuthor) return;
+    const totalPages = Math.max(
+      1,
+      tweets.data.pagination.totalPages ||
+        (tweets.data.pagination.pageSize > 0 ? Math.ceil(tweets.data.pagination.total / tweets.data.pagination.pageSize) : 1),
+    );
+    if (requestedPage > totalPages) {
+      change({ page: totalPages > 1 ? String(totalPages) : "" }, true);
+    }
+  }, [tweets.data, tweets.isPlaceholderData, search, debounced, author, debouncedAuthor, requestedPage, change]);
   const page = normalizeTweetPage(snapshot?.key === queryIdentity ? snapshot.page : tweets.data);
   const authorOptions = useMemo(() => {
     const options = authors.data ?? [];
@@ -111,7 +193,7 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
       <h1 className="page-title">{t("archive.title")}</h1>
       <div className="page-actions">
         <div className="archive-layout" role="radiogroup" aria-label={t("archive.layout")}><RadioGroup name="archive-layout" type="button" buttonSize="middle" value={compact ? "compact" : "comfortable"} onChange={event => change({ view: event.target.value === "comfortable" ? "comfortable" : "", page: filters.get("page") ?? "" })} options={[{ value: "compact", label: <span className="archive-layout-option"><AlignJustify size={14} />{t("archive.compact")}</span> }, { value: "comfortable", label: <span className="archive-layout-option"><Rows3 size={14} />{t("archive.comfortable")}</span> }]} /></div>
-        <Button type="tertiary" icon={<RefreshCw size={16} />} loading={tweets.isFetching} disabled={tweets.isFetching} aria-busy={tweets.isFetching} onClick={() => void tweets.refetch().then(result => { if (result.data) setSnapshot({ key: queryIdentity, page: result.data }); })}>{t("刷新数据")}</Button>
+        <Button type="tertiary" icon={<RefreshCw size={16} />} loading={tweets.isFetching} disabled={tweets.isFetching} aria-busy={tweets.isFetching} onClick={() => { const requestIdentity = queryIdentity; void tweets.refetch().then(result => { if (result.data && queryIdentityRef.current === requestIdentity) setSnapshot({ key: requestIdentity, page: result.data }); }); }}>{t("刷新数据")}</Button>
       </div>
     </div>
     <div className={`page-toolbar archive-filters${filtersOpen ? " archive-filters-expanded" : ""}`}>
@@ -125,15 +207,15 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
       <label className="sr-only" id="archive-sort-label" htmlFor="archive-sort">{t("排序顺序")}</label><Select className="toolbar-select" id="archive-sort" aria-labelledby="archive-sort-label" value={filters.get("sort") === "asc" ? "asc" : "desc"} onChange={value => change({ sort: String(value) })} optionList={[{ value: "desc", label: t("最新发布优先"), showTick: false }, { value: "asc", label: t("最早发布优先"), showTick: false }]} />
       <div className="archive-date">
         <Suspense fallback={<Button type="tertiary" aria-label={t("发布时间")} icon={<CalendarDays size={16} />}>{t("全部时间")}</Button>}><ArchiveDatePicker type="dateRange" format="yyyy-MM-dd" onChangeWithDateFirst={false} dropdownClassName="archive-date-picker"
-          value={filters.get("from") && filters.get("to") ? [filters.get("from")!, filters.get("to")!] : []}
+          value={fromDate && toDate ? [fromDate, toDate] : []}
           onChange={value => { const dates = Array.isArray(value) ? value : []; change({ from: String(dates[0] ?? ""), to: String(dates[1] ?? "") }); }}
-          triggerRender={() => <Button id="archive-date" type={filters.has("from") || filters.has("to") ? "primary" : "tertiary"} aria-label={t("发布时间")} aria-pressed={filters.has("from") || filters.has("to")} icon={<CalendarDays size={16} />}>{filters.has("from") || filters.has("to") ? `${filters.get("from") || t("不限")} ~ ${filters.get("to") || t("不限")}` : t("全部时间")}</Button>}
+          triggerRender={() => <Button id="archive-date" type={fromDate || toDate ? "primary" : "tertiary"} aria-label={t("发布时间")} aria-pressed={Boolean(fromDate || toDate)} icon={<CalendarDays size={16} />}>{fromDate || toDate ? `${fromDate || t("不限")} ~ ${toDate || t("不限")}` : t("全部时间")}</Button>}
           showClear /></Suspense>
       </div>
       </div>
       </div>
     </div>
-    {(filters.has("id") || filters.has("jobId") || filters.has("author") || filters.has("from") || filters.has("to") || filters.has("mediaType") || filters.has("search") || retweets) && <div className="archive-active-filters active-filter-tags">{["id", "jobId", "author", "from", "to", "mediaType", "search", "retweets"].filter(key => filters.get(key)).map(key => <Button size="small" type="tertiary" className="filter-chip" icon={<X size={12} />} iconPosition="right" key={key} aria-label={`${t("移除筛选")} ${filters.get(key)}`} onClick={() => { if (key === "search") setSearch(""); if (key === "author") setAuthor(""); change({ [key]: "" }); }}>{t(({ id: "推文 ID", jobId: "来源任务", author: "archive.author", from: "开始日期", to: "结束日期", mediaType: "archive.mediaType", search: "archive.search", retweets: "archive.retweetFilter" } as Record<string, string>)[key])}: {filters.get(key)}</Button>)}<Button size="small" theme="borderless" type="tertiary" onClick={() => { setSearch(""); setAuthor(""); change({ id: "", jobId: "", author: "", from: "", to: "", mediaType: "", search: "", retweets: "" }); }}>{t("archive.clearFilters")}</Button></div>}
+    {hasActiveFilters && <div className="archive-active-filters active-filter-tags">{(["id", "jobId", "author", "from", "to", "mediaType", "search", "retweets"] as const).map(key => [key, key === "from" ? fromDate : key === "to" ? toDate : key === "retweets" ? retweets : filters.get(key) ?? ""] as const).filter(([, value]) => Boolean(value)).map(([key, value]) => <Button size="small" type="tertiary" className="filter-chip" icon={<X size={12} />} iconPosition="right" key={key} aria-label={`${t("移除筛选")} ${value}`} onClick={() => { if (key === "search") setSearch(""); if (key === "author") setAuthor(""); change({ [key]: "" }); }}>{t(({ id: "推文 ID", jobId: "来源任务", author: "archive.author", from: "开始日期", to: "结束日期", mediaType: "archive.mediaType", search: "archive.search", retweets: "archive.retweetFilter" } as Record<string, string>)[key])}: {value}</Button>)}<Button size="small" theme="borderless" type="tertiary" onClick={() => { setSearch(""); setAuthor(""); change({ id: "", jobId: "", author: "", from: "", to: "", mediaType: "", search: "", retweets: "" }); }}>{t("archive.clearFilters")}</Button></div>}
     <div className="archive-results-bar">
       {page && <span className="archive-result-count" aria-live="polite">{t("archive.total", { count: page.pagination.total })}</span>}
     </div>
@@ -141,7 +223,7 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
     {newRecords > 0 && <Button className="archive-new-records" icon={<RefreshCw size={14} />} onClick={() => { if (tweets.data) setSnapshot({ key: queryIdentity, page: tweets.data }); }}>{t("有 {{count}} 条新记录", { count: newRecords })}</Button>}
     {tweets.isError && <Alert type="error" message={tweets.error.message} action={<Button onClick={() => void tweets.refetch()}>{t("重试")}</Button>} />}
     {!page && tweets.isLoading && <ListSkeleton />}
-    {page?.items.length === 0 && <Empty description={filters.size ? t("没有匹配的推文") : t("archive.empty")} />}
+    {page?.items.length === 0 && <Empty description={hasActiveFilters ? t("没有匹配的推文") : t("archive.empty")} />}
     <div className="tweet-list">{page?.items.map(tweet => (
       <TweetCard
         key={tweet.id}
@@ -157,7 +239,7 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
       />
     ))}</div>
     {page && <Pagination page={page.pagination.page} pageSize={page.pagination.pageSize} total={page.pagination.total} onPageChange={value => change({ page: String(value) })} onPageSizeChange={value => change({ pageSize: String(value) })} />}
-    <Drawer open={Boolean(detail)} onClose={() => setDetailId(null)} title={detail ? `@${detail.author.screenName}` : t("归档详情")} width="44rem">{detail && <div className="space-y-4"><div className="text-xs text-fg-muted">{t("推文 ID")}: {detail.id} · {formatDateTime(detail.createdAt)}</div><TweetText text={detailReposted?.text ?? detail.text} compact={false} highlight={debounced} />{detail.related?.filter(related => related.id !== detailReposted?.id).map(related => <blockquote className="tweet-related" key={related.id}><a href={`/tweets?id=${related.id}`}>@{related.author.screenName}</a><TweetText text={related.text} compact={false} highlight={debounced} /></blockquote>)}<div className="tweet-archive-meta">{t("归档于")} {formatDateTime(detail.archivedAt)}<span>{t("来源任务")}: {detail.jobIds.map(id => `#${id}`).join(", ") || "—"}</span></div>{detail.downloads.map(record => <button className="tweet-detail-file" key={record.id} onClick={() => setPreview({ tweet: detail, index: Math.max(0, detail.downloads.findIndex(item => item.id === record.id)) })}><FileText size={16} /><span>{record.filePath.split(/[\\/]/).pop()}</span><ExternalLink size={14} /></button>)}<div className="flex gap-2"><Button icon={<Copy size={16} />} onClick={() => void copyToClipboard(detail.url, t("推文链接"))}>{t("复制链接")}</Button><a href={detail.url} target="_blank" rel="noreferrer" className="text-sm text-brand-600">{t("archive.original")}</a>{detail.downloads[0] && <a href={`/gallery?q=${encodeURIComponent(detail.downloads[0].filePath.split(/[\\/]/).pop() || "")}`} className="text-sm text-brand-600">{t("定位媒体库")}</a>}</div></div>}</Drawer>
-    <MediaModal open={preview !== null} onClose={() => setPreview(null)} title={preview ? `@${preview.tweet.author.screenName} · ${preview.tweet.id}` : ""}>{preview && previewRecord && <div className="space-y-3"><div className="relative flex min-h-[18rem] items-center justify-center bg-black/95 p-2"><Button theme="borderless" type="tertiary" icon={<ChevronLeft size={20} />} aria-label={t("上一个媒体")} disabled={preview.index <= 0} onClick={() => setPreview(current => current && current.index > 0 ? { ...current, index: current.index - 1 } : current)} className="absolute left-2 z-10 text-white" />{previewVideo ? <video className="max-h-[75dvh] max-w-full mx-auto" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} poster={`/api/library/downloads/${previewRecord.id}/preview`} controls autoPlay playsInline /> : <img className="max-h-[75dvh] max-w-full mx-auto object-contain" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} alt={`@${preview.tweet.author.screenName} · ${preview.tweet.id}`} />}<Button theme="borderless" type="tertiary" icon={<ChevronRight size={20} />} aria-label={t("下一个媒体")} disabled={preview.index >= preview.tweet.downloads.length - 1} onClick={() => setPreview(current => current && current.index < current.tweet.downloads.length - 1 ? { ...current, index: current.index + 1 } : current)} className="absolute right-2 z-10 text-white" /></div><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-fg-muted"><span>{preview.index + 1} / {preview.tweet.downloads.length}</span><a className="text-brand-600" href={`/gallery?q=${encodeURIComponent(previewRecord.filePath.split(/[\\/]/).pop() || "")}`}>{t("定位媒体库")}</a></div></div>}</MediaModal>
+    <Drawer open={Boolean(detail)} onClose={() => setDetailId(null)} title={detail ? `@${detail.author?.screenName ?? ""}` : t("归档详情")} width="44rem">{detail && <div className="space-y-4"><div className="text-xs text-fg-muted">{t("推文 ID")}: {detail.id} · {formatDateTime(detail.createdAt)}</div><TweetText text={detailReposted?.text ?? detail.text} compact={false} highlight={debounced} />{detail.related?.filter(related => related.id !== detailReposted?.id).map(related => <blockquote className="tweet-related" key={related.id}><a href={`/tweets?id=${encodeURIComponent(related.id)}`}>@{related.author?.screenName ?? ""}</a><TweetText text={related.text} compact={false} highlight={debounced} /></blockquote>)}<div className="tweet-archive-meta">{t("归档于")} {formatDateTime(detail.archivedAt)}<span>{t("来源任务")}: {detail.jobIds.map(id => `#${id}`).join(", ") || "—"}</span></div>{detail.downloads.map(record => <button className="tweet-detail-file" key={record.id} onClick={() => setPreview({ tweet: detail, index: Math.max(0, detail.downloads.findIndex(item => item.id === record.id)) })}><FileText size={16} /><span>{record.filePath.split(/[\\/]/).pop()}</span><ExternalLink size={14} /></button>)}<div className="flex gap-2"><Button icon={<Copy size={16} />} onClick={() => void copyToClipboard(detail.url, t("推文链接"))}>{t("复制链接")}</Button>{/^https?:\/\//i.test(detail.url) && <a href={detail.url} target="_blank" rel="noreferrer" className="text-sm text-brand-600">{t("archive.original")}</a>}{detail.downloads[0] && <a href={`/gallery?q=${encodeURIComponent(detail.downloads[0].filePath.split(/[\\/]/).pop() || "")}`} className="text-sm text-brand-600">{t("定位媒体库")}</a>}</div></div>}</Drawer>
+    <MediaModal open={preview !== null} onClose={() => setPreview(null)} title={preview ? `@${preview.tweet.author?.screenName ?? ""} · ${preview.tweet.id}` : ""}>{preview && previewRecord && <div className="space-y-3"><div className="relative flex min-h-[18rem] items-center justify-center bg-black/95 p-2"><Button theme="borderless" type="tertiary" icon={<ChevronLeft size={20} />} aria-label={t("上一个媒体")} disabled={preview.index <= 0} onClick={() => setPreview(current => current && current.index > 0 ? { ...current, index: current.index - 1 } : current)} className="absolute left-2 z-10 text-white" />{previewVideo ? <video key={previewRecord.id} className="max-h-[75dvh] max-w-full mx-auto" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} poster={`/api/library/downloads/${previewRecord.id}/preview`} controls autoPlay playsInline /> : <img className="max-h-[75dvh] max-w-full mx-auto object-contain" src={previewRecord.fileUrl ?? `/api/library/downloads/${previewRecord.id}/file`} alt={`@${preview.tweet.author?.screenName ?? ""} · ${preview.tweet.id}`} />}<Button theme="borderless" type="tertiary" icon={<ChevronRight size={20} />} aria-label={t("下一个媒体")} disabled={preview.index >= preview.tweet.downloads.length - 1} onClick={() => setPreview(current => current && current.index < current.tweet.downloads.length - 1 ? { ...current, index: current.index + 1 } : current)} className="absolute right-2 z-10 text-white" /></div><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-fg-muted"><span>{preview.index + 1} / {preview.tweet.downloads.length}</span><a className="text-brand-600" href={`/gallery?q=${encodeURIComponent(previewRecord.filePath.split(/[\\/]/).pop() || "")}`}>{t("定位媒体库")}</a></div></div>}</MediaModal>
   </div>;
 }

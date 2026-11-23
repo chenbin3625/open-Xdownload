@@ -4,15 +4,17 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import {
+  checkAllXAccounts,
   checkXAccount,
   deleteXAccount,
   getXAccounts,
   importXAccounts,
   unlockXAccount,
   updateXAccount,
+  type XAccountCheckAllResult,
   type XAccountView,
 } from "../../lib/api";
-import { renderWithProviders, screen, waitFor } from "../../test/render";
+import { act, renderWithProviders, screen, waitFor } from "../../test/render";
 import { XAccountsSettings } from "./XAccountsSettings";
 
 vi.mock("../../lib/api", async (importOriginal) => ({
@@ -108,7 +110,7 @@ it("shows an empty state that opens the import dialog", async () => {
   expect(screen.getByRole("textbox", { name: "账号导入内容" })).toBeTruthy();
 });
 
-it("shows created count and import issues after importing", async () => {
+it("shows created count and import issues after importing and preserves textarea on partial failure", async () => {
   vi.mocked(importXAccounts).mockResolvedValue({
     created: [makeAccount({ id: 3, screenName: "bob" })],
     issues: [
@@ -121,10 +123,10 @@ it("shows created count and import issues after importing", async () => {
   await screen.findByText("@alice");
 
   await user.click(screen.getByRole("button", { name: "导入账号" }));
-  await user.type(
-    screen.getByRole("textbox", { name: "账号导入内容" }),
-    "bad-entry",
-  );
+  const importBox = screen.getByRole("textbox", { name: "账号导入内容" }) as HTMLTextAreaElement;
+  expect(importBox.getAttribute("spellcheck")).toBe("false");
+  expect(importBox.getAttribute("autocomplete")).toBe("off");
+  await user.type(importBox, "bad-entry");
   await user.click(screen.getByRole("button", { name: "导入" }));
 
   expect(await screen.findByText("已导入 1 个账号")).toBeTruthy();
@@ -133,6 +135,8 @@ it("shows created count and import issues after importing", async () => {
   expect(screen.getByText("缺少 ct0")).toBeTruthy();
   expect(screen.getByText("第 3 条")).toBeTruthy();
   expect(screen.getByText("无法解析 JSON")).toBeTruthy();
+  // Partial failure must preserve pasted input so cookies are not lost
+  expect(importBox.value).toBe("bad-entry");
   await waitFor(() => expect(getXAccounts).toHaveBeenCalledTimes(2));
 });
 
@@ -230,4 +234,87 @@ it("sends a patch when toggling an account", async () => {
     expect(updateXAccount).toHaveBeenCalledWith(1, { active: false }),
   );
   await waitFor(() => expect(getXAccounts).toHaveBeenCalledTimes(2));
+});
+
+it("enforces mutex between checkAll and row actions, and disables spellcheck/autocomplete on cookie textareas", async () => {
+  let resolveCheckAll!: (value: XAccountCheckAllResult) => void;
+  let resolveRowCheck!: (value: { ok: boolean; screenName: string; account: XAccountView }) => void;
+  vi.mocked(checkAllXAccounts).mockImplementation(() => new Promise<XAccountCheckAllResult>((resolve) => { resolveCheckAll = resolve; }));
+  vi.mocked(checkXAccount).mockImplementation(() => new Promise((resolve) => { resolveRowCheck = resolve; }));
+
+  const user = userEvent.setup();
+  renderAccounts();
+  await screen.findByText("@alice");
+
+  // Edit cookie textarea disables spellcheck & autocomplete
+  await user.click(screen.getByRole("button", { name: "编辑 @alice" }));
+  const editCookieBox = screen.getByRole("textbox", { name: "替换 Cookie" });
+  expect(editCookieBox.getAttribute("spellcheck")).toBe("false");
+  expect(editCookieBox.getAttribute("autocomplete")).toBe("off");
+  await user.click(screen.getByRole("button", { name: "取消" }));
+
+  // While checkAll is pending, row edit & delete are disabled
+  await user.click(screen.getByRole("button", { name: "全部检测" }));
+  await waitFor(() => expect(checkAllXAccounts).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole("button", { name: "编辑 @alice" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "删除 @alice" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "检测 @alice" }).hasAttribute("disabled")).toBe(true);
+
+  await act(async () => resolveCheckAll({ results: [], accounts: [makeAccount()] }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "编辑 @alice" }).hasAttribute("disabled")).toBe(false));
+
+  // While a row action is pending, checkAll is disabled
+  await user.click(screen.getByRole("button", { name: "检测 @alice" }));
+  await waitFor(() => expect(checkXAccount).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole("button", { name: "全部检测" }).hasAttribute("disabled")).toBe(true);
+
+  await act(async () => resolveRowCheck({ ok: true, screenName: "alice", account: makeAccount() }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "全部检测" }).hasAttribute("disabled")).toBe(false));
+});
+
+it("clears importText after import and editCookie after edit modal closes, and tracks concurrent row updates independently", async () => {
+  vi.mocked(importXAccounts).mockResolvedValue({
+    created: [makeAccount({ id: 3, screenName: "bob" })],
+    issues: [],
+  });
+  let resolveRow1!: (v: XAccountView) => void;
+  let resolveRow2!: (v: XAccountView) => void;
+  vi.mocked(getXAccounts).mockResolvedValue({
+    scraper: "legacy",
+    accounts: [makeAccount({ id: 1, screenName: "alice" }), makeAccount({ id: 2, screenName: "bob", isPrimary: false })],
+  });
+  vi.mocked(updateXAccount)
+    .mockImplementationOnce(() => new Promise(r => { resolveRow1 = r; }))
+    .mockImplementationOnce(() => new Promise(r => { resolveRow2 = r; }));
+
+  const user = userEvent.setup();
+  renderAccounts();
+  await screen.findByText("@alice");
+
+  // Import clears importText on success
+  await user.click(screen.getByRole("button", { name: "导入账号" }));
+  const importBox = screen.getByRole("textbox", { name: "账号导入内容" }) as HTMLTextAreaElement;
+  await user.type(importBox, "auth_token=secret; ct0=token");
+  await user.click(screen.getByRole("button", { name: "导入" }));
+  await waitFor(() => expect(importBox.value).toBe(""));
+  await user.click(screen.getByRole("button", { name: "关闭" }));
+
+  // Edit modal clears editCookie on close
+  await user.click(screen.getByRole("button", { name: "编辑 @alice" }));
+  const cookieBox = screen.getByRole("textbox", { name: "替换 Cookie" }) as HTMLTextAreaElement;
+  await user.type(cookieBox, "auth_token=new; ct0=new");
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  await user.click(screen.getByRole("button", { name: "编辑 @alice" }));
+  expect((screen.getByRole("textbox", { name: "替换 Cookie" }) as HTMLTextAreaElement).value).toBe("");
+  await user.click(screen.getByRole("button", { name: "取消" }));
+
+  // Concurrent row switches don't disable or clobber other rows
+  const switch1 = screen.getByRole("switch", { name: "启用状态 @alice" });
+  const switch2 = screen.getByRole("switch", { name: "启用状态 @bob" });
+  await user.click(switch1);
+  expect(switch2.hasAttribute("disabled")).toBe(false);
+  await user.click(switch2);
+  expect(updateXAccount).toHaveBeenCalledTimes(2);
+  resolveRow1(makeAccount({ id: 1, screenName: "alice", active: false }));
+  resolveRow2(makeAccount({ id: 2, screenName: "bob", isPrimary: false, active: false }));
 });

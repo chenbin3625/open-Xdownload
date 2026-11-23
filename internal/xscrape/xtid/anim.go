@@ -10,6 +10,9 @@ import (
 
 // calcAnimationKey 复刻 twscrape 的 load_keys + cacl_anim_key。
 func calcAnimationKey(animationPaths []string, indices []int, verification []byte) (string, error) {
+	if len(animationPaths) == 0 {
+		return "", fmt.Errorf("动画 path 为空")
+	}
 	if len(indices) == 0 {
 		return "", fmt.Errorf("key byte 索引为空")
 	}
@@ -40,6 +43,9 @@ func calcAnimationKey(animationPaths []string, indices []int, verification []byt
 	// 与 JS Math.round(frame_time / 10) * 10 一致（frame_time 非负）。
 	frameFloat, _ := new(big.Float).SetInt(frameTime).Float64()
 	frameFloat = math.Floor(frameFloat/10+0.5) * 10
+	if math.IsNaN(frameFloat) || math.IsInf(frameFloat, 0) {
+		return "", fmt.Errorf("动画帧时间溢出")
+	}
 
 	return animationKeyFromRow(rows[rowIndex], frameFloat/4096)
 }
@@ -48,6 +54,14 @@ func calcAnimationKey(animationPaths []string, indices []int, verification []byt
 func animationKeyFromRow(frames []float64, targetTime float64) (string, error) {
 	if len(frames) < 7 {
 		return "", fmt.Errorf("动画帧只有 %d 个数值，至少需要 7 个", len(frames))
+	}
+	if math.IsNaN(targetTime) || math.IsInf(targetTime, 0) {
+		return "", fmt.Errorf("动画目标时间无效: %v", targetTime)
+	}
+	for i, v := range frames {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return "", fmt.Errorf("动画帧数值[%d]无效: %v", i, v)
+		}
 	}
 	fromColor := []float64{frames[0], frames[1], frames[2], 1}
 	toColor := []float64{frames[3], frames[4], frames[5], 1}
@@ -67,12 +81,21 @@ func animationKeyFromRow(frames []float64, targetTime float64) (string, error) {
 		return "", fmt.Errorf("cubic-bezier 需要 4 个控制点，实际 %d 个", len(curves))
 	}
 	value := cubicCurve{curves: curves}.value(targetTime)
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return "", fmt.Errorf("动画曲线输出无效: %v", value)
+	}
 
 	color := interpolate(fromColor, toColor, value)
 	for i := range color {
+		if math.IsNaN(color[i]) || math.IsInf(color[i], 0) {
+			return "", fmt.Errorf("动画颜色插值无效: %v", color[i])
+		}
 		color[i] = math.Max(0, math.Min(255, color[i]))
 	}
 	rotation := interpolate(fromRotation, toRotation, value)
+	if math.IsNaN(rotation[0]) || math.IsInf(rotation[0], 0) {
+		return "", fmt.Errorf("动画旋转插值无效: %v", rotation[0])
+	}
 	matrix := rotationMatrix(rotation[0])
 
 	var b strings.Builder
@@ -80,6 +103,9 @@ func animationKeyFromRow(frames []float64, targetTime float64) (string, error) {
 		b.WriteString(strconv.FormatInt(int64(math.RoundToEven(v)), 16))
 	}
 	for _, v := range matrix {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return "", fmt.Errorf("动画矩阵输出无效: %v", v)
+		}
 		rounded := roundTo2(v)
 		if rounded < 0 {
 			rounded = -rounded

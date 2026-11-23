@@ -2,24 +2,45 @@ diff --git a/node_modules/picomatch/lib/parse.js b/node_modules/picomatch/lib/pa
 index 2920751..931782f 100644
 --- a/node_modules/picomatch/lib/parse.js
 +++ b/node_modules/picomatch/lib/parse.js
-@@ -284,6 +284,24 @@ const repeatedExtglobRecursion = pattern => {
+@@ -284,6 +284,45 @@ const repeatedExtglobRecursion = pattern => {
    return depth;
  };
  
-+const hasUnboundedBranchQuantifier = branch => {
++const findClosing = (str, start, closeChar) => {
 +  let escaped = false;
-+  let bracket = 0;
-+  let quote = false;
-+  for (let i = 0; i < branch.length; i++) {
-+    const ch = branch[i];
++  for (let i = start + 1; i < str.length; i++) {
++    const ch = str[i];
 +    if (escaped) { escaped = false; continue; }
 +    if (ch === '\\') { escaped = true; continue; }
-+    if (ch === '"' && bracket === 0) { quote = !quote; continue; }
-+    if (quote) continue;
-+    if (ch === '[') { bracket++; continue; }
-+    if (ch === ']' && bracket > 0) { bracket--; continue; }
-+    if (bracket > 0) continue;
-+    if (ch === '*' || (ch === '+' && branch[i + 1] === '(')) return true;
++    if (ch === closeChar) return i;
++  }
++  return -1;
++};
++
++const isQuoteBoundary = ch => /[@![\].,$*+?^{}()|\\/]/.test(ch);
++
++const hasUnboundedBranchQuantifier = branch => {
++  let escaped = false;
++  let inBracket = false;
++  let canStartQuote = true;
++  for (let i = 0; i < branch.length; i++) {
++    const ch = branch[i];
++    if (escaped) { escaped = false; canStartQuote = !inBracket; continue; }
++    if (ch === '\\') { escaped = true; continue; }
++    if (ch === '"' && !inBracket && canStartQuote) {
++      const end = findClosing(branch, i, '"');
++      if (end !== -1) { i = end; canStartQuote = true; continue; }
++      continue;
++    }
++    if (ch === '[' && !inBracket) {
++      if (findClosing(branch, i, ']') !== -1) { inBracket = true; }
++      canStartQuote = true;
++      continue;
++    }
++    if (ch === ']' && inBracket) { inBracket = false; canStartQuote = true; continue; }
++    if (inBracket) continue;
++    if (ch === '*' || (ch === '+' && (i > 0 || branch[i + 1] === '('))) return true;
++    canStartQuote = isQuoteBoundary(ch);
 +  }
 +  return false;
 +};
@@ -27,7 +48,7 @@ index 2920751..931782f 100644
  const analyzeRepeatedExtglob = (body, options) => {
    if (options.maxExtglobRecursion === false) {
      return { risky: false };
-@@ -332,7 +350,7 @@ const analyzeRepeatedExtglob = (body, options) => {
+@@ -332,7 +371,7 @@ const analyzeRepeatedExtglob = (body, options) => {
  
      combinable = false;
  

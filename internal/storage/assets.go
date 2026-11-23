@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -129,6 +130,23 @@ func (s *Store) SaveStorageDocument(ctx context.Context, next config.StorageDocu
 			}
 		}
 	}
+	rootsToKeep := make([]string, 0, len(next.Targets)+1)
+	for _, target := range next.Targets {
+		if target.Type != "local" && target.Type != "nas" {
+			continue
+		}
+		if strings.TrimSpace(target.Root) == "" {
+			continue
+		}
+		if err := validateTrustedDownloadRoot(target.Root); err != nil {
+			return next, ErrValidation(err.Error())
+		}
+		abs, absErr := filepath.Abs(target.Root)
+		if absErr != nil {
+			return next, ErrValidation(absErr.Error())
+		}
+		rootsToKeep = append(rootsToKeep, filepath.Clean(abs))
+	}
 	next.Version = version + 1
 	encoded, err := json.Marshal(next)
 	if err != nil {
@@ -138,25 +156,21 @@ func (s *Store) SaveStorageDocument(ctx context.Context, next config.StorageDocu
 	if _, err = tx.ExecContext(ctx, `INSERT INTO storage_versions(version,document,created_at) VALUES(?,?,?)`, next.Version, string(encoded), now); err != nil {
 		return next, err
 	}
-	for _, target := range next.Targets {
-		if target.Type != "local" && target.Type != "nas" {
-			continue
-		}
-		if strings.TrimSpace(target.Root) == "" {
-			continue
-		}
-		if err := validateTrustedDownloadRoot(target.Root); err != nil {
-			continue
-		}
-		abs, absErr := filepath.Abs(target.Root)
-		if absErr != nil {
-			continue
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO download_roots(path, last_seen_at) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, filepath.Clean(abs), now); err != nil {
+	for _, cleanRoot := range rootsToKeep {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO download_roots(path, last_seen_at) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, cleanRoot, now); err != nil {
 			return next, err
 		}
 	}
-	return next, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return next, err
+	}
+	if cfg, cfgErr := s.GetConfig(ctx); cfgErr == nil && strings.TrimSpace(cfg.DownloadDir) != "" {
+		rootsToKeep = append(rootsToKeep, cfg.DownloadDir)
+	}
+	if _, pruneErr := s.PruneDownloadRoots(ctx, rootsToKeep); pruneErr != nil {
+		log.Printf("storage: prune download roots: %v", pruneErr)
+	}
+	return next, nil
 }
 
 // The first execution fixes the strategy. Recovery of the same job reuses it.
@@ -174,11 +188,15 @@ func (s *Store) FreezeJobStorage(ctx context.Context, jobID int64) (config.Stora
 		return d, err
 	}
 	if d.Version == 0 {
-		d, err = s.SaveStorageDocument(ctx, d)
-		if err != nil {
+		var saveErr error
+		d, saveErr = s.SaveStorageDocument(ctx, d)
+		if saveErr != nil {
 			d, err = s.GetStorageDocument(ctx)
-			if err != nil || d.Version == 0 {
+			if err != nil {
 				return d, fmt.Errorf("初始化存储策略失败: %w", err)
+			}
+			if d.Version == 0 {
+				return d, fmt.Errorf("初始化存储策略失败: %w", saveErr)
 			}
 		}
 	}
@@ -193,9 +211,18 @@ func (s *Store) FreezeJobStorage(ctx context.Context, jobID int64) (config.Stora
 
 func (s *Store) CreateAsset(ctx context.Context, a Asset) (Asset, error) {
 	a.CreatedAt = time.Now().UTC()
-	_, err := s.db.NamedExecContext(ctx, `INSERT INTO assets(id,kind,policy_version,target_id,target_version,object_key,content_hash,size,content_type,created_at)
-VALUES(:id,:kind,:policy_version,:target_id,:target_version,:object_key,:content_hash,:size,:content_type,:created_at)`, a)
-	return a, err
+	var created Asset
+	err := s.db.GetContext(ctx, &created, `INSERT INTO assets(id,kind,policy_version,target_id,target_version,object_key,content_hash,size,content_type,created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(target_id,target_version,object_key) DO UPDATE SET
+	kind=excluded.kind,
+	policy_version=excluded.policy_version,
+	content_hash=excluded.content_hash,
+	size=excluded.size,
+	content_type=excluded.content_type
+RETURNING *`,
+		a.ID, a.Kind, a.PolicyVersion, a.TargetID, a.TargetVersion, a.Key, a.ContentHash, a.Size, a.ContentType, formatSortableTime(a.CreatedAt))
+	return created, err
 }
 func (s *Store) GetAsset(ctx context.Context, id string) (Asset, error) {
 	var a Asset
@@ -204,7 +231,9 @@ func (s *Store) GetAsset(ctx context.Context, id string) (Asset, error) {
 }
 func (s *Store) FindAssetHash(ctx context.Context, hash string, kind config.AssetKind, target config.StorageTarget, policyVersion int64) (*Asset, error) {
 	var a Asset
-	err := s.db.GetContext(ctx, &a, `SELECT * FROM assets WHERE content_hash=? AND kind=? AND target_id=? AND target_version=? AND policy_version=? ORDER BY created_at LIMIT 1`, hash, kind, target.ID, target.Version, policyVersion)
+	err := s.db.GetContext(ctx, &a, `SELECT * FROM assets WHERE content_hash=? AND kind=? AND target_id=? AND target_version=?
+ORDER BY (policy_version = ?) DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) ASC, created_at ASC, id ASC LIMIT 1`,
+		hash, kind, target.ID, target.Version, policyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -286,20 +315,28 @@ func (s *Store) DownloadAssetsBatch(ctx context.Context, ids []int64) (map[int64
 	return result, nil
 }
 func (s *Store) RememberMediaContext(ctx context.Context, tweet parser.TweetData) error {
+	if len(tweet.Media) == 0 {
+		return nil
+	}
 	data, err := json.Marshal(tweet)
 	if err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	for i, media := range tweet.Media {
 		key := downloader.MediaIdentity(parser.MediaDownloadURL(media))
 		if key == "" {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO media_context VALUES(?,?,?,?) ON CONFLICT(media_key) DO UPDATE SET tweet_id=excluded.tweet_id,payload=excluded.payload,position=excluded.position`, key, tweet.ID, string(data), i); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO media_context VALUES(?,?,?,?) ON CONFLICT(media_key) DO UPDATE SET tweet_id=excluded.tweet_id,payload=excluded.payload,position=excluded.position`, key, tweet.ID, string(data), i); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 func (s *Store) AssetContext(ctx context.Context, key string) (parser.TweetData, parser.Media, int, error) {
 	var raw string

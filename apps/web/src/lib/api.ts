@@ -380,8 +380,8 @@ export interface LibraryUserSummary {
 
 export const libraryUsersQueryRoot = ["library-users"] as const;
 
-export const getLibraryUsers = () =>
-  api<{ items: LibraryUserSummary[] }>("/api/library/users");
+export const getLibraryUsers = (signal?: AbortSignal) =>
+  api<{ items: LibraryUserSummary[] }>("/api/library/users", { signal });
 
 export interface FailedTweetPage {
   items: FailedTweet[];

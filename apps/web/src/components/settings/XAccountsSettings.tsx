@@ -81,10 +81,28 @@ function useNow(active: boolean) {
     if (!active) {
       return;
     }
+    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [active]);
   return now;
+}
+
+function addPendingId(setter: React.Dispatch<React.SetStateAction<Set<number>>>, id: number) {
+  setter((prev) => {
+    const next = new Set(prev);
+    next.add(id);
+    return next;
+  });
+}
+
+function removePendingId(setter: React.Dispatch<React.SetStateAction<Set<number>>>, id: number) {
+  setter((prev) => {
+    if (!prev.has(id)) return prev;
+    const next = new Set(prev);
+    next.delete(id);
+    return next;
+  });
 }
 
 export function XAccountsSettings() {
@@ -97,6 +115,11 @@ export function XAccountsSettings() {
   const [editUserAgent, setEditUserAgent] = useState("");
   const [editProxy, setEditProxy] = useState("");
   const [editCookie, setEditCookie] = useState("");
+  const [checkingIds, setCheckingIds] = useState<Set<number>>(() => new Set());
+  const [updatingIds, setUpdatingIds] = useState<Set<number>>(() => new Set());
+  const [togglingIds, setTogglingIds] = useState<Set<number>>(() => new Set());
+  const [unlockingIds, setUnlockingIds] = useState<Set<number>>(() => new Set());
+  const [deletingIds, setDeletingIds] = useState<Set<number>>(() => new Set());
   const importFormats = [
     { example: "auth_token=xxx; ct0=yyy", label: t("Cookie 请求头字符串：一行一个账号") },
     { example: "auth_token ct0 / auth_token,ct0", label: t("两个裸值：auth_token 与 ct0，空格或逗号分隔") },
@@ -110,7 +133,7 @@ export function XAccountsSettings() {
   });
   const accounts = query.data?.accounts ?? [];
   const scraping = query.data?.scraper;
-  const now = useNow(accounts.some((account) => account.locks.length > 0));
+  const now = useNow(accounts.some((account) => activeLocks(account.locks, Date.now()).length > 0));
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: xAccountsQueryRoot });
 
@@ -118,6 +141,10 @@ export function XAccountsSettings() {
     mutationFn: importXAccounts,
     onSuccess: (result) => {
       setImportResult(result);
+      // 仅在全部导入成功时清空输入框，部分或全部失败时保留内容方便用户修正重试。
+      if (result.issues.length === 0 && result.created.length > 0) {
+        setImportText("");
+      }
       void refresh();
     },
     onError: notifyError(t("导入账号失败")),
@@ -125,6 +152,8 @@ export function XAccountsSettings() {
 
   const checkOne = useMutation({
     mutationFn: checkXAccount,
+    onMutate: (id) => addPendingId(setCheckingIds, id),
+    onSettled: (_data, _error, id) => removePendingId(setCheckingIds, id),
     onSuccess: (result) => {
       if (result.ok) {
         toast.success({
@@ -160,15 +189,43 @@ export function XAccountsSettings() {
     onError: notifyError(t("全部检测失败")),
   });
 
-  const update = useMutation({
+  const updateRow = useMutation({
     mutationFn: ({ id, patch }: { id: number; patch: XAccountPatch }) =>
       updateXAccount(id, patch),
+    onMutate: ({ id, patch }) => {
+      addPendingId(setUpdatingIds, id);
+      if (patch.active !== undefined) {
+        addPendingId(setTogglingIds, id);
+      }
+    },
+    onSettled: (_data, _error, { id, patch }) => {
+      removePendingId(setUpdatingIds, id);
+      if (patch.active !== undefined) {
+        removePendingId(setTogglingIds, id);
+      }
+    },
     onSuccess: () => void refresh(),
+    onError: notifyError(t("更新账号失败")),
+  });
+
+  const editMutation = useMutation({
+    mutationFn: ({ id, patch }: { id: number; patch: XAccountPatch }) =>
+      updateXAccount(id, patch),
+    onSuccess: () => {
+      setEditing(null);
+      setEditUserAgent("");
+      setEditProxy("");
+      setEditCookie("");
+      toast.success({ message: t("账号已更新") });
+      void refresh();
+    },
     onError: notifyError(t("更新账号失败")),
   });
 
   const remove = useMutation({
     mutationFn: deleteXAccount,
+    onMutate: (id) => addPendingId(setDeletingIds, id),
+    onSettled: (_data, _error, id) => removePendingId(setDeletingIds, id),
     onSuccess: () => {
       toast.success({ message: t("账号已删除") });
       void refresh();
@@ -178,6 +235,8 @@ export function XAccountsSettings() {
 
   const unlock = useMutation({
     mutationFn: unlockXAccount,
+    onMutate: (id) => addPendingId(setUnlockingIds, id),
+    onSettled: (_data, _error, id) => removePendingId(setUnlockingIds, id),
     onSuccess: () => {
       toast.success({ message: t("账号已解锁") });
       void refresh();
@@ -185,10 +244,26 @@ export function XAccountsSettings() {
     onError: notifyError(t("解锁账号失败")),
   });
 
+  const anyRowBusy =
+    checkingIds.size > 0 ||
+    updatingIds.size > 0 ||
+    unlockingIds.size > 0 ||
+    deletingIds.size > 0 ||
+    editMutation.isPending;
+
   function openImport() {
     setImportText("");
     setImportResult(null);
     setImportOpen(true);
+  }
+
+  function closeImport() {
+    if (importMutation.isPending) {
+      return;
+    }
+    setImportOpen(false);
+    setImportText("");
+    setImportResult(null);
   }
 
   function submitImport() {
@@ -200,14 +275,27 @@ export function XAccountsSettings() {
   }
 
   function openEdit(account: XAccountView) {
+    if (checkAll.isPending) {
+      return;
+    }
     setEditing(account);
     setEditUserAgent(account.userAgent);
     setEditProxy(account.proxy);
     setEditCookie("");
   }
 
+  function closeEdit() {
+    if (editMutation.isPending) {
+      return;
+    }
+    setEditing(null);
+    setEditUserAgent("");
+    setEditProxy("");
+    setEditCookie("");
+  }
+
   function submitEdit() {
-    if (!editing || update.isPending) {
+    if (!editing || editMutation.isPending || checkAll.isPending) {
       return;
     }
     const patch: XAccountPatch = {};
@@ -221,24 +309,11 @@ export function XAccountsSettings() {
       patch.cookie = editCookie.trim();
     }
     if (Object.keys(patch).length === 0) {
-      setEditing(null);
+      closeEdit();
       return;
     }
-    update.mutate(
-      { id: editing.id, patch },
-      {
-        onSuccess: () => {
-          setEditing(null);
-          toast.success({ message: t("账号已更新") });
-        },
-      },
-    );
+    editMutation.mutate({ id: editing.id, patch });
   }
-
-  const updatePendingId = update.isPending ? update.variables?.id : undefined;
-  const deletePendingId = remove.isPending ? remove.variables : undefined;
-  const unlockPendingId = unlock.isPending ? unlock.variables : undefined;
-  const checkPendingId = checkOne.isPending ? checkOne.variables : undefined;
 
   const columns: TableColumn<XAccountView>[] = [
     {
@@ -360,7 +435,13 @@ export function XAccountsSettings() {
       render: (account) => {
         const label = accountLabel(account);
         const isEnv = account.source === "env";
-        const busy = updatePendingId === account.id;
+        const rowChecking = checkingIds.has(account.id);
+        const rowUpdating = updatingIds.has(account.id) || (editMutation.isPending && editing?.id === account.id);
+        const rowToggling = togglingIds.has(account.id);
+        const rowUnlocking = unlockingIds.has(account.id);
+        const rowDeleting = deletingIds.has(account.id);
+        const bulkChecking = checkAll.isPending;
+        const busy = rowUpdating || rowDeleting || bulkChecking;
         const locks = activeLocks(account.locks, now);
         return (
           <div className="x-account-actions">
@@ -368,10 +449,10 @@ export function XAccountsSettings() {
               <Button
                 theme="borderless"
                 type="tertiary"
-                icon={<RefreshCw className={cn("size-4", checkPendingId === account.id && "animate-spin")} />}
+                icon={<RefreshCw className={cn("size-4", rowChecking && "animate-spin")} />}
                 aria-label={`${t("检测")} ${label}`}
-                loading={checkPendingId === account.id}
-                disabled={checkOne.isPending}
+                loading={rowChecking}
+                disabled={rowChecking || busy}
                 onClick={() => checkOne.mutate(account.id)}
               />
             </Tooltip>
@@ -379,11 +460,11 @@ export function XAccountsSettings() {
               <span>
                 <Switch
                   checked={account.active}
-                  loading={busy && update.variables?.patch.active !== undefined}
-                  disabled={busy}
+                  loading={rowToggling}
+                  disabled={busy || rowChecking}
                   ariaLabel={`${t("启用状态")} ${label}`}
                   onChange={(checked) =>
-                    update.mutate({ id: account.id, patch: { active: checked } })
+                    updateRow.mutate({ id: account.id, patch: { active: checked } })
                   }
                 />
               </span>
@@ -394,8 +475,8 @@ export function XAccountsSettings() {
                 type="tertiary"
                 icon={<Star className={cn("size-4", account.isPrimary && "fill-current")} />}
                 aria-label={`${t("设为主账号")} ${label}`}
-                disabled={account.isPrimary || busy}
-                onClick={() => update.mutate({ id: account.id, patch: { isPrimary: true } })}
+                disabled={account.isPrimary || busy || rowChecking}
+                onClick={() => updateRow.mutate({ id: account.id, patch: { isPrimary: true } })}
               />
             </Tooltip>
             <Tooltip content={t("编辑")}>
@@ -404,7 +485,7 @@ export function XAccountsSettings() {
                 type="tertiary"
                 icon={<Pencil className="size-4" />}
                 aria-label={`${t("编辑")} ${label}`}
-                disabled={busy}
+                disabled={busy || rowChecking}
                 onClick={() => openEdit(account)}
               />
             </Tooltip>
@@ -415,8 +496,8 @@ export function XAccountsSettings() {
                   type="tertiary"
                   icon={<Unlock className="size-4" />}
                   aria-label={`${t("解锁")} ${label}`}
-                  loading={unlockPendingId === account.id}
-                  disabled={unlock.isPending}
+                  loading={rowUnlocking}
+                  disabled={rowUnlocking || rowDeleting || bulkChecking}
                   onClick={() => unlock.mutate(account.id)}
                 />
               </Tooltip>
@@ -441,15 +522,18 @@ export function XAccountsSettings() {
                 okText={t("删除")}
                 cancelText={t("取消")}
                 danger
-                onConfirm={() => remove.mutate(account.id)}
+                disabled={busy || rowChecking || rowUnlocking}
+                onConfirm={() => {
+                  if (!deletingIds.has(account.id) && !checkAll.isPending) remove.mutate(account.id);
+                }}
               >
                 <Button
                   theme="borderless"
                   type="danger"
                   icon={<Trash2 className="size-4" />}
                   aria-label={`${t("删除")} ${label}`}
-                  loading={deletePendingId === account.id}
-                  disabled={remove.isPending}
+                  loading={rowDeleting}
+                  disabled={busy || rowChecking || rowUnlocking}
                 />
               </Popconfirm>
             )}
@@ -479,8 +563,10 @@ export function XAccountsSettings() {
           type="tertiary"
           icon={<RefreshCw className={cn("size-4", checkAll.isPending && "animate-spin")} />}
           loading={checkAll.isPending}
-          disabled={checkAll.isPending || accounts.length === 0}
-          onClick={() => checkAll.mutate()}
+          disabled={checkAll.isPending || anyRowBusy || accounts.length === 0}
+          onClick={() => {
+            if (!checkAll.isPending && !anyRowBusy) checkAll.mutate();
+          }}
         >
           {t("全部检测")}
         </Button>
@@ -557,18 +643,14 @@ export function XAccountsSettings() {
 
       <Modal
         open={importOpen}
-        onClose={() => {
-          if (!importMutation.isPending) {
-            setImportOpen(false);
-          }
-        }}
+        onClose={closeImport}
         title={t("导入 X 账号")}
         footer={
           <>
             <Button
               type="tertiary"
               disabled={importMutation.isPending}
-              onClick={() => setImportOpen(false)}
+              onClick={closeImport}
             >
               {t("关闭")}
             </Button>
@@ -601,8 +683,10 @@ export function XAccountsSettings() {
               rows={7}
               value={importText}
               aria-label={t("账号导入内容")}
-              placeholder={"auth_token=xxx; ct0=yyy\n{\"auth_token\":\"xxx\",\"ct0\":\"yyy\"}"}
+              placeholder={'auth_token=xxx; ct0=yyy\n{"auth_token":"xxx","ct0":"yyy"}'}
               className="font-mono text-xs"
+              spellCheck={false}
+              autoComplete="off"
               disabled={importMutation.isPending}
               onChange={(event) => setImportText(event.target.value)}
             />
@@ -642,26 +726,22 @@ export function XAccountsSettings() {
 
       <Modal
         open={editing !== null}
-        onClose={() => {
-          if (!update.isPending) {
-            setEditing(null);
-          }
-        }}
+        onClose={closeEdit}
         title={t("编辑账号")}
         description={editing ? accountLabel(editing) : undefined}
         footer={
           <>
             <Button
               type="tertiary"
-              disabled={update.isPending}
-              onClick={() => setEditing(null)}
+              disabled={editMutation.isPending}
+              onClick={closeEdit}
             >
               {t("取消")}
             </Button>
             <Button
               theme="solid"
-              loading={update.isPending}
-              disabled={update.isPending}
+              loading={editMutation.isPending}
+              disabled={editMutation.isPending || checkAll.isPending}
               onClick={submitEdit}
             >
               {t("保存")}
@@ -674,7 +754,7 @@ export function XAccountsSettings() {
             <Input
               value={editUserAgent}
               aria-label={t("User-Agent")}
-              disabled={update.isPending}
+              disabled={editMutation.isPending}
               onChange={(event) => setEditUserAgent(event.target.value)}
             />
           </Field>
@@ -683,7 +763,7 @@ export function XAccountsSettings() {
               value={editProxy}
               aria-label={t("代理")}
               placeholder={t("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080")}
-              disabled={update.isPending}
+              disabled={editMutation.isPending}
               onChange={(event) => setEditProxy(event.target.value)}
             />
           </Field>
@@ -700,7 +780,9 @@ export function XAccountsSettings() {
                 aria-label={t("替换 Cookie")}
                 placeholder={"auth_token=xxx; ct0=yyy"}
                 className="font-mono text-xs"
-                disabled={update.isPending}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={editMutation.isPending}
                 onChange={(event) => setEditCookie(event.target.value)}
               />
             </Field>

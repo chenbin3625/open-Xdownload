@@ -1,5 +1,5 @@
 /// <reference types="vitest/config" />
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib";
 import tailwindcss from "@tailwindcss/vite";
@@ -36,14 +36,21 @@ function walkFiles(dir: string): string[] {
 // 构建期写出 .br / .gz：Go 静态层优先读 sidecar，首个访客不再付 Brotli CPU。
 function precompress(): Plugin {
   let outDir = "";
+  let buildFailed = false;
   return {
     name: "precompress",
     apply: "build",
     configResolved(config) {
       outDir = path.resolve(config.root, config.build.outDir);
     },
-    closeBundle() {
-      if (!outDir) return;
+    buildStart() {
+      buildFailed = false;
+    },
+    buildEnd(err) {
+      if (err) buildFailed = true;
+    },
+    closeBundle(err) {
+      if (err || buildFailed || !outDir || !existsSync(outDir)) return;
       for (const file of walkFiles(outDir)) {
         const ext = path.extname(file).toLowerCase();
         if (!compressibleExt.has(ext)) continue;
@@ -70,7 +77,7 @@ function deferDatePickerStyles(): Plugin {
     apply: "build",
     enforce: "post",
     transformIndexHtml(html) {
-      return html.replace(/\n[ \t]*<link rel="stylesheet"[^>]*href="[^"]*datePicker-[^"]+\.css"[^>]*>\n/g, "\n");
+      return html.replace(/[ \t]*<link rel="stylesheet"[^>]*href="[^"]*datePicker-[^"]+\.css"[^>]*>(?:\r?\n)?/g, "");
     },
   };
 }
@@ -85,7 +92,7 @@ export default defineConfig({
   },
   plugins: [tailwindcss(), react(), deferDatePickerStyles(), precompress()],
   build: {
-    target: "es2020",
+    target: "es2022",
     // 保持现状不产出 sourcemap：发布物由 Go embed 进二进制，体积优先。
     // 需要排查生产问题时临时改为 true（或在 CLI 上加 --sourcemap）。
     sourcemap: false,

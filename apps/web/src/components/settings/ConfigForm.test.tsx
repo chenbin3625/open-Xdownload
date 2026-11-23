@@ -197,3 +197,29 @@ it("does not label anything when envOverridden is absent", () => {
   );
   expect(screen.queryByText("由环境变量提供，保存不会覆盖")).toBeNull();
 });
+
+it("does not overwrite saved values with stale pre-save props even after 3s, until a new server config arrives", async () => {
+  const config: api.AppConfig = {
+    downloadDir: "/downloads", maxConcurrency: 1, proxyUrl: "",
+    autoRetryFailed: true, autoFollowProtected: false, includeNestedTweetMedia: false,
+    incrementalArchive: false, fileNamingMode: "tweet_text", maxFilenameLength: 120,
+    storageType: "local",
+  };
+  vi.mocked(api.updateConfig).mockResolvedValue({ ...config, proxyUrl: "http://saved:7890" });
+  const client = new QueryClient();
+  const form = (value: api.AppConfig) => <QueryClientProvider client={client}><ConfigForm config={value} /></QueryClientProvider>;
+  const view = renderWithProviders(form(config));
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  const input = screen.getByRole("textbox", { name: "网络代理 (Proxy)" }) as HTMLInputElement;
+  await waitFor(() => expect(input.value).toBe("http://saved:7890"));
+
+  // Wait > 3s and re-render with a fresh object holding the same stale pre-save snapshot
+  await new Promise(resolve => setTimeout(resolve, 3_150));
+  view.rerender(<TooltipProvider>{form({ ...config })}</TooltipProvider>);
+  expect(input.value).toBe("http://saved:7890");
+
+  // Once a genuinely different server config arrives, form syncs to it
+  view.rerender(<TooltipProvider>{form({ ...config, proxyUrl: "http://later:7890" })}</TooltipProvider>);
+  await waitFor(() => expect(input.value).toBe("http://later:7890"));
+});

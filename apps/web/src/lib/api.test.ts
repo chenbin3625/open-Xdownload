@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, api, formatBytes } from "./api";
+import { ApiError, api, formatBytes, getLibraryUsers } from "./api";
 import { noteSessionChange, sessionRevision } from "./session";
 
 describe("formatBytes", () => {
@@ -153,5 +153,14 @@ describe("api error handling", () => {
     } finally {
       Object.defineProperty(AbortSignal, "any", originalAny);
     }
+  });
+
+  it("forwards AbortSignal in getLibraryUsers", async () => {
+    stubResponse(JSON.stringify({ items: [] }), { status: 200 });
+    const controller = new AbortController();
+    await getLibraryUsers(controller.signal);
+    const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    controller.abort("unmounted");
+    expect(init.signal?.aborted).toBe(true);
   });
 });

@@ -99,13 +99,30 @@ func TestLoginRateLimitsConcurrentAttempts(t *testing.T) {
 
 func TestLoginRateReclaimsExpiredClientsAndBoundsBuckets(t *testing.T) {
 	s := NewServer(nil, nil, nil, nil)
-	for i := 0; i < maxLoginClients; i++ {
-		s.loginAttempts[strconv.Itoa(i)] = []time.Time{time.Now()}
+	now := time.Now()
+	// Fill buckets with active entries; entry "0" is oldest unlocked, entry "locked" is oldest overall but locked.
+	lockedAttempts := make([]time.Time, maxLoginAttempts)
+	for i := range lockedAttempts {
+		lockedAttempts[i] = now.Add(-2 * time.Minute)
+	}
+	s.loginAttempts["locked"] = lockedAttempts
+	s.loginAttempts["0"] = []time.Time{now.Add(-time.Minute)}
+	for i := 1; i < maxLoginClients-1; i++ {
+		s.loginAttempts[strconv.Itoa(i)] = []time.Time{now}
 	}
 	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
 	r.RemoteAddr = "198.51.100.10:40000"
-	if s.checkLoginRate(httptest.NewRecorder(), r) {
-		t.Fatal("new client should be rejected when all buckets are occupied")
+	if !s.checkLoginRate(httptest.NewRecorder(), r) {
+		t.Fatal("new client must not be globally locked out when buckets are full")
+	}
+	if len(s.loginAttempts) != maxLoginClients {
+		t.Fatalf("client buckets = %d, want %d", len(s.loginAttempts), maxLoginClients)
+	}
+	if _, exists := s.loginAttempts["0"]; exists {
+		t.Fatal("oldest unlocked bucket should have been evicted")
+	}
+	if _, exists := s.loginAttempts["locked"]; !exists {
+		t.Fatal("locked attacker bucket should not be evicted while unlocked buckets exist")
 	}
 	for key := range s.loginAttempts {
 		s.loginAttempts[key] = []time.Time{time.Now().Add(-2 * loginRateWindow)}

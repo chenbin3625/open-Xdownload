@@ -8,8 +8,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,26 +17,12 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/xapi"
+	"github.com/tidwall/gjson"
 )
 
-// defaultGuestBearerValue 是 X 的公开 guest token（公开已知常量）。
-const defaultGuestBearerValue = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
-
-// guestBearer 每次进程启动读取一次；可用环境变量 OPEN_XDOWNLOAD_GUEST_BEARER 覆盖，
-// 以便官方 token 变更时无需改代码即可轮换（S4）。
-var guestBearer = defaultGuestBearer()
-
-func defaultGuestBearer() string {
-	if value := strings.TrimSpace(os.Getenv("OPEN_XDOWNLOAD_GUEST_BEARER")); value != "" {
-		return value
-	}
-	return defaultGuestBearerValue
-}
-
-// screenNamePattern 用于从首页识别登录账号；包级编译，避免每次调用重复编译正则（M3）。
-var screenNamePattern = regexp.MustCompile(`"screen_name":"(\S+?)"`)
-
 const requestMaxAttempts = 3
+
+var errRequestBudgetExhausted = errors.New("请求重试预算耗尽")
 
 // requestTotalBudget 是一次“逻辑请求”跨 Cookie 重试的总耗时上限。次数预算见
 // newRequestBudget：所有 Cookie 合计最多 requestMaxAttempts 次尝试。
@@ -92,11 +76,11 @@ func (c *Client) rateLimitedError(path string, cause error) error {
 	return &RateLimitedError{Path: path, RetryAt: retryAt, Cause: cause}
 }
 
-// clientDisableCooldown 是认证失败（/home 也确认 401、账号锁定）后客户端被禁用的时长。
+// clientDisableCooldown 是认证失败（登录校验确认 401、账号锁定）后客户端被禁用的时长。
 // 冷却到期后下一次请求会重新探测，真正失效的 Cookie 会再次被禁用，因此不需要锁太久。
 var clientDisableCooldown = 10 * time.Minute
 
-// homeVerifiedTTL 内 /home 校验通过过，接口 401 直接视为接口/目标级问题，不重复探测。
+// homeVerifiedTTL 内登录校验通过过，接口 401 直接视为接口/目标级问题，不重复探测。
 const homeVerifiedTTL = 2 * time.Minute
 
 // clientForbiddenDisableCooldown 是非 WAF 的 403 被禁用时的较短冷却，避免一次误封把
@@ -106,8 +90,8 @@ var clientForbiddenDisableCooldown = 5 * time.Minute
 // wafBackoffDuration 是 WAF 挑战页命中后的账号级短退避，不 disable。
 const wafBackoffDuration = 60 * time.Second
 
-// homeCheckPath 是 /home 登录自检在本地限流器里的 path key。
-const homeCheckPath = "/home"
+// homeCheckPath 是登录自检端点及其本地限流器 path key，与 xapi/probe.go 及 xscrape 对齐。
+const homeCheckPath = "/i/api/1.1/account/multi/list.json"
 
 type Credentials struct {
 	AuthToken string
@@ -132,7 +116,7 @@ type Client struct {
 	// 来自 WAF 等瞬时拦截，Pool 按配置长期缓存，永久禁用会让主 Cookie 直到重启都不可用。
 	disabledUntil time.Time
 	lastError     string
-	// homeVerifiedAt 是最近一次 /home 登录校验成功的时间。
+	// homeVerifiedAt 是最近一次登录校验成功的时间。
 	homeVerifiedAt time.Time
 	requestCount   atomic.Int64
 }
@@ -271,6 +255,9 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 	var waited time.Duration
 	excluded := excludedClients(ctx)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		var blocked int
 		var pacingBlocked int
 		var disabled int
@@ -311,10 +298,18 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 		if blocked == 0 {
 			return nil, errors.New("没有可用 X 客户端")
 		}
-		// 全部候选被限流：等最早复位时刻（有界），避免按固定 3s 空转碰运气。
-		wait := p.earliestBlockedWait(path)
-		if wait <= 0 {
+		// 全部候选被限流：保留未截断的 earliest 复位时刻用于 RetryAt；
+		// 单步睡眠才按 maxPoolSelectWaitStep 截断以便定期重评。
+		now := time.Now()
+		earliest, hasReset := p.earliestBlockedResetExcluding(excluded, path)
+		var wait time.Duration
+		var retryAt time.Time
+		if hasReset && earliest.After(now) {
+			retryAt = earliest
+			wait = earliest.Sub(now)
+		} else {
 			wait = 200 * time.Millisecond
+			retryAt = now.Add(wait)
 		}
 		if yieldsToScheduler(ctx) {
 			// 至少有一个账号只是需要按配额匀速发送：短间隔直接在这里等，避免把
@@ -322,25 +317,26 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 			// 必须保留 Pacing 标记，不能计入限流累计推迟。
 			if pacingBlocked > 0 {
 				if wait > maxPacingWait {
-					return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait, Pacing: true}
+					return nil, &RateLimitedError{Path: path, RetryAt: retryAt, Cause: errRateLimitBusyWait, Pacing: true}
 				}
 			} else {
 				// 调度器模式下不在这里等：把最早的恢复时间交回去，让任务释放执行槽。
 				// 直接媒体下载、其他接口或下一个任务可以先运行。
-				return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited, PoolExhausted: true}
+				return nil, &RateLimitedError{Path: path, RetryAt: retryAt, Cause: ErrAllClientsRateLimited, PoolExhausted: true}
 			}
 		}
-		if wait > maxPoolSelectWaitStep {
-			wait = maxPoolSelectWaitStep
+		stepWait := wait
+		if stepWait > maxPoolSelectWaitStep {
+			stepWait = maxPoolSelectWaitStep
 		}
-		if waited+wait > maxPoolSelectWait {
+		if waited+stepWait > maxPoolSelectWait {
 			if pacingBlocked > 0 {
-				return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: errRateLimitBusyWait, Pacing: true}
+				return nil, &RateLimitedError{Path: path, RetryAt: retryAt, Cause: errRateLimitBusyWait, Pacing: true}
 			}
-			return nil, &RateLimitedError{Path: path, RetryAt: time.Now().Add(wait), Cause: ErrAllClientsRateLimited, PoolExhausted: true}
+			return nil, &RateLimitedError{Path: path, RetryAt: retryAt, Cause: ErrAllClientsRateLimited, PoolExhausted: true}
 		}
-		waited += wait
-		timer := time.NewTimer(wait)
+		waited += stepWait
+		timer := time.NewTimer(stepWait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -352,10 +348,22 @@ func (p *Pool) Select(ctx context.Context, path string) (*Client, error) {
 
 // earliestBlockedWait 返回当前所有客户端中最快结束限流的时间距离；无人限流返回 0。
 func (p *Pool) earliestBlockedWait(paths ...string) time.Duration {
+	return p.earliestBlockedWaitExcluding(nil, paths...)
+}
+
+func (p *Pool) earliestBlockedWaitExcluding(excluded map[*Client]bool, paths ...string) time.Duration {
+	earliest, found := p.earliestBlockedResetExcluding(excluded, paths...)
+	if !found {
+		return 0
+	}
+	return time.Until(earliest)
+}
+
+func (p *Pool) earliestBlockedResetExcluding(excluded map[*Client]bool, paths ...string) (time.Time, bool) {
 	var earliest time.Time
 	found := false
 	for _, client := range p.clients {
-		if client.isDisabled() || client.limiter == nil {
+		if excluded[client] || client.isDisabled() || client.limiter == nil {
 			continue
 		}
 		if reset, ok := client.limiter.blockedReset(paths...); ok {
@@ -365,10 +373,7 @@ func (p *Pool) earliestBlockedWait(paths ...string) time.Duration {
 			}
 		}
 	}
-	if !found {
-		return 0
-	}
-	return time.Until(earliest)
+	return earliest, found
 }
 
 func (p *Pool) Diagnostics() PoolDiagnostics {
@@ -387,7 +392,7 @@ func (p *Pool) Diagnostics() PoolDiagnostics {
 	return PoolDiagnostics{Total: len(items), Available: available, Clients: items}
 }
 
-// RecheckDisabledClients 立即对被禁用的 Cookie 做一次 /home 登录校验，通过即解除禁用，
+// RecheckDisabledClients 立即对被禁用的 Cookie 做一次登录校验，通过即解除禁用，
 // 返回此后是否至少有一个 Cookie 可用。用于区分"某个目标/游标返回 401"与"Cookie 真失效"：
 // X 对深翻页的私密时间线也会回 401，不能因此把唯一 Cookie 锁 30 分钟。
 func (p *Pool) RecheckDisabledClients(ctx context.Context) bool {
@@ -443,17 +448,26 @@ func ParseAdditionalCookies(raw string) []Credentials {
 }
 
 func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
-	// WAF 挑战页命中后 60s 内直接返回，不再继续撞 /home；挑战不等于 Cookie 失效。
+	// 冷却中直接返回，不再继续撞校验端点；区分 WAF 挑战与 429 限流冷却。
 	if c.limiter != nil && c.limiter.wouldBlock(homeCheckPath) {
-		return "", fmt.Errorf("%w: /home 短退避冷却中", ErrWAFChallenge)
+		if c.limiter.isWAFBlocked() {
+			return "", fmt.Errorf("%w: 登录校验短退避冷却中", ErrWAFChallenge)
+		}
+		return "", c.rateLimitedError(homeCheckPath, errors.New("X 登录校验被限流冷却中"))
 	}
-	endpoint := c.requestBaseURL() + "/home"
+	endpoint := c.requestBaseURL() + homeCheckPath
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
 	}
 	c.setCookieHeaders(request)
+	request.Header.Set("Authorization", "Bearer "+xapi.GuestBearer())
+	request.Header.Set("X-Csrf-Token", c.csrfToken)
 	request.Header.Set("User-Agent", c.requestUserAgent())
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Twitter-Auth-Type", "OAuth2Session")
+	request.Header.Set("X-Twitter-Active-User", "yes")
+	request.Header.Set("X-Twitter-Client-Language", "en")
 	release, err := c.beginRequest(ctx, homeCheckPath)
 	if err != nil {
 		return "", err
@@ -471,56 +485,118 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 	if c.limiter != nil {
 		c.limiter.after(homeCheckPath, response.Header)
 	}
-	// 先读 body 再判断状态：403 需要按响应内容区分 WAF/挑战页与真正凭证失效。
+	// 先读 body 再判断状态：需解析 API 错误码并区分 WAF 挑战页与真正凭证失效。
 	payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	code, message := probeErrorCode(payload)
+
+	if response.StatusCode == http.StatusUnauthorized {
+		err := probeRejection(code, message, response.StatusCode)
+		c.disable(err)
+		return "", err
+	}
+	if response.StatusCode == http.StatusTooManyRequests || code == apiErrRateLimit {
+		var cause error
+		if code == apiErrRateLimit {
+			cause = fmt.Errorf("X 登录校验被限流（code %d）", code)
+		} else {
+			cause = fmt.Errorf("X 登录校验失败: HTTP %d", response.StatusCode)
+		}
+		if c.limiter != nil {
+			c.limiter.markRateLimited(homeCheckPath, response.Header)
+		}
+		httpx.SlowXRequests()
+		return "", c.rateLimitedError(homeCheckPath, cause)
+	}
+	if code == 353 {
+		err := errors.New("ct0 与 auth_token 不匹配（code 353）")
+		c.disable(err)
+		return "", err
+	}
+	if xapi.IsFatalAPIErrorCode(code) {
+		err := probeRejection(code, message, response.StatusCode)
+		c.disable(err)
+		return "", err
+	}
 	if response.StatusCode >= 400 {
-		err := fmt.Errorf("X 登录校验失败: HTTP %d", response.StatusCode)
-		switch response.StatusCode {
-		case http.StatusUnauthorized:
-			c.disable(err)
-		case http.StatusTooManyRequests:
-			if c.limiter != nil {
-				c.limiter.markRateLimited(homeCheckPath, response.Header)
-			}
-			httpx.SlowXRequests()
-			err = c.rateLimitedError(homeCheckPath, err)
-		case http.StatusForbidden:
+		if response.StatusCode == http.StatusForbidden {
 			if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
-				// 挑战页 ≠ 凭证失效：短退避即可，不能把唯一 Cookie 锁 30 分钟。
+				// 挑战页 ≠ 凭证失效：短退避即可，不能把唯一 Cookie 锁死。
 				if c.limiter != nil {
-					c.limiter.markRateLimitedFor(homeCheckPath, wafBackoffDuration)
-					c.limiter.markAccountCooldown(wafBackoffDuration)
+					c.limiter.markWAFCooldown(homeCheckPath, wafBackoffDuration)
 				}
 				httpx.SlowXRequests()
-				err = fmt.Errorf("%w: HTTP 403", ErrWAFChallenge)
-			} else {
-				c.disableFor(err, clientForbiddenDisableCooldown)
+				return "", fmt.Errorf("%w: HTTP 403", ErrWAFChallenge)
 			}
+			err := fmt.Errorf("X 登录校验失败: HTTP %d", response.StatusCode)
+			c.disableFor(err, clientForbiddenDisableCooldown)
+			return "", err
 		}
-		return "", err
+		if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
+			if c.limiter != nil {
+				c.limiter.markWAFCooldown(homeCheckPath, wafBackoffDuration)
+			}
+			httpx.SlowXRequests()
+			return "", fmt.Errorf("%w: HTTP %d", ErrWAFChallenge, response.StatusCode)
+		}
+		return "", fmt.Errorf("X 登录校验失败: HTTP %d", response.StatusCode)
 	}
 	if readErr != nil {
 		return "", readErr
 	}
-	matches := screenNamePattern.FindSubmatch(payload)
-	if len(matches) < 2 {
-		if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
-			if c.limiter != nil {
-				c.limiter.markRateLimitedFor(homeCheckPath, wafBackoffDuration)
-				c.limiter.markAccountCooldown(wafBackoffDuration)
-			}
-			httpx.SlowXRequests()
-			err := fmt.Errorf("%w: /home 返回挑战页", ErrWAFChallenge)
-			c.recordError(err)
-			return "", err
-		}
-		// HTTP 200 却识别不到账号，多是首页改版或返回了挑战页，不能证明 Cookie 失效：
-		// 只记录错误供诊断，不禁用。
-		err := errors.New("无法从 X 首页识别登录账号")
+	if response.StatusCode != http.StatusOK {
+		err := fmt.Errorf("X 登录校验失败: HTTP %d", response.StatusCode)
 		c.recordError(err)
 		return "", err
 	}
-	screenName := string(matches[1])
+
+	users := gjson.GetBytes(payload, "users")
+	if !users.IsArray() {
+		if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
+			if c.limiter != nil {
+				c.limiter.markWAFCooldown(homeCheckPath, wafBackoffDuration)
+			}
+			httpx.SlowXRequests()
+			err := fmt.Errorf("%w: 登录校验返回挑战页", ErrWAFChallenge)
+			c.recordError(err)
+			return "", err
+		}
+		// HTTP 200 但结构变化，不能证明 Cookie 失效：只记录错误供诊断，不禁用。
+		err := errors.New("X 登录校验响应中没有 users 列表")
+		c.recordError(err)
+		return "", err
+	}
+	twid := c.twidUserID()
+	var chosen gjson.Result
+	found := false
+	for _, user := range users.Array() {
+		if !user.Get("is_auth_valid").Bool() {
+			continue
+		}
+		if !found {
+			chosen = user
+			found = true
+		}
+		if twid != "" && user.Get("user_id").String() == twid {
+			chosen = user
+			break
+		}
+	}
+	if !found {
+		err := errors.New("X 登录校验响应中没有 is_auth_valid 为 true 的账号")
+		c.recordError(err)
+		return "", err
+	}
+	if chosen.Get("is_suspended").Bool() {
+		err := errors.New("账号已被封禁")
+		c.disable(err)
+		return "", err
+	}
+	screenName := strings.TrimSpace(chosen.Get("screen_name").String())
+	if screenName == "" {
+		err := errors.New("X 登录校验响应中没有 screen_name")
+		c.recordError(err)
+		return "", err
+	}
 	c.mu.Lock()
 	c.screen = screenName
 	c.homeVerifiedAt = time.Now()
@@ -530,6 +606,79 @@ func (c *Client) GetSelfScreenName(ctx context.Context) (string, error) {
 		c.limiter.succeeded(homeCheckPath)
 	}
 	return screenName, nil
+}
+
+// probeErrorCode 从响应体提取第一个 API 错误码，兼容 errors 数组和 403 顶层 {"code":353,...}。
+func probeErrorCode(payload []byte) (int, string) {
+	if len(payload) == 0 {
+		return 0, ""
+	}
+	root := gjson.ParseBytes(payload)
+	if value := root.Get("code"); value.Exists() {
+		return int(value.Int()), strings.TrimSpace(root.Get("message").String())
+	}
+	errs := root.Get("errors")
+	if errs.IsArray() {
+		for _, entry := range errs.Array() {
+			if value := entry.Get("code"); value.Exists() {
+				return int(value.Int()), strings.TrimSpace(entry.Get("message").String())
+			}
+		}
+		return 0, ""
+	}
+	if value := errs.Get("code"); value.Exists() {
+		return int(value.Int()), strings.TrimSpace(errs.Get("message").String())
+	}
+	return 0, ""
+}
+
+func probeRejection(code int, message string, status int) error {
+	switch code {
+	case apiErrAccountLocked:
+		return fmt.Errorf("账号已锁定（code %d）", code)
+	case 64:
+		return errors.New("账号已被封禁")
+	case 89:
+		return fmt.Errorf("Cookie 已失效（code %d）", code)
+	case 215:
+		return fmt.Errorf("Cookie 无效（code %d）", code)
+	}
+	if code > 0 {
+		if message != "" {
+			return fmt.Errorf("X 拒绝了该账号（code %d: %s）", code, message)
+		}
+		return fmt.Errorf("X 拒绝了该账号（code %d）", code)
+	}
+	return fmt.Errorf("X 登录校验失败: HTTP %d", status)
+}
+
+func (c *Client) twidUserID() string {
+	for _, cookie := range c.extraCookies {
+		if cookie == nil || cookie.Name != "twid" {
+			continue
+		}
+		raw := strings.TrimSpace(cookie.Value)
+		if raw == "" {
+			return ""
+		}
+		if decoded, err := url.QueryUnescape(raw); err == nil {
+			raw = decoded
+		}
+		if index := strings.Index(raw, "u="); index >= 0 {
+			raw = raw[index+2:]
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return ""
+		}
+		for _, r := range raw {
+			if r < '0' || r > '9' {
+				return ""
+			}
+		}
+		return raw
+	}
+	return ""
 }
 
 func (c *Client) GetUserByInput(ctx context.Context, input string) (User, error) {
@@ -602,9 +751,12 @@ func lookupFetcher(requester timelineRequester) xapi.LookupFetcher {
 	}
 	// excluded 跨尝试累积，与旧实现的 map 生命周期一致。
 	var excluded map[*Client]bool
-	return func(ctx context.Context, path string, values url.Values, _ []byte) ([]byte, bool, error) {
+	return func(ctx context.Context, path string, values url.Values, last []byte) ([]byte, bool, error) {
 		payload, client, err := pool.graphQLWithClient(withExcludedClients(ctx, excluded), path, values)
 		if err != nil {
+			if len(last) > 0 && ctx.Err() == nil && !xapi.IsRateLimitError(err) {
+				return last, false, nil
+			}
 			return nil, false, err
 		}
 		if !xapi.AgeRestrictedPayload(payload) {
@@ -614,8 +766,15 @@ func lookupFetcher(requester timelineRequester) xapi.LookupFetcher {
 			excluded = make(map[*Client]bool, len(pool.clients))
 		}
 		excluded[client] = true
-		if len(excluded) >= len(pool.clients) {
-			// 所有 Cookie 都被拒绝：返回最后一次响应，由 ParseUser 生成带提示的错误。
+		hasCandidate := false
+		for _, candidate := range pool.clients {
+			if !excluded[candidate] && !candidate.isDisabled() {
+				hasCandidate = true
+				break
+			}
+		}
+		if !hasCandidate {
+			// 所有可用 Cookie 都被拒绝或不可用：返回最后一次响应，由 ParseUser 生成带提示的错误。
 			return payload, false, nil
 		}
 		return payload, true, nil
@@ -754,12 +913,15 @@ func (p *Pool) FollowUser(ctx context.Context, user User) error {
 			return nil
 		}
 		lastErr = err
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) {
 			return err
 		}
-		// 凭证失效/账号锁定/限流/WAF 都交给下一个 client 重试；只有非此类的确定性
-		// 业务错误（如用户不存在/参数错误）才直接返回，换 Cookie 也不会改变结果。
-		if errors.Is(err, ErrClientDisabled) || isYieldableError(err) || isPermanentClientError(err) {
+		// 凭证失效/账号锁定/限流/WAF/代理拨号超时都交给下一个 client 重试；只有非此类的
+		// 确定性业务错误（如用户不存在/参数错误）才直接返回，换 Cookie 也不会改变结果。
+		if errors.Is(err, ErrClientDisabled) || isYieldableError(err) || isPermanentClientError(err) || isFailoverNetworkError(ctx, err) {
 			continue
 		}
 		return err
@@ -826,6 +988,17 @@ func excludedClients(ctx context.Context) map[*Client]bool {
 	return excluded
 }
 
+func isFailoverNetworkError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	var dialTimeout *proxyDialTimeoutError
+	if errors.As(err, &dialTimeout) {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
 // GraphQL 实现 xapi.Requester（在账号池内自动选号/换号）。
 func (p *Pool) GraphQL(ctx context.Context, path string, values url.Values) ([]byte, error) {
 	return p.graphQL(ctx, path, values)
@@ -845,15 +1018,24 @@ func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Va
 	failures, handoffs := 0, 0
 	// 为备用账号保留尝试机会，同时限制所有 Cookie 的总请求次数。
 	if requestBudgetFrom(ctx) == nil {
-		budget := newRequestBudget(requestMaxAttempts, requestTotalBudget)
-		budget.perClient = max(1, requestMaxAttempts-len(p.clients)+1)
+		perClient := max(1, requestMaxAttempts-len(p.clients)+1)
+		totalAttempts := max(requestMaxAttempts, len(p.clients)*perClient)
+		budget := newRequestBudget(totalAttempts, requestTotalBudget)
+		budget.perClient = perClient
 		ctx = withRequestBudget(ctx, budget)
 	}
 	// 限流交还不计入失败次数，但总数有界：限流复位后若仍反复 429，最终按失败处理。
 	maxHandoffs := max(1, len(p.clients)) * requestMaxAttempts
 	for failures < max(1, len(p.clients)) {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		client, err := p.Select(ctx, path)
 		if err != nil {
+			// 调用方取消/超时优先级最高，不能被上一轮的 lastErr 吞掉。
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			// "全部限流"必须原样上抛（保留最后一次失败作上下文）：manager 靠这个分类中止
 			// 批量归档，被 lastErr（通常是一个 429）覆盖后会继续对后面每个用户撞限流。
 			if _, limited := RateLimitRetryAt(err); limited {
@@ -871,9 +1053,18 @@ func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Va
 		if err == nil {
 			return payload, client, nil
 		}
-		lastErr = err
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
+		}
+		if errors.Is(err, errRequestBudgetExhausted) && lastErr != nil {
+			return nil, nil, lastErr
+		}
+		lastErr = err
+		// 客户端在 Select 与 doOnce 之间被并发请求禁用：立即切换下一个账号，
+		// 不能要求 client.limiter.wouldBlock(path)（禁用状态不保存在 limiter 中）。
+		if errors.Is(err, ErrClientDisabled) {
+			failures++
+			continue
 		}
 		// 限流/本地限流忙碌/WAF 挑战：立即交还 Pool，换用其他 Cookie，而不是在原
 		// client 上重试等待（Client-only 路径已在 do() 里直接返回，无重试放大）。
@@ -884,13 +1075,17 @@ func (p *Pool) graphQLWithClient(ctx context.Context, path string, values url.Va
 			}
 			return nil, nil, err
 		}
-		if IsUnauthorized(err) {
+		var dialTimeout *proxyDialTimeoutError
+		if IsUnauthorized(err) || errors.As(err, &dialTimeout) {
 			excluded[client] = true
 			ctx = withExcludedClients(ctx, excluded)
-		} else if !client.isDisabled() && !isTransientError(err) {
+		} else if !client.isDisabled() && !isTransientError(err) && !isFailoverNetworkError(ctx, err) {
 			return nil, nil, err
 		}
 		failures++
+	}
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
 	}
 	if lastErr != nil {
 		return nil, nil, lastErr
@@ -905,10 +1100,13 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 		attempts = min(attempts, budget.perClient)
 	}
 	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// 跨 Cookie 共享的重试预算：耗尽后不再发起请求，把最后一次错误上抛。
 		if budget := requestBudgetFrom(ctx); budget != nil && !budget.acquire() {
 			if lastErr == nil {
-				lastErr = errors.New("请求重试预算耗尽")
+				lastErr = errRequestBudgetExhausted
 			}
 			return nil, lastErr
 		}
@@ -936,6 +1134,11 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 		// 限流（429/API-88）、本地限流忙碌、WAF 挑战都不在本客户端重试：
 		// 要么等 Pool 换 Cookie，要么由调用方短退避。
 		if isYieldableError(err) {
+			return nil, err
+		}
+		// 代理拨号超时在 Pool 模式下立即交还换号，避免在黑洞代理上连撞多次超时。
+		var dialTimeout *proxyDialTimeoutError
+		if yieldsOnRateLimit(ctx) && errors.As(err, &dialTimeout) {
 			return nil, err
 		}
 		if !isTransientError(err) || ctx.Err() != nil || attempt == attempts-1 {
@@ -973,7 +1176,7 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 		return nil, err
 	}
 	c.setCookieHeaders(request)
-	request.Header.Set("Authorization", "Bearer "+guestBearer)
+	request.Header.Set("Authorization", "Bearer "+xapi.GuestBearer())
 	request.Header.Set("X-Csrf-Token", c.csrfToken)
 	request.Header.Set("User-Agent", c.requestUserAgent())
 	request.Header.Set("Accept", "application/json")
@@ -1027,8 +1230,7 @@ func (c *Client) doOnce(ctx context.Context, method string, path string, query u
 			if looksLikeWAFChallenge(response.Header.Get("Content-Type"), payload) {
 				httpErr.WAFChallenge = true
 				if c.limiter != nil {
-					c.limiter.markRateLimitedFor(path, wafBackoffDuration)
-					c.limiter.markAccountCooldown(wafBackoffDuration)
+					c.limiter.markWAFCooldown(path, wafBackoffDuration)
 				}
 				httpx.SlowXRequests()
 				return nil, fmt.Errorf("%w: %w", ErrWAFChallenge, httpErr)
@@ -1124,7 +1326,7 @@ func (c *Client) disableFor(err error, cooldown time.Duration) {
 
 // handleUnauthorized 区分"接口/目标 401"与"Cookie 失效"：X 停用旧接口路径、目标账号
 // 不可见等都会返回 401，单凭接口响应禁用 Cookie 会让所有任务误报"Cookie 不可用"。
-// 只有 /home 也返回 401 才按失效禁用（GetSelfScreenName 内部完成）。
+// 只有登录校验接口也明确拒绝才按失效禁用（GetSelfScreenName 内部完成）。
 func (c *Client) handleUnauthorized(ctx context.Context, err error) {
 	c.mu.Lock()
 	recentlyVerified := !c.homeVerifiedAt.IsZero() && time.Since(c.homeVerifiedAt) < homeVerifiedTTL
@@ -1133,10 +1335,10 @@ func (c *Client) handleUnauthorized(ctx context.Context, err error) {
 		return
 	}
 	if _, checkErr := c.GetSelfScreenName(ctx); checkErr == nil || c.isDisabled() || ctx.Err() != nil {
-		// 成功：Cookie 有效，不禁用；/home 401：已按失效禁用；取消：不做判断。
+		// 成功：Cookie 有效，不禁用；校验确认失效：已按失效禁用；取消：不做判断。
 		return
 	}
-	// /home 网络错误、限流、WAF 或响应格式异常都不能确认凭证失效；
+	// 校验网络错误、限流、WAF 或响应格式异常都不能确认凭证失效；
 	// 保留原始接口错误，交给 Pool 选择其他客户端，不要把唯一账号锁死。
 	c.recordError(err)
 }

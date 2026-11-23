@@ -143,22 +143,133 @@ func TestLocalStoreRenameExistingTargetIsConflict(t *testing.T) {
 	}
 }
 
-func TestLocalStoreRenameIdempotentWhenTargetIsSameFile(t *testing.T) {
+func TestLocalStoreRenameIdempotentSamePathAndRejectsHardlinkAlias(t *testing.T) {
 	store, root := newRenameTestStore(t)
 	source := filepath.Join(root, "source-file")
-	target := filepath.Join(root, "target-alias")
 	if err := os.WriteFile(source, []byte("same inode"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Clean 后路径相同才是真正的幂等重试，返回 nil。
+	if err := store.Rename(context.Background(), source, filepath.Join(root, ".", "source-file")); err != nil {
+		t.Fatalf("Rename() same path err = %v, want nil", err)
+	}
+	// 指向同一 inode 的不同目录项（硬链接别名）必须视为目标冲突，不能静默成为 POSIX no-op。
+	target := filepath.Join(root, "target-alias")
 	if err := os.Link(source, target); err != nil {
 		t.Skipf("hard links unsupported: %v", err)
 	}
-	// 语义 1 的幂等分支：目标与源是同一 inode 视为已改完，返回 nil 让 jobs 继续 DB 重写。
-	if err := store.Rename(context.Background(), source, target); err != nil {
-		t.Fatalf("Rename() err = %v, want nil for same-inode target", err)
+	err := store.Rename(context.Background(), source, target)
+	if !errors.Is(err, ErrTargetExists) || !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Rename() hardlink alias err = %v, want ErrTargetExists/fs.ErrExist", err)
 	}
 	if _, err := os.Stat(source); err != nil {
-		t.Fatalf("source missing after idempotent rename: %v", err)
+		t.Fatalf("source missing after conflict: %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("target missing after conflict: %v", err)
+	}
+}
+
+func TestLocalStoreRenameRejectsCaseVariantHardlinkAlias(t *testing.T) {
+	store, root := newRenameTestStore(t)
+	lower := filepath.Join(root, "alice")
+	upper := filepath.Join(root, "Alice")
+	if err := os.WriteFile(lower, []byte("case hardlink"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(lower, upper); err != nil {
+		t.Skipf("case-sensitive hard links unavailable: %v", err)
+	}
+	err := store.Rename(context.Background(), lower, upper)
+	if !errors.Is(err, ErrTargetExists) || !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Rename(alice -> Alice hardlink) err = %v, want ErrTargetExists/fs.ErrExist", err)
+	}
+	if _, err := os.Stat(lower); err != nil {
+		t.Fatalf("lower hardlink removed: %v", err)
+	}
+	if _, err := os.Stat(upper); err != nil {
+		t.Fatalf("upper hardlink removed: %v", err)
+	}
+}
+
+func TestLocalStoreRenameTrailingSlashes(t *testing.T) {
+	store, root := newRenameTestStore(t)
+	sep := string(filepath.Separator)
+
+	// Missing parent with trailing slash must not misjudge parent dir or wrap os.ErrNotExist.
+	err := store.Rename(context.Background(), filepath.Join(root, "old")+sep, filepath.Join(root, "missing-parent", "new")+sep)
+	if err == nil {
+		t.Fatal("expected error for missing target parent with trailing slash")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing target parent with trailing slash misclassified as ErrNotExist: %v", err)
+	}
+
+	// Existing target directory with trailing slash must be conflict.
+	err = store.Rename(context.Background(), filepath.Join(root, "old")+sep, filepath.Join(root, "new")+sep)
+	if !errors.Is(err, ErrTargetExists) || !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("existing target with trailing slash err = %v, want ErrTargetExists", err)
+	}
+
+	// Valid move with trailing slashes succeeds.
+	dest := filepath.Join(root, "moved-dir")
+	if err := store.Rename(context.Background(), filepath.Join(root, "old")+sep, dest+sep); err != nil {
+		t.Fatalf("valid rename with trailing slashes err = %v", err)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("moved-dir missing: %v", err)
+	}
+}
+
+func TestRenameNoOverwriteRejectsExistingFileAndDir(t *testing.T) {
+	root := t.TempDir()
+	srcFile := filepath.Join(root, "src.txt")
+	dstFile := filepath.Join(root, "dst.txt")
+	if err := os.WriteFile(srcFile, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dstFile, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := renameNoOverwrite(srcFile, dstFile, false); !os.IsExist(err) {
+		t.Fatalf("renameNoOverwrite(file->existing file) err = %v, want EEXIST", err)
+	}
+	if got, err := os.ReadFile(dstFile); err != nil || string(got) != "keep" {
+		t.Fatalf("dstFile overwritten: %q, %v", got, err)
+	}
+
+	srcDir := filepath.Join(root, "src-dir")
+	dstDir := filepath.Join(root, "dst-dir")
+	if err := os.MkdirAll(srcDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dstDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := renameNoOverwrite(srcDir, dstDir, true); !os.IsExist(err) {
+		t.Fatalf("renameNoOverwrite(dir->existing empty dir) err = %v, want EEXIST", err)
+	}
+	if _, err := os.Stat(srcDir); err != nil {
+		t.Fatalf("srcDir vanished after failed renameNoOverwrite: %v", err)
+	}
+}
+
+func TestLocalStoreRenameCrossDirectory(t *testing.T) {
+	store, root := newRenameTestStore(t)
+	destDir := filepath.Join(root, "dest")
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(root, "existing-file")
+	newPath := filepath.Join(destDir, "moved-file")
+	if err := store.Rename(context.Background(), oldPath, newPath); err != nil {
+		t.Fatalf("cross-dir Rename() err = %v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("moved file missing: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old file still exists: %v", err)
 	}
 }
 

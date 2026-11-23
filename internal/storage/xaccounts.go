@@ -57,6 +57,10 @@ type XAccountPatch struct {
 	IsPrimary *bool // true 时清掉其他账号的 primary
 	UserAgent *string
 	Proxy     *string
+	// ProxyResolver 非 nil 时在 UpdateXAccount 的同一 SQLite 事务里以当前持久化
+	// proxy 为入参解析最终代理（用于打码代理凭据的原子还原，消除先读后写 TOCTOU）。
+	// 优先于 Proxy 字段。
+	ProxyResolver func(currentProxy string) (string, error)
 	// AuthToken / CSRFToken / ExtraCookies 对 source='env' 的账号拒绝修改。
 	AuthToken    *string
 	CSRFToken    *string
@@ -173,6 +177,17 @@ INSERT INTO x_accounts (
 			return err
 		}
 	}
+	var primaries int
+	if err := exec.Get(&primaries, `SELECT COUNT(*) FROM x_accounts WHERE is_primary = 1`); err != nil {
+		return err
+	}
+	if primaries == 0 {
+		if _, err := exec.Exec(`
+UPDATE x_accounts SET is_primary = 1, updated_at = ?
+WHERE id = (SELECT id FROM x_accounts WHERE active = 1 ORDER BY id ASC LIMIT 1)`, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -231,15 +246,21 @@ func (s *Store) CreateXAccount(ctx context.Context, account XAccount) (XAccount,
 	if duplicate > 0 {
 		return XAccount{}, ErrValidation("auth_token 已存在")
 	}
-	var total int
-	if err := tx.GetContext(ctx, &total, `SELECT COUNT(*) FROM x_accounts`); err != nil {
+	var primaries int
+	if err := tx.GetContext(ctx, &primaries, `SELECT COUNT(*) FROM x_accounts WHERE is_primary = 1`); err != nil {
 		return XAccount{}, err
 	}
-	makePrimary := account.IsPrimary || total == 0
+	makePrimary := account.IsPrimary || primaries == 0
 	if makePrimary {
 		if _, err := tx.ExecContext(ctx, `UPDATE x_accounts SET is_primary = 0 WHERE is_primary = 1`); err != nil {
 			return XAccount{}, err
 		}
+	}
+	if account.LastUsed.Valid {
+		account.LastUsed.Time = account.LastUsed.Time.UTC()
+	}
+	if account.VerifiedAt.Valid {
+		account.VerifiedAt.Time = account.VerifiedAt.Time.UTC()
 	}
 	created := XAccount{}
 	err = tx.GetContext(ctx, &created, `
@@ -284,9 +305,39 @@ func (s *Store) UpdateXAccount(ctx context.Context, id int64, patch XAccountPatc
 		return XAccount{}, ErrValidation("环境变量账号不能修改 Cookie")
 	}
 
-	sets := make([]string, 0, 10)
-	args := make([]any, 0, 10)
-	credentialsChanged := patch.AuthToken != nil || patch.CSRFToken != nil
+	authTokenChanged := false
+	ct0Changed := false
+	var nextAuthToken, nextCSRFToken string
+	if patch.AuthToken != nil {
+		nextAuthToken = strings.TrimSpace(*patch.AuthToken)
+		if nextAuthToken == "" {
+			return XAccount{}, ErrValidation("auth_token 不能为空")
+		}
+		if nextAuthToken != current.AuthToken {
+			authTokenChanged = true
+		}
+	}
+	if patch.CSRFToken != nil {
+		nextCSRFToken = strings.TrimSpace(*patch.CSRFToken)
+		if nextCSRFToken != current.CSRFToken {
+			ct0Changed = true
+		}
+	}
+	credentialsChanged := authTokenChanged || ct0Changed
+
+	effectiveActive := current.Active
+	if patch.Active != nil {
+		effectiveActive = *patch.Active
+	} else if credentialsChanged && !current.Active && current.ErrorMsg != "" {
+		effectiveActive = true
+	}
+	if patch.IsPrimary != nil && *patch.IsPrimary && !effectiveActive {
+		return XAccount{}, ErrValidation("停用的账号不能设为主账号")
+	}
+
+	now := time.Now().UTC()
+	sets := make([]string, 0, 12)
+	args := make([]any, 0, 12)
 	if patch.Active != nil {
 		// 用户手动启用/停用时清空 error_msg：error_msg 非空的停用账号表示"被系统停用"，
 		// 检测成功会自动重新启用；手动停用的账号不能被检测重新启用。
@@ -299,9 +350,25 @@ func (s *Store) UpdateXAccount(ctx context.Context, id int64, patch XAccountPatc
 	if credentialsChanged {
 		sets = append(sets, "verified_at = NULL")
 	}
+	if authTokenChanged {
+		// auth_token 变更意味着切换到了另一个 X 账号，旧的 screen_name 不再适用。
+		sets = append(sets, "screen_name = ''")
+	}
 	if patch.IsPrimary != nil {
 		if *patch.IsPrimary {
 			if _, err := tx.ExecContext(ctx, `UPDATE x_accounts SET is_primary = 0 WHERE id <> ?`, id); err != nil {
+				return XAccount{}, err
+			}
+		} else if current.IsPrimary {
+			var nextPrimaryID int64
+			err := tx.GetContext(ctx, &nextPrimaryID, `SELECT id FROM x_accounts WHERE active = 1 AND id <> ? ORDER BY id ASC LIMIT 1`, id)
+			if errors.Is(err, sql.ErrNoRows) {
+				return XAccount{}, ErrValidation("至少需要保留一个主账号")
+			}
+			if err != nil {
+				return XAccount{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE x_accounts SET is_primary = 1, updated_at = ? WHERE id = ?`, now, nextPrimaryID); err != nil {
 				return XAccount{}, err
 			}
 		}
@@ -312,28 +379,33 @@ func (s *Store) UpdateXAccount(ctx context.Context, id int64, patch XAccountPatc
 		sets = append(sets, "user_agent = ?")
 		args = append(args, *patch.UserAgent)
 	}
-	if patch.Proxy != nil {
+	if patch.ProxyResolver != nil {
+		resolvedProxy, resolveErr := patch.ProxyResolver(current.Proxy)
+		if resolveErr != nil {
+			return XAccount{}, resolveErr
+		}
+		if resolvedProxy != current.Proxy {
+			sets = append(sets, "proxy = ?")
+			args = append(args, resolvedProxy)
+		}
+	} else if patch.Proxy != nil {
 		sets = append(sets, "proxy = ?")
 		args = append(args, *patch.Proxy)
 	}
 	if patch.AuthToken != nil {
-		token := strings.TrimSpace(*patch.AuthToken)
-		if token == "" {
-			return XAccount{}, ErrValidation("auth_token 不能为空")
-		}
 		sets = append(sets, "auth_token = ?")
-		args = append(args, token)
+		args = append(args, nextAuthToken)
 	}
 	if patch.CSRFToken != nil {
 		sets = append(sets, "ct0 = ?")
-		args = append(args, strings.TrimSpace(*patch.CSRFToken))
+		args = append(args, nextCSRFToken)
 	}
 	if patch.ExtraCookies != nil {
 		sets = append(sets, "extra_cookies = ?")
 		args = append(args, *patch.ExtraCookies)
 	}
 	sets = append(sets, "updated_at = ?")
-	args = append(args, time.Now().UTC())
+	args = append(args, now)
 	args = append(args, id)
 
 	updated := XAccount{}
@@ -347,8 +419,13 @@ func (s *Store) UpdateXAccount(ctx context.Context, id int64, patch XAccountPatc
 		}
 		return XAccount{}, err
 	}
-	if credentialsChanged {
-		// '*' 锁是账号级冷却（401/403/WAF），属于旧 Cookie；按 queue 的限流锁对应 X 账号本身，保留。
+	if authTokenChanged {
+		// auth_token 变更代表换了 X 账号，旧账号的按 queue 限流锁与 '*' 冷却锁一并清除。
+		if _, err := tx.ExecContext(ctx, `DELETE FROM x_account_locks WHERE account_id = ?`, id); err != nil {
+			return XAccount{}, err
+		}
+	} else if ct0Changed {
+		// 仅更换 ct0 仍是同一 X 账号：清掉 '*' 账号级冷却锁，保留按 queue 的限流锁。
 		if _, err := tx.ExecContext(ctx, `DELETE FROM x_account_locks WHERE account_id = ? AND queue = '*'`, id); err != nil {
 			return XAccount{}, err
 		}
@@ -435,6 +512,9 @@ func (s *Store) SyncEnvXAccounts(ctx context.Context, accounts []EnvXAccount) er
 	primaryTaken := false
 	for _, account := range accounts {
 		account.AuthToken = strings.TrimSpace(account.AuthToken)
+		if account.AuthToken == "" {
+			return ErrValidation("环境变量账号缺少 auth_token 或 ct0")
+		}
 		if _, duplicate := seen[account.AuthToken]; duplicate {
 			continue
 		}
@@ -463,13 +543,24 @@ func (s *Store) SyncEnvXAccounts(ctx context.Context, accounts []EnvXAccount) er
 
 // upsertEnvXAccount 写入/更新一条 env 账号。已存在且 ct0 未变时保留 active/error_msg：
 // 每次重启不应把用户手动停用、或已确认失效的同一组 Cookie 重新启用；换了新 ct0 或
-// 原先是 db 账号时视为新凭据，重新启用并清空错误。
+// 原先是 db 账号时视为新凭据，重新启用并清空错误；同时清空 env 账号不可编辑的 extra_cookies。
 func upsertEnvXAccount(ctx context.Context, tx *sqlx.Tx, account EnvXAccount, now time.Time) error {
 	authToken := strings.TrimSpace(account.AuthToken)
 	ct0 := strings.TrimSpace(account.CSRFToken)
 	if authToken == "" || ct0 == "" {
 		return ErrValidation("环境变量账号缺少 auth_token 或 ct0")
 	}
+	var prev struct {
+		ID     int64  `db:"id"`
+		CT0    string `db:"ct0"`
+		Source string `db:"source"`
+	}
+	prevErr := tx.GetContext(ctx, &prev, `SELECT id, ct0, source FROM x_accounts WHERE auth_token = ?`, authToken)
+	if prevErr != nil && !errors.Is(prevErr, sql.ErrNoRows) {
+		return prevErr
+	}
+	credentialsChanged := prevErr == nil && (prev.CT0 != ct0 || prev.Source != xAccountSourceEnv)
+
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO x_accounts (
 	screen_name, auth_token, ct0, extra_cookies, user_agent, proxy,
@@ -478,12 +569,19 @@ INSERT INTO x_accounts (
 ON CONFLICT(auth_token) DO UPDATE SET
 	active = CASE WHEN x_accounts.ct0 <> excluded.ct0 OR x_accounts.source <> 'env' THEN 1 ELSE x_accounts.active END,
 	error_msg = CASE WHEN x_accounts.ct0 <> excluded.ct0 OR x_accounts.source <> 'env' THEN '' ELSE x_accounts.error_msg END,
+	verified_at = CASE WHEN x_accounts.ct0 <> excluded.ct0 OR x_accounts.source <> 'env' THEN NULL ELSE x_accounts.verified_at END,
 	ct0 = excluded.ct0,
+	extra_cookies = '',
 	source = 'env',
 	is_primary = CASE WHEN excluded.is_primary = 1 THEN 1 ELSE x_accounts.is_primary END,
 	updated_at = excluded.updated_at`,
 		authToken, ct0, account.Primary, now, now); err != nil {
 		return err
+	}
+	if credentialsChanged {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM x_account_locks WHERE account_id = ? AND queue = '*'`, prev.ID); err != nil {
+			return err
+		}
 	}
 	if account.Primary {
 		if _, err := tx.ExecContext(ctx, `UPDATE x_accounts SET is_primary = 0 WHERE is_primary = 1 AND auth_token <> ?`, authToken); err != nil {
@@ -567,7 +665,7 @@ RETURNING *`
 func (s *Store) EarliestXAccountUnlock(ctx context.Context, queue string, exclude []int64, now time.Time) (time.Time, bool, error) {
 	now = now.UTC()
 	query := `
-SELECT l.until FROM x_account_locks l
+SELECT MAX(l.until) AS unlock_at FROM x_account_locks l
 JOIN x_accounts a ON a.id = l.account_id
 WHERE a.active = 1
   AND l.queue IN (?, ?)
@@ -582,7 +680,7 @@ WHERE a.active = 1
 		}
 		query += ` AND a.id NOT IN (` + strings.Join(placeholders, ",") + `)`
 	}
-	query += ` ORDER BY l.until ASC LIMIT 1`
+	query += ` GROUP BY l.account_id ORDER BY unlock_at ASC LIMIT 1`
 
 	var until sql.NullTime
 	err := s.db.GetContext(ctx, &until, query, args...)
@@ -649,9 +747,13 @@ UPDATE x_accounts SET
 WHERE id = ?`, at.UTC(), screenName, screenName, time.Now().UTC(), id)
 }
 
-// SetXAccountError 只记录错误信息，不停用账号。
+// SetXAccountError 只记录错误信息，不停用账号；保留用户手动停用标记（active=0 且 error_msg 为空）。
 func (s *Store) SetXAccountError(ctx context.Context, id int64, msg string) error {
-	return s.updateXAccountState(ctx, `UPDATE x_accounts SET error_msg = ?, updated_at = ? WHERE id = ?`, msg, time.Now().UTC(), id)
+	return s.updateXAccountState(ctx, `
+UPDATE x_accounts SET
+	error_msg = CASE WHEN active = 1 OR error_msg <> '' THEN ? ELSE error_msg END,
+	updated_at = ?
+WHERE id = ?`, msg, time.Now().UTC(), id)
 }
 
 // XAccountCheck 是一次账号校验的结论。storage 不依赖 xapi，调用方把
@@ -679,8 +781,73 @@ func (s *Store) ApplyXAccountCheck(ctx context.Context, id int64, check XAccount
 	}
 	defer tx.Rollback() // Commit 后为 no-op
 
+	updated, err := applyXAccountCheckTx(ctx, tx, id, check, at)
+	if err != nil {
+		return XAccount{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return XAccount{}, err
+	}
+	return updated, nil
+}
+
+// ApplyXAccountCheckIfUnchanged 在单个 SQLite 事务内先核对账号凭据（auth_token、ct0、
+// extra_cookies、proxy、user_agent）是否仍与探测发起时的快照 expected 一致，再写回校验结论。
+// 若凭据已在探测期间被其他写操作更新，则不改写账号状态，返回 (latest, false, nil)，从存储层
+// 彻底消除慢速旧探测覆盖新 Cookie/代理的 TOCTOU 竞争。
+func (s *Store) ApplyXAccountCheckIfUnchanged(ctx context.Context, expected XAccount, check XAccountCheck, at time.Time) (XAccount, bool, error) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	at = at.UTC()
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return XAccount{}, false, err
+	}
+	defer tx.Rollback() // Commit 后为 no-op
+
+	latest := XAccount{}
+	if err := tx.GetContext(ctx, &latest, `SELECT * FROM x_accounts WHERE id = ?`, expected.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return XAccount{}, false, ErrNotFound("账号不存在", err)
+		}
+		return XAccount{}, false, err
+	}
+	if xAccountCredentialsChanged(expected, latest) {
+		return latest, false, nil
+	}
+	updated, err := applyXAccountCheckTx(ctx, tx, expected.ID, check, at)
+	if err != nil {
+		return XAccount{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return XAccount{}, false, err
+	}
+	return updated, true, nil
+}
+
+func xAccountCredentialsChanged(a, b XAccount) bool {
+	return a.AuthToken != b.AuthToken ||
+		a.CSRFToken != b.CSRFToken ||
+		a.ExtraCookies != b.ExtraCookies ||
+		a.Proxy != b.Proxy ||
+		a.UserAgent != b.UserAgent
+}
+
+func applyXAccountCheckTx(ctx context.Context, tx *sqlx.Tx, id int64, check XAccountCheck, at time.Time) (XAccount, error) {
 	updated := XAccount{}
+	var err error
 	switch {
+	case check.Unauthorized:
+		// 手动停用的账号（active=0 且 error_msg 为空）保持这个标记，否则之后的
+		// 一次成功检测会把用户手动停用的账号重新启用。
+		err = tx.GetContext(ctx, &updated, `
+UPDATE x_accounts SET
+	error_msg = CASE WHEN active = 1 OR error_msg <> '' THEN ? ELSE error_msg END,
+	active = 0,
+	updated_at = ?
+WHERE id = ?
+RETURNING *`, xAccountCheckError(check.Err, "X 拒绝了这个账号"), at, id)
 	case check.Err == "":
 		screenName := strings.TrimSpace(check.ScreenName)
 		err = tx.GetContext(ctx, &updated, `
@@ -695,16 +862,6 @@ RETURNING *`, at, screenName, screenName, at, id)
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `DELETE FROM x_account_locks WHERE account_id = ? AND queue = '*'`, id)
 		}
-	case check.Unauthorized:
-		// 手动停用的账号（active=0 且 error_msg 为空）保持这个标记，否则之后的
-		// 一次成功检测会把用户手动停用的账号重新启用。
-		err = tx.GetContext(ctx, &updated, `
-UPDATE x_accounts SET
-	error_msg = CASE WHEN active = 1 OR error_msg <> '' THEN ? ELSE error_msg END,
-	active = 0,
-	updated_at = ?
-WHERE id = ?
-RETURNING *`, xAccountCheckError(check.Err, "X 拒绝了这个账号"), at, id)
 	default:
 		err = tx.GetContext(ctx, &updated, `
 UPDATE x_accounts SET
@@ -717,9 +874,6 @@ RETURNING *`, check.Err, at, id)
 		return XAccount{}, ErrNotFound("账号不存在", err)
 	}
 	if err != nil {
-		return XAccount{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return XAccount{}, err
 	}
 	return updated, nil

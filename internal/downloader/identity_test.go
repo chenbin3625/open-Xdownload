@@ -74,6 +74,11 @@ func TestMediaIdentityGroupsEquivalentMediaURLs(t *testing.T) {
 			want: "https://pbs.twimg.com/media/abc?format=png",
 		},
 		{
+			name: "trailing dot host normalized",
+			in:   "https://pbs.twimg.com./media/abc.jpg",
+			want: "https://pbs.twimg.com/media/abc?format=jpg",
+		},
+		{
 			name: "non-twimg url unchanged",
 			in:   "https://example.com/media/abc.jpg?tag=1",
 			want: "https://example.com/media/abc.jpg?tag=1",

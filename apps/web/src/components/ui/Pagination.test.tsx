@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Pagination, buildPageItems } from "../semi";
+import { CountBadge, Pagination, buildPageItems } from "../semi";
 
 describe("buildPageItems", () => {
   it("总页数不超过 7 时全部列出，不折叠", () => {
@@ -115,5 +115,28 @@ describe("Pagination", () => {
       />,
     );
     expect(screen.getByText("共 42 个任务")).not.toBeNull();
+  });
+
+  it("totalLabel 返回 undefined 时隐藏总数文案而不回退默认文案", () => {
+    render(
+      <Pagination
+        page={1}
+        pageSize={10}
+        total={42}
+        onPageChange={() => {}}
+        totalLabel={() => undefined}
+      />,
+    );
+    expect(screen.queryByText("共 42 条")).toBeNull();
+  });
+});
+
+describe("CountBadge", () => {
+  it("maps tone to Semi badge type and hides non-positive count", () => {
+    const { container, rerender } = render(<CountBadge count={0} tone="danger" />);
+    expect(container.firstChild).toBeNull();
+    rerender(<CountBadge count={5} tone="danger" />);
+    expect(container.querySelector(".semi-badge-danger")).not.toBeNull();
+    expect(screen.getByText("5")).not.toBeNull();
   });
 });

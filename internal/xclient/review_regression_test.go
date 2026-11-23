@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-func TestSelfCheckAcceptsNormalHTML(t *testing.T) {
+func TestSelfCheckAcceptsMultiListJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><html><body><script>window.user={"screen_name":"owner"}</script></body></html>`))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"users":[{"user_id":"1","screen_name":"owner","is_auth_valid":true}]}`))
 	}))
 	defer server.Close()
 	client := newHeaderTestClient(server)
@@ -25,7 +25,7 @@ func TestSelfCheckAcceptsNormalHTML(t *testing.T) {
 		t.Fatalf("self check = %q, %v, want owner", screen, err)
 	}
 	if client.isDisabled() {
-		t.Fatal("successful HTML self check did not re-enable the client")
+		t.Fatal("successful multi/list self check did not re-enable the client")
 	}
 }
 

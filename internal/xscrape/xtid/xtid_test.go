@@ -323,16 +323,41 @@ func TestMissingVerificationKey(t *testing.T) {
 	}
 	fs.setRoute("/", broken)
 
-	gen := newWithOptions(fs.client(), fs.URL, testUserAgent, testOptions(golden.Timestamp, golden.RandomByte))
+	var mu sync.Mutex
+	now := time.Unix(golden.Timestamp, 0)
+	opts := options{
+		now:      func() time.Time { mu.Lock(); defer mu.Unlock(); return now },
+		randByte: func() byte { return golden.RandomByte },
+	}
+	gen := newWithOptions(fs.client(), fs.URL, testUserAgent, opts)
 	_, err := gen.Generate(context.Background(), "GET", golden.Cases[0].Path)
 	if err == nil || !strings.Contains(err.Error(), "twitter-site-verification") {
 		t.Fatalf("错误 = %v, 期望包含 twitter-site-verification", err)
 	}
 
-	// 失败结果不缓存，下次调用应重新抓取。
+	// 退避窗口内直接复用失败结果，避免每次请求都同步重爬首页。
+	_, err = gen.Generate(context.Background(), "GET", golden.Cases[0].Path)
+	if err == nil || !strings.Contains(err.Error(), "twitter-site-verification") {
+		t.Fatalf("退避期内错误 = %v, 期望包含 twitter-site-verification", err)
+	}
+	if got := fs.count("/"); got != 1 {
+		t.Fatalf("退避期内首页请求数 = %d, want 1", got)
+	}
+
+	// 退避期过后重新抓取。
+	mu.Lock()
+	now = now.Add(failureBackoff)
+	mu.Unlock()
 	_, _ = gen.Generate(context.Background(), "GET", golden.Cases[0].Path)
 	if got := fs.count("/"); got != 2 {
-		t.Fatalf("失败后首页请求数 = %d, want 2", got)
+		t.Fatalf("退避过期后首页请求数 = %d, want 2", got)
+	}
+
+	// Invalidate 立即清掉退避窗口。
+	gen.Invalidate()
+	_, _ = gen.Generate(context.Background(), "GET", golden.Cases[0].Path)
+	if got := fs.count("/"); got != 3 {
+		t.Fatalf("Invalidate 后首页请求数 = %d, want 3", got)
 	}
 }
 
@@ -369,7 +394,7 @@ func TestMissingSigningScript(t *testing.T) {
 func TestExtractScriptURLsLegacyChunkMaps(t *testing.T) {
 	// 同时覆盖 7 位（旧）与 16 位（新）chunk hash 映射。
 	page := `<script>,3:"ondemand.s",4:"chunk-name",3:"abcdef1",4:"0123456789abcdef"</script>`
-	urls := extractScriptURLs(page, "https://x.com")
+	urls := extractScriptURLs(page)
 	joined := strings.Join(urls, "\n")
 
 	for _, want := range []string{

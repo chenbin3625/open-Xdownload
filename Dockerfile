@@ -55,6 +55,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD sh -c 'port="${OPEN_XDOWNLOAD_ADDR##*:}"; port="${port:-8787}"; \
     wget -q -O /dev/null "http://127.0.0.1:${port}/api/health" \
     || wget -q -O /dev/null "https://127.0.0.1:${port}/api/health" \
+    || wget -q -O /dev/null "http://[::1]:${port}/api/health" \
+    || wget -q -O /dev/null "https://[::1]:${port}/api/health" \
     || exit 1'
 
 ENTRYPOINT ["docker-entrypoint.sh"]

@@ -26,6 +26,22 @@ import { Drawer, Modal, Popconfirm, Tooltip } from "../components/semi/overlays"
 import { Tag } from "../components/semi/data";
 import { toast } from "../components/semi/toast";
 
+type EditingSchedule = Omit<ArchiveSchedule, "intervalMinutes"> & {
+  intervalMinutes: number | string;
+};
+
+function parseIntervalMinutes(value: number | string): number {
+  if (typeof value === "string") {
+    if (value.trim() === "") return Number.NaN;
+    return Number(value);
+  }
+  return value;
+}
+
+function isValidIntervalMinutes(value: number): boolean {
+  return Number.isInteger(value) && value >= 5 && value <= 43200;
+}
+
 function localTimeZone() {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }
 }
@@ -56,11 +72,13 @@ export function SchedulesPage({
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [detailId, setDetailId] = useState<number | null>(null);
-  const [editing, setEditing] = useState<ArchiveSchedule | null>(null);
+  const [editing, setEditing] = useState<EditingSchedule | null>(null);
   const [lastRun, setLastRun] = useState<number[] | null>(null);
   const timeZone = useMemo(() => localTimeZone(), []);
   const detail = schedules.find((schedule) => schedule.id === detailId);
   const detailRunStatus = runStatusLabel(detail?.lastRunStatus);
+  const editingInterval = editing ? parseIntervalMinutes(editing.intervalMinutes) : Number.NaN;
+  const editingIntervalValid = isValidIntervalMinutes(editingInterval);
   const filtered = schedules.filter(
     (schedule) =>
       (status === "all" || schedule.enabled === (status === "enabled")) &&
@@ -83,13 +101,26 @@ export function SchedulesPage({
     onError: notifyError(t("更新失败")),
   });
   const save = useMutation({
-    mutationFn: (schedule: ArchiveSchedule) =>
-      updateArchiveSchedule(schedule.id, {
-        name: schedule.name.trim(),
-        intervalMinutes: schedule.intervalMinutes,
+    mutationFn: (schedule: EditingSchedule) => {
+      const intervalMinutes = parseIntervalMinutes(schedule.intervalMinutes);
+      if (!isValidIntervalMinutes(intervalMinutes)) {
+        throw new Error(t("调度频率需在 5 至 43200 分钟之间"));
+      }
+      const trimmedName = schedule.name.trim();
+      const trimmedItems = schedule.items.map((item) => ({
+        ...item,
+        input: item.input.trim(),
+      }));
+      if (!trimmedName || trimmedItems.length === 0 || trimmedItems.some((item) => !item.input)) {
+        throw new Error(t("请填写完整的计划名称和目标"));
+      }
+      return updateArchiveSchedule(schedule.id, {
+        name: trimmedName,
+        intervalMinutes,
         enabled: schedule.enabled,
-        items: schedule.items,
-      }),
+        items: trimmedItems,
+      });
+    },
     onSuccess: () => {
       setEditing(null);
       void invalidateWorkbenchQueries(queryClient);
@@ -425,9 +456,7 @@ export function SchedulesPage({
                 !editing.items.length ||
                 editing.items.some((item) => !item.input.trim()) ||
                 save.isPending ||
-                !Number.isInteger(editing.intervalMinutes) ||
-                editing.intervalMinutes < 5 ||
-                editing.intervalMinutes > 43200
+                !editingIntervalValid
               }
               onClick={() => editing && save.mutate(editing)}
             >
@@ -454,12 +483,15 @@ export function SchedulesPage({
                 max={43200}
                 value={editing.intervalMinutes}
                 disabled={save.isPending}
-                onChange={(value) =>
-                  setEditing({ ...editing, intervalMinutes: Number(value) })
-                }
+                onChange={(value) => {
+                  setEditing({
+                    ...editing,
+                    intervalMinutes: value === "" || value === undefined || value === null ? "" : value,
+                  });
+                }}
               />
               <span className="text-xs text-fg-muted">
-                {formatIntervalMinutes(editing.intervalMinutes)}
+                {editingIntervalValid ? formatIntervalMinutes(editingInterval) : "—"}
               </span>
             </Field>
             <h3 className="text-sm font-semibold text-fg">{t("目标清单")}</h3>
@@ -485,6 +517,7 @@ export function SchedulesPage({
                     type="danger"
                     icon={<Trash2 size={16} />}
                     aria-label={`${t("移除目标")} ${index + 1}`}
+                    disabled={save.isPending}
                     onClick={() =>
                       setEditing({
                         ...editing,

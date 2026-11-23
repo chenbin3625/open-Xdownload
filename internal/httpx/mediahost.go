@@ -9,5 +9,8 @@ import "strings"
 // 只允许 twimg.com 本身与其子域，避免 `evil-twimg.com` 这类后缀混淆。
 func IsTwimgHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" || strings.HasPrefix(host, ".") || strings.Contains(host, "..") {
+		return false
+	}
 	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
 }

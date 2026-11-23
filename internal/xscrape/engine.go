@@ -9,6 +9,8 @@ package xscrape
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -42,9 +44,25 @@ type Options struct {
 }
 
 const (
-	defaultBaseURL    = "https://x.com"
-	defaultAPIBaseURL = "https://api.x.com"
+	defaultBaseURL      = "https://x.com"
+	defaultAPIBaseURL   = "https://api.x.com"
+	maxCachedTransports = 8
 )
+
+// proxyDialTimeout 限制单次代理/TCP 建连耗时，避免死代理在 30s×3 次重试里卡住多账号故障转移。
+var proxyDialTimeout = 10 * time.Second
+
+// proxyDialTimeoutError 表示单次代理/建连超时，不包装 context.DeadlineExceeded，
+// 防止上层误判为调用方 ctx 超时而中止多账号故障转移。
+type proxyDialTimeoutError struct {
+	err error
+}
+
+func (e *proxyDialTimeoutError) Error() string {
+	return fmt.Sprintf("连接代理或远端超时: %v", e.err)
+}
+func (e *proxyDialTimeoutError) Timeout() bool   { return true }
+func (e *proxyDialTimeoutError) Temporary() bool { return true }
 
 // Engine 持有跨 Source 重建共享的状态：xtid 生成器、queryId 表、每个账号的内存
 // 执行槽与请求间隔、guest token 缓存和账号探测记录。进程内只创建一个，jobs 每次
@@ -69,6 +87,10 @@ type Engine struct {
 	// 探测/请求回退。HomeProber 可能在 Source 之前被调用，此时为空。
 	globalMu    sync.Mutex
 	globalProxy string
+
+	transportMu    sync.Mutex
+	transports     map[string]*http.Transport
+	transportOrder []string
 
 	queryIDs queryIDTable
 	slots    accountSlots
@@ -108,12 +130,11 @@ func (e *Engine) Source(ctx context.Context, cfg config.AppConfig) (xapi.Source,
 	if err := httpx.ValidateProxyURL(proxy); err != nil {
 		return nil, err
 	}
-	// 全局代理变化时重建 xtid 生成器；首次使用时在后台发现 queryId。
+	// 全局代理变化时重建 xtid 生成器；queryId 发现延迟到首个真实 GraphQL 请求时后台触发。
 	e.globalMu.Lock()
 	e.globalProxy = proxy
 	e.globalMu.Unlock()
 	e.generatorFor(proxy)
-	e.queryIDs.ensureFresh(ctx, e, proxy)
 	return &source{engine: e, proxy: proxy}, nil
 }
 
@@ -125,17 +146,67 @@ func (e *Engine) HomeProber() xapi.HomeProber {
 	}
 }
 
-// transport 返回请求使用的 RoundTripper：测试注入的 Transport 优先，否则按代理取
-// httpx 的共享 Transport（空代理时尊重环境变量代理）。
+// transport 返回请求使用的 RoundTripper：测试注入的 Transport 优先，否则基于
+// httpx 共享 Transport 克隆一份带短建连超时的 Transport（按代理缓存以复用连接池）。
 func (e *Engine) transport(proxy string) (http.RoundTripper, error) {
 	if e.opts.Transport != nil {
 		return e.opts.Transport, nil
 	}
-	transport, err := httpx.Transport(proxy)
+	key := strings.TrimSpace(proxy)
+	e.transportMu.Lock()
+	if cached, ok := e.transports[key]; ok {
+		e.transportMu.Unlock()
+		return cached, nil
+	}
+	e.transportMu.Unlock()
+
+	shared, err := httpx.Transport(key)
 	if err != nil {
 		return nil, err
 	}
-	return transport, nil
+	cloned := wrapDialTimeout(shared.Clone())
+
+	e.transportMu.Lock()
+	defer e.transportMu.Unlock()
+	if cached, ok := e.transports[key]; ok {
+		cloned.CloseIdleConnections()
+		return cached, nil
+	}
+	if e.transports == nil {
+		e.transports = make(map[string]*http.Transport, maxCachedTransports)
+	}
+	if len(e.transportOrder) >= maxCachedTransports {
+		oldest := e.transportOrder[0]
+		e.transportOrder = e.transportOrder[1:]
+		if evicted, ok := e.transports[oldest]; ok {
+			delete(e.transports, oldest)
+			evicted.CloseIdleConnections()
+		}
+	}
+	e.transports[key] = cloned
+	e.transportOrder = append(e.transportOrder, key)
+	return cloned, nil
+}
+
+func wrapDialTimeout(tr *http.Transport) *http.Transport {
+	baseDial := tr.DialContext
+	if baseDial == nil {
+		baseDial = (&net.Dialer{Timeout: proxyDialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	}
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		timeout := proxyDialTimeout
+		if timeout <= 0 {
+			return baseDial(ctx, network, addr)
+		}
+		dialCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		conn, err := baseDial(dialCtx, network, addr)
+		if err != nil && ctx.Err() == nil && errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
+			return nil, &proxyDialTimeoutError{err: err}
+		}
+		return conn, err
+	}
+	return tr
 }
 
 // generatorFor 返回绑定到全局代理的 xtid 生成器；代理变化时重建。

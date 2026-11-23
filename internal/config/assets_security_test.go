@@ -77,3 +77,88 @@ func TestParseCookieInputLowercaseHeaderAndInjection(t *testing.T) {
 		t.Fatalf("expected cookie value with semicolon to be rejected, inputs=%+v issues=%+v", inputs, issues)
 	}
 }
+
+func TestStorageValidateChecksDefaultLegacyRulesAndS3Names(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "downloads")
+
+	// Default target must be validated even when image & video rules override everything.
+	doc := DefaultStorage(baseDir)
+	doc.Default.TargetID = "missing-default"
+	doc.Rules = map[AssetKind]AssetRule{
+		AssetImage: {TargetID: "local", DirectoryTemplate: "{username}", FilenameTemplate: "{tweet_id}.{ext}"},
+		AssetVideo: {TargetID: "local", DirectoryTemplate: "{username}", FilenameTemplate: "{tweet_id}.{ext}"},
+	}
+	if err := doc.Validate(); err == nil {
+		t.Fatal("expected invalid Default.TargetID to fail Validate")
+	}
+
+	doc = DefaultStorage(baseDir)
+	doc.Default.DirectoryTemplate = "../escape"
+	doc.Rules = map[AssetKind]AssetRule{
+		AssetImage: {TargetID: "local", DirectoryTemplate: "{username}", FilenameTemplate: "{tweet_id}.{ext}"},
+		AssetVideo: {TargetID: "local", DirectoryTemplate: "{username}", FilenameTemplate: "{tweet_id}.{ext}"},
+	}
+	if err := doc.Validate(); err == nil {
+		t.Fatal("expected invalid Default.DirectoryTemplate to fail Validate")
+	}
+
+	// Legacy rule keys (thumbnail / video_cover) must also be validated.
+	doc = DefaultStorage(baseDir)
+	doc.Rules = map[AssetKind]AssetRule{
+		AssetThumbnail: {DirectoryTemplate: "../escape"},
+	}
+	if err := doc.Validate(); err == nil {
+		t.Fatal("expected invalid legacy rule template to fail Validate")
+	}
+
+	// S3 endpoint must have a hostname, and bucket must reject invalid chars/segments.
+	doc = DefaultStorage(baseDir)
+	doc.Targets = append(doc.Targets, StorageTarget{
+		ID:       "s3-bad",
+		Name:     "S3",
+		Type:     "s3",
+		Endpoint: "https://:443",
+		Bucket:   "media",
+	})
+	if err := doc.Validate(); err == nil {
+		t.Fatal("expected S3 endpoint without hostname to fail Validate")
+	}
+
+	for _, badBucket := range []string{".", "..", "a..b", "bad bucket", "bad?bucket", "bad#bucket", "bad\nbucket", "bad\x00bucket"} {
+		doc.Targets[1].Endpoint = "https://s3.example.com"
+		doc.Targets[1].Bucket = badBucket
+		if err := doc.Validate(); err == nil {
+			t.Fatalf("expected S3 bucket %q to fail Validate", badBucket)
+		}
+	}
+}
+
+func TestMergeStorageSecretsDoesNotMutateOrLeakOnValidationFailure(t *testing.T) {
+	oldDoc := StorageDocument{
+		Enabled: true,
+		Targets: []StorageTarget{{
+			ID:        "s3-main",
+			Name:      "S3",
+			Type:      "s3",
+			Endpoint:  "https://s3.trusted.example",
+			Bucket:    "media",
+			AccessKey: "real-access",
+			SecretKey: "real-secret",
+		}},
+		Default: AssetRule{TargetID: "s3-main", DirectoryTemplate: "{username}", FilenameTemplate: "{tweet_id}.{ext}"},
+		Rules:   map[AssetKind]AssetRule{},
+	}
+
+	badNext := oldDoc.Redacted()
+	badNext.Default.DirectoryTemplate = "../escape"
+	merged, err := MergeStorageSecrets(badNext, oldDoc)
+	if err == nil {
+		t.Fatal("expected validation failure")
+	}
+	if len(merged.Targets) != 0 {
+		t.Fatalf("expected zero StorageDocument on error, got %+v", merged)
+	}
+	if badNext.Targets[0].AccessKey != SecretPlaceholder || badNext.Targets[0].SecretKey != SecretPlaceholder {
+		t.Fatalf("caller slice mutated with plaintext secrets on error: %+v", badNext.Targets[0])
+	}
+}

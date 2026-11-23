@@ -45,9 +45,9 @@ func newFakeXServer(t *testing.T) *fakeXServer {
 		})
 		fake.mu.Unlock()
 		switch {
-		case r.URL.Path == "/home":
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<script>{"screen_name":"owner"}</script>`))
+		case r.URL.Path == homeCheckPath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"users":[{"user_id":"1","screen_name":"owner","is_auth_valid":true}]}`))
 		case strings.HasSuffix(r.URL.Path, "/TweetResultByRestId"):
 			_, _ = w.Write([]byte(`{"data":{"tweet_result_by_rest_id":{"result":` + fullTweetFixture("123", "author") + `}}}`))
 		case strings.HasSuffix(r.URL.Path, "/UserByRestId"), strings.HasSuffix(r.URL.Path, "/UserByScreenName"):
@@ -129,7 +129,7 @@ func TestNewSourceFromAccountsPrimarySemantics(t *testing.T) {
 	}
 }
 
-// 账号级 UA 与额外 Cookie 对所有请求生效，包括 /home 自检；额外 Cookie 按名字排序，
+// 账号级 UA 与额外 Cookie 对所有请求生效，包括登录自检；额外 Cookie 按名字排序，
 // 排在 auth_token/ct0 之后，非法名字被丢弃。
 func TestAccountSettingsApplyToEveryRequest(t *testing.T) {
 	fake := newFakeXServer(t)
@@ -168,8 +168,8 @@ func TestAccountSettingsApplyToEveryRequest(t *testing.T) {
 			t.Fatalf("%s user-agent = %q", request.path, request.userAgent)
 		}
 	}
-	if requests[2].path != "/home" {
-		t.Fatalf("last request path = %q, want /home", requests[2].path)
+	if requests[2].path != homeCheckPath {
+		t.Fatalf("last request path = %q, want %q", requests[2].path, homeCheckPath)
 	}
 
 	// 没有账号级 UA 时用默认 UA。
@@ -289,5 +289,21 @@ func TestDisablePacingKeepsRateLimiter(t *testing.T) {
 	}
 	if production.(*Pool).Primary().requests == nil {
 		t.Fatal("production client lost per-account pacing")
+	}
+}
+
+func TestSortedExtraCookiesRejectsControlCharacters(t *testing.T) {
+	cookies := sortedExtraCookies(map[string]string{
+		"ok":   "valid-value",
+		"nul":  "a\x00b",
+		"tab":  "a\tb",
+		"ctrl": "a\x1fb",
+		"del":  "a\x7fb",
+		"semi": "a;b",
+		"cr":   "a\rb",
+		"lf":   "a\nb",
+	})
+	if len(cookies) != 1 || cookies[0].Name != "ok" || cookies[0].Value != "valid-value" {
+		t.Fatalf("cookies = %+v, want only ok", cookies)
 	}
 }

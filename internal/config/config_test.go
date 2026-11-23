@@ -478,3 +478,231 @@ func TestValidateDownloadRootSentinel(t *testing.T) {
 		t.Fatal("unexpected nested dir")
 	}
 }
+
+func TestRedactURLUserinfoUnparseableAndSchemeRelative(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		want      string
+		forbidSub string
+	}{
+		{
+			name:      "unescaped percent in password",
+			in:        "http://alice:p%ss@proxy.local:3128/path",
+			want:      "http://" + SecretPlaceholder + "@proxy.local:3128/path",
+			forbidSub: "p%ss",
+		},
+		{
+			name:      "space in password",
+			in:        "http://alice:my secret@proxy.local:3128",
+			want:      "http://" + SecretPlaceholder + "@proxy.local:3128",
+			forbidSub: "my secret",
+		},
+		{
+			name:      "scheme-relative userinfo",
+			in:        "//alice:s3cret@proxy.local:3128/dav",
+			want:      "//" + SecretPlaceholder + "@proxy.local:3128/dav",
+			forbidSub: "s3cret",
+		},
+		{
+			name:      "unparseable without scheme prefix",
+			in:        "alice:p%ss@proxy.local:3128",
+			want:      SecretPlaceholder,
+			forbidSub: "p%ss",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactURLUserinfo(tc.in)
+			if got != tc.want {
+				t.Fatalf("RedactURLUserinfo(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if tc.forbidSub != "" && (len(got) > 0 && (got == tc.in || containsString(got, tc.forbidSub))) {
+				t.Fatalf("credential leaked in %q", got)
+			}
+		})
+	}
+}
+
+func containsString(s, sub string) bool {
+	return len(sub) > 0 && len(s) >= len(sub) && (s == sub || indexString(s, sub) >= 0)
+}
+
+func indexString(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestSameURLAuthorityIPv6AndEmptyHost(t *testing.T) {
+	if !SameURLAuthority("https://[::1]", "https://[::1]:443") {
+		t.Fatal("expected IPv6 default HTTPS port to match bracketed host")
+	}
+	if !SameURLAuthority("http://[::1]:80/a", "http://[::1]/b") {
+		t.Fatal("expected IPv6 default HTTP port to match bracketed host")
+	}
+	if !SameURLAuthority("socks5://[::1]:1080", "socks5://[::1]") {
+		t.Fatal("expected IPv6 default SOCKS5 port to match")
+	}
+	if SameURLAuthority("https://[::1]:8443", "https://[::1]") {
+		t.Fatal("non-default IPv6 port must not match default port")
+	}
+	if SameURLAuthority("http:///foo", "http:///bar") {
+		t.Fatal("empty hostname URLs must not match")
+	}
+	if SameURLAuthority("http://:80/foo", "http://:80/bar") {
+		t.Fatal("missing hostname with port must not match")
+	}
+}
+
+func TestRestoreURLUserinfoPartialEdits(t *testing.T) {
+	stored := "http://alice:s3cret@proxy.local:3128"
+	if got := RestoreURLUserinfo("http://"+SecretPlaceholder+":newpass@proxy.local:3128", stored); got != "http://alice:newpass@proxy.local:3128" {
+		t.Fatalf("edited password with placeholder user = %q", got)
+	}
+	if got := RestoreURLUserinfo("http://bob:"+SecretPlaceholder+"@proxy.local:3128", stored); got != "http://bob:s3cret@proxy.local:3128" {
+		t.Fatalf("edited user with placeholder password = %q", got)
+	}
+	if got := RestoreURLUserinfo("http://bob:"+SecretPlaceholder+"@other.local:3128", stored); got != "http://bob@other.local:3128" {
+		t.Fatalf("edited host with placeholder password leaked or kept mask = %q", got)
+	}
+	if got := RestoreURLUserinfo("http://bob:"+SecretPlaceholder+"@proxy.local:3128", "http://alice@proxy.local:3128"); got != "http://bob@proxy.local:3128" {
+		t.Fatalf("placeholder password with passwordless stored = %q", got)
+	}
+}
+
+func TestParseCookiePairsEdgeCases(t *testing.T) {
+	// Whitespace-only JSON fields fall back / get dropped
+	pairs := ParseCookiePairs(`[{"authToken":"   ","auth_token":"at-1","csrfToken":"  ","ct0":"ct-1"},{"authToken":"  ","ct0":"\t"}]`)
+	if len(pairs) != 1 || pairs[0].AuthToken != "at-1" || pairs[0].CSRFToken != "ct-1" {
+		t.Fatalf("JSON whitespace trimming failed: %+v", pairs)
+	}
+
+	// Indented YAML list + '=' inside value after ':'
+	pairs = ParseCookiePairs("  - auth_token: abc=def\n    ct0: ghi=jkl")
+	if len(pairs) != 1 || pairs[0].AuthToken != "abc=def" || pairs[0].CSRFToken != "ghi=jkl" {
+		t.Fatalf("indented YAML list failed: %+v", pairs)
+	}
+
+	// Tabs and spaces around '='
+	for _, raw := range []string{
+		"auth_token=at1\tct0=ct1",
+		"auth_token = at1; ct0 = ct1",
+		"auth_token = at1, ct0 = ct1",
+		"auth_token = at1\tct0 = ct1",
+	} {
+		pairs = ParseCookiePairs(raw)
+		if len(pairs) != 1 || pairs[0].AuthToken != "at1" || pairs[0].CSRFToken != "ct1" {
+			t.Fatalf("ParseCookiePairs(%q) = %+v", raw, pairs)
+		}
+	}
+}
+
+func TestNormalizedAndResolveSubmissionTrimDownloadDir(t *testing.T) {
+	t.Setenv(EnvDownloadDir, "")
+	if got := (AppConfig{DownloadDir: "  /tmp/dl-trimmed  "}).Normalized().DownloadDir; got != "/tmp/dl-trimmed" {
+		t.Fatalf("Normalized DownloadDir = %q", got)
+	}
+	if got := (AppConfig{DownloadDir: "   "}).Normalized().DownloadDir; got == "   " || got == "" {
+		t.Fatalf("blank DownloadDir should fall back to default, got %q", got)
+	}
+	res, err := ResolveSubmission(AppConfig{DownloadDir: "  /tmp/sub-dl  "}, AppConfig{DownloadDir: "/tmp/old"})
+	if err != nil || res.DownloadDir != "/tmp/sub-dl" {
+		t.Fatalf("ResolveSubmission trimmed = %q, err=%v", res.DownloadDir, err)
+	}
+}
+
+func TestRestoreURLUserinfoUnparseableAndOpaque(t *testing.T) {
+	roundTripCases := []struct {
+		name   string
+		stored string
+	}{
+		{"unparseable without scheme", "alice:p%ss@proxy.local:3128"},
+		{"opaque url with credentials", "http:user:pass@proxy.local:3128"},
+		{"unparseable with scheme", "http://alice:p%ss@proxy.local:3128/path"},
+		{"scheme-relative with credentials", "//alice:s3cret@proxy.local:3128/dav"},
+	}
+	for _, tc := range roundTripCases {
+		t.Run("roundtrip/"+tc.name, func(t *testing.T) {
+			redacted := RedactURLUserinfo(tc.stored)
+			if got := RestoreURLUserinfo(redacted, tc.stored); got != tc.stored {
+				t.Fatalf("RestoreURLUserinfo(%q, %q) = %q, want %q", redacted, tc.stored, got, tc.stored)
+			}
+		})
+	}
+
+	// Standalone placeholder must never corrupt ProxyURL into "********" when
+	// stored does not itself redact to the standalone placeholder.
+	for _, stored := range []string{"", "http://proxy.local:3128", "http://alice:s3cret@proxy.local:3128"} {
+		if got := RestoreURLUserinfo(SecretPlaceholder, stored); got != "" {
+			t.Fatalf("RestoreURLUserinfo(placeholder, %q) = %q, want empty", stored, got)
+		}
+	}
+}
+
+func TestResolveSubmissionDoesNotLeakEnvDownloadDirWhenStoredEmpty(t *testing.T) {
+	t.Setenv(EnvDownloadDir, "/tmp/env-only-download")
+	for _, storedDir := range []string{"", "   "} {
+		for _, submittedDir := range []string{"", "/tmp/env-only-download", "/tmp/user-submitted"} {
+			got, err := ResolveSubmission(AppConfig{DownloadDir: submittedDir}, AppConfig{DownloadDir: storedDir})
+			if err != nil {
+				t.Fatalf("ResolveSubmission(%q, %q) error: %v", submittedDir, storedDir, err)
+			}
+			if got.DownloadDir != "" {
+				t.Fatalf("ResolveSubmission(%q, %q).DownloadDir = %q, want empty (must not leak env into SQLite)", submittedDir, storedDir, got.DownloadDir)
+			}
+		}
+	}
+}
+
+func TestWithCookieIDsAvoidsCollisionsAcrossSaves(t *testing.T) {
+	// Start with two anonymous cookies -> cookie-0, cookie-1.
+	initial := "auth_token=tok0; ct0=csrf0\nauth_token=tok1; ct0=csrf1"
+	redacted1 := ParseCookiePairs(RedactAdditionalCookies(initial))
+	if len(redacted1) != 2 {
+		t.Fatalf("initial redacted pairs = %+v, want 2", redacted1)
+	}
+
+	// Delete row 0 (leaving cookie-1) and append a new anonymous cookie.
+	save1Payload, err := json.Marshal([]AuthCookie{
+		redacted1[1],
+		{ID: "", AuthToken: "tok2", CSRFToken: "csrf2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved1 := RestoreAdditionalCookies(string(save1Payload), initial)
+	saved1Pairs := ParseCookiePairs(saved1)
+	if len(saved1Pairs) != 2 {
+		t.Fatalf("saved1 pairs = %+v, want 2", saved1Pairs)
+	}
+	if saved1Pairs[0].ID == saved1Pairs[1].ID {
+		t.Fatalf("colliding cookie IDs generated: %+v", saved1Pairs)
+	}
+
+	// Next round-trip save must preserve both cookies without silent deletion.
+	redacted2 := RedactAdditionalCookies(saved1)
+	saved2 := RestoreAdditionalCookies(redacted2, saved1)
+	saved2Pairs := ParseCookiePairs(saved2)
+	if len(saved2Pairs) != 2 || saved2Pairs[0].AuthToken != "tok1" || saved2Pairs[1].AuthToken != "tok2" {
+		t.Fatalf("second save lost or corrupted cookies: %+v", saved2Pairs)
+	}
+
+	// Direct withCookieIDs check with pre-existing IDs and whitespace IDs.
+	assigned := withCookieIDs([]AuthCookie{
+		{ID: "cookie-1", AuthToken: "a"},
+		{ID: "   ", AuthToken: "b"},
+		{ID: "cookie-2", AuthToken: "c"},
+		{ID: "", AuthToken: "d"},
+	})
+	seen := make(map[string]bool, len(assigned))
+	for _, c := range assigned {
+		if c.ID == "" || seen[c.ID] {
+			t.Fatalf("duplicate or empty cookie ID in %+v", assigned)
+		}
+		seen[c.ID] = true
+	}
+}

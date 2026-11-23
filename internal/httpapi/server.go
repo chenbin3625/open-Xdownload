@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
@@ -43,6 +44,8 @@ type Server struct {
 	bcryptSem chan struct{}
 	// homeProber 是账号检测用的探测函数，由 cmd/server 注入；nil 表示未初始化。
 	homeProber xapi.HomeProber
+	// xAccountMu 串行化账号代理还原更新与探测结果写回，避免并发 TOCTOU 覆写。
+	xAccountMu sync.Mutex
 }
 
 const maxLoginAttempts = 10             // 窗口内最大尝试次数
@@ -85,10 +88,11 @@ func (s *Server) withMeta(ctx context.Context, event jobs.Event) jobs.Event {
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
-	// 防止浏览器对下载目录内文件做 MIME 嗅探（媒体库端点可能输出任意扩展名文件）。
+	// 防止浏览器对下载目录内文件做 MIME 嗅探（媒体库端点可能输出任意扩展名文件）及点击劫持。
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
 			next.ServeHTTP(w, req)
 		})
 	})
@@ -191,10 +195,15 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := rejectDuplicateCaseInsensitiveKeys(fields); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	if err := dropLegacyCookieFields(fields); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	hasDownloadDir := canonicalizeFieldKey(fields, "downloadDir")
 	// 环境变量接管的字段：请求里回显的值不能参与校验（见下方 ProxyURL/DownloadDir），
 	// 落库值由 storage 的 ResolveSubmission 保证保留库内值，这里原样透传 patch。
 	cfg := stored
@@ -216,6 +225,11 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 	// 或不含 scheme 的写法）只由部署方负责，不该让整份配置保存 400。
 	if !config.IsEnvOverridden("ProxyURL") {
 		if err := httpx.ValidateProxyURL(validationCfg.ProxyURL); err != nil {
+			var urlErr *url.Error
+			if errors.As(err, &urlErr) {
+				writeError(w, http.StatusBadRequest, storage.ErrValidation("代理地址无效"))
+				return
+			}
 			writeError(w, http.StatusBadRequest, storage.ErrValidation(err.Error()))
 			return
 		}
@@ -223,25 +237,32 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 	// 下载目录同时充当媒体库的沙箱根：若允许改成 "/"，任意媒体文件都会变成
 	// "下载目录内"从而可被读取。允许根必须取自已存储的配置与环境变量生效值，
 	// 用请求里的新值会让攻击者自证合法（"/" 的允许根就包含 "/"）。
-	submittedDir := strings.TrimSpace(cfg.DownloadDir)
-	effectiveDir := config.EffectiveDownloadDir(stored)
-	envDirActive := config.IsEnvOverridden("DownloadDir")
-	switch {
-	case submittedDir == "":
-		// 未提交 downloadDir：PATCH 语义，无需校验。
-	case envDirActive && pathsEqual(submittedDir, effectiveDir):
-		// env 生效值的回显：运行时不会变、也不会落库，跳过校验。
-	case envDirActive && !pathsEqual(submittedDir, stored.DownloadDir):
-		// env 接管时提交新目录不会生效。旧实现会走到 validateDownloadDir 报
-		// "请用 OPEN_XDOWNLOAD_DOWNLOAD_DIR 环境变量启动"（用户其实已经在用），
-		// 这里直接说明由环境变量接管，避免误导。
-		writeError(w, http.StatusBadRequest, storage.ErrValidation(
-			"下载目录由 OPEN_XDOWNLOAD_DOWNLOAD_DIR 环境变量接管，保存不会写入库；如需修改请调整该环境变量"))
-		return
-	default:
-		if err := validateDownloadDir(validationCfg.DownloadDir, localDirectoryAllowedRoots(stored)); err != nil {
-			writeError(w, http.StatusBadRequest, storage.ErrValidation(err.Error()))
+	// 同时用大小写无关字段检测与解包结果对比兜底，防止 {"DownloadDir": "/etc"}
+	// 借 encoding/json 大小写无关匹配绕过校验。
+	if hasDownloadDir ||
+		strings.TrimSpace(cfg.DownloadDir) != strings.TrimSpace(stored.DownloadDir) ||
+		strings.TrimSpace(validationCfg.DownloadDir) != strings.TrimSpace(stored.DownloadDir) {
+		submittedDir := strings.TrimSpace(cfg.DownloadDir)
+		effectiveDir := config.EffectiveDownloadDir(stored)
+		envDirActive := config.IsEnvOverridden("DownloadDir")
+		switch {
+		case submittedDir == "":
+			writeError(w, http.StatusBadRequest, storage.ErrValidation("下载目录不能为空"))
 			return
+		case envDirActive && pathsEqual(submittedDir, effectiveDir):
+			// env 生效值的回显：运行时不会变、也不会落库，跳过校验。
+		case envDirActive && !pathsEqual(submittedDir, stored.DownloadDir):
+			// env 接管时提交新目录不会生效。旧实现会走到 validateDownloadDir 报
+			// "请用 OPEN_XDOWNLOAD_DOWNLOAD_DIR 环境变量启动"（用户其实已经在用），
+			// 这里直接说明由环境变量接管，避免误导。
+			writeError(w, http.StatusBadRequest, storage.ErrValidation(
+				"下载目录由 OPEN_XDOWNLOAD_DOWNLOAD_DIR 环境变量接管，保存不会写入库；如需修改请调整该环境变量"))
+			return
+		default:
+			if err := validateDownloadDir(validationCfg.DownloadDir, localDirectoryAllowedRoots(stored)); err != nil {
+				writeError(w, http.StatusBadRequest, storage.ErrValidation(err.Error()))
+				return
+			}
 		}
 	}
 	updated, err := s.store.UpdateConfigPatch(r.Context(), fields)
@@ -255,18 +276,82 @@ func (s *Server) updateConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // legacyCookieConfigFields 是 /api/config 已移除的旧 Cookie 字段（JSON 名）。
-var legacyCookieConfigFields = []string{"authToken", "csrfToken", "additionalCookies"}
+var legacyCookieConfigFields = []string{"authToken", "csrfToken", "ct0", "additionalCookies"}
 
 // errLegacyCookieConfig 提示调用方 Cookie 已改到账号池管理。
 var errLegacyCookieConfig = storage.ErrValidation("Cookie 已改为在「设置 → X 账号池」中导入")
 
-// dropLegacyCookieFields 从配置 patch 里删掉旧 Cookie 字段，app_config 的旧列因此不会再经
-// /api/config 写入。空值和打码占位符（旧前端原样回传的读取结果）静默忽略；真实 Cookie
-// 返回 400，提示到账号池导入。
+// rejectDuplicateCaseInsensitiveKeys 拒绝同一 JSON 对象里仅大小写不同的重复字段，
+// 避免 map 按精确键检查与 encoding/json 大小写无关解包出现语义分歧。
+func foldCanonicalKey(key string) string {
+	var b strings.Builder
+	b.Grow(len(key))
+	for _, r := range key {
+		if r < 0x80 {
+			if r >= 'a' && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			b.WriteRune(r)
+			continue
+		}
+		minRune := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < minRune {
+				minRune = f
+			}
+		}
+		b.WriteRune(minRune)
+	}
+	return b.String()
+}
+
+func rejectDuplicateCaseInsensitiveKeys(fields map[string]json.RawMessage) error {
+	seen := make(map[string]struct{}, len(fields))
+	for key := range fields {
+		canonical := foldCanonicalKey(key)
+		if _, dup := seen[canonical]; dup {
+			return storage.ErrValidation("配置包含重复字段")
+		}
+		seen[canonical] = struct{}{}
+	}
+	return nil
+}
+
+// canonicalizeFieldKey 按大小写无关方式查找 canonical 字段，并将其键规范为 canonical，
+// 保证校验与后续 UpdateConfigPatch 看到的是同一个键。
+func canonicalizeFieldKey(fields map[string]json.RawMessage, canonical string) bool {
+	found := false
+	var matched json.RawMessage
+	for key, raw := range fields {
+		if strings.EqualFold(key, canonical) {
+			found = true
+			matched = raw
+			if key != canonical {
+				delete(fields, key)
+			}
+		}
+	}
+	if found {
+		fields[canonical] = matched
+	}
+	return found
+}
+
+func isLegacyCookieConfigField(key string) bool {
+	for _, legacy := range legacyCookieConfigFields {
+		if strings.EqualFold(key, legacy) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropLegacyCookieFields 从配置 patch 里删掉旧 Cookie 字段（大小写无关匹配），
+// app_config 的旧列因此不会再经 /api/config 写入。空值和打码占位符（旧前端原样回传的
+// 读取结果）静默忽略；真实 Cookie 返回 400，提示到账号池导入。
 func dropLegacyCookieFields(fields map[string]json.RawMessage) error {
-	for _, key := range legacyCookieConfigFields {
-		raw, ok := fields[key]
-		if !ok {
+	for key, raw := range fields {
+		if !isLegacyCookieConfigField(key) {
 			continue
 		}
 		delete(fields, key)
@@ -917,7 +1002,12 @@ func (s *Server) deleteJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.store.DeleteJob(r.Context(), id); err != nil {
+	if s.manager != nil {
+		err = s.manager.DeleteJob(r.Context(), id)
+	} else {
+		err = s.store.DeleteJob(r.Context(), id)
+	}
+	if err != nil {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			writeError(w, http.StatusNotFound, storage.ErrNotFound("任务不存在", err))
@@ -966,19 +1056,21 @@ const sseAuthRecheckInterval = 30 * time.Second
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(authContextKey{}).(authenticatedSession)
 	if s.eventBus == nil {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("事件总线不可用"))
+		writeError(w, http.StatusServiceUnavailable, &storage.UserFacingError{Status: http.StatusServiceUnavailable, Message: "事件总线不可用"})
 		return
 	}
 	channel, ok := s.eventBus.Subscribe()
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("事件订阅连接数已达上限"))
+		writeError(w, http.StatusServiceUnavailable, &storage.UserFacingError{Status: http.StatusServiceUnavailable, Message: "事件订阅连接数已达上限"})
 		return
 	}
 	defer s.eventBus.Unsubscribe(channel)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	if r.ProtoMajor == 1 {
+		w.Header().Set("Connection", "keep-alive")
+	}
 	// 提示 nginx 等反向代理不要缓冲事件流，保证前端实时收到消息（M8）。
 	w.Header().Set("X-Accel-Buffering", "no")
 
@@ -1360,11 +1452,18 @@ func (g *posterFetchSingleFlight) Do(ctx context.Context, key string, fn func() 
 	g.calls[key] = call
 	g.mu.Unlock()
 
+	completed := false
+	defer func() {
+		if !completed {
+			call.err = fmt.Errorf("poster fetch panicked")
+		}
+		g.mu.Lock()
+		delete(g.calls, key)
+		g.mu.Unlock()
+		close(call.done)
+	}()
 	call.err = fn()
-	g.mu.Lock()
-	delete(g.calls, key)
-	g.mu.Unlock()
-	close(call.done)
+	completed = true
 	return call.err
 }
 
@@ -1380,6 +1479,10 @@ type posterStatusError struct {
 }
 
 func (e *posterStatusError) Error() string { return e.message }
+
+func (e *posterStatusError) Unwrap() error {
+	return &storage.UserFacingError{Status: e.status, Message: e.message}
+}
 
 // fetchRemotePoster 回源下载海报并原子发布到 posterPath。并发名额覆盖整个下载过程（含
 // 读取 body），否则首屏几十张卡片的 body 仍会同时下载。超过 maxBytes 时报错且不发布：
@@ -1485,32 +1588,32 @@ func isVideoURL(value string) bool {
 // resolveLocalLibraryPath resolves requested against the download directory,
 // rejecting traversal and symlink escapes. Missing files return an error that
 // satisfies errors.Is(err, os.ErrNotExist) so callers can map it to 404.
-func resolveLocalLibraryPath(root, requested string) (string, error) {
+func resolveLocalLibraryPath(root, requested string) (string, string, error) {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	filePath, err := filepath.Abs(requested)
 	if err != nil {
-		return "", fmt.Errorf("文件路径无效")
+		return "", "", fmt.Errorf("文件路径无效")
 	}
 	rel, err := filepath.Rel(rootAbs, filePath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", errFileOutsideDownloadDir
+		return "", "", errFileOutsideDownloadDir
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
-		return "", fmt.Errorf("下载目录不存在: %w", os.ErrNotExist)
+		return "", "", fmt.Errorf("下载目录不存在: %w", os.ErrNotExist)
 	}
 	resolvedFile, err := filepath.EvalSymlinks(filePath)
 	if err != nil {
-		return "", fmt.Errorf("文件不存在: %w", os.ErrNotExist)
+		return "", "", fmt.Errorf("文件不存在: %w", os.ErrNotExist)
 	}
 	resolvedRel, err := filepath.Rel(resolvedRoot, resolvedFile)
 	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
-		return "", errFileOutsideDownloadDir
+		return "", "", errFileOutsideDownloadDir
 	}
-	return resolvedFile, nil
+	return resolvedFile, resolvedRoot, nil
 }
 
 var errFileOutsideDownloadDir = errors.New("文件不在下载目录内")
@@ -1562,10 +1665,9 @@ func (s *Server) resolveDownloadPath(ctx context.Context, currentRoot, requested
 	}
 	lastErr := errFileOutsideDownloadDir
 	for _, root := range roots {
-		path, err := resolveLocalLibraryPath(root, requested)
+		path, resolvedRoot, err := resolveLocalLibraryPath(root, requested)
 		if err == nil {
-			resolvedRoot, err := filepath.EvalSymlinks(root)
-			return path, resolvedRoot, err
+			return path, resolvedRoot, nil
 		}
 		if !errors.Is(err, errFileOutsideDownloadDir) {
 			lastErr = err
@@ -1616,6 +1718,7 @@ func serveOpenedMedia(w http.ResponseWriter, r *http.Request, file *os.File) {
 	// 不必为每张图反复回源。与 /api/assets/{id} 的缓存策略一致；Range/304 仍由
 	// ServeContent 按 Last-Modified 处理。
 	w.Header().Set("Cache-Control", "private, max-age=3600")
+	setMediaSecurityHeaders(w)
 	http.ServeContent(w, r, filepath.Base(file.Name()), info.ModTime(), file)
 }
 
@@ -1641,13 +1744,17 @@ func (s *Server) serveLibraryFile(w http.ResponseWriter, r *http.Request) {
 	// 与 /api/library/downloads/{id}/file 保持同一套多根语义：改过下载目录之后，
 	// 旧目录里的孤儿文件（画廊用 ?path= 打开的条目）也应该继续可读，否则同一份
 	// 文件"有记录能播、没记录 404"。
-	archive, file, _, err := s.openDownloadFile(r.Context(), cfg.DownloadDir, pathValue)
+	archive, file, relative, err := s.openDownloadFile(r.Context(), cfg.DownloadDir, pathValue)
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 	defer archive.Close()
 	defer file.Close()
+	if !storage.IsLibraryMediaPath(relative) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("不允许读取非媒体文件"))
+		return
+	}
 	serveOpenedMedia(w, r, file)
 }
 
@@ -1855,6 +1962,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	}
 	// 拒绝尾随 JSON（如 `{"a":1}{"b":2}`）：只接受单个顶层值。
 	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return errRequestBodyTooLarge
+		}
 		return storage.ErrValidation("请求体包含多余数据")
 	}
 	return nil
@@ -2167,7 +2278,8 @@ func validateDownloadDir(value string, allowedRoots []string) error {
 	}
 	// 下载目录同时是媒体库的沙箱根：设成文件系统根或家目录本身，其下所有图片/视频都会
 	// 变成可读的"媒体库文件"。当前下载目录保持不变是允许的。
-	if isFilesystemRoot(path) || isHomeDirectory(path) {
+	resolved, resolveErr := resolvePathForCheck(path)
+	if isFilesystemRoot(path) || (resolveErr == nil && isFilesystemRoot(resolved)) || isHomeDirectory(path) {
 		return fmt.Errorf("下载目录不能是文件系统根目录或家目录本身，请选择其中的子目录")
 	}
 	if !withinAllowedRoot(path, allowedRoots) {

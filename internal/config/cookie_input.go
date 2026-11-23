@@ -108,6 +108,40 @@ func isCookieExtensionExport(items []any) bool {
 	return hasName && hasValue
 }
 
+var nonCookieAccountMetadataKeys = map[string]bool{
+	"id":              true,
+	"label":           true,
+	"name":            true,
+	"note":            true,
+	"proxy":           true,
+	"useragent":       true,
+	"user_agent":      true,
+	"source":          true,
+	"active":          true,
+	"isprimary":       true,
+	"is_primary":      true,
+	"errormsg":        true,
+	"error_msg":       true,
+	"locks":           true,
+	"screenname":      true,
+	"screen_name":     true,
+	"lastused":        true,
+	"last_used":       true,
+	"verifiedat":      true,
+	"verified_at":     true,
+	"createdat":       true,
+	"created_at":      true,
+	"updatedat":       true,
+	"updated_at":      true,
+	"cookie":          true,
+	"cookies":         true,
+	"extracookies":    true,
+	"extra_cookies":   true,
+	"hasextracookies": true,
+	"requeststoday":   true,
+	"requestsbyqueue": true,
+}
+
 func cookieInputFromAccountObject(object map[string]any) (CookieInput, string) {
 	authToken := firstString(object, "auth_token", "authToken")
 	csrfToken := firstString(object, "ct0", "csrfToken")
@@ -115,6 +149,9 @@ func cookieInputFromAccountObject(object map[string]any) (CookieInput, string) {
 	for key, raw := range object {
 		switch key {
 		case "auth_token", "authToken", "ct0", "csrfToken":
+			continue
+		}
+		if nonCookieAccountMetadataKeys[strings.ToLower(strings.TrimSpace(key))] {
 			continue
 		}
 		value, ok := raw.(string)
@@ -134,11 +171,24 @@ func cookieInputFromExtension(items []any) (CookieInput, string) {
 		if !ok {
 			continue
 		}
+		if rawDomain, exists := object["domain"]; exists && rawDomain != nil {
+			domain, ok := rawDomain.(string)
+			if !ok || !isXCookieDomain(domain) {
+				continue
+			}
+		}
 		name, _ := object["name"].(string)
 		value, _ := object["value"].(string)
 		assignCookieValue(&authToken, &csrfToken, extra, name, value)
 	}
 	return buildCookieInput(authToken, csrfToken, extra)
+}
+
+func isXCookieDomain(domain string) bool {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	d = strings.TrimPrefix(d, ".")
+	return d == "x.com" || strings.HasSuffix(d, ".x.com") ||
+		d == "twitter.com" || strings.HasSuffix(d, ".twitter.com")
 }
 
 func parseCookieInputLines(raw string) ([]CookieInput, []CookieInputIssue) {
@@ -163,6 +213,7 @@ func parseCookieInputLines(raw string) ([]CookieInput, []CookieInputIssue) {
 }
 
 func parseCookieInputLine(line string) (CookieInput, string) {
+	line = strings.TrimSpace(line)
 	line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
 	if len(line) >= len("cookie:") && strings.EqualFold(line[:len("cookie:")], "cookie:") {
 		line = strings.TrimSpace(line[len("cookie:"):])
@@ -170,35 +221,40 @@ func parseCookieInputLine(line string) (CookieInput, string) {
 	authToken, csrfToken := "", ""
 	extra := make(map[string]string)
 
-	// 格式 1：a=b; auth_token=..; ct0=..。没有分号时也允许空格分隔的 key=value。
-	parts := []string{line}
-	if strings.Contains(line, ";") {
-		parts = strings.Split(line, ";")
-	} else if strings.ContainsAny(line, "=:") && strings.Contains(line, " ") {
-		parts = strings.Fields(line)
-	}
-	for _, part := range parts {
-		key, value, ok := cutCookiePair(part)
-		if !ok {
-			continue
+	// 格式 1：含 = 或 : 的结构化键值对行（Header / 逗号分隔 / YAML 行），不回落到裸值解析。
+	if strings.ContainsAny(line, "=:") {
+		var parts []string
+		switch {
+		case strings.Contains(line, ";"):
+			parts = strings.Split(line, ";")
+		case strings.Contains(line, ","):
+			parts = strings.Split(line, ",")
+		case strings.ContainsAny(line, " \t"):
+			fields := strings.Fields(line)
+			if countPairFields(fields) >= 2 {
+				parts = fields
+			} else {
+				parts = []string{line}
+			}
+		default:
+			parts = []string{line}
 		}
-		assignCookieValue(&authToken, &csrfToken, extra, key, value)
-	}
-	if authToken != "" || csrfToken != "" {
+		for _, part := range parts {
+			key, value, ok := cutCookiePair(part)
+			if !ok {
+				continue
+			}
+			assignCookieValue(&authToken, &csrfToken, extra, key, value)
+		}
 		return buildCookieInput(authToken, csrfToken, extra)
 	}
 
-	// 格式 2：两个裸值。构造 key=value 后交给 ParseCookiePairs，保持旧格式语义一致。
+	// 格式 2：两个裸值，直接构造 CookieInput 校验，避免拼接后再经 ParseCookiePairs 被 ';' 截断。
 	fields := strings.FieldsFunc(line, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t'
 	})
 	if len(fields) == 2 {
-		if pairs := ParseCookiePairs("auth_token=" + fields[0] + "; ct0=" + fields[1]); len(pairs) > 0 {
-			return buildCookieInput(pairs[0].AuthToken, pairs[0].CSRFToken, nil)
-		}
-	}
-	if pairs := ParseCookiePairs(line); len(pairs) == 1 {
-		return buildCookieInput(pairs[0].AuthToken, pairs[0].CSRFToken, nil)
+		return buildCookieInput(strings.Trim(fields[0], `"'`), strings.Trim(fields[1], `"'`), nil)
 	}
 	return buildCookieInput("", "", nil)
 }
@@ -216,7 +272,7 @@ func buildCookieInput(authToken, csrfToken string, extra map[string]string) (Coo
 	if len(missing) > 0 {
 		return CookieInput{}, "缺少 " + strings.Join(missing, " 和 ")
 	}
-	if strings.ContainsAny(authToken, ";\r\n") || strings.ContainsAny(csrfToken, ";\r\n") {
+	if hasInvalidCookieValueChar(authToken) || hasInvalidCookieValueChar(csrfToken) {
 		return CookieInput{}, "Cookie 值包含非法字符"
 	}
 	input := CookieInput{AuthToken: authToken, CSRFToken: csrfToken}
@@ -224,6 +280,16 @@ func buildCookieInput(authToken, csrfToken string, extra map[string]string) (Coo
 		input.Extra = extra
 	}
 	return input, ""
+}
+
+func hasInvalidCookieValueChar(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == ';' || b < 0x20 || b == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func assignCookieValue(authToken, csrfToken *string, extra map[string]string, name, value string) {
@@ -249,7 +315,7 @@ func addExtraCookie(extra map[string]string, name, value string) {
 	if name == "" || !validCookieName.MatchString(name) {
 		return
 	}
-	if strings.ContainsAny(value, ";\r\n") {
+	if hasInvalidCookieValueChar(value) {
 		return
 	}
 	extra[name] = value
@@ -257,10 +323,7 @@ func addExtraCookie(extra map[string]string, name, value string) {
 
 func cutCookiePair(raw string) (string, string, bool) {
 	raw = strings.TrimSpace(raw)
-	key, value, ok := strings.Cut(raw, "=")
-	if !ok {
-		key, value, ok = strings.Cut(raw, ":")
-	}
+	key, value, ok := cutEarliestCookieSep(raw)
 	if !ok {
 		return "", "", false
 	}

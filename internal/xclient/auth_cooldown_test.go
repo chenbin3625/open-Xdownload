@@ -16,14 +16,15 @@ import (
 	"time"
 )
 
-// 接口返回 401 但 /home 校验通过：说明是该接口/目标的问题（例如 X 停用旧路径），
+// 接口返回 401 但登录校验通过：说明是该接口/目标的问题（例如 X 停用旧路径），
 // 不能把仍然有效的 Cookie 禁用。
 func TestEndpointUnauthorizedWithValidCookieDoesNotDisable(t *testing.T) {
 	var homeChecks atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/home" {
+		if r.URL.Path == homeCheckPath {
 			homeChecks.Add(1)
-			_, _ = w.Write([]byte(`{"screen_name":"owner"}`))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"users":[{"user_id":"1","screen_name":"owner","is_auth_valid":true}]}`))
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)
@@ -38,13 +39,13 @@ func TestEndpointUnauthorizedWithValidCookieDoesNotDisable(t *testing.T) {
 			t.Fatal("valid cookie was disabled after an endpoint-level 401")
 		}
 	}
-	// 短时间内重复 401 不应每次都去撞 /home。
+	// 短时间内重复 401 不应每次都去撞登录校验接口。
 	if got := homeChecks.Load(); got != 1 {
 		t.Fatalf("home checks = %d, want 1", got)
 	}
 }
 
-// /home 也 401：Cookie 确实失效，禁用；冷却期不应再长达 30 分钟。
+// 登录校验也 401：Cookie 确实失效，禁用；冷却期不应再长达 30 分钟。
 func TestUnauthorizedConfirmedByHomeDisablesWithModerateCooldown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -62,10 +63,10 @@ func TestUnauthorizedConfirmedByHomeDisablesWithModerateCooldown(t *testing.T) {
 	}
 }
 
-// /home 无法给出结论（网络错误/挑战页）时不禁用 Cookie。
+// 登录校验无法给出结论（网络错误/挑战页）时不禁用 Cookie。
 func TestUnauthorizedWithInconclusiveHomeUsesShortCooldown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/home" {
+		if r.URL.Path == homeCheckPath {
 			_, _ = w.Write([]byte(`<html>challenge</html>`))
 			return
 		}
@@ -77,13 +78,13 @@ func TestUnauthorizedWithInconclusiveHomeUsesShortCooldown(t *testing.T) {
 		t.Fatal("expected 401 error")
 	}
 	if client.isDisabled() {
-		t.Fatal("inconclusive /home result must not disable the client")
+		t.Fatal("inconclusive probe result must not disable the client")
 	}
 }
 
 func TestPoolUnauthorizedWithInconclusiveHomeTriesBackup(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/home" {
+		if r.URL.Path == homeCheckPath {
 			_, _ = w.Write([]byte(`<html>challenge</html>`))
 			return
 		}

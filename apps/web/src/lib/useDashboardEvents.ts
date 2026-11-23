@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { notifyManager, type QueryClient } from "@tanstack/react-query";
+import { notifyManager, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import type { DashboardMeta, Job, JobsPage } from "./api";
 import {
   archiveScheduleQueryRoot,
@@ -74,6 +74,18 @@ export function isDashboardJobList(payload: unknown): payload is Job[] {
   return Array.isArray(payload) && payload.every(isDashboardJobPayload);
 }
 
+function extractDeletedJobId(event: DashboardEvent): number | undefined {
+  if (typeof event.jobId === "number") return event.jobId;
+  if (
+    event.payload &&
+    typeof event.payload === "object" &&
+    typeof (event.payload as { id?: unknown }).id === "number"
+  ) {
+    return (event.payload as { id: number }).id;
+  }
+  return undefined;
+}
+
 export function sameJob(left: Job, right: Job) {
   return (
     left.id === right.id &&
@@ -103,7 +115,28 @@ export function isStaleJobUpdate(previous: Job, next: Job) {
 // ORDER BY created_at DESC, id DESC 的排序语义它本该出现在第 1 页首位。
 // 这里刻意不比较浏览器时钟（客户端时钟与服务端可能差几十秒），只做服务器排序语义比较；
 // createdAt 非法时直接不保留，避免 NaN 比较把整页排序打乱。
-export function mergeNewerJobs(cached: JobsPage | undefined, fetched: JobsPage): JobsPage {
+const sseInsertedJobs = new WeakMap<QueryClient, Set<number>>();
+
+function sseInsertedIdsFor(queryClient: QueryClient): Set<number> {
+  let ids = sseInsertedJobs.get(queryClient);
+  if (!ids) {
+    ids = new Set<number>();
+    sseInsertedJobs.set(queryClient, ids);
+  }
+  return ids;
+}
+
+export function mergeNewerJobs(
+  cached: JobsPage | undefined,
+  fetched: JobsPage,
+  queryClient?: QueryClient,
+): JobsPage {
+  const sseIds = queryClient ? sseInsertedIdsFor(queryClient) : null;
+  if (sseIds) {
+    for (const job of fetched.items) {
+      sseIds.delete(job.id);
+    }
+  }
   if (!cached) return fetched;
   let changed = false;
   const items = fetched.items.map((job) => {
@@ -115,23 +148,27 @@ export function mergeNewerJobs(cached: JobsPage | undefined, fetched: JobsPage):
     return job;
   });
 
-  // 保留由 SSE 插入但尚未被轮询覆盖的任务（仅第一页）。
+  // 保留由 SSE 插入但尚未被轮询确认/删除的任务（仅第一页）。
   if (fetched.page === 1) {
     const fetchedIds = new Set(fetched.items.map((job) => job.id));
     const newestFetched = fetched.items[0];
     const newestCreatedTime = newestFetched ? Date.parse(newestFetched.createdAt) : Number.NaN;
-    // fetched 首页为空说明快照里没有任何任务：缓存里不属于该快照的行一定是快照之后插入的。
+    // fetched 首页为空时，只保留明确来自 SSE 且尚未被确认/删除的任务，绝不复活已删除任务。
     const fetchedIsEmpty = fetched.items.length === 0;
     const retained = cached.items.filter((job) => {
       if (fetchedIds.has(job.id)) return false;
+      if (sseIds && !sseIds.has(job.id)) return false;
       const createdTime = Date.parse(job.createdAt);
       if (!Number.isFinite(createdTime)) return false;
       if (fetchedIsEmpty) return true;
       if (!Number.isFinite(newestCreatedTime)) return false;
-      return (
+      const isNewer =
         createdTime > newestCreatedTime ||
-        (createdTime === newestCreatedTime && job.id > newestFetched.id)
-      );
+        (createdTime === newestCreatedTime && job.id > newestFetched.id);
+      if (!isNewer && sseIds) {
+        sseIds.delete(job.id);
+      }
+      return isNewer;
     });
     if (retained.length > 0) {
       changed = true;
@@ -205,10 +242,36 @@ export function cancelScheduledTerminalRefresh(queryClient: QueryClient) {
 }
 
 export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Job) {
+  // 先只读扫描全部任务分页缓存：只要任意缓存已存在更新版本，就绝不拿较旧的非活跃缓存做增量统计变更。
+  let anyStale = false;
+  const outdatedKeys: QueryKey[] = [];
+  for (const [queryKey, current] of queryClient.getQueriesData<JobsPage>({ queryKey: jobsQueryRoot })) {
+    if (!current) continue;
+    const existing = current.items.find((job) => job.id === updatedJob.id);
+    if (!existing) continue;
+    if (isStaleJobUpdate(existing, updatedJob)) {
+      anyStale = true;
+    } else {
+      outdatedKeys.push(queryKey);
+    }
+  }
+
+  if (anyStale) {
+    if (outdatedKeys.length > 0) {
+      for (const queryKey of outdatedKeys) {
+        void queryClient.invalidateQueries({ queryKey, exact: true });
+      }
+      void queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot, refetchType: "none" });
+      return { found: false, needsFullRefresh: true, stale: true };
+    }
+    return { found: false, needsFullRefresh: false, stale: true };
+  }
+
   let found = false;
   let needsFullRefresh = false;
-  let stale = false;
-  let previousStatus: Job["status"] | undefined;
+  let newestPreviousJob: Job | undefined;
+  let bucketsDisagree = false;
+  let seenBucket: ReturnType<typeof jobStatusBucket> | undefined;
 
   queryClient.setQueriesData<JobsPage>({ queryKey: jobsQueryRoot }, (current) => {
     if (!current) return current;
@@ -217,17 +280,20 @@ export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Jo
     if (jobIndex === -1) return current;
 
     const previousJob = current.items[jobIndex];
-    if (isStaleJobUpdate(previousJob, updatedJob)) {
-      stale = true;
-      return current;
+    found = true;
+
+    const prevBucket = jobStatusBucket(previousJob.status);
+    if (seenBucket !== undefined && seenBucket !== prevBucket) {
+      bucketsDisagree = true;
+    }
+    seenBucket = prevBucket;
+
+    if (!newestPreviousJob || !isStaleJobUpdate(newestPreviousJob, previousJob)) {
+      newestPreviousJob = previousJob;
     }
 
-    found = true;
-    previousStatus = previousJob.status;
-    if (
-      jobStatusBucket(previousJob.status) !== jobStatusBucket(updatedJob.status) ||
-      isJobTerminal(updatedJob.status)
-    ) {
+    const nextBucket = jobStatusBucket(updatedJob.status);
+    if (prevBucket !== nextBucket || isJobTerminal(updatedJob.status)) {
       needsFullRefresh = true;
     }
     if (sameJob(previousJob, updatedJob)) return current;
@@ -235,8 +301,6 @@ export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Jo
     const items = [...current.items];
     items[jobIndex] = updatedJob;
     let counts = current.counts;
-    const prevBucket = jobStatusBucket(previousJob.status);
-    const nextBucket = jobStatusBucket(updatedJob.status);
     if (counts && prevBucket !== nextBucket) {
       const nextCounts = { ...counts };
       if (prevBucket === "active") nextCounts.active = Math.max(0, nextCounts.active - 1);
@@ -250,8 +314,11 @@ export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Jo
     return { ...current, items, counts };
   });
 
-  if (found && previousStatus) {
-    const fromStatus = previousStatus;
+  if (bucketsDisagree) {
+    needsFullRefresh = true;
+    void queryClient.invalidateQueries({ queryKey: dashboardMetaQueryRoot, refetchType: "none" });
+  } else if (found && newestPreviousJob) {
+    const fromStatus = newestPreviousJob.status;
     queryClient.setQueryData<DashboardMeta>(dashboardMetaQueryRoot, (current) => {
       if (!current) return current;
       const stats = dashboardStatsWithJobStatusChange(current.stats, fromStatus, updatedJob.status);
@@ -260,7 +327,7 @@ export function patchDashboardJobCaches(queryClient: QueryClient, updatedJob: Jo
     });
   }
 
-  return { found, needsFullRefresh, stale };
+  return { found, needsFullRefresh, stale: false };
 }
 
 export function prependJobsToCaches(queryClient: QueryClient, jobs: Job[]) {
@@ -274,6 +341,11 @@ export function prependJobsToCaches(queryClient: QueryClient, jobs: Job[]) {
   }
   const fresh = jobs.filter((job) => !known.has(job.id));
   if (fresh.length === 0) return;
+
+  const sseIds = sseInsertedIdsFor(queryClient);
+  for (const job of fresh) {
+    sseIds.add(job.id);
+  }
 
   queryClient.setQueriesData<JobsPage>({ queryKey: jobsQueryRoot, predicate: isUnfilteredJobsQuery }, (current) => {
     if (!current || current.page !== 1) return current;
@@ -298,8 +370,79 @@ export function prependJobsToCaches(queryClient: QueryClient, jobs: Job[]) {
   });
 }
 
+export function removeJobFromCaches(queryClient: QueryClient, jobId: number) {
+  sseInsertedIdsFor(queryClient).delete(jobId);
+
+  let removedStatus: Job["status"] | undefined;
+  queryClient.setQueriesData<JobsPage>({ queryKey: jobsQueryRoot }, (current) => {
+    if (!current) return current;
+    const index = current.items.findIndex((job) => job.id === jobId);
+    if (index === -1) return current;
+    removedStatus = current.items[index].status;
+    const items = current.items.filter((job) => job.id !== jobId);
+    let counts = current.counts;
+    if (counts) {
+      const nextCounts = { ...counts, all: Math.max(0, counts.all - 1) };
+      const bucket = jobStatusBucket(removedStatus);
+      if (bucket === "active") nextCounts.active = Math.max(0, nextCounts.active - 1);
+      if (bucket === "completed") nextCounts.completed = Math.max(0, nextCounts.completed - 1);
+      if (bucket === "failed") nextCounts.failed = Math.max(0, nextCounts.failed - 1);
+      counts = nextCounts;
+    }
+    return {
+      ...current,
+      items,
+      total: current.total === undefined ? undefined : Math.max(0, current.total - 1),
+      counts,
+    };
+  });
+
+  if (removedStatus) {
+    const bucket = jobStatusBucket(removedStatus);
+    queryClient.setQueryData<DashboardMeta>(dashboardMetaQueryRoot, (current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        stats: {
+          ...current.stats,
+          total: Math.max(0, current.stats.total - 1),
+          active: bucket === "active" ? Math.max(0, current.stats.active - 1) : current.stats.active,
+          completed: bucket === "completed" ? Math.max(0, current.stats.completed - 1) : current.stats.completed,
+          failed: bucket === "failed" ? Math.max(0, current.stats.failed - 1) : current.stats.failed,
+        },
+      };
+    });
+  }
+}
+
 export function applyDashboardMeta(queryClient: QueryClient, meta: DashboardMeta) {
   queryClient.setQueryData(dashboardMetaQueryRoot, meta);
+  const nextCounts = {
+    all: meta.stats.total,
+    active: meta.stats.active,
+    completed: meta.stats.completed,
+    failed: meta.stats.failed,
+  };
+  queryClient.setQueriesData<JobsPage>(
+    { queryKey: jobsQueryRoot, predicate: isUnfilteredJobsQuery },
+    (current) => {
+      if (!current) return current;
+      if (
+        current.total === meta.stats.total &&
+        current.counts?.all === nextCounts.all &&
+        current.counts?.active === nextCounts.active &&
+        current.counts?.completed === nextCounts.completed &&
+        current.counts?.failed === nextCounts.failed
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        total: meta.stats.total,
+        counts: nextCounts,
+      };
+    },
+  );
 }
 
 export type ApplyDashboardEventResult =
@@ -343,10 +486,26 @@ export function applyDashboardEvent(
     if (!applyEventMeta()) return "refresh-meta";
     return "handled";
   }
+  if (event.type === "job.deleted") {
+    const deletedId = extractDeletedJobId(event);
+    if (typeof deletedId === "number") {
+      removeJobFromCaches(queryClient, deletedId);
+    }
+    const metaApplied = applyEventMeta();
+    void queryClient.invalidateQueries({ queryKey: jobsQueryRoot });
+    void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+    void queryClient.invalidateQueries({ queryKey: libraryUsersQueryRoot });
+    void queryClient.invalidateQueries({ queryKey: tweetsQueryKey });
+    void queryClient.invalidateQueries({ queryKey: tweetAuthorsQueryKey });
+    return metaApplied ? "handled" : "refresh-meta";
+  }
   if (event.type === "job.updated" && isDashboardJobPayload(event.payload)) {
     const patched = patchDashboardJobCaches(queryClient, event.payload);
-    // 迟到的事件已被丢弃，不能再拿它去驱动统计刷新。
-    if (patched.stale) return "handled";
+    // 迟到的事件已被丢弃，不能再拿它去驱动统计刷新；
+    // 若跨缓存版本不一致，触发一次权威统计重拉。
+    if (patched.stale) {
+      return patched.needsFullRefresh ? "refresh-meta" : "handled";
+    }
     // 任务结束意味着可能落了新文件；媒体库 staleTime 很长，需主动失效（只会重拉活跃查询）。
     // 批量收尾时合并成一次刷新，避免 200 个终态事件打出 200 次媒体库请求。
     if (isJobTerminal(event.payload.status)) {
@@ -512,6 +671,15 @@ export function useDashboardEvents(queryClient: QueryClient, onRefresh: () => vo
         enqueueJobUpdate(event);
         return;
       }
+      // 结构性事件（创建/删除等）到来前先清理或刷出挂起的 250ms 缓冲，
+      // 防止旧时刻的 job.updated meta 在 250ms 后反过来覆盖新统计。
+      if (event.type === "job.deleted") {
+        const deletedId = extractDeletedJobId(event);
+        if (typeof deletedId === "number") {
+          jobUpdates.delete(deletedId);
+        }
+      }
+      flushJobUpdates();
       handleEventResult(applyDashboardEvent(queryClient, event));
     };
 

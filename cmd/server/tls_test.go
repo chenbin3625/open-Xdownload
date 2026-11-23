@@ -133,3 +133,31 @@ func TestEnvEnabled(t *testing.T) {
 		t.Fatal("empty should be disabled")
 	}
 }
+
+func TestEnsureDevTLSHardensKeyModeAndECDSAKeyUsage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	certFile, keyFile, err := ensureDevTLS(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("keyFile mode = %o, want 0600", info.Mode().Perm())
+	}
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cert.KeyUsage&x509.KeyUsageKeyEncipherment != 0 {
+		t.Fatalf("ECDSA cert should not set KeyUsageKeyEncipherment: %v", cert.KeyUsage)
+	}
+}

@@ -87,17 +87,23 @@ func TestWebAppSecurityHeaders(t *testing.T) {
 	}
 
 	csp := header.Get("Content-Security-Policy")
-	// antd 的 CSS-in-JS 必须能注入 <style>，Google Fonts 必须可达，否则页面会明显崩坏。
+	// antd 的 CSS-in-JS 必须能注入 <style>；未使用的 Google Fonts 不应出现在 CSP 中。
 	for _, required := range []string{
 		"default-src 'self'",
 		"script-src 'self'",
 		"'unsafe-inline'",
-		"https://fonts.googleapis.com",
-		"https://fonts.gstatic.com",
 		"frame-ancestors 'none'",
 	} {
 		if !strings.Contains(csp, required) {
 			t.Errorf("CSP 缺少 %q: %s", required, csp)
+		}
+	}
+	for _, forbidden := range []string{
+		"https://fonts.googleapis.com",
+		"https://fonts.gstatic.com",
+	} {
+		if strings.Contains(csp, forbidden) {
+			t.Errorf("CSP 不应包含未使用的 %q: %s", forbidden, csp)
 		}
 	}
 	// 可执行脚本不得放开 unsafe-inline / unsafe-eval。

@@ -20,6 +20,14 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+const mediaContentSecurityPolicy = "default-src 'none'; media-src 'self'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+func setMediaSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", mediaContentSecurityPolicy)
+}
+
 func (s *Server) getStorage(w http.ResponseWriter, r *http.Request) {
 	d, err := s.store.GetStorageDocument(r.Context())
 	if err != nil {
@@ -45,11 +53,13 @@ func (s *Server) updateStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowedRoots := storageAllowedRoots(stored, existing)
-	for _, target := range document.Targets {
-		if target.Type != "local" && target.Type != "nas" {
+	for i := range document.Targets {
+		if document.Targets[i].Type != "local" && document.Targets[i].Type != "nas" {
 			continue
 		}
-		if err := validateDownloadDir(target.Root, allowedRoots); err != nil {
+		// Normalize Root in-place so the exact string validated here is persisted by SaveStorageDocument.
+		document.Targets[i].Root = strings.TrimSpace(document.Targets[i].Root)
+		if err := validateDownloadDir(document.Targets[i].Root, allowedRoots); err != nil {
 			writeError(w, http.StatusBadRequest, storage.ErrValidation(err.Error()))
 			return
 		}
@@ -70,8 +80,9 @@ func (s *Server) updateStorage(w http.ResponseWriter, r *http.Request) {
 func storageAllowedRoots(stored config.AppConfig, existing config.StorageDocument) []string {
 	roots := localDirectoryAllowedRoots(stored)
 	for _, target := range existing.Targets {
-		if (target.Type == "local" || target.Type == "nas") && strings.TrimSpace(target.Root) != "" && !unsafeDownloadRoot(target.Root) {
-			roots = append(roots, target.Root)
+		root := strings.TrimSpace(target.Root)
+		if (target.Type == "local" || target.Type == "nas") && root != "" && !unsafeDownloadRoot(root) {
+			roots = append(roots, root)
 		}
 	}
 	if extra := strings.TrimSpace(os.Getenv("OPEN_XDOWNLOAD_ALLOWED_STORAGE_ROOTS")); extra != "" {
@@ -169,7 +180,7 @@ func (s *Server) serveAssetIDResult(w http.ResponseWriter, r *http.Request, id s
 			status = http.StatusNotFound
 		}
 		if writeErrors {
-			writeError(w, status, fmt.Errorf("asset unavailable"))
+			writeError(w, status, &storage.UserFacingError{Status: status, Message: "asset unavailable", Cause: err})
 		}
 		return false
 	}
@@ -180,10 +191,15 @@ func (s *Server) serveAssetIDResult(w http.ResponseWriter, r *http.Request, id s
 		}
 		return false
 	}
-	w.Header().Set("Content-Type", a.ContentType)
-	w.Header().Set("ETag", `"`+a.ContentHash+`"`)
+	if contentType := strings.TrimSpace(a.ContentType); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	if contentHash := strings.TrimSpace(a.ContentHash); contentHash != "" && !strings.ContainsAny(contentHash, "\"\r\n") {
+		w.Header().Set("ETag", `"`+contentHash+`"`)
+	}
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	w.Header().Set("Content-Disposition", `inline`)
+	setMediaSecurityHeaders(w)
 	http.ServeContent(w, r, path.Base(a.Key), a.CreatedAt, file)
 	return true
 }
@@ -220,6 +236,10 @@ func (s *Server) enrichAssetURLs(r *http.Request, records []storage.DownloadReco
 	if err != nil {
 		return
 	}
+	applyAssetURLs(records, assetsByID)
+}
+
+func applyAssetURLs(records []storage.DownloadRecord, assetsByID map[int64]map[config.AssetKind]string) {
 	for i := range records {
 		assets := assetsByID[records[i].ID]
 		records[i].AssetURLs = map[config.AssetKind]string{}

@@ -25,7 +25,11 @@ type memberCheckpoint struct {
 var memberPageDelay = xapi.PaginationPageDelay
 
 func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storage.Job, fetch func(string, string) (xapi.UserPage, error)) ([]xapi.User, error) {
-	cp, _, err := m.loadArchiveCheckpoint(saveCtx, job.ID)
+	return m.collectArchiveMembersWithRecheck(ctx, saveCtx, job, nil, fetch)
+}
+
+func (m *Manager) collectArchiveMembersWithRecheck(ctx, saveCtx context.Context, job storage.Job, recheck func(context.Context) bool, fetch func(string, string) (xapi.UserPage, error)) ([]xapi.User, error) {
+	cp, _, err := m.loadArchiveCheckpointProgress(saveCtx, job.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -41,6 +45,8 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 		seenCursors[cursor] = true
 	}
 	started := time.Now()
+	startCursor := state.Cursor
+	retriedStaleCursor := false
 	for fetched := 0; !state.Complete; fetched++ {
 		if fetched > 0 && memberPageDelay > 0 {
 			select {
@@ -57,6 +63,28 @@ func (m *Manager) collectArchiveMembers(ctx, saveCtx context.Context, job storag
 		}
 		page, err := fetch(state.Cursor, state.ViewerKey)
 		if err != nil {
+			// 仅当带着持久化游标续跑且首页请求即失效时才重置游标，
+			// 避免全新扫描或已成功翻页后因瞬时错误被清空回第 0 页。
+			staleCursor := fetched == 0 && startCursor != "" && !retriedStaleCursor &&
+				(xapi.IsInvalidTimelineCursor(err) || (recheck != nil && xapi.IsUnauthorized(err) && recheck(ctx)))
+			if staleCursor {
+				retriedStaleCursor = true
+				startCursor = ""
+				state.Cursor = ""
+				state.ViewerKey = ""
+				state.SeenCursors = nil
+				state.EmptyPages = 0
+				seenCursors = map[string]bool{}
+				payload, marshalErr := json.Marshal(cp.progress())
+				if marshalErr != nil {
+					return nil, marshalErr
+				}
+				if saveErr := m.store.SaveJobCheckpoint(saveCtx, job.ID, payload); saveErr != nil {
+					return nil, saveErr
+				}
+				fetched = -1
+				continue
+			}
 			return nil, err
 		}
 		// 服务端到末尾时会返回原样（或已见过）的 Bottom cursor。与媒体时间线一致：

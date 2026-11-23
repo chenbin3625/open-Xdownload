@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -26,6 +28,8 @@ const (
 	xAccountCheckTimeout = 20 * time.Second
 	// xAccountCheckConcurrency 是全部检测时同时探测的账号数上限。
 	xAccountCheckConcurrency = 4
+	// maxXAccountImportItems 限制单次批量导入的账号条目上限，避免过大请求占用过多资源。
+	maxXAccountImportItems = 200
 	// maxXAccountUserAgentRunes 限制账号级 User-Agent 的长度。
 	maxXAccountUserAgentRunes = 512
 	// maxXAccountCheckErrorRunes 限制写进 error_msg 的检测错误长度。
@@ -191,11 +195,21 @@ func (s *Server) importXAccounts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, storage.ErrValidation("没有识别到要导入的账号"))
 		return
 	}
+	if len(inputs)+len(parseIssues) > maxXAccountImportItems {
+		writeError(w, http.StatusBadRequest, storage.ErrValidation(fmt.Sprintf("一次最多导入 %d 个账号", maxXAccountImportItems)))
+		return
+	}
 	issues := make([]xAccountImportIssue, 0, len(parseIssues))
 	for _, issue := range parseIssues {
 		issues = append(issues, xAccountImportIssue{Index: issue.Index, Reason: issue.Reason})
 	}
 	created := make([]storage.XAccount, 0, len(inputs))
+	mutated := false
+	defer func() {
+		if mutated {
+			s.invalidateXSource()
+		}
+	}()
 	for _, input := range inputs {
 		account, err := xAccountFromCookieInput(input)
 		if err == nil {
@@ -209,11 +223,13 @@ func (s *Server) importXAccounts(w http.ResponseWriter, r *http.Request) {
 			issues = append(issues, xAccountImportIssue{Index: input.Index, Reason: xAccountEntryError(err)})
 			continue
 		}
+		mutated = true
 		created = append(created, account)
 	}
 	sort.SliceStable(issues, func(i, j int) bool { return issues[i].Index < issues[j].Index })
-	if len(created) > 0 {
+	if mutated {
 		s.invalidateXSource()
+		mutated = false
 	}
 	views, err := s.xAccountViews(r.Context(), created)
 	if err != nil {
@@ -238,11 +254,6 @@ func (s *Server) updateXAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, storage.ErrValidation("不能直接取消主账号，请把另一个账号设为主账号"))
 		return
 	}
-	current, err := s.store.GetXAccount(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 	patch := storage.XAccountPatch{Active: req.Active, IsPrimary: req.IsPrimary}
 	if req.UserAgent != nil {
 		userAgent, err := normalizeXAccountUserAgent(*req.UserAgent)
@@ -251,15 +262,6 @@ func (s *Server) updateXAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		patch.UserAgent = &userAgent
-	}
-	if req.Proxy != nil {
-		// 前端把打码后的代理原样带回来：同一主机时还原库内的用户名密码。
-		proxy, err := normalizeXAccountProxy(*req.Proxy, current.Proxy)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		patch.Proxy = &proxy
 	}
 	// 留空表示不替换 Cookie，与编辑框"留空则不修改"一致。
 	if req.Cookie != nil && strings.TrimSpace(*req.Cookie) != "" {
@@ -278,7 +280,16 @@ func (s *Server) updateXAccount(w http.ResponseWriter, r *http.Request) {
 		patch.CSRFToken = &input.CSRFToken
 		patch.ExtraCookies = &extra
 	}
+	if req.Proxy != nil {
+		submittedProxy := *req.Proxy
+		patch.ProxyResolver = func(currentProxy string) (string, error) {
+			return normalizeXAccountProxy(submittedProxy, currentProxy)
+		}
+	}
+	// 在 SQLite 写事务内原子还原打码代理，同时用进程锁与探测写回互斥。
+	s.xAccountMu.Lock()
 	updated, err := s.store.UpdateXAccount(r.Context(), id, patch)
+	s.xAccountMu.Unlock()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -299,6 +310,15 @@ func (s *Server) deleteXAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidateXSource()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// applyXAccountCheckIfFresh 在同一 SQLite 事务内重新核对账号凭据是否变化，防止慢速旧探测
+// 覆盖或停用用户刚刚更新的新 Cookie / 代理。
+func (s *Server) applyXAccountCheckIfFresh(ctx context.Context, probed storage.XAccount, check storage.XAccountCheck) (storage.XAccount, bool, error) {
+	s.xAccountMu.Lock()
+	defer s.xAccountMu.Unlock()
+
+	return s.store.ApplyXAccountCheckIfUnchanged(ctx, probed, check, time.Now())
 }
 
 func (s *Server) checkXAccount(w http.ResponseWriter, r *http.Request) {
@@ -326,15 +346,25 @@ func (s *Server) checkXAccount(w http.ResponseWriter, r *http.Request) {
 		// 客户端已断开：探测结果多半是"已取消"，不能据此改写账号状态。
 		return
 	}
-	updated, err := s.store.ApplyXAccountCheck(r.Context(), id, check, time.Now())
+	updated, applied, err := s.applyXAccountCheckIfFresh(r.Context(), account, check)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.invalidateXSource()
+	if applied {
+		s.invalidateXSource()
+	}
 	view, err := s.xAccountView(r.Context(), updated)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !applied {
+		writeJSON(w, http.StatusOK, xAccountCheckResponse{
+			OK:      false,
+			Error:   "账号凭据在检测期间已更新，已忽略旧检测结果",
+			Account: view,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, xAccountCheckResponse{
@@ -383,16 +413,37 @@ func (s *Server) checkAllXAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]xAccountCheckAllItem, len(accounts))
 	next := make(chan int)
+	var mutated atomic.Bool
+	defer func() {
+		if mutated.Load() {
+			s.invalidateXSource()
+		}
+	}()
 	var wg sync.WaitGroup
 	for range min(xAccountCheckConcurrency, len(accounts)) {
 		wg.Go(func() {
 			for index := range next {
-				results[index] = s.checkXAccountInBatch(ctx, accounts[index], globalProxy)
+				if ctx.Err() != nil {
+					return
+				}
+				item, wrote := s.checkXAccountInBatch(ctx, accounts[index], globalProxy)
+				results[index] = item
+				if wrote {
+					mutated.Store(true)
+				}
 			}
 		})
 	}
+enqueue:
 	for index := range accounts {
-		next <- index
+		if ctx.Err() != nil {
+			break enqueue
+		}
+		select {
+		case <-ctx.Done():
+			break enqueue
+		case next <- index:
+		}
 	}
 	close(next)
 	wg.Wait()
@@ -400,6 +451,7 @@ func (s *Server) checkAllXAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidateXSource()
+	mutated.Store(false)
 	refreshed, err := s.store.ListXAccounts(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -414,21 +466,26 @@ func (s *Server) checkAllXAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 // checkXAccountInBatch 检测一个账号并写回结果，供全部检测使用。
-func (s *Server) checkXAccountInBatch(ctx context.Context, account storage.XAccount, globalProxy string) xAccountCheckAllItem {
+func (s *Server) checkXAccountInBatch(ctx context.Context, account storage.XAccount, globalProxy string) (xAccountCheckAllItem, bool) {
 	item := xAccountCheckAllItem{ID: account.ID}
 	check := s.probeXAccount(ctx, account, globalProxy)
 	if ctx.Err() != nil {
 		item.Error = "检测已取消"
-		return item
+		return item, false
 	}
-	if _, err := s.store.ApplyXAccountCheck(ctx, account.ID, check, time.Now()); err != nil {
+	_, applied, err := s.applyXAccountCheckIfFresh(ctx, account, check)
+	if err != nil {
 		item.Error = xAccountEntryError(err)
-		return item
+		return item, false
+	}
+	if !applied {
+		item.Error = "账号凭据在检测期间已更新，已忽略旧检测结果"
+		return item, false
 	}
 	item.OK = check.Err == ""
 	item.ScreenName = check.ScreenName
 	item.Error = check.Err
-	return item
+	return item, true
 }
 
 // probeXAccount 用注入的探测函数检测账号（最多 xAccountCheckTimeout），并把结果转换成
@@ -491,14 +548,25 @@ func xAccountProbeMessage(err error, fallback string, creds xapi.AccountCredenti
 	if message == "" {
 		return fallback
 	}
+	if creds.Proxy != "" {
+		redactedProxy := config.RedactURLUserinfo(creds.Proxy)
+		if redactedProxy != creds.Proxy {
+			message = strings.ReplaceAll(message, creds.Proxy, redactedProxy)
+		}
+		if proxy, parseErr := url.Parse(creds.Proxy); parseErr == nil && proxy.User != nil {
+			message = strings.ReplaceAll(message, proxy.String(), redactedProxy)
+			message = strings.ReplaceAll(message, proxy.User.String()+"@", config.SecretPlaceholder+"@")
+			if _, encodedPassword, hasPassword := strings.Cut(proxy.User.String(), ":"); hasPassword && encodedPassword != "" {
+				message = strings.ReplaceAll(message, encodedPassword, config.SecretPlaceholder)
+			}
+			if password, ok := proxy.User.Password(); ok && password != "" {
+				message = strings.ReplaceAll(message, password, config.SecretPlaceholder)
+			}
+		}
+	}
 	secrets := []string{creds.AuthToken, creds.CSRFToken}
 	for _, value := range creds.ExtraCookies {
 		secrets = append(secrets, value)
-	}
-	if proxy, parseErr := url.Parse(creds.Proxy); parseErr == nil && proxy.User != nil {
-		if password, ok := proxy.User.Password(); ok {
-			secrets = append(secrets, password)
-		}
 	}
 	for _, secret := range secrets {
 		// 太短的值（如 lang=en）替换掉会破坏正常文字，也不是凭据。

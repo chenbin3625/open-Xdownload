@@ -147,6 +147,7 @@ func TestDownloadWithOptionsSkipsCompleteLocalFile(t *testing.T) {
 	body := []byte("new media")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -184,6 +185,7 @@ func TestDownloadWithOptionsRedownloadsPartialLocalFile(t *testing.T) {
 	body := []byte("new media")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -320,6 +322,7 @@ func TestDownloadWithMaxLengthFilenameSucceeds(t *testing.T) {
 func TestDownloadWithOptionsDoesNotSkipCompleteFileOwnedByOtherDownload(t *testing.T) {
 	body := []byte("distinct media body")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -354,6 +357,7 @@ func TestDownloadWithOptionsDoesNotSkipCompleteFileOwnedByOtherDownload(t *testi
 func TestDownloadWithOptionsDoesNotOverwritePartialFileOwnedByOtherDownload(t *testing.T) {
 	body := []byte("full media body longer than the stale partial")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -390,6 +394,7 @@ func TestDownloadWithOptionsSkipsOwnedCompleteFile(t *testing.T) {
 	body := []byte("media")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -422,6 +427,7 @@ func TestDownloadWithOptionsSkipsOwnedCompleteFile(t *testing.T) {
 func TestDownloadWithOptionsReplacesOwnedPartialFile(t *testing.T) {
 	body := []byte("complete body")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -1076,5 +1082,153 @@ func TestAllowedHostInjectionKeepsProductionWhitelist(t *testing.T) {
 	// 未注入的 host 仍被拒绝。
 	if _, err := allowed.Open(context.Background(), "https://evil.example/media.mp4", Options{}); err == nil || !strings.Contains(err.Error(), "非 twimg.com") {
 		t.Fatalf("Open(evil.example) error = %v, want non-twimg rejection", err)
+	}
+}
+
+func TestDownloadRejectsZeroContentLengthBeforeExistingCheck(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	// Even if a 0-byte file sits at basePath, Content-Length: 0 must be rejected, never skipped.
+	if err := os.WriteFile(filepath.Join(dir, "media.mp4"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newTestDownloader().DownloadWithOptions(context.Background(), server.URL+"/movie.mp4", dir, "media", Options{}); err == nil {
+		t.Fatal("expected Content-Length: 0 rejection")
+	}
+
+	// existingFileState must not treat 0-byte local files as complete even when contentLength == 0.
+	if _, complete, _, err := existingFileState(filepath.Join(dir, "media.mp4"), 0); err != nil || complete {
+		t.Fatalf("existingFileState(0, 0) complete=%v err=%v, want false", complete, err)
+	}
+}
+
+func TestDownloadRejectsAdditionalNonMediaTypesAndXMLBody(t *testing.T) {
+	for _, tc := range []struct{ name, ct, body string }{
+		{"text-xml", "text/xml", "error"},
+		{"text-plain", "text/plain", "error"},
+		{"xhtml", "application/xhtml+xml", "error"},
+		{"xml-prolog-body", "video/mp4", `  <?xml version="1.0"?><Error/>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.ct)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			if _, err := newTestDownloader().Download(context.Background(), server.URL+"/movie.mp4", dir, "movie"); err == nil {
+				t.Fatalf("%s was accepted as media", tc.name)
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+				t.Fatalf("rejected %s left files: %v, %v", tc.name, entries, err)
+			}
+		})
+	}
+}
+
+func TestOpenGuardsNilClientTrimsURLAndRejectsIntermediateHTTPSDowngrade(t *testing.T) {
+	// Zero-value Downloader must not panic on nil d.client.
+	zero := &Downloader{allowedHost: func(h string) bool { return h == "127.0.0.1" }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	resp, err := zero.Open(context.Background(), "  "+server.URL+"/a.mp4  ", Options{})
+	if err != nil {
+		t.Fatalf("zero Downloader.Open with whitespace URL failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// Verify HTTPS->HTTP downgrade across intermediate hops via local proxy.
+	hop := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hop++
+		switch hop {
+		case 1:
+			http.Redirect(w, r, "https://pbs.twimg.com/step2.jpg", http.StatusFound)
+		case 2:
+			http.Redirect(w, r, "http://pbs.twimg.com/downgrade.jpg", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer proxy.Close()
+	if _, err := New().Open(context.Background(), "http://pbs.twimg.com/start.jpg", Options{ProxyURL: proxy.URL}); err == nil {
+		t.Fatal("expected HTTPS->HTTP intermediate downgrade rejection")
+	}
+}
+
+func TestPostPublishSkippedComputesHashFromDiskInsteadOfStaleOption(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "media.mp4")
+	diskBody := []byte("real-disk-bytes")
+	if err := os.WriteFile(basePath, diskBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantSum := sha256.Sum256(diskBody)
+	wantHash := hex.EncodeToString(wantSum[:])
+
+	tempPath := filepath.Join(dir, ".xdl-race.part")
+	if err := os.WriteFile(tempPath, []byte("new-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, skipped, err := publishTempFile(tempPath, basePath, 9, int64(len(diskBody)), 120, true)
+	if err != nil || !skipped {
+		t.Fatalf("publishTempFile skipped=%v err=%v, want skipped=true, nil", skipped, err)
+	}
+	// Simulate post-publish hash calculation as done in DownloadWithOptions.
+	gotHash, err := existingContentHash(res.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHash != wantHash {
+		t.Fatalf("post-publish hash = %q, want %q", gotHash, wantHash)
+	}
+}
+
+func TestSanitizeAndComposeFilenameEdgeCases(t *testing.T) {
+	if got := sanitizeFilename("CON .jpg"); got != "_CON .jpg" {
+		t.Fatalf("sanitizeFilename('CON .jpg') = %q, want '_CON .jpg'", got)
+	}
+	if got := composeFilename("CON         xyz", ".mp4", "", 16); got != "_CON.mp4" {
+		t.Fatalf("composeFilename reserved after truncate = %q, want '_CON.mp4'", got)
+	}
+	if got := composeFilename("abc...def", ".mp4", "", 16); got != "abc...def.mp4" {
+		t.Fatalf("composeFilename normal = %q", got)
+	}
+	if got := composeFilename("abcdefghij..klmn", ".mp4", "", 16); got != "abcdefghij.mp4" {
+		t.Fatalf("composeFilename trailing dot after truncate = %q, want 'abcdefghij.mp4'", got)
+	}
+}
+
+func TestSanitizeAndFilenameBlockHiddenPreviewTempLookalikes(t *testing.T) {
+	inputs := []string{
+		". .preview-123.jpg",
+		"\u00a0.preview-123.jpg",
+		"\u3000.\u200b.preview-123.jpg",
+		"\u200d.preview-123.jpg",
+		"\ufeff\u202e.xdl-123.part",
+		"\x00.. .preview-123.jpg",
+		"///.preview-123.jpg",
+		"\r\n\t\u2028\u2029.. .preview-999.jpg",
+	}
+	for _, raw := range inputs {
+		if sanitized := sanitizeFilename(raw); strings.HasPrefix(sanitized, ".") {
+			t.Fatalf("sanitizeFilename(%q) = %q starts with dot", raw, sanitized)
+		}
+		got := Filename("https://pbs.twimg.com/media/abc.jpg", raw, "image/jpeg", 120)
+		if got == "" || strings.HasPrefix(got, ".") {
+			t.Fatalf("Filename(%q) = %q, must be non-empty and not hidden", raw, got)
+		}
+		if isStaleTempFileName(got) {
+			t.Fatalf("Filename(%q) = %q matched stale temp file pattern", raw, got)
+		}
 	}
 }

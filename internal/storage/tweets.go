@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
+	"github.com/jmoiron/sqlx"
 )
 
 type ArchiveMode string
@@ -59,7 +61,23 @@ type TweetAuthor struct {
 
 func (s *Store) ListTweetAuthors(ctx context.Context) ([]TweetAuthor, error) {
 	authors := []TweetAuthor{}
-	err := s.db.SelectContext(ctx, &authors, `SELECT screen_name AS value, MAX(author_name) AS label FROM tweets GROUP BY author_id, screen_name ORDER BY lower(screen_name)`)
+	err := s.db.SelectContext(ctx, &authors, `
+SELECT screen_name AS value, author_name AS label
+FROM (
+	SELECT screen_name, author_name,
+		ROW_NUMBER() OVER (
+			PARTITION BY CASE WHEN author_id <> '' THEN author_id ELSE lower(screen_name) END
+			ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', published_at), published_at) DESC,
+				published_at DESC,
+				COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', updated_at), updated_at) DESC,
+				updated_at DESC,
+				id DESC
+		) AS rn
+	FROM tweets
+	WHERE screen_name <> ''
+)
+WHERE rn = 1
+ORDER BY lower(screen_name), screen_name`)
 	return authors, err
 }
 
@@ -145,80 +163,13 @@ func (s *Store) ArchiveTweetMediaOnly(ctx context.Context, jobID int64, tweet pa
 }
 
 func (s *Store) archiveTweet(ctx context.Context, jobID int64, tweet parser.TweetData, bodyStatus, mediaStatus string) error {
-	if tweet.ID == "" {
-		return ErrValidation("推文缺少 ID")
-	}
-	if tweet.Media == nil {
-		tweet.Media = []parser.Media{}
-	}
-	for _, related := range tweet.Related {
-		relatedStatus := "not_requested"
-		if mediaStatus != "not_requested" {
-			for _, item := range related.Media {
-				for _, requested := range tweet.Media {
-					if (item.ID != "" && item.ID == requested.ID) || (parser.MediaDownloadURL(item) != "" && downloader.MediaIdentity(parser.MediaDownloadURL(item)) == downloader.MediaIdentity(parser.MediaDownloadURL(requested))) {
-						relatedStatus = mediaStatus
-					}
-				}
-			}
-		}
-		if err := s.archiveTweet(ctx, jobID, related, bodyStatus, relatedStatus); err != nil {
-			return err
-		}
-	}
-	payload, err := json.Marshal(tweet)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC()
-	_, err = tx.ExecContext(ctx, `INSERT INTO tweets(id,author_id,screen_name,author_name,body,published_at,payload,archived_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET author_id=excluded.author_id,screen_name=excluded.screen_name,
-author_name=excluded.author_name,body=excluded.body,published_at=excluded.published_at,payload=excluded.payload,updated_at=excluded.updated_at`,
-		tweet.ID, tweet.Author.ID, tweet.Author.ScreenName, tweet.Author.Name, tweet.Text, tweet.CreatedAt.UTC().Format(time.RFC3339Nano), string(payload), now, now)
-	if err != nil {
+	if err := archiveTweetTx(ctx, tx, jobID, tweet, bodyStatus, mediaStatus, mediaStatus, tweet.Media, map[string]struct{}{}, false); err != nil {
 		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO tweet_jobs(tweet_id,job_id,body_status,media_status) VALUES(?,?,?,?)
-ON CONFLICT(tweet_id,job_id) DO UPDATE SET
-	body_status = CASE WHEN tweet_jobs.body_status = 'not_requested' THEN excluded.body_status ELSE tweet_jobs.body_status END,
-	media_status = CASE WHEN tweet_jobs.media_status = 'not_requested' THEN excluded.media_status ELSE tweet_jobs.media_status END`, tweet.ID, jobID, bodyStatus, mediaStatus); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM tweet_relations WHERE tweet_id=?`, tweet.ID); err != nil {
-		return err
-	}
-	for kind, related := range map[string]string{"reply": tweet.ReplyToID, "quote": tweet.QuotedTweetID, "retweet": tweet.RetweetedTweetID} {
-		if related != "" {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO tweet_relations VALUES(?,?,?)`, tweet.ID, kind, related); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tweet_media WHERE tweet_id=?`, tweet.ID); err != nil {
-		return err
-	}
-	for i, media := range tweet.Media {
-		if media.ID == "" {
-			media.ID = media.URL
-		}
-		if media.ID == "" {
-			continue
-		}
-		data, err := json.Marshal(media)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO archive_media VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,source_url=excluded.source_url`, media.ID, media.Type, parser.MediaDownloadURL(media), string(data)); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tweet_media VALUES(?,?,?) ON CONFLICT(tweet_id,media_id) DO UPDATE SET position=excluded.position`, tweet.ID, media.ID, i); err != nil {
-			return err
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -227,13 +178,140 @@ ON CONFLICT(tweet_id,job_id) DO UPDATE SET
 	return nil
 }
 
+func archiveTweetTx(ctx context.Context, tx *sqlx.Tx, jobID int64, tweet parser.TweetData, bodyStatus, mediaStatus, rootMediaStatus string, requestedMedia []parser.Media, ancestors map[string]struct{}, isRelated bool) error {
+	if tweet.ID == "" {
+		return ErrValidation("推文缺少 ID")
+	}
+	if _, inCycle := ancestors[tweet.ID]; inCycle {
+		return nil
+	}
+	ancestors[tweet.ID] = struct{}{}
+	defer delete(ancestors, tweet.ID)
+
+	if tweet.Media == nil {
+		tweet.Media = []parser.Media{}
+	}
+	for _, related := range tweet.Related {
+		relatedStatus := "not_requested"
+		if rootMediaStatus != "not_requested" {
+			for _, item := range related.Media {
+				itemIdentity := downloader.MediaIdentity(parser.MediaDownloadURL(item))
+				for _, requested := range requestedMedia {
+					if (item.ID != "" && item.ID == requested.ID) || (itemIdentity != "" && itemIdentity == downloader.MediaIdentity(parser.MediaDownloadURL(requested))) {
+						relatedStatus = rootMediaStatus
+						break
+					}
+				}
+				if relatedStatus != "not_requested" {
+					break
+				}
+			}
+		}
+		if err := archiveTweetTx(ctx, tx, jobID, related, bodyStatus, relatedStatus, rootMediaStatus, requestedMedia, ancestors, true); err != nil {
+			return err
+		}
+	}
+	payload, err := json.Marshal(tweet)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	publishedAt := formatSortableTime(tweet.CreatedAt)
+
+	preserveExisting := false
+	if isRelated {
+		var existingCount int
+		if err := tx.GetContext(ctx, &existingCount, `SELECT COUNT(*) FROM tweets WHERE id=?`, tweet.ID); err != nil {
+			return err
+		}
+		preserveExisting = existingCount > 0
+	}
+
+	if !preserveExisting {
+		_, err = tx.ExecContext(ctx, `INSERT INTO tweets(id,author_id,screen_name,author_name,body,published_at,payload,archived_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET author_id=excluded.author_id,screen_name=excluded.screen_name,
+author_name=excluded.author_name,body=excluded.body,published_at=excluded.published_at,payload=excluded.payload,updated_at=excluded.updated_at`,
+			tweet.ID, tweet.Author.ID, tweet.Author.ScreenName, tweet.Author.Name, tweet.Text, publishedAt, string(payload), now, now)
+		if err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO tweet_jobs(tweet_id,job_id,body_status,media_status) VALUES(?,?,?,?)
+ON CONFLICT(tweet_id,job_id) DO UPDATE SET
+	body_status = CASE WHEN tweet_jobs.body_status = 'not_requested' THEN excluded.body_status ELSE tweet_jobs.body_status END,
+	media_status = CASE WHEN tweet_jobs.media_status = 'not_requested' THEN excluded.media_status ELSE tweet_jobs.media_status END`, tweet.ID, jobID, bodyStatus, mediaStatus); err != nil {
+		return err
+	}
+	if !preserveExisting {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM tweet_relations WHERE tweet_id=?`, tweet.ID); err != nil {
+			return err
+		}
+	}
+	for kind, related := range map[string]string{"reply": tweet.ReplyToID, "quote": tweet.QuotedTweetID, "retweet": tweet.RetweetedTweetID} {
+		if related != "" {
+			if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO tweet_relations VALUES(?,?,?)`, tweet.ID, kind, related); err != nil {
+				return err
+			}
+		}
+	}
+	writeMedia := !preserveExisting
+	if preserveExisting && len(tweet.Media) > 0 {
+		var existingMedia int
+		if err := tx.GetContext(ctx, &existingMedia, `SELECT COUNT(*) FROM tweet_media WHERE tweet_id=?`, tweet.ID); err != nil {
+			return err
+		}
+		writeMedia = existingMedia == 0
+	}
+	if writeMedia {
+		if !preserveExisting {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM tweet_media WHERE tweet_id=?`, tweet.ID); err != nil {
+				return err
+			}
+		}
+		for i, media := range tweet.Media {
+			if media.ID == "" {
+				media.ID = media.URL
+			}
+			if media.ID == "" {
+				media.ID = parser.MediaDownloadURL(media)
+			}
+			if media.ID == "" {
+				continue
+			}
+			data, err := json.Marshal(media)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO archive_media VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET media_type=excluded.media_type,payload=excluded.payload,source_url=excluded.source_url`, media.ID, media.Type, parser.MediaDownloadURL(media), string(data)); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO tweet_media VALUES(?,?,?) ON CONFLICT(tweet_id,media_id) DO UPDATE SET position=excluded.position`, tweet.ID, media.ID, i); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Store) SetTweetMediaResult(ctx context.Context, jobID int64, tweetID, status, message string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE tweet_jobs SET media_status=?,media_error=? WHERE tweet_id=? AND job_id=?`, status, message, tweetID, jobID)
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := setTweetMediaResultTx(ctx, tx, jobID, tweetID, status, message); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func setTweetMediaResultTx(ctx context.Context, tx *sqlx.Tx, jobID int64, tweetID, status, message string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE tweet_jobs SET media_status=?,media_error=? WHERE tweet_id=? AND job_id=?`, status, message, tweetID, jobID)
 	if err != nil {
 		return err
 	}
 	var payload string
-	if err := s.db.GetContext(ctx, &payload, `SELECT payload FROM tweets WHERE id=?`, tweetID); err != nil {
+	if err := tx.GetContext(ctx, &payload, `SELECT payload FROM tweets WHERE id=?`, tweetID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -243,35 +321,54 @@ func (s *Store) SetTweetMediaResult(ctx context.Context, jobID int64, tweetID, s
 	if err := json.Unmarshal([]byte(payload), &tweet); err != nil {
 		return err
 	}
+	visited := map[string]struct{}{tweetID: {}}
 	var updateRelated func(parser.TweetData) error
 	updateRelated = func(related parser.TweetData) error {
-		requested, available := 0, 0
+		if related.ID == "" {
+			return nil
+		}
+		if _, seen := visited[related.ID]; seen {
+			return nil
+		}
+		visited[related.ID] = struct{}{}
+		requested, downloadable, available := 0, 0, 0
 		for _, item := range related.Media {
+			itemURL := downloader.NormalizeMediaURL(parser.MediaDownloadURL(item))
+			itemIdentity := downloader.MediaIdentity(parser.MediaDownloadURL(item))
 			for _, media := range tweet.Media {
-				if (item.ID != "" && item.ID == media.ID) || (parser.MediaDownloadURL(item) != "" && downloader.MediaIdentity(parser.MediaDownloadURL(item)) == downloader.MediaIdentity(parser.MediaDownloadURL(media))) {
+				if (item.ID != "" && item.ID == media.ID) || (itemIdentity != "" && itemIdentity == downloader.MediaIdentity(parser.MediaDownloadURL(media))) {
 					requested++
-					download, err := s.GetDownloadByTweetMedia(ctx, related.ID, downloader.NormalizeMediaURL(parser.MediaDownloadURL(item)))
-					if err != nil {
-						return err
-					}
-					if download != nil {
-						available++
-					}
 					break
 				}
+			}
+			if itemURL == "" {
+				continue
+			}
+			downloadable++
+			download, err := getDownloadByTweetMediaTx(ctx, tx, related.ID, itemURL)
+			if err != nil {
+				return err
+			}
+			if download != nil {
+				available++
 			}
 		}
 		if requested > 0 {
 			relatedStatus, relatedError := status, message
 			if status != "pending" {
-				relatedStatus = "failed"
-				if available == requested {
+				if downloadable == 0 {
+					if status == "completed" {
+						relatedError = ""
+					}
+				} else if available == downloadable {
 					relatedStatus, relatedError = "completed", ""
 				} else if available > 0 {
 					relatedStatus = "partial"
+				} else {
+					relatedStatus = "failed"
 				}
 			}
-			if _, err := s.db.ExecContext(ctx, `UPDATE tweet_jobs SET media_status=?,media_error=? WHERE tweet_id=? AND job_id=?`, relatedStatus, relatedError, related.ID, jobID); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE tweet_jobs SET media_status=?,media_error=? WHERE tweet_id=? AND job_id=?`, relatedStatus, relatedError, related.ID, jobID); err != nil {
 				return err
 			}
 		}
@@ -295,20 +392,35 @@ func (s *Store) SetTweetMediaResult(ctx context.Context, jobID int64, tweetID, s
 // download loop, but each related tweet must still work when opened on its own.
 func (s *Store) LinkRelatedTweetMedia(ctx context.Context, jobID int64, tweet parser.TweetData, media parser.Media) error {
 	mediaURL := downloader.NormalizeMediaURL(parser.MediaDownloadURL(media))
-	record, err := s.GetDownloadByTweetMedia(ctx, tweet.ID, mediaURL)
-	if err != nil || record == nil {
-		return err
-	}
-	assets, err := s.DownloadAssets(ctx, record.ID)
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	record, err := getDownloadByTweetMediaTx(ctx, tx, tweet.ID, mediaURL)
+	if err != nil || record == nil {
+		return err
+	}
+	assets, err := downloadAssetsTx(ctx, tx, record.ID)
+	if err != nil {
+		return err
+	}
+	mutatedDownloads := false
+	visited := map[string]struct{}{tweet.ID: {}}
 	var link func(parser.TweetData) error
 	link = func(related parser.TweetData) error {
+		if related.ID == "" {
+			return nil
+		}
+		if _, seen := visited[related.ID]; seen {
+			return nil
+		}
+		visited[related.ID] = struct{}{}
 		matches := false
 		relatedMediaURL := mediaURL
+		id := downloader.MediaIdentity(mediaURL)
 		for _, item := range related.Media {
-			if (media.ID != "" && item.ID == media.ID) || downloader.MediaIdentity(parser.MediaDownloadURL(item)) == downloader.MediaIdentity(mediaURL) {
+			if (media.ID != "" && item.ID == media.ID) || (id != "" && downloader.MediaIdentity(parser.MediaDownloadURL(item)) == id) {
 				matches = true
 				relatedMediaURL = downloader.NormalizeMediaURL(parser.MediaDownloadURL(item))
 				break
@@ -318,18 +430,23 @@ func (s *Store) LinkRelatedTweetMedia(ctx context.Context, jobID int64, tweet pa
 			copy := *record
 			copy.ID, copy.JobID, copy.TweetID = 0, jobID, related.ID
 			copy.MediaURL = relatedMediaURL
-			created, err := s.CreateDownload(ctx, copy)
+			created, err := createDownloadTx(ctx, tx, copy)
 			if err != nil {
 				return err
 			}
+			mutatedDownloads = true
 			for kind, assetID := range assets {
-				if err := s.LinkDownloadAsset(ctx, created.ID, kind, assetID); err != nil {
+				if err := linkDownloadAssetTx(ctx, tx, created.ID, kind, assetID); err != nil {
 					return err
 				}
 			}
 			status := "completed"
 			for _, item := range related.Media {
-				download, err := s.GetDownloadByTweetMedia(ctx, related.ID, downloader.NormalizeMediaURL(parser.MediaDownloadURL(item)))
+				itemURL := downloader.NormalizeMediaURL(parser.MediaDownloadURL(item))
+				if itemURL == "" {
+					continue
+				}
+				download, err := getDownloadByTweetMediaTx(ctx, tx, related.ID, itemURL)
 				if err != nil {
 					return err
 				}
@@ -337,7 +454,7 @@ func (s *Store) LinkRelatedTweetMedia(ctx context.Context, jobID int64, tweet pa
 					status = "partial"
 				}
 			}
-			if err := s.SetTweetMediaResult(ctx, jobID, related.ID, status, ""); err != nil {
+			if err := setTweetMediaResultTx(ctx, tx, jobID, related.ID, status, ""); err != nil {
 				return err
 			}
 		}
@@ -353,7 +470,36 @@ func (s *Store) LinkRelatedTweetMedia(ctx context.Context, jobID int64, tweet pa
 			return err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if mutatedDownloads {
+		s.markLibraryDownloadsCacheStale()
+	}
 	return nil
+}
+
+func downloadAssetsTx(ctx context.Context, tx *sqlx.Tx, id int64) (map[config.AssetKind]string, error) {
+	rows, err := tx.QueryxContext(ctx, `SELECT kind,asset_id FROM download_assets WHERE download_id=?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[config.AssetKind]string{}
+	for rows.Next() {
+		var kind config.AssetKind
+		var value string
+		if err := rows.Scan(&kind, &value); err != nil {
+			return nil, err
+		}
+		result[kind] = value
+	}
+	return result, rows.Err()
+}
+
+func linkDownloadAssetTx(ctx context.Context, tx *sqlx.Tx, downloadID int64, kind config.AssetKind, assetID string) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO download_assets VALUES(?,?,?) ON CONFLICT(download_id,kind) DO UPDATE SET asset_id=excluded.asset_id`, downloadID, kind, assetID)
+	return err
 }
 
 func (s *Store) GetTweet(ctx context.Context, id string) (ArchivedTweet, error) {
@@ -376,21 +522,38 @@ func normalizeTweetData(tweet *parser.TweetData) {
 	}
 }
 
-func (s *Store) getTweet(ctx context.Context, id string, jobID int64) (ArchivedTweet, error) {
-	var row struct {
-		ID          string    `db:"id"`
-		AuthorID    string    `db:"author_id"`
-		ScreenName  string    `db:"screen_name"`
-		AuthorName  string    `db:"author_name"`
-		Body        string    `db:"body"`
-		PublishedAt time.Time `db:"published_at"`
-		Payload     string    `db:"payload"`
-		ArchivedAt  time.Time `db:"archived_at"`
+type tweetRow struct {
+	ID          string    `db:"id"`
+	AuthorID    string    `db:"author_id"`
+	ScreenName  string    `db:"screen_name"`
+	AuthorName  string    `db:"author_name"`
+	Body        string    `db:"body"`
+	PublishedAt time.Time `db:"published_at"`
+	Payload     string    `db:"payload"`
+	ArchivedAt  time.Time `db:"archived_at"`
+}
+
+func hydrateArchivedTweetRow(row tweetRow, jobIDs []int64, bodyStatus, mediaStatus, mediaError string, downloads []DownloadRecord) (ArchivedTweet, error) {
+	if jobIDs == nil {
+		jobIDs = []int64{}
 	}
-	if err := s.db.GetContext(ctx, &row, `SELECT id,author_id,screen_name,author_name,body,published_at,payload,archived_at FROM tweets WHERE id=?`, id); err != nil {
-		return ArchivedTweet{}, err
+	if downloads == nil {
+		downloads = []DownloadRecord{}
 	}
-	result := ArchivedTweet{ArchivedAt: row.ArchivedAt, JobIDs: []int64{}, Downloads: []DownloadRecord{}}
+	if bodyStatus == "" {
+		bodyStatus = "not_requested"
+	}
+	if mediaStatus == "" {
+		mediaStatus = "not_requested"
+	}
+	result := ArchivedTweet{
+		ArchivedAt:  row.ArchivedAt,
+		JobIDs:      jobIDs,
+		BodyStatus:  bodyStatus,
+		MediaStatus: mediaStatus,
+		MediaError:  mediaError,
+		Downloads:   downloads,
+	}
 	if err := json.Unmarshal([]byte(row.Payload), &result.TweetData); err != nil {
 		return result, err
 	}
@@ -418,23 +581,44 @@ func (s *Store) getTweet(ctx context.Context, id string, jobID int64) (ArchivedT
 	// 序列化出去会变成 "media": null。API 契约是数组，这里统一归一化，
 	// 避免前端对 null 调 .length 导致整页崩溃。
 	normalizeTweetData(&result.TweetData)
-	if err := s.db.SelectContext(ctx, &result.JobIDs, `SELECT job_id FROM tweet_jobs WHERE tweet_id=? ORDER BY job_id DESC`, id); err != nil {
-		return result, err
+	return result, nil
+}
+
+func (s *Store) getTweet(ctx context.Context, id string, jobID int64) (ArchivedTweet, error) {
+	var row tweetRow
+	if err := s.db.GetContext(ctx, &row, `SELECT id,author_id,screen_name,author_name,body,published_at,payload,archived_at FROM tweets WHERE id=?`, id); err != nil {
+		return ArchivedTweet{}, err
 	}
+	var jobIDs []int64
+	if err := s.db.SelectContext(ctx, &jobIDs, `SELECT job_id FROM tweet_jobs WHERE tweet_id=? ORDER BY job_id DESC`, id); err != nil {
+		return ArchivedTweet{}, err
+	}
+	var bodyStatus, mediaStatus, mediaError string
 	if err := s.db.QueryRowContext(ctx, `
 SELECT
   CASE WHEN EXISTS(SELECT 1 FROM tweet_jobs WHERE tweet_id=? AND body_status='archived') THEN 'archived' ELSE 'not_requested' END,
   COALESCE((SELECT media_status FROM tweet_jobs WHERE tweet_id=? AND (?=0 OR job_id=?) ORDER BY job_id DESC LIMIT 1), 'not_requested'),
-  COALESCE((SELECT media_error FROM tweet_jobs WHERE tweet_id=? AND (?=0 OR job_id=?) ORDER BY job_id DESC LIMIT 1), '')`, id, id, jobID, jobID, id, jobID, jobID).Scan(&result.BodyStatus, &result.MediaStatus, &result.MediaError); err != nil {
-		return result, err
+  COALESCE((SELECT media_error FROM tweet_jobs WHERE tweet_id=? AND (?=0 OR job_id=?) ORDER BY job_id DESC LIMIT 1), '')`, id, id, jobID, jobID, id, jobID, jobID).Scan(&bodyStatus, &mediaStatus, &mediaError); err != nil {
+		return ArchivedTweet{}, err
 	}
 	// 必须写出部分索引谓词 tweet_id <> ''：idx_downloads_tweet_media_unique 是
 	// `WHERE tweet_id <> ''` 的部分索引，只写 tweet_id=? 时 SQLite 无法证明谓词成立，
 	// 会退化为整表扫描（10 万行约 8ms/次，而 ListTweets 与资产下载路径都会逐条调用）。
-	if err := s.db.SelectContext(ctx, &result.Downloads, `SELECT d.*, '' AS user_screen_name, '' AS user_name FROM downloads d WHERE tweet_id=? AND tweet_id<>'' ORDER BY id`, id); err != nil {
-		return result, err
+	var downloads []DownloadRecord
+	if err := s.db.SelectContext(ctx, &downloads, `SELECT d.*, '' AS user_screen_name, '' AS user_name FROM downloads d WHERE tweet_id=? AND tweet_id<>'' ORDER BY id`, id); err != nil {
+		return ArchivedTweet{}, err
 	}
-	return result, nil
+	return hydrateArchivedTweetRow(row, jobIDs, bodyStatus, mediaStatus, mediaError, downloads)
+}
+
+func normalizeTweetFilterTime(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC().Format("2006-01-02T15:04:05.000Z"), true
+		}
+	}
+	return raw, false
 }
 
 func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error) {
@@ -448,7 +632,7 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	args := []any{}
 	for _, condition := range []struct{ value, sql string }{
 		{f.Search, `instr(lower(t.body),lower(?))>0`}, {strings.TrimPrefix(f.Author, "@"), `(t.author_id=? OR lower(t.screen_name)=lower(?))`},
-		{f.From, `datetime(t.published_at)>=datetime(?)`}, {f.To, `datetime(t.published_at)<datetime(?)`}, {f.ID, `t.id=?`},
+		{f.ID, `t.id=?`},
 	} {
 		if condition.value != "" {
 			where = append(where, condition.sql)
@@ -456,6 +640,24 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 			if strings.Contains(condition.sql, " OR ") {
 				args = append(args, condition.value)
 			}
+		}
+	}
+	if f.From != "" {
+		if norm, ok := normalizeTweetFilterTime(f.From); ok {
+			where = append(where, `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at)>=?`)
+			args = append(args, norm)
+		} else {
+			where = append(where, `datetime(t.published_at)>=datetime(?)`)
+			args = append(args, f.From)
+		}
+	}
+	if f.To != "" {
+		if norm, ok := normalizeTweetFilterTime(f.To); ok {
+			where = append(where, `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at)<?`)
+			args = append(args, norm)
+		} else {
+			where = append(where, `datetime(t.published_at)<datetime(?)`)
+			args = append(args, f.To)
 		}
 	}
 	if f.MediaType != "" {
@@ -483,17 +685,83 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	}
 	result.Pagination.TotalPages = max(1, (result.Pagination.Total+f.PageSize-1)/f.PageSize)
 	result.Pagination.Page = min(f.Page, result.Pagination.TotalPages)
-	var ids []string
 	args = append(args, f.PageSize, (result.Pagination.Page-1)*f.PageSize)
 	order := "DESC"
 	if f.Sort == "asc" {
 		order = "ASC"
 	}
-	if err := s.db.SelectContext(ctx, &ids, `SELECT t.id FROM tweets t WHERE `+clause+` ORDER BY published_at `+order+`,id `+order+` LIMIT ? OFFSET ?`, args...); err != nil {
+	var rows []tweetRow
+	if err := s.db.SelectContext(ctx, &rows, `SELECT t.id,t.author_id,t.screen_name,t.author_name,t.body,t.published_at,t.payload,t.archived_at FROM tweets t WHERE `+clause+
+		` ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) `+order+`, t.published_at `+order+`, t.id `+order+` LIMIT ? OFFSET ?`, args...); err != nil {
 		return result, err
 	}
-	for _, id := range ids {
-		tweet, err := s.getTweet(ctx, id, f.JobID)
+	if len(rows) == 0 {
+		return result, nil
+	}
+
+	idArgs := make([]any, len(rows))
+	for i, row := range rows {
+		idArgs[i] = row.ID
+	}
+	placeholders := sqlPlaceholders(len(rows))
+
+	type tweetJobRow struct {
+		TweetID     string `db:"tweet_id"`
+		JobID       int64  `db:"job_id"`
+		BodyStatus  string `db:"body_status"`
+		MediaStatus string `db:"media_status"`
+		MediaError  string `db:"media_error"`
+	}
+	var jobRows []tweetJobRow
+	if err := s.db.SelectContext(ctx, &jobRows, `SELECT tweet_id, job_id, body_status, media_status, media_error FROM tweet_jobs WHERE tweet_id IN (`+placeholders+`) ORDER BY tweet_id ASC, job_id DESC`, idArgs...); err != nil {
+		return result, err
+	}
+	type tweetJobAgg struct {
+		jobIDs      []int64
+		bodyStatus  string
+		mediaStatus string
+		mediaError  string
+		mediaPicked bool
+	}
+	jobsByTweet := make(map[string]*tweetJobAgg, len(rows))
+	for _, jr := range jobRows {
+		agg := jobsByTweet[jr.TweetID]
+		if agg == nil {
+			agg = &tweetJobAgg{bodyStatus: "not_requested", mediaStatus: "not_requested"}
+			jobsByTweet[jr.TweetID] = agg
+		}
+		agg.jobIDs = append(agg.jobIDs, jr.JobID)
+		if jr.BodyStatus == "archived" {
+			agg.bodyStatus = "archived"
+		}
+		if !agg.mediaPicked && (f.JobID == 0 || jr.JobID == f.JobID) {
+			agg.mediaStatus = jr.MediaStatus
+			agg.mediaError = jr.MediaError
+			agg.mediaPicked = true
+		}
+	}
+
+	// 保持部分索引谓词 d.tweet_id <> ''，避免 downloads 整表扫描。
+	var downloadRows []DownloadRecord
+	if err := s.db.SelectContext(ctx, &downloadRows, `SELECT d.*, '' AS user_screen_name, '' AS user_name FROM downloads d WHERE d.tweet_id IN (`+placeholders+`) AND d.tweet_id<>'' ORDER BY d.id`, idArgs...); err != nil {
+		return result, err
+	}
+	downloadsByTweet := make(map[string][]DownloadRecord, len(rows))
+	for _, d := range downloadRows {
+		downloadsByTweet[d.TweetID] = append(downloadsByTweet[d.TweetID], d)
+	}
+
+	result.Items = make([]ArchivedTweet, 0, len(rows))
+	for _, row := range rows {
+		var jobIDs []int64
+		bodyStatus, mediaStatus, mediaError := "not_requested", "not_requested", ""
+		if agg := jobsByTweet[row.ID]; agg != nil {
+			jobIDs = agg.jobIDs
+			bodyStatus = agg.bodyStatus
+			mediaStatus = agg.mediaStatus
+			mediaError = agg.mediaError
+		}
+		tweet, err := hydrateArchivedTweetRow(row, jobIDs, bodyStatus, mediaStatus, mediaError, downloadsByTweet[row.ID])
 		if err != nil {
 			return result, err
 		}
@@ -561,13 +829,23 @@ func (s *Store) ListTweetSyncUpdatedAt(ctx context.Context) (map[string]time.Tim
 
 func (s *Store) SaveTweetSync(ctx context.Context, state TweetSync) error {
 	state.UpdatedAt = time.Now().UTC()
-	_, err := s.db.NamedExecContext(ctx, `UPDATE tweet_sync SET last_id=:last_id,cursor=:cursor,head_id=:head_id,status=:status,error=:error,count=:count,updated_at=:updated_at WHERE user_id=:user_id`, state)
+	_, err := s.db.NamedExecContext(ctx, `
+INSERT INTO tweet_sync (user_id, last_id, cursor, head_id, status, error, count, updated_at)
+VALUES (:user_id, :last_id, :cursor, :head_id, :status, :error, :count, :updated_at)
+ON CONFLICT(user_id) DO UPDATE SET
+	last_id = excluded.last_id,
+	cursor = excluded.cursor,
+	head_id = excluded.head_id,
+	status = excluded.status,
+	error = excluded.error,
+	count = excluded.count,
+	updated_at = excluded.updated_at`, state)
 	return err
 }
 
 func (s *Store) ListTweetSync(ctx context.Context) ([]TweetSync, error) {
 	items := []TweetSync{}
-	err := s.db.SelectContext(ctx, &items, `SELECT * FROM tweet_sync ORDER BY updated_at DESC LIMIT 200`)
+	err := s.db.SelectContext(ctx, &items, `SELECT * FROM tweet_sync ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', updated_at), updated_at) DESC, updated_at DESC, user_id ASC LIMIT 200`)
 	return items, err
 }
 
@@ -608,13 +886,17 @@ EXISTS(SELECT 1 FROM tweet_jobs tj WHERE tj.job_id=j.id AND tj.tweet_id=?)`, twe
 	if active > 0 {
 		return Job{}, ErrJobRetryBusy
 	}
+	tweetURL := strings.TrimSpace(tweet.URL)
+	if tweetURL == "" {
+		tweetURL = "https://x.com/i/web/status/" + tweetID
+	}
 	var inputs []string
 	if err := tx.SelectContext(ctx, &inputs, `SELECT input FROM jobs WHERE kind=? AND status IN (`+activeJobStatusesSQL+`)`, JobKindTweetLink); err != nil {
 		return Job{}, err
 	}
 	for _, input := range inputs {
 		_, activeTweetID, err := parser.ExtractTweetURL(input)
-		if input == tweet.URL || (err == nil && activeTweetID == tweetID) {
+		if input == tweetURL || (err == nil && activeTweetID == tweetID) {
 			return Job{}, ErrJobRetryBusy
 		}
 	}
@@ -624,7 +906,7 @@ EXISTS(SELECT 1 FROM tweet_jobs tj WHERE tj.job_id=j.id AND tj.tweet_id=?)`, twe
 	now := time.Now().UTC()
 	var job Job
 	if err := tx.GetContext(ctx, &job, `INSERT INTO jobs(kind,status,input,title,archive_mode,progress,message,created_at,updated_at,enqueued_at,enqueue_ns,source)
-VALUES(?,?,?,?,?,0,?,?,?,?,?,?) RETURNING *`, JobKindTweetLink, JobPending, tweet.URL, "Retry media "+tweetID, ArchiveMedia, "排队中", now, now, now, now.UnixNano(), JobSourceManual); err != nil {
+VALUES(?,?,?,?,?,0,?,?,?,?,?,?) RETURNING *`, JobKindTweetLink, JobPending, tweetURL, "Retry media "+tweetID, ArchiveMedia, "排队中", now, now, now, now.UnixNano(), JobSourceManual); err != nil {
 		return Job{}, err
 	}
 	return job, tx.Commit()

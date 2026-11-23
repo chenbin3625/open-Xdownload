@@ -68,9 +68,26 @@ body .semi-modal-wrap {
   padding: 0;
 }
 
-.semi-description-grid {
+.semi-description-grid > table {
+  width: 100%;
+}
+
+.semi-description-grid.semi-descriptions-double tbody {
   display: grid;
   grid-template-columns: var(--description-grid-columns, repeat(3, minmax(0, 1fr)));
+  gap: 12px 16px;
+}
+
+.semi-description-grid.semi-descriptions-double tr {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.semi-description-grid.semi-descriptions-double .semi-descriptions-item {
+  min-width: 0;
+  padding-right: 0;
+  overflow-wrap: anywhere;
 }
 
 /* 链接保留下载与新窗口语义，使用 Semi 按钮的原生样式。 */

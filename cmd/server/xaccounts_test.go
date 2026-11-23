@@ -113,3 +113,25 @@ func TestHomeProberAvailableInBothModes(t *testing.T) {
 		t.Fatal("nil engine must not provide a home prober")
 	}
 }
+
+func TestSyncEnvXAccountsSkipsHalfCompleteAndInvalidAdditionalCookies(t *testing.T) {
+	store := openXAccountsTestStore(t)
+	ctx := context.Background()
+	t.Setenv("OPEN_XDOWNLOAD_AUTH_TOKEN", "primary-auth")
+	t.Setenv("OPEN_XDOWNLOAD_CT0", "primary-ct0")
+	t.Setenv("OPEN_XDOWNLOAD_ADDITIONAL_COOKIES", `[{"auth_token":"half-only"},{"auth_token":"bad\u0007tok","ct0":"bad-ct0"},{"auth_token":"valid-backup","ct0":"valid-ct0"}]`)
+
+	if err := syncEnvXAccounts(ctx, store); err != nil {
+		t.Fatalf("syncEnvXAccounts failed because of one bad entry: %v", err)
+	}
+	accounts, err := store.ListXAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("accounts = %+v, want primary + 1 valid backup", accounts)
+	}
+	if accounts[1].AuthToken != "valid-backup" || accounts[1].CSRFToken != "valid-ct0" {
+		t.Fatalf("backup = %+v, want valid-backup", accounts[1])
+	}
+}

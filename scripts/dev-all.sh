@@ -24,25 +24,43 @@ if [ "$needs_install" -eq 1 ]; then
   fi
 fi
 
+backend_bin=""
 backend_pid=""
 frontend_pid=""
 
+kill_tree() {
+  [ -n "${1:-}" ] || return 0
+  for _child in $(ps -eo pid=,ppid= 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }' || true); do
+    kill_tree "$_child"
+  done
+  if kill -0 "$1" 2>/dev/null; then
+    kill -TERM "$1" 2>/dev/null || true
+  fi
+}
+
 cleanup() {
   trap - INT TERM EXIT
-  if [ -n "$frontend_pid" ] && kill -0 "$frontend_pid" 2>/dev/null; then
-    kill "$frontend_pid" 2>/dev/null || true
+  if [ -n "$frontend_pid" ]; then
+    kill_tree "$frontend_pid"
+    wait "$frontend_pid" 2>/dev/null || true
   fi
-  if [ -n "$backend_pid" ] && kill -0 "$backend_pid" 2>/dev/null; then
-    kill "$backend_pid" 2>/dev/null || true
+  if [ -n "$backend_pid" ]; then
+    kill_tree "$backend_pid"
+    wait "$backend_pid" 2>/dev/null || true
   fi
-  wait "$frontend_pid" 2>/dev/null || true
-  wait "$backend_pid" 2>/dev/null || true
+  if [ -n "$backend_bin" ]; then
+    rm -f "$backend_bin"
+  fi
 }
 
 trap cleanup INT TERM EXIT
 
+backend_bin=$(mktemp "${TMPDIR:-/tmp}/open-xdownload-dev.XXXXXX")
+echo "Building backend..."
+go build -o "$backend_bin" ./cmd/server
+
 echo "Starting backend:  http://${OPEN_XDOWNLOAD_ADDR:-127.0.0.1:8787}"
-go run ./cmd/server &
+"$backend_bin" &
 backend_pid=$!
 
 # 前端默认只监听回环（vite dev server 无鉴权，避免误暴露给局域网）。

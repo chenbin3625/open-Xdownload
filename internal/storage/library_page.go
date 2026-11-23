@@ -25,6 +25,14 @@ const (
 	MaxDownloadRoots = 32
 )
 
+// librarySnapshotMaxEntries controls how many deduplicated download entries are
+// cached in memory inside librarySnapshot. Libraries exceeding this threshold
+// automatically fall back to SQL querying/pagination in ListLibraryDownloadsPage
+// so filtering, sorting, and pagination totals stay 100% consistent.
+// Defined as a package variable so unit tests can exercise the SQL fallback path
+// without inserting 100,000+ rows.
+var librarySnapshotMaxEntries = MaxLibraryDownloadsLimit
+
 const (
 	libraryKindAll    = "all"
 	libraryKindImages = "images"
@@ -87,19 +95,29 @@ type libraryCounts struct {
 	gifs   int
 }
 
+type libraryUserAggregate struct {
+	screenName  string
+	displayName string
+	mediaCount  int
+	totalBytes  int64
+	latestAt    time.Time
+}
+
 // librarySnapshot 是媒体库分页使用的进程内只读快照：孤儿文件、用户归属前缀、用户 facet
 // 与全局分类计数。它随 libraryCacheGen 失效、最长 5 分钟刷新一次，因此分页请求不会每次
 // 都重新扫描 downloads 全表与整个下载目录。
 type librarySnapshot struct {
-	gen            uint64
-	at             time.Time
-	entries        []DownloadRecord // 去重后的下载记录（已按目录前缀补全归属），最多 MaxLibraryDownloadsLimit 条
-	orphans        []DownloadRecord // 无下载记录的磁盘媒体文件，按 CreatedAt 降序
-	prefixes       []libraryEntityPrefix
-	prefixIndex    map[string]int // 实体前缀 -> prefixes 下标（取 id 最小者）
-	users          []LibraryUserOption
-	unknownEntries int // 无归属的 entries（含 file_path 为空的记录）
-	counts         libraryCounts
+	gen              uint64
+	at               time.Time
+	entries          []DownloadRecord // 去重后的下载记录（已按目录前缀补全归属），最多 librarySnapshotMaxEntries 条
+	entriesTruncated bool
+	orphans          []DownloadRecord // 无下载记录的磁盘媒体文件，按 CreatedAt 降序
+	prefixes         []libraryEntityPrefix
+	prefixIndex      map[string]int // 实体前缀 -> prefixes 下标（取 id 最小者）
+	users            []LibraryUserOption
+	userAggregates   map[string]*libraryUserAggregate // 全量（含超过阈值与孤儿）按小写 screen_name 聚合
+	unknownEntries   int                              // 无归属的 entries（含 file_path 为空的记录）
+	counts           libraryCounts
 }
 
 // ListLibraryDownloadsPage 返回媒体库按 page/pageSize 分页、并已按 Kind/User/Search 过滤的
@@ -107,6 +125,8 @@ type librarySnapshot struct {
 // （与旧 HTTP 层实现的分组语义一致）；磁盘上无记录的文件（孤儿）并入同一排序与分页。
 //
 // Counts/Users 是不受过滤条件影响的全局 facet（与旧响应语义一致）。
+// 当下载总数超过快照上限（entriesTruncated）时自动回退到全量 SQL 查询/分页，
+// 避免按用户/类型筛选、date_asc/size 排序或总数统计在超大媒体库下失真。
 func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOptions) (LibraryPage, error) {
 	pageSize := opts.PageSize
 	if pageSize <= 0 {
@@ -124,8 +144,10 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	if err != nil {
 		return LibraryPage{}, err
 	}
-	// 过滤、排序、分页全部在快照上进行：快照重建时已经流式扫描过 downloads 全表，
-	// 分页请求不再执行第二次 ROW_NUMBER 全表查询（10 万条约 0.8s/页）。
+	if snap.entriesTruncated {
+		return s.listLibraryDownloadsPageSQL(ctx, snap, page, pageSize, filter, opts.Sort)
+	}
+	// 快照包含全量条目时直接在内存切片上过滤、排序、分页，避免每次翻页重跑全表 SQL。
 	entries := filterLibraryEntries(snap.entries, filter, snap)
 	sort.SliceStable(entries, func(i, j int) bool { return libraryEntryLess(entries[i], entries[j], opts.Sort) })
 	orphans := filterLibraryOrphans(snap.orphans, filter)
@@ -133,17 +155,14 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	dbItems, dbTotal := entries, len(entries)
 
 	total := dbTotal + len(orphans)
-	truncated := total > MaxLibraryDownloadsLimit
-	if truncated {
-		total = MaxLibraryDownloadsLimit
-	}
 	totalPages := max(1, (total+pageSize-1)/pageSize)
 	if page > totalPages {
 		page = totalPages
 	}
 	offset := (page - 1) * pageSize
+	need := min(offset+pageSize, total)
 
-	merged := mergeLibraryEntries(dbItems, orphans, offset+pageSize, opts.Sort)
+	merged := mergeLibraryEntries(dbItems, orphans, need, opts.Sort)
 	if offset < len(merged) {
 		merged = merged[offset:]
 	} else {
@@ -152,17 +171,21 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	if len(merged) > pageSize {
 		merged = merged[:pageSize]
 	}
-	if merged == nil {
-		merged = []DownloadRecord{}
+	return buildLibraryPageResponse(snap, merged, page, pageSize, total, totalPages, false), nil
+}
+
+func buildLibraryPageResponse(snap *librarySnapshot, items []DownloadRecord, page, pageSize, total, totalPages int, truncated bool) LibraryPage {
+	if items == nil {
+		items = []DownloadRecord{}
 	}
-	for index := range merged {
-		if merged[index].PreviewURL == "" {
-			merged[index].PreviewURL = deriveVideoPreviewURL(merged[index].MediaURL)
+	for index := range items {
+		if items[index].PreviewURL == "" {
+			items[index].PreviewURL = deriveVideoPreviewURL(items[index].MediaURL)
 		}
-		if merged[index].UserScreenName == "" && merged[index].FilePath != "" {
-			if prefix, ok := snap.matchUser(merged[index].FilePath); ok {
-				merged[index].UserScreenName = prefix.screen
-				merged[index].UserName = prefix.name
+		if items[index].UserScreenName == "" && items[index].FilePath != "" {
+			if prefix, ok := snap.matchUser(items[index].FilePath); ok {
+				items[index].UserScreenName = prefix.screen
+				items[index].UserName = prefix.name
 			}
 		}
 	}
@@ -171,7 +194,7 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 		users = []LibraryUserOption{}
 	}
 	return LibraryPage{
-		Items: merged,
+		Items: items,
 		Pagination: Pagination{
 			Page:       page,
 			PageSize:   pageSize,
@@ -186,7 +209,273 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 		},
 		Users:     users,
 		Truncated: truncated,
-	}, nil
+	}
+}
+
+func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySnapshot, page, pageSize int, filter LibraryFilter, order string) (LibraryPage, error) {
+	if _, ok := libraryKindExts(filter.Kind); !ok {
+		return buildLibraryPageResponse(snap, nil, 1, pageSize, 0, 1, false), nil
+	}
+	orphans := filterLibraryOrphans(snap.orphans, filter)
+	sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], order) })
+
+	whereClause, args := buildLibraryEntriesWhereSQL(filter)
+	orderBy := libraryEntriesOrderBySQL(order)
+	baseCTE := libraryEntriesCTESQL()
+
+	hasSubMillisBounds := (!filter.From.IsZero() && filter.From.Nanosecond()%1_000_000 != 0) ||
+		(!filter.To.IsZero() && filter.To.Nanosecond()%1_000_000 != 0)
+	needsGoFilter := filter.User != libraryKindAll || (filter.Search != "" && !isASCIIString(filter.Search)) || hasSubMillisBounds
+	if !needsGoFilter {
+		var dbTotal int
+		countQuery := baseCTE + ` SELECT COUNT(*) FROM ranked WHERE rn = 1` + whereClause
+		if err := s.db.GetContext(ctx, &dbTotal, countQuery, args...); err != nil {
+			return LibraryPage{}, err
+		}
+		total := dbTotal + len(orphans)
+		totalPages := max(1, (total+pageSize-1)/pageSize)
+		if page > totalPages {
+			page = totalPages
+		}
+		offset := (page - 1) * pageSize
+		if dbTotal == 0 {
+			var pageItems []DownloadRecord
+			if offset < len(orphans) {
+				end := min(offset+pageSize, len(orphans))
+				pageItems = append([]DownloadRecord(nil), orphans[offset:end]...)
+			}
+			return buildLibraryPageResponse(snap, pageItems, page, pageSize, total, totalPages, false), nil
+		}
+		if len(orphans) == 0 {
+			dbItems := []DownloadRecord{}
+			selectQuery := baseCTE + libraryEntriesSelectColsSQL + whereClause + ` ORDER BY ` + orderBy + ` LIMIT ? OFFSET ?`
+			selectArgs := append(append([]any{}, args...), pageSize, offset)
+			if err := s.db.SelectContext(ctx, &dbItems, selectQuery, selectArgs...); err != nil {
+				return LibraryPage{}, err
+			}
+			return buildLibraryPageResponse(snap, dbItems, page, pageSize, total, totalPages, false), nil
+		}
+		dbStart, dbLimit := librarySQLMergeWindow(offset, pageSize, dbTotal, len(orphans))
+		dbItems := []DownloadRecord{}
+		selectQuery := baseCTE + libraryEntriesSelectColsSQL + whereClause + ` ORDER BY ` + orderBy + ` LIMIT ? OFFSET ?`
+		selectArgs := append(append([]any{}, args...), dbLimit, dbStart)
+		if err := s.db.SelectContext(ctx, &dbItems, selectQuery, selectArgs...); err != nil {
+			return LibraryPage{}, err
+		}
+		pageItems := mergeLibraryWindowPage(dbItems, dbStart, orphans, offset, pageSize, order)
+		return buildLibraryPageResponse(snap, pageItems, page, pageSize, total, totalPages, false), nil
+	}
+
+	// 需要按 user_entities 前缀归属或非 ASCII 关键词过滤时，按目标 SQL 排序流式扫描，
+	// 仅在内存中保留当前页合并窗口（O(pageSize + len(orphans)) 内存），零截断。
+	streamPage := func(reqOffset int, forcedStart int) (int, []DownloadRecord, int, error) {
+		dbStart := max(0, reqOffset-len(orphans))
+		if forcedStart >= 0 {
+			dbStart = forcedStart
+		}
+		dbLimit := pageSize + len(orphans)
+		if reqOffset <= len(orphans) {
+			dbStart = 0
+			dbLimit = reqOffset + pageSize
+		}
+		selectQuery := baseCTE + libraryEntriesSelectColsSQL + whereClause + ` ORDER BY ` + orderBy
+		rows, err := s.db.QueryxContext(ctx, selectQuery, args...)
+		if err != nil {
+			return 0, nil, 0, err
+		}
+		defer rows.Close()
+
+		user := ""
+		if filter.User != libraryKindAll && filter.User != libraryUserUnknown {
+			user = strings.ToLower(strings.TrimPrefix(filter.User, "@"))
+		}
+		dbTotal := 0
+		window := make([]DownloadRecord, 0, min(dbLimit, pageSize+len(orphans)))
+		for rows.Next() {
+			var item DownloadRecord
+			if err := rows.StructScan(&item); err != nil {
+				return 0, nil, 0, err
+			}
+			if item.UserScreenName == "" && item.FilePath != "" {
+				if prefix, ok := snap.matchUser(item.FilePath); ok {
+					item.UserScreenName = prefix.screen
+					item.UserName = prefix.name
+				}
+			}
+			if !matchesLibraryUserAndSearch(item, filter, user) {
+				continue
+			}
+			if dbTotal >= dbStart && len(window) < dbLimit {
+				window = append(window, item)
+			}
+			dbTotal++
+		}
+		if err := rows.Err(); err != nil {
+			return 0, nil, 0, err
+		}
+		return dbTotal, window, dbStart, nil
+	}
+
+	reqOffset := (page - 1) * pageSize
+	dbTotal, dbWindow, dbStart, err := streamPage(reqOffset, -1)
+	if err != nil {
+		return LibraryPage{}, err
+	}
+	total := dbTotal + len(orphans)
+	totalPages := max(1, (total+pageSize-1)/pageSize)
+	actualPage := min(page, totalPages)
+	actualOffset := (actualPage - 1) * pageSize
+	if dbTotal == 0 {
+		var pageItems []DownloadRecord
+		if actualOffset < len(orphans) {
+			end := min(actualOffset+pageSize, len(orphans))
+			pageItems = append([]DownloadRecord(nil), orphans[actualOffset:end]...)
+		}
+		return buildLibraryPageResponse(snap, pageItems, actualPage, pageSize, total, totalPages, false), nil
+	}
+	wantStart, _ := librarySQLMergeWindow(actualOffset, pageSize, dbTotal, len(orphans))
+	if actualPage != page || wantStart != dbStart {
+		dbTotal, dbWindow, dbStart, err = streamPage(actualOffset, wantStart)
+		if err != nil {
+			return LibraryPage{}, err
+		}
+	}
+	pageItems := mergeLibraryWindowPage(dbWindow, dbStart, orphans, actualOffset, pageSize, order)
+	return buildLibraryPageResponse(snap, pageItems, actualPage, pageSize, total, totalPages, false), nil
+}
+
+func librarySQLMergeWindow(offset, pageSize, dbTotal, orphanCount int) (dbStart, dbLimit int) {
+	if offset <= orphanCount {
+		return 0, min(dbTotal, offset+pageSize)
+	}
+	dbStart = min(offset-orphanCount, dbTotal-1)
+	return dbStart, min(dbTotal-dbStart, orphanCount+pageSize)
+}
+
+func mergeLibraryWindowPage(dbItems []DownloadRecord, dbStart int, orphans []DownloadRecord, offset, pageSize int, order string) []DownloadRecord {
+	if len(orphans) == 0 {
+		if len(dbItems) > pageSize {
+			return dbItems[:pageSize]
+		}
+		return dbItems
+	}
+	oBefore := 0
+	if offset > len(orphans) && len(dbItems) > 0 {
+		oBefore = sort.Search(len(orphans), func(j int) bool {
+			return !libraryEntryLess(orphans[j], dbItems[0], order)
+		})
+	}
+	skipped := dbStart + oBefore
+	skipInWindow := offset - skipped
+	if skipInWindow < 0 {
+		skipInWindow = 0
+	}
+	need := skipInWindow + pageSize
+	merged := mergeLibraryEntries(dbItems, orphans[oBefore:], need, order)
+	if skipInWindow < len(merged) {
+		merged = merged[skipInWindow:]
+	} else {
+		merged = nil
+	}
+	if len(merged) > pageSize {
+		merged = merged[:pageSize]
+	}
+	return merged
+}
+
+func matchesLibraryUserAndSearch(item DownloadRecord, filter LibraryFilter, lowerUser string) bool {
+	if (!filter.From.IsZero() && item.CreatedAt.Before(filter.From)) || (!filter.To.IsZero() && !item.CreatedAt.Before(filter.To)) {
+		return false
+	}
+	if filter.Search != "" &&
+		!strings.Contains(strings.ToLower(item.FilePath), filter.Search) &&
+		!strings.Contains(strings.ToLower(item.MediaURL), filter.Search) &&
+		!strings.Contains(strings.ToLower(item.TweetID), filter.Search) {
+		return false
+	}
+	switch filter.User {
+	case libraryKindAll:
+		return true
+	case libraryUserUnknown:
+		return item.UserScreenName == ""
+	default:
+		return strings.EqualFold(item.UserScreenName, lowerUser)
+	}
+}
+
+func buildLibraryEntriesWhereSQL(filter LibraryFilter) (string, []any) {
+	conds := []string{}
+	args := []any{}
+	if exts, ok := libraryKindExts(filter.Kind); ok && len(exts) > 0 {
+		extConds := make([]string, len(exts))
+		for i, ext := range exts {
+			extConds[i] = `lower(file_path) LIKE ?`
+			args = append(args, "%"+ext)
+		}
+		conds = append(conds, "("+strings.Join(extConds, " OR ")+")")
+	}
+	if filter.Search != "" && isASCIIString(filter.Search) {
+		conds = append(conds, `(instr(lower(file_path), ?) > 0 OR instr(lower(media_url), ?) > 0 OR instr(lower(tweet_id), ?) > 0)`)
+		args = append(args, filter.Search, filter.Search, filter.Search)
+	}
+	switch filter.User {
+	case libraryKindAll:
+	case libraryUserUnknown:
+		conds = append(conds, `user_screen_name = ''`)
+	default:
+		lowerUser := strings.ToLower(strings.TrimPrefix(filter.User, "@"))
+		conds = append(conds, `(lower(user_screen_name) = ? OR user_screen_name = '')`)
+		args = append(args, lowerUser)
+	}
+	normCreated := `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at)`
+	if !filter.From.IsZero() {
+		conds = append(conds, normCreated+` >= ?`)
+		args = append(args, filter.From.UTC().Format("2006-01-02T15:04:05.000Z"))
+	}
+	if !filter.To.IsZero() {
+		toBound := filter.To.UTC()
+		if toBound.Nanosecond()%1_000_000 != 0 {
+			// Round up by 1ms for the SQL pre-filter; streamPage applies exact Go comparison.
+			toBound = toBound.Truncate(time.Millisecond).Add(time.Millisecond)
+		}
+		conds = append(conds, normCreated+` < ?`)
+		args = append(args, toBound.Format("2006-01-02T15:04:05.000Z"))
+	}
+	if filter.MinBytes != nil {
+		conds = append(conds, `bytes >= ?`)
+		args = append(args, *filter.MinBytes)
+	}
+	if filter.MaxBytes != nil {
+		conds = append(conds, `bytes <= ?`)
+		args = append(args, *filter.MaxBytes)
+	}
+	if len(conds) == 0 {
+		return "", args
+	}
+	return " AND " + strings.Join(conds, " AND "), args
+}
+
+func libraryEntriesOrderBySQL(order string) string {
+	const normCreated = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at)`
+	switch order {
+	case "date_asc":
+		return normCreated + ` ASC, created_at ASC, id DESC, file_path ASC`
+	case "size_asc":
+		return `bytes ASC, ` + normCreated + ` DESC, created_at DESC, id DESC, file_path ASC`
+	case "size_desc":
+		return `bytes DESC, ` + normCreated + ` DESC, created_at DESC, id DESC, file_path ASC`
+	default:
+		return normCreated + ` DESC, created_at DESC, id DESC, file_path ASC`
+	}
+}
+
+func isASCIIString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeLibraryFilter(filter LibraryFilter) LibraryFilter {
@@ -259,10 +548,13 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
-// libraryEntriesSQL 返回"每个 file_path 只保留最新一条下载记录"的去重查询。
-// 过滤/排序/分页全部在 Go 侧基于快照完成（见 filterLibraryEntries），SQL 只负责
-// 一次全表流式扫描。
-func libraryEntriesSQL() string {
+const libraryEntriesSelectColsSQL = `
+SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash,
+	user_screen_name, user_name
+FROM ranked
+WHERE rn = 1`
+
+func libraryEntriesCTESQL() string {
 	return `
 WITH filtered AS (
 	SELECT d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes,
@@ -272,13 +564,17 @@ WITH filtered AS (
 	FROM downloads d
 	LEFT JOIN tweets t ON t.id = d.tweet_id
 ), ranked AS (
-	SELECT filtered.*, ROW_NUMBER() OVER (PARTITION BY entry_key ORDER BY created_at DESC, id DESC) AS rn
+	SELECT filtered.*, ROW_NUMBER() OVER (
+		PARTITION BY entry_key
+		ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC
+	) AS rn
 	FROM filtered
-)
-SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash,
-	user_screen_name, user_name
-FROM ranked
-WHERE rn = 1`
+)`
+}
+
+// libraryEntriesSQL 返回"每个 file_path 只保留最新一条下载记录"的去重查询。
+func libraryEntriesSQL() string {
+	return libraryEntriesCTESQL() + libraryEntriesSelectColsSQL
 }
 
 // matchUser 按"目录前缀逐级上溯、取 id 最小的实体"判定路径归属（与
@@ -346,6 +642,10 @@ func filterLibraryEntries(entries []DownloadRecord, filter LibraryFilter, snap *
 
 func filterLibraryOrphans(orphans []DownloadRecord, filter LibraryFilter) []DownloadRecord {
 	items := make([]DownloadRecord, 0, len(orphans))
+	user := ""
+	if filter.User != libraryKindAll && filter.User != libraryUserUnknown {
+		user = strings.TrimPrefix(filter.User, "@")
+	}
 	for _, item := range orphans {
 		if (!filter.From.IsZero() && item.CreatedAt.Before(filter.From)) || (!filter.To.IsZero() && !item.CreatedAt.Before(filter.To)) {
 			continue
@@ -356,13 +656,13 @@ func filterLibraryOrphans(orphans []DownloadRecord, filter LibraryFilter) []Down
 		if filter.User == libraryUserUnknown && item.UserScreenName != "" {
 			continue
 		}
-		if filter.User != libraryKindAll && filter.User != libraryUserUnknown && item.UserScreenName != strings.TrimPrefix(filter.User, "@") {
+		if user != "" && !strings.EqualFold(item.UserScreenName, user) {
 			continue
 		}
 		if !libraryKindMatches(item.FilePath, filter.Kind) {
 			continue
 		}
-		if filter.Search != "" && !strings.Contains(libraryMatchPath(item.FilePath), filter.Search) {
+		if filter.Search != "" && !strings.Contains(strings.ToLower(strings.ReplaceAll(item.FilePath, `\`, "/")), filter.Search) {
 			continue
 		}
 		items = append(items, item)
@@ -471,6 +771,7 @@ func (s *Store) librarySnapshot(ctx context.Context) (*librarySnapshot, error) {
 	}
 	s.libraryBuildMu.Lock()
 	defer s.libraryBuildMu.Unlock()
+	s.invalidateStaleLibraryDownloadsCache()
 	gen := s.libraryCacheGen.Load()
 	if snap := s.peekLibrarySnapshot(gen); snap != nil {
 		return snap, nil
@@ -479,13 +780,18 @@ func (s *Store) librarySnapshot(ctx context.Context) (*librarySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.librarySnapMu.Lock()
-	s.librarySnap = snap
-	s.librarySnapMu.Unlock()
+	if s.libraryCacheGen.Load() == gen && !s.libraryStale.Load() {
+		s.librarySnapMu.Lock()
+		s.librarySnap = snap
+		s.librarySnapMu.Unlock()
+	}
 	return snap, nil
 }
 
 func (s *Store) peekLibrarySnapshot(gen uint64) *librarySnapshot {
+	if s.libraryStale.Load() {
+		return nil
+	}
 	s.librarySnapMu.RLock()
 	defer s.librarySnapMu.RUnlock()
 	snap := s.librarySnap
@@ -496,7 +802,12 @@ func (s *Store) peekLibrarySnapshot(gen uint64) *librarySnapshot {
 }
 
 func (s *Store) buildLibrarySnapshot(ctx context.Context, gen uint64) (*librarySnapshot, error) {
-	snap := &librarySnapshot{gen: gen, at: time.Now(), prefixIndex: map[string]int{}}
+	snap := &librarySnapshot{
+		gen:            gen,
+		at:             time.Now(),
+		prefixIndex:    map[string]int{},
+		userAggregates: map[string]*libraryUserAggregate{},
+	}
 	type entityRow struct {
 		ScreenName string `db:"screen_name"`
 		UserName   string `db:"user_name"`
@@ -520,14 +831,34 @@ ORDER BY ue.id`); err != nil {
 		if value == libraryKindAll || value == libraryUserUnknown {
 			value = "@" + value
 		}
-		if _, exists := userByScreen[value]; exists {
+		key := strings.ToLower(value)
+		if _, exists := userByScreen[key]; exists {
 			return
 		}
 		label := name
 		if label == "" {
 			label = screen
 		}
-		userByScreen[value] = LibraryUserOption{Value: value, Label: label + " (@" + screen + ")"}
+		userByScreen[key] = LibraryUserOption{Value: value, Label: label + " (@" + screen + ")"}
+	}
+	addUserAggregate := func(item DownloadRecord) {
+		if item.UserScreenName == "" {
+			return
+		}
+		key := strings.ToLower(item.UserScreenName)
+		agg := snap.userAggregates[key]
+		if agg == nil {
+			agg = &libraryUserAggregate{screenName: item.UserScreenName}
+			snap.userAggregates[key] = agg
+		}
+		agg.mediaCount++
+		agg.totalBytes += item.Bytes
+		if item.CreatedAt.After(agg.latestAt) {
+			agg.latestAt = item.CreatedAt
+		}
+		if agg.displayName == "" {
+			agg.displayName = item.UserName
+		}
 	}
 	for _, entity := range entities {
 		prefix := libraryEntityPrefix{
@@ -548,7 +879,7 @@ ORDER BY ue.id`); err != nil {
 	// 流式扫描每个文件的最新下载记录，作者和去重规则与分页结果保持一致。
 	known := make(map[string]struct{})
 	pathVariants := make(map[string][]string)
-	rows, err := s.db.QueryxContext(ctx, libraryEntriesSQL()+" ORDER BY created_at DESC, id DESC")
+	rows, err := s.db.QueryxContext(ctx, libraryEntriesSQL()+" ORDER BY "+libraryEntriesOrderBySQL("date_desc"))
 	if err != nil {
 		return nil, err
 	}
@@ -587,10 +918,13 @@ ORDER BY ue.id`); err != nil {
 		} else {
 			snap.unknownEntries++
 		}
-		// 快照里保留去重后的条目，供分页、unknown 筛选与用户卡片复用。超过上限时
-		// 按 created_at 降序截断（与接口 10 万条的 total 上限一致）。
-		if len(snap.entries) < MaxLibraryDownloadsLimit {
+		addUserAggregate(item)
+		// 仅在总数不超过阈值时缓存全部条目；超过阈值后分页查询自动回退 SQL，
+		// 避免把超大媒体库的全部记录常驻内存，同时保证筛选/排序/统计 100% 一致。
+		if len(snap.entries) < librarySnapshotMaxEntries {
 			snap.entries = append(snap.entries, item)
+		} else {
+			snap.entriesTruncated = true
 		}
 	}
 	rowsErr := rows.Err()
@@ -642,6 +976,7 @@ ORDER BY ue.id`); err != nil {
 			} else {
 				snap.unknownEntries++
 			}
+			addUserAggregate(item)
 			snap.orphans = append(snap.orphans, item)
 			snap.counts.all++
 			switch libraryCategory(cleaned) {

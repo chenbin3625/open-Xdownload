@@ -2,6 +2,7 @@ package filestore
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -28,7 +29,6 @@ import (
 
 var assetTokens = regexp.MustCompile(`\{([^{}]+)\}`)
 var windowsReservedAssetName = regexp.MustCompile(`^(COM|LPT)[1-9]$`)
-var s3AssetWrites [64]sync.Mutex
 
 // TemplateUserDir 只渲染资产目录模板里依赖 {kind} 与 {username} 的部分，用于把
 // 归档用户的实体目录与媒体落盘目录对齐（默认 {kind}/{username} 即 image/<handle>、
@@ -79,11 +79,29 @@ func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.Twe
 	if err := config.ValidateAssetTemplate(rule.FilenameTemplate, true); err != nil {
 		return "", err
 	}
-	values := map[string]string{"author_id": tweet.Author.ID, "username": tweet.Author.ScreenName, "tweet_id": tweet.ID, "media_id": media.ID, "index": strconv.Itoa(index + 1), "published_at": tweet.CreatedAt.UTC().Format("20060102T150405Z"), "year": tweet.CreatedAt.UTC().Format("2006"), "month": tweet.CreatedAt.UTC().Format("01"), "day": tweet.CreatedAt.UTC().Format("02"), "text": safeAssetSegment(truncateSegment(tweet.Text, 64)), "ext": strings.TrimPrefix(ext, "."), "kind": string(kind)}
+	cleanExt := strings.TrimPrefix(strings.TrimSpace(ext), ".")
+	extSegment := ""
+	if cleanExt != "" {
+		extSegment = safeAssetSegment(cleanExt)
+	}
+	values := map[string]string{
+		"author_id":    tweet.Author.ID,
+		"username":     tweet.Author.ScreenName,
+		"tweet_id":     tweet.ID,
+		"media_id":     media.ID,
+		"index":        strconv.Itoa(index + 1),
+		"published_at": tweet.CreatedAt.UTC().Format("20060102T150405Z"),
+		"year":         tweet.CreatedAt.UTC().Format("2006"),
+		"month":        tweet.CreatedAt.UTC().Format("01"),
+		"day":          tweet.CreatedAt.UTC().Format("02"),
+		"text":         safeAssetSegment(truncateSegment(tweet.Text, 64)),
+		"ext":          extSegment,
+		"kind":         string(kind),
+	}
 	render := func(template string) string {
 		return assetTokens.ReplaceAllStringFunc(template, func(token string) string {
-			if token == "{text}" {
-				return values["text"]
+			if token == "{text}" || token == "{ext}" {
+				return values[token[1:len(token)-1]]
 			}
 			return safeAssetSegment(values[token[1:len(token)-1]])
 		})
@@ -104,8 +122,23 @@ func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.Twe
 		available := max(0, config.MaxFilenameLength-len(render(rule.FilenameTemplate))) / count
 		values["text"] = truncateSegment(cleanAssetSegment(tweet.Text), available)
 	}
-	name := cleanAssetSegment(render(rule.FilenameTemplate))
-	extension := path.Ext(name)
+	renderedName := render(rule.FilenameTemplate)
+	if values["ext"] == "" && strings.HasSuffix(rule.FilenameTemplate, "_{ext}") {
+		renderedName = strings.TrimSuffix(renderedName, "_")
+	}
+	name := cleanAssetSegment(renderedName)
+	extension := ""
+	if values["ext"] != "" {
+		if dotExt := "." + values["ext"]; strings.HasSuffix(name, dotExt) {
+			extension = dotExt
+		} else if underExt := "_" + values["ext"]; strings.HasSuffix(name, underExt) {
+			extension = underExt
+		} else {
+			extension = path.Ext(name)
+		}
+	} else if strings.HasSuffix(rule.FilenameTemplate, ".{ext}") {
+		extension = path.Ext(name)
+	}
 	if len(name) > config.MaxFilenameLength {
 		digest := sha256.Sum256([]byte(name))
 		suffix := "_" + hex.EncodeToString(digest[:6])
@@ -140,43 +173,69 @@ func cleanAssetSegment(value string) string {
 		if unicode.IsControl(r) || strings.ContainsRune(`<>:"/\|?*`, r) {
 			return '_'
 		}
+		if unicode.Is(unicode.Cf, r) && r != '\u200d' {
+			return -1
+		}
+		if unicode.IsSpace(r) {
+			return ' '
+		}
 		return r
 	}, value)
-	value = strings.TrimSpace(strings.Trim(value, ". "))
+	value = strings.TrimFunc(value, func(r rune) bool {
+		return r == '.' || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
+	})
 	if value == "" || value == "." || value == ".." {
 		return "_"
 	}
-	base := strings.ToUpper(strings.SplitN(value, ".", 2)[0])
-	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || windowsReservedAssetName.MatchString(base) {
+	base := strings.ToUpper(strings.TrimRightFunc(strings.SplitN(value, ".", 2)[0], unicode.IsSpace))
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || base == "CONIN$" || base == "CONOUT$" || windowsReservedAssetName.MatchString(base) {
 		value = "_" + value
 	}
 	return value
 }
 func validAssetKey(key string) bool {
-	return key != "" && !strings.HasPrefix(key, "/") && !strings.Contains(key, "\\") && path.Clean(key) == key && key != ".." && !strings.HasPrefix(key, "../")
+	return key != "" &&
+		key != "." &&
+		key != ".." &&
+		!strings.ContainsRune(key, '\x00') &&
+		!strings.HasPrefix(key, "/") &&
+		!strings.Contains(key, "\\") &&
+		path.Clean(key) == key &&
+		!strings.HasPrefix(key, "../")
 }
 
-// s3ClientKey 只包含影响 minio 客户端构造的字段。批量资产迁移会反复用同一 target
-// 调用 PutAsset/OpenAsset，缓存客户端可避免重复解析 endpoint/读取环境变量；底层
-// http.DefaultTransport 也因此在进程内共享连接池。
+// s3ClientKey 只包含影响 minio 客户端构造的字段，凭据以 SHA-256 摘要入键以免在内存键中保留明文密钥。
 type s3ClientKey struct {
-	endpoint     string
-	region       string
-	access       string
-	secret       string
-	sessionToken string
-	secure       bool
+	endpoint string
+	region   string
+	credHash [32]byte
+	secure   bool
+}
+
+const maxS3Clients = 8
+
+type s3ClientEntry struct {
+	client   *minio.Client
+	lastUsed uint64
 }
 
 var s3Clients = struct {
 	sync.Mutex
-	byKey map[s3ClientKey]*minio.Client
-}{byKey: map[s3ClientKey]*minio.Client{}}
+	seq   uint64
+	byKey map[s3ClientKey]*s3ClientEntry
+}{byKey: map[s3ClientKey]*s3ClientEntry{}}
 
 func S3Client(target config.StorageTarget) (*minio.Client, error) {
 	u, err := url.Parse(target.Endpoint)
-	if err != nil || u.Host == "" || u.User != nil {
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, fmt.Errorf("无效的 S3 endpoint")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("无效的 S3 endpoint")
+	}
+	if httpx.BlockedHost(host) {
+		return nil, fmt.Errorf("S3 endpoint 不能使用受限地址: %s", host)
 	}
 	access, secret := target.AccessKey, target.SecretKey
 	if target.AccessKeyEnv != "" {
@@ -195,24 +254,66 @@ func S3Client(target config.StorageTarget) (*minio.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := s3ClientKey{endpoint: u.Host, region: target.Region, access: access, secret: secret, sessionToken: target.SessionToken, secure: u.Scheme == "https"}
+	h := sha256.New()
+	_, _ = h.Write([]byte(access))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(secret))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(target.SessionToken))
+	var credHash [32]byte
+	copy(credHash[:], h.Sum(nil))
+
+	key := s3ClientKey{endpoint: u.Host, region: target.Region, credHash: credHash, secure: u.Scheme == "https"}
 	s3Clients.Lock()
 	defer s3Clients.Unlock()
-	if client, ok := s3Clients.byKey[key]; ok {
-		return client, nil
+	if entry, ok := s3Clients.byKey[key]; ok {
+		s3Clients.seq++
+		entry.lastUsed = s3Clients.seq
+		return entry.client, nil
 	}
-	client, err := minio.New(u.Host, &minio.Options{Creds: credentials.NewStaticV4(access, secret, target.SessionToken), Secure: key.secure, Region: target.Region, Transport: transport})
+	client, err := minio.New(u.Host, &minio.Options{
+		Creds:     credentials.NewStaticV4(access, secret, target.SessionToken),
+		Secure:    key.secure,
+		Region:    target.Region,
+		Transport: httpx.GuardedRoundTripper(transport),
+	})
 	if err != nil {
 		return nil, err
 	}
-	s3Clients.byKey[key] = client
+	if len(s3Clients.byKey) >= maxS3Clients {
+		var oldestKey s3ClientKey
+		var oldestSeq uint64
+		first := true
+		for k, entry := range s3Clients.byKey {
+			if first || entry.lastUsed < oldestSeq {
+				oldestKey = k
+				oldestSeq = entry.lastUsed
+				first = false
+			}
+		}
+		if !first {
+			delete(s3Clients.byKey, oldestKey)
+		}
+	}
+	s3Clients.seq++
+	s3Clients.byKey[key] = &s3ClientEntry{client: client, lastUsed: s3Clients.seq}
 	return client, nil
+}
+
+func assetCollisionCandidate(key, safeID string, attempt int) string {
+	if attempt == 0 {
+		return key
+	}
+	extension := path.Ext(key)
+	stemBudget := max(1, min(170, 230-len(extension)-len(safeID)-len(strconv.Itoa(attempt))-2))
+	return path.Join(path.Dir(key), truncateSegment(strings.TrimSuffix(path.Base(key), extension), stemBudget)+"_"+safeID+"_"+strconv.Itoa(attempt)+extension)
 }
 
 func PutAsset(ctx context.Context, target config.StorageTarget, key, source, contentType, assetID string) (string, error) {
 	if !validAssetKey(key) {
 		return "", fmt.Errorf("无效的资产 key")
 	}
+	safeID := truncateSegment(safeAssetSegment(assetID), 64)
 	file, err := os.Open(source)
 	if err != nil {
 		return "", err
@@ -222,97 +323,108 @@ func PutAsset(ctx context.Context, target config.StorageTarget, key, source, con
 	if err != nil {
 		return "", err
 	}
-	var client *minio.Client
-	var root *os.Root
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("资产源文件不是普通文件: %s", source)
+	}
 	if target.Type == "s3" {
-		digest := sha256.Sum256([]byte(target.Endpoint + "\x00" + target.Bucket + "\x00" + key))
-		lock := &s3AssetWrites[int(digest[0])%len(s3AssetWrites)]
-		lock.Lock()
-		defer lock.Unlock()
-		client, err = S3Client(target)
-	} else {
-		if err = config.ValidateDownloadRoot(target.Root); err == nil {
-			err = os.MkdirAll(target.Root, 0o700)
-		}
-		if err == nil {
-			root, err = os.OpenRoot(target.Root)
-		}
-		if root != nil {
-			defer root.Close()
-		}
-	}
-	if err != nil {
-		return "", err
-	}
-	for attempt := 0; attempt < 10; attempt++ {
-		candidate := key
-		if attempt > 0 {
-			extension := path.Ext(key)
-			candidate = path.Join(path.Dir(key), truncateSegment(strings.TrimSuffix(path.Base(key), extension), 170)+"_"+assetID+"_"+strconv.Itoa(attempt)+extension)
-		}
-		if _, err = file.Seek(0, io.SeekStart); err != nil {
+		client, err := S3Client(target)
+		if err != nil {
 			return "", err
 		}
-		if client != nil {
+		for attempt := 0; attempt < 10; attempt++ {
+			candidate := assetCollisionCandidate(key, safeID, attempt)
+			if !validAssetKey(candidate) {
+				return "", fmt.Errorf("无效的资产 key")
+			}
 			if _, statErr := client.StatObject(ctx, target.Bucket, candidate, minio.StatObjectOptions{}); statErr == nil {
 				continue
 			} else if response := minio.ToErrorResponse(statErr); response.StatusCode != 404 && response.Code != "NoSuchKey" && response.Code != "NotFound" {
 				return "", statErr
 			}
+			if _, err = file.Seek(0, io.SeekStart); err != nil {
+				return "", err
+			}
 			opts := minio.PutObjectOptions{ContentType: contentType}
 			opts.SetMatchETagExcept("*")
 			_, err = client.PutObject(ctx, target.Bucket, candidate, file, info.Size(), opts)
-			if response := minio.ToErrorResponse(err); response.StatusCode == 412 || response.Code == "PreconditionFailed" {
+			if response := minio.ToErrorResponse(err); response.StatusCode == 412 || response.Code == "PreconditionFailed" || response.StatusCode == 409 || response.Code == "ConditionalRequestConflict" {
 				continue
 			}
-			return candidate, err
+			if err != nil {
+				return "", err
+			}
+			return candidate, nil
 		}
-		if err = root.MkdirAll(filepath.FromSlash(path.Dir(candidate)), 0o700); err != nil {
+		return "", fmt.Errorf("资源命名冲突过多")
+	}
+
+	if !filepath.IsAbs(target.Root) {
+		return "", fmt.Errorf("本地或 NAS 目标必须使用绝对目录")
+	}
+	if err := config.ValidateDownloadRoot(target.Root); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(target.Root, 0o700); err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(target.Root)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+
+	// 同一资产的所有冲突候选名位于相同父目录：先一次性写入并 fsync 临时文件，
+	// 随后循环以不覆盖方式发布到唯一目标名，避免每次命名冲突都重复复制与 fsync 大文件。
+	parentDir := path.Dir(key)
+	if parentDir != "." && parentDir != "" {
+		if err = root.MkdirAll(filepath.FromSlash(parentDir), 0o700); err != nil {
 			return "", err
 		}
-		temp := filepath.FromSlash(path.Join(path.Dir(candidate), ".asset-"+assetID+".part"))
-		out, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			return "", err
+	}
+	var nonceBytes [8]byte
+	if _, randErr := rand.Read(nonceBytes[:]); randErr != nil {
+		return "", randErr
+	}
+	temp := filepath.FromSlash(path.Join(parentDir, ".asset-"+safeID+"-"+hex.EncodeToString(nonceBytes[:])+".part"))
+	out, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	_, copyErr := io.Copy(out, &contextAssetReader{ctx: ctx, reader: file})
+	if copyErr == nil {
+		copyErr = out.Sync()
+	}
+	closeErr := out.Close()
+	if copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		_ = root.Remove(temp)
+		return "", copyErr
+	}
+	defer func() { _ = root.Remove(temp) }()
+
+	for attempt := 0; attempt < 10; attempt++ {
+		candidate := assetCollisionCandidate(key, safeID, attempt)
+		if !validAssetKey(candidate) {
+			return "", fmt.Errorf("无效的资产 key")
 		}
-		_, copyErr := io.Copy(out, &contextAssetReader{ctx: ctx, reader: file})
-		if copyErr == nil {
-			copyErr = out.Sync()
-		}
-		closeErr := out.Close()
-		if copyErr == nil {
-			copyErr = closeErr
-		}
-		if copyErr != nil {
-			_ = root.Remove(temp)
-			return "", copyErr
-		}
-		err = root.Link(temp, filepath.FromSlash(candidate))
-		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EXDEV) {
-			reservation, reserveErr := root.OpenFile(filepath.FromSlash(candidate), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		targetRel := filepath.FromSlash(candidate)
+		err = root.Link(temp, targetRel)
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EXDEV) || errors.Is(err, syscall.ENOTSUP) {
+			reservation, reserveErr := root.OpenFile(targetRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if reserveErr != nil {
 				err = reserveErr
+			} else if closeErr := reservation.Close(); closeErr != nil {
+				_ = root.Remove(targetRel)
+				err = closeErr
 			} else {
-				owned, _ := reservation.Stat()
-				_, err = file.Seek(0, io.SeekStart)
-				if err == nil {
-					_, err = io.Copy(reservation, &contextAssetReader{ctx: ctx, reader: file})
-				}
-				if err == nil {
-					err = reservation.Sync()
-				}
-				closeErr := reservation.Close()
-				if err == nil {
-					err = closeErr
-				}
+				err = root.Rename(temp, targetRel)
 				if err != nil {
-					if current, statErr := root.Lstat(filepath.FromSlash(candidate)); statErr == nil && os.SameFile(owned, current) {
-						_ = root.Remove(filepath.FromSlash(candidate))
-					}
+					_ = root.Remove(targetRel)
 				}
 			}
 		}
-		_ = root.Remove(temp)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
@@ -367,6 +479,12 @@ func OpenAsset(ctx context.Context, target config.StorageTarget, key string) (io
 			return nil, 0, err
 		}
 		return object, stat.Size, nil
+	}
+	if !filepath.IsAbs(target.Root) {
+		return nil, 0, fmt.Errorf("本地或 NAS 目标必须使用绝对目录")
+	}
+	if err := config.ValidateDownloadRoot(target.Root); err != nil {
+		return nil, 0, err
 	}
 	root, err := os.OpenRoot(target.Root)
 	if err != nil {

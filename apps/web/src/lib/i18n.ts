@@ -61,5 +61,10 @@ export async function setLanguagePreference(preference: LanguagePreference) {
   await i18n.changeLanguage(resolveLanguage(preference));
 }
 
+/** 仅用于测试重置内存中的会话语言偏好，防止跨用例状态泄漏。 */
+export function resetLanguagePreference() {
+  sessionPreference = undefined;
+}
+
 export const t = i18n.t.bind(i18n);
 export default i18n;

@@ -4,23 +4,31 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/quic-go/quic-go/http3"
 )
 
 func TestListenOptionsValidate(t *testing.T) {
 	t.Parallel()
-	if err := (listenOptions{}).validate(); err != nil {
-		t.Fatalf("empty tls files should be valid: %v", err)
+	if err := (listenOptions{}).validate(); err == nil {
+		t.Fatal("empty addr should be invalid")
 	}
-	if err := (listenOptions{certFile: "cert.pem", keyFile: "key.pem"}).validate(); err != nil {
+	if err := (listenOptions{addr: "   "}).validate(); err == nil {
+		t.Fatal("blank addr should be invalid")
+	}
+	if err := (listenOptions{addr: "127.0.0.1:8787"}).validate(); err != nil {
+		t.Fatalf("empty tls files with valid addr should be valid: %v", err)
+	}
+	if err := (listenOptions{addr: "127.0.0.1:8787", certFile: "cert.pem", keyFile: "key.pem"}).validate(); err != nil {
 		t.Fatalf("paired tls files should be valid: %v", err)
 	}
-	if err := (listenOptions{certFile: "cert.pem"}).validate(); err == nil {
+	if err := (listenOptions{addr: "127.0.0.1:8787", certFile: "cert.pem"}).validate(); err == nil {
 		t.Fatal("cert without key should be invalid")
 	}
-	if err := (listenOptions{keyFile: "key.pem"}).validate(); err == nil {
+	if err := (listenOptions{addr: "127.0.0.1:8787", keyFile: "key.pem"}).validate(); err == nil {
 		t.Fatal("key without cert should be invalid")
 	}
 }
@@ -77,5 +85,28 @@ func TestNewHTTP3ServerUsesH3ALPN(t *testing.T) {
 	}
 	if len(base.NextProtos) != 2 {
 		t.Fatal("HTTP/2 TLSConfig should stay unchanged")
+	}
+}
+
+func TestWithHTTP3AltSvcNilAvailableDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	var nilFlag *atomic.Bool
+	handler := withHTTP3AltSvc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), "8787", nilFlag)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := response.Header().Get("Alt-Svc"); got != `h3=":8787"; ma=86400` {
+		t.Fatalf("Alt-Svc = %q", got)
+	}
+}
+
+func TestNewHTTP3ServerSetsIdleTimeout(t *testing.T) {
+	t.Parallel()
+	base := &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"}}
+	server := newHTTP3Server("127.0.0.1:0", http.NotFoundHandler(), base)
+	h3 := server.(*http3.Server)
+	if h3.IdleTimeout != 90*time.Second {
+		t.Fatalf("IdleTimeout = %v, want 90s", h3.IdleTimeout)
 	}
 }

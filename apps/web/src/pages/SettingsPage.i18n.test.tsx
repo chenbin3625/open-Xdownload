@@ -32,7 +32,7 @@ it("switches settings to English without losing the unsaved configuration draft"
   await user.click(screen.getByRole("option", { name: "English" }));
   await waitFor(() => expect(document.documentElement.lang).toBe("en"));
   expect(localStorage.getItem("open-xdownload-language")).toBe("en");
-  expect(screen.getByRole("textbox", { name: "Network proxy (Proxy)" })).toBe(proxy);
+  expect(screen.getByRole("textbox", { name: "Network proxy" })).toBe(proxy);
   expect((proxy as HTMLInputElement).value).toBe("http://unsaved:7890");
   expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
 });

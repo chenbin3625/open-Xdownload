@@ -10,6 +10,7 @@ import {
   applyDashboardMeta,
   applyDashboardEvent,
   prependJobsToCaches,
+  removeJobFromCaches,
   invalidateWorkbenchQueries,
   invalidateAfterReconnect,
   cancelScheduledTerminalRefresh,
@@ -65,17 +66,32 @@ it("refreshes open job files after an SSE reconnect", async () => {
 });
 
 describe("applyDashboardMeta", () => {
-  it("replaces meta without touching the jobs page cache", () => {
+  it("syncs counts and total into cached unfiltered jobs pages while keeping items and filtered pages intact", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    const jobs = makeJobsPage([makeJob()]);
-    queryClient.setQueryData([...jobsQueryRoot, 1, 20], jobs);
+    const item = makeJob();
+    const unfiltered = makeJobsPage([item]);
+    const filtered: JobsPage = {
+      items: [],
+      page: 1,
+      pageSize: 20,
+      total: 0,
+      counts: { all: 1, active: 1, completed: 0, failed: 0 },
+    };
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20], unfiltered);
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20, "failed", "all", ""], filtered);
+
     applyDashboardMeta(queryClient, {
       stats: { total: 9, active: 1, completed: 8, failed: 0 },
       failedTweetCount: 4,
     });
-    expect(queryClient.getQueryData([...jobsQueryRoot, 1, 20])).toBe(jobs);
+
+    const updated = queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20]);
+    expect(updated?.items).toBe(unfiltered.items);
+    expect(updated?.total).toBe(9);
+    expect(updated?.counts).toEqual({ all: 9, active: 1, completed: 8, failed: 0 });
+    expect(queryClient.getQueryData([...jobsQueryRoot, 1, 20, "failed", "all", ""])).toBe(filtered);
     expect(queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot)?.failedTweetCount).toBe(4);
   });
 });
@@ -382,6 +398,38 @@ describe("patchDashboardJobCaches ordering guard", () => {
 
     expect(result).toBe("refresh-meta");
   });
+
+  it("refuses partial local meta patches and requests refresh when any cache has a newer version of the job", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const newerKey = [...jobsQueryRoot, 1, 20, "all", "all", ""];
+    const olderKey = [...jobsQueryRoot, 2, 20, "all", "all", ""];
+    const newerJob = makeJob({ id: 1, status: "completed", progress: 1, updatedAt: "2024-01-01T00:00:20Z" });
+    const olderJob = makeJob({ id: 1, status: "downloading", progress: 0.2, updatedAt: "2024-01-01T00:00:05Z" });
+    queryClient.setQueryData(newerKey, makeJobsPage([newerJob]));
+    queryClient.setQueryData(olderKey, makeJobsPage([olderJob]));
+    queryClient.setQueryData(dashboardMetaQueryRoot, {
+      stats: { total: 1, active: 0, completed: 1, failed: 0 },
+      failedTweetCount: 0,
+    });
+
+    const middleEventJob = makeJob({ id: 1, status: "failed", progress: 0.5, updatedAt: "2024-01-01T00:00:10Z" });
+    const result = applyDashboardEvent(queryClient, {
+      type: "job.updated",
+      payload: middleEventJob,
+    });
+
+    expect(result).toBe("refresh-meta");
+    expect(queryClient.getQueryData<DashboardMeta>(dashboardMetaQueryRoot)?.stats).toEqual({
+      total: 1,
+      active: 0,
+      completed: 1,
+      failed: 0,
+    });
+    expect(isInvalidated(queryClient, olderKey)).toBe(true);
+    expect(isInvalidated(queryClient, dashboardMetaQueryRoot)).toBe(true);
+  });
 });
 
 function isInvalidated(queryClient: QueryClient, key: readonly unknown[]) {
@@ -492,5 +540,74 @@ describe("terminal job.updated", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("deleted jobs never resurrect on page 1", () => {
+  it("does not resurrect a deleted newest job when fetched page 1 no longer has it or is empty", () => {
+    const queryClient = new QueryClient();
+    const older = makeJob({ id: 1, createdAt: "2024-01-01T00:00:00Z" });
+    const newest = makeJob({ id: 2, createdAt: "2024-01-01T00:05:00Z", status: "completed" });
+    const cached = makeJobsPage([newest, older]);
+
+    // Case 1: fetched has only [older] after newest was deleted
+    expect(
+      mergeNewerJobs(cached, makeJobsPage([older]), queryClient).items.map((job) => job.id),
+    ).toEqual([1]);
+
+    // Case 2: fetched is completely empty after the only job on page 1 was deleted
+    expect(
+      mergeNewerJobs(makeJobsPage([newest]), makeJobsPage([]), queryClient).items,
+    ).toEqual([]);
+  });
+
+  it("retains unconfirmed SSE jobs on empty/stale page 1, then stops retaining once confirmed and deleted", () => {
+    const queryClient = new QueryClient();
+    const sseJob = makeJob({ id: 10, createdAt: "2024-01-01T00:10:00Z", status: "pending" });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20, "all", "all", ""], makeJobsPage([]));
+
+    prependJobsToCaches(queryClient, [sseJob]);
+    const cachedAfterSse = queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20, "all", "all", ""]);
+    expect(mergeNewerJobs(cachedAfterSse, makeJobsPage([]), queryClient).items.map((j) => j.id)).toEqual([10]);
+
+    // Server fetch confirms job 10 exists
+    const confirmed = mergeNewerJobs(cachedAfterSse, makeJobsPage([sseJob]), queryClient);
+    expect(confirmed.items.map((j) => j.id)).toEqual([10]);
+
+    // Later job 10 is deleted on server and fetch returns empty
+    expect(mergeNewerJobs(confirmed, makeJobsPage([]), queryClient).items).toEqual([]);
+  });
+
+  it("handles job.deleted SSE event and removeJobFromCaches without resurrecting", () => {
+    const queryClient = new QueryClient();
+    const job1 = makeJob({ id: 1, status: "completed", createdAt: "2024-01-01T00:00:00Z" });
+    const job2 = makeJob({ id: 2, status: "pending", createdAt: "2024-01-01T00:01:00Z" });
+    queryClient.setQueryData([...jobsQueryRoot, 1, 20, "all", "all", ""], {
+      ...makeJobsPage([job1]),
+      total: 1,
+      counts: { all: 1, active: 0, completed: 1, failed: 0 },
+    });
+    queryClient.setQueryData(dashboardMetaQueryRoot, {
+      failedTweetCount: 0,
+      stats: { total: 1, active: 0, completed: 1, failed: 0 },
+    });
+
+    prependJobsToCaches(queryClient, [job2]);
+    const result = applyDashboardEvent(queryClient, {
+      type: "job.deleted",
+      payload: { id: 2 },
+      meta: { stats: { total: 1, active: 0, completed: 1, failed: 0 }, failedTweetCount: 0 },
+    });
+
+    expect(result).toBe("handled");
+    const page = queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20, "all", "all", ""]);
+    expect(page?.items.map((j) => j.id)).toEqual([1]);
+    expect(page?.total).toBe(1);
+    expect(isInvalidated(queryClient, [...jobsQueryRoot, 1, 20, "all", "all", ""])).toBe(true);
+
+    removeJobFromCaches(queryClient, 1);
+    const afterRemove = queryClient.getQueryData<JobsPage>([...jobsQueryRoot, 1, 20, "all", "all", ""]);
+    expect(afterRemove?.items).toEqual([]);
+    expect(mergeNewerJobs(afterRemove, makeJobsPage([]), queryClient).items).toEqual([]);
   });
 });

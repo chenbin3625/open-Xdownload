@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Card from "@douyinfe/semi-ui/lib/es/card";
 import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
@@ -94,8 +94,12 @@ export interface GalleryPageProps {
   ) => void;
 }
 
-/** 搜索输入防抖：避免每敲一个字符就打一次服务端分页查询。 */
+/** 搜索与体积输入防抖：避免每敲一个字符就打一次服务端分页查询。 */
 const GALLERY_SEARCH_DEBOUNCE_MS = 300;
+/** 导出清单的 Blob URL 延迟释放，避免浏览器尚未开始读取下载流就被提前 revoke。 */
+const OBJECT_URL_REVOKE_DELAY_MS = 60_000;
+/** 批量下载逐个错峰触发，避免同一 tick 内连续触发数十次 <a>.click() 被浏览器限流丢弃。 */
+const BATCH_DOWNLOAD_STAGGER_MS = 150;
 
 function VideoPoster({
   item,
@@ -214,6 +218,7 @@ const GalleryCard = React.memo(function GalleryCard({
                     alt={fileName}
                     loading="lazy"
                     decoding="async"
+                    referrerPolicy={imageSource === remoteThumbnail ? "no-referrer" : undefined}
                     onError={() => { if (imageSource !== localThumbnail) setImageSource(localThumbnail); else setImageFailed(true); }}
                     className={`relative z-10 h-full w-full ${thumbnailFit === "cover" ? "object-cover" : "object-contain"}`}
                   />
@@ -248,7 +253,7 @@ const GalleryCard = React.memo(function GalleryCard({
         </div>
 
         <div className="gallery-card-meta">
-          {item.tweetId && <a className="text-brand-600" href={`/tweets?id=${item.tweetId}`}>{t("archive.title")}</a>}
+          {item.tweetId && <a className="text-brand-600" href={`/tweets?id=${encodeURIComponent(item.tweetId)}`}>{t("archive.title")}</a>}
           <time dateTime={item.createdAt} title={formatDateTime(item.createdAt)}>{formatDateTime(item.createdAt)}</time>
           <div className="gallery-card-actions">
             <Tooltip title={t("下载原文件")}>
@@ -371,6 +376,12 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   const pageSize = galleryPageSize;
   // 输入框即时响应，查询键用 300ms 防抖后的值。
   const debouncedSearch = useDebouncedValue(filter.search, GALLERY_SEARCH_DEBOUNCE_MS);
+  const debouncedMinBytes = useDebouncedValue(filter.minBytes, GALLERY_SEARCH_DEBOUNCE_MS);
+  const debouncedMaxBytes = useDebouncedValue(filter.maxBytes, GALLERY_SEARCH_DEBOUNCE_MS);
+  const filtersPendingDebounce =
+    debouncedSearch !== filter.search ||
+    debouncedMinBytes !== filter.minBytes ||
+    debouncedMaxBytes !== filter.maxBytes;
   const rangeError = filter.from && filter.to && filter.from > filter.to
     ? t("开始日期不能晚于结束日期")
     : filter.minBytes !== "" && filter.maxBytes !== "" && Number(filter.minBytes) > Number(filter.maxBytes)
@@ -379,7 +390,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   // 只有切到「按账号」时才拉聚合数据，避免每次进归档库都多一次全量扫描。
   const usersQuery = useQuery({
     queryKey: libraryUsersQueryRoot,
-    queryFn: getLibraryUsers,
+    queryFn: ({ signal }) => getLibraryUsers(signal),
     enabled: viewMode === "users",
     staleTime: 30_000,
   });
@@ -395,8 +406,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         sort: filter.sort,
         from: filter.from,
         to: filter.to,
-        minBytes: filter.minBytes,
-        maxBytes: filter.maxBytes,
+        minBytes: debouncedMinBytes,
+        maxBytes: debouncedMaxBytes,
       },
     ],
     queryFn: ({ signal }) =>
@@ -410,8 +421,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           sort: filter.sort,
           from: filter.from,
           to: filter.to,
-          minBytes: filter.minBytes,
-          maxBytes: filter.maxBytes,
+          minBytes: debouncedMinBytes,
+          maxBytes: debouncedMaxBytes,
         },
         signal,
       ),
@@ -456,24 +467,32 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
   // 数据变少（删除/筛选后总数下降）时把页码收敛到最后一页，避免停在空页。
   useEffect(() => {
-    if (!libraryQuery.data || libraryQuery.isPlaceholderData || debouncedSearch !== filter.search) return;
+    if (!libraryQuery.data || libraryQuery.isPlaceholderData || filtersPendingDebounce) return;
     if (filter.page > totalPages) {
       updateFilter({ page: totalPages }, { replace: true });
     }
-  }, [libraryQuery.data, libraryQuery.isPlaceholderData, debouncedSearch, filter.search, filter.page, totalPages, updateFilter]);
+  }, [libraryQuery.data, libraryQuery.isPlaceholderData, filtersPendingDebounce, filter.page, totalPages, updateFilter]);
 
   const visibleEntries = indexedDownloads;
   const selectedEntries = useMemo(
     () => visibleEntries.filter(({ item }) => selected.has(entryKey(item))),
     [selected, visibleEntries],
   );
-  const selectionDisabled = libraryQuery.isPlaceholderData || Boolean(rangeError) || debouncedSearch !== filter.search;
+  const selectionDisabled = libraryQuery.isPlaceholderData || Boolean(rangeError) || filtersPendingDebounce;
   const hasActiveFilter =
     filter.kind !== "all" || filter.user !== "all" || filter.search.trim() !== "" ||
     filter.from !== "" || filter.to !== "" || filter.minBytes !== "" || filter.maxBytes !== "";
 
+  const downloadTimersRef = useRef<number[]>([]);
+  useEffect(() => () => {
+    downloadTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+    downloadTimersRef.current = [];
+  }, []);
+
   const downloadSelected = useCallback(() => {
-    selectedEntries.forEach(({ item }) => {
+    downloadTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+    downloadTimersRef.current = [];
+    const triggerDownload = (item: DownloadRecord) => {
       const anchor = document.createElement("a");
       anchor.href = fileURL(item);
       anchor.download = displayFileName(item);
@@ -481,6 +500,17 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
+    };
+    selectedEntries.forEach(({ item }, index) => {
+      if (index === 0) {
+        triggerDownload(item);
+        return;
+      }
+      const timerId = window.setTimeout(() => {
+        downloadTimersRef.current = downloadTimersRef.current.filter((id) => id !== timerId);
+        triggerDownload(item);
+      }, index * BATCH_DOWNLOAD_STAGGER_MS);
+      downloadTimersRef.current.push(timerId);
     });
   }, [selectedEntries]);
 
@@ -500,27 +530,42 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    window.setTimeout(() => URL.revokeObjectURL(url), OBJECT_URL_REVOKE_DELAY_MS);
   }, [selectedEntries]);
 
-  const previewIndex = useMemo(
-    () =>
-      previewId === null
-        ? -1
-        : visibleEntries.findIndex((entry) => entryKey(entry.item) === previewId),
-    [previewId, visibleEntries],
-  );
-  const previewEntry = previewIndex >= 0 ? visibleEntries[previewIndex] : undefined;
+  // 跨页切图：走到当前页边界时翻一页，等新页数据落地后再把灯箱定位到首/末项。
+  const [pendingPreviewEdge, setPendingPreviewEdge] = useState<"first" | "last" | null>(null);
+  const lastPreviewEntryRef = useRef<(typeof visibleEntries)[number] | undefined>(undefined);
 
+  const previewIndex = useMemo(() => {
+    if (previewId === null) return -1;
+    const direct = visibleEntries.findIndex((entry) => entryKey(entry.item) === previewId);
+    if (direct >= 0) return direct;
+    // 新页刚落地但 effect 尚未提交新 previewId 时，渲染期直接解析首/末项，避免灯箱闪烁卸载。
+    if (pendingPreviewEdge && !libraryQuery.isError && !libraryQuery.isPlaceholderData && visibleEntries.length > 0) {
+      return pendingPreviewEdge === "first" ? 0 : visibleEntries.length - 1;
+    }
+    return -1;
+  }, [previewId, visibleEntries, pendingPreviewEdge, libraryQuery.isError, libraryQuery.isPlaceholderData]);
+
+  const previewEntry =
+    previewIndex >= 0
+      ? visibleEntries[previewIndex]
+      : pendingPreviewEdge && !libraryQuery.isError
+        ? lastPreviewEntryRef.current
+        : undefined;
+
+  if (previewIndex >= 0) {
+    lastPreviewEntryRef.current = visibleEntries[previewIndex];
+  } else if (previewId === null || libraryQuery.isError) {
+    lastPreviewEntryRef.current = undefined;
+  }
 
   const openPreview = useCallback((nextId: string) => setPreviewId(nextId), []);
   const openUserMedia = useCallback((screenName: string) => {
     setViewMode("media");
     updateFilter({ user: screenName, page: 1 });
   }, [updateFilter]);
-
-  // 跨页切图：走到当前页边界时翻一页，等新页数据落地后再把灯箱定位到首/末项。
-  const [pendingPreviewEdge, setPendingPreviewEdge] = useState<"first" | "last" | null>(null);
 
   const stepPreview = useCallback(
     (delta: number) => {
@@ -562,7 +607,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         : visibleEntries[visibleEntries.length - 1];
     setPreviewId(entryKey(target.item));
     setPendingPreviewEdge(null);
-  }, [pendingPreviewEdge, libraryQuery.data, libraryQuery.isPlaceholderData, visibleEntries]);
+  }, [pendingPreviewEdge, libraryQuery.data, libraryQuery.isPlaceholderData, libraryQuery.isError, visibleEntries]);
 
   useEffect(() => {
     // 正在跨页续开时不要因为"当前页找不到旧 previewId"就关掉灯箱。
@@ -584,6 +629,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
 
   const goToPage = useCallback(
     (nextPage: number) => {
+      setPendingPreviewEdge(null);
       setPreviewId(null);
       updateFilter({ page: Math.min(Math.max(1, nextPage), totalPages) });
     },
@@ -721,7 +767,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       </div>}
       <div className="gallery-result-bar">
         <Checkbox checked={Boolean(visibleEntries.length) && selectedEntries.length === visibleEntries.length} indeterminate={selectedEntries.length > 0 && selectedEntries.length < visibleEntries.length} disabled={selectionDisabled || !visibleEntries.length} onChange={event => setSelected(event.target.checked ? new Set(visibleEntries.map(({ item }) => entryKey(item))) : new Set())}>{t("选择本页")}</Checkbox>
-        <span className="text-xs text-fg-muted" aria-live="polite">{libraryQuery.isPlaceholderData ? t("正在应用筛选...") : `${t("筛选结果")} ${totalEntries} ${t("项")}`}</span>
+        <span className="text-xs text-fg-muted" aria-live="polite">{rangeError ? `${t("筛选结果")} —` : libraryQuery.isPlaceholderData && libraryQuery.isFetching ? t("正在应用筛选...") : `${t("筛选结果")} ${totalEntries} ${t("项")}`}</span>
         {selectedEntries.length > 0 && <div className="gallery-batch-actions"><span className="text-xs">{t("已选")} {selectedEntries.length}</span><Button size="small" type="tertiary" icon={<Copy size={14} />} disabled={selectionDisabled} onClick={() => void copyToClipboard(selectedEntries.map(({ item }) => item.filePath).join("\n"), t("所选文件路径"))}>{t("复制路径")}</Button><Button size="small" type="tertiary" icon={<Download size={14} />} disabled={selectionDisabled} onClick={downloadSelected}>{t("批量下载")}</Button><Button size="small" type="tertiary" icon={<ExternalLink size={14} />} disabled={selectionDisabled} onClick={exportSelected}>{t("导出清单")}</Button><Button size="small" theme="borderless" type="tertiary" icon={<X size={14} />} aria-label={t("取消选择")} onClick={() => setSelected(new Set())} /></div>}
       </div>
       {rangeError && <Alert type="warning" message={rangeError} />}
@@ -914,7 +960,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                   <ChevronRight className="size-5" />
                 </button>
               </div>
-              <div className="gallery-preview-details"><span>{pendingPreviewEdge || libraryQuery.isPlaceholderData ? t("加载中...") : `${((libraryQuery.data?.pagination.page ?? filter.page) - 1) * pageSize + previewIndex + 1} / ${totalEntries}`}</span>{item.jobId > 0 && <a href="/tasks">{t("来源任务")} #{item.jobId}</a>}{item.tweetId && <a href={`/tweets?id=${item.tweetId}`}>{t("archive.title")} <ExternalLink size={12} /></a>}<code title={item.filePath}>{item.filePath}</code></div>
+              <div className="gallery-preview-details"><span>{pendingPreviewEdge || libraryQuery.isPlaceholderData ? t("加载中...") : `${((libraryQuery.data?.pagination.page ?? filter.page) - 1) * pageSize + previewIndex + 1} / ${totalEntries}`}</span>{item.jobId > 0 && <a href="/tasks">{t("来源任务")} #{item.jobId}</a>}{item.tweetId && <a href={`/tweets?id=${encodeURIComponent(item.tweetId)}`}>{t("archive.title")} <ExternalLink size={12} /></a>}<code title={item.filePath}>{item.filePath}</code></div>
 
               {/* 弹窗底部操作与详情栏 */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface px-4 py-3 text-xs">

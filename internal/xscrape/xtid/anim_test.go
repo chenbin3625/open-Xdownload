@@ -65,3 +65,23 @@ func TestSolve(t *testing.T) {
 		t.Fatalf("solve(5,0,1,false) = %v, want 0.02", got)
 	}
 }
+
+func TestCalcAnimationKeyGuardsEmptyPathsAndNonFinite(t *testing.T) {
+	if _, err := calcAnimationKey(nil, []int{1}, []byte{0, 1, 2, 3, 4, 5}); err == nil {
+		t.Fatal("expected error for empty animationPaths")
+	}
+	if _, err := animationKeyFromRow([]float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, math.NaN()); err == nil {
+		t.Fatal("expected error for NaN targetTime")
+	}
+	if _, err := animationKeyFromRow([]float64{math.Inf(1), 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, 0.1); err == nil {
+		t.Fatal("expected error for Inf frame value")
+	}
+}
+
+func TestParseAnimationPathsHandlesUnicodeCaseExpansion(t *testing.T) {
+	page := []byte(`<svg id="loading-x-anim-0"><path d="M0 0"></path><path d="M0 0 10 10C1 2 3 4 5 6"></path><!-- İİİ --></svg>`)
+	paths, err := parseAnimationPaths(page)
+	if err != nil || len(paths) != 1 || paths[0] != "M0 0 10 10C1 2 3 4 5 6" {
+		t.Fatalf("paths = %v, err = %v", paths, err)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -64,7 +65,7 @@ func isStreamingPath(path string) bool {
 func compressJSON(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isStreamingPath(r.URL.Path) {
-			serveWithRecovery(next, w, r)
+			serveWithRecovery(next, newStreamingResponseWriter(w), r)
 			return
 		}
 		// Vary 只在这里加一次：finish() 不再重复 Add（重复 Vary 虽然语义等价，
@@ -75,34 +76,97 @@ func compressJSON(next http.Handler) http.Handler {
 		// 换成干净的 500 JSON，否则客户端会拿到半截 JSON + 200（见
 		// TestCompressJSONRecoversWithoutPublishingPartialJSON）。缓冲的代价只落在
 		// 非流式 JSON 上，体量有限。
-		writer := newSniffCompressWriter(w, encoding)
-		// HEAD 与 GET 走完全相同的路径：只读端点同时注册 GET/HEAD（见 Routes），
-		// net/http 会丢弃 HEAD 的 body 并按实际写入量推导 Content-Length，因此
-		// 响应头自然与 GET 一致。旧的 finishHead 分支已删除——它要求 chi 匹配 HEAD，
-		// 而 chi 的 Get 路由对 HEAD 一律 405，那段代码永远执行不到。
-		defer writer.finish()
+		writer := newSniffCompressWriter(w, encoding, r.Method == http.MethodHead)
+		completed := false
+		defer func() {
+			if !completed {
+				return
+			}
+			writer.finish()
+		}()
 		serveWithRecovery(next, writer, r)
+		completed = true
 	})
+}
+
+type streamingResponseWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func newStreamingResponseWriter(w http.ResponseWriter) *streamingResponseWriter {
+	return &streamingResponseWriter{ResponseWriter: w}
+}
+
+func (w *streamingResponseWriter) WriteHeader(code int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *streamingResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *streamingResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if err := http.NewResponseController(w.ResponseWriter).Flush(); err != nil {
+		if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+}
+
+func (w *streamingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func clearRecoveryHeaders(header http.Header, preserveVaryAcceptEncoding bool) {
+	clear(header)
+	if preserveVaryAcceptEncoding {
+		header.Add("Vary", "Accept-Encoding")
+	}
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Cache-Control", "no-store")
 }
 
 func serveWithRecovery(next http.Handler, w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if value := recover(); value != nil {
 			if value == http.ErrAbortHandler {
+				if writer, ok := w.(*sniffCompressWriter); ok && !writer.emitted {
+					writer.buffer.Reset()
+					clear(w.Header())
+				} else if writer, ok := w.(*streamingResponseWriter); ok && !writer.wroteHeader {
+					clear(w.Header())
+				}
 				panic(value)
 			}
 			log.Printf("http panic: %v\n%s", value, debug.Stack())
+			preserveVary := false
 			if writer, ok := w.(*sniffCompressWriter); ok {
 				if writer.emitted {
-					return
+					panic(http.ErrAbortHandler)
 				}
+				preserveVary = true
 				writer.buffer.Reset()
 				writer.handlerWroteHeader = false
+				writer.handlerStatus = http.StatusOK
 				writer.forceRaw = false
 				writer.contentType = ""
 			}
-			w.Header().Del("Content-Length")
-			w.Header().Del("Content-Encoding")
+			if writer, ok := w.(*streamingResponseWriter); ok && writer.wroteHeader {
+				panic(http.ErrAbortHandler)
+			}
+			clearRecoveryHeaders(w.Header(), preserveVary)
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("handler panic"))
 		}
 	}()
@@ -124,6 +188,7 @@ func isJSONContentType(contentType string) bool {
 type sniffCompressWriter struct {
 	http.ResponseWriter
 	encoding           string
+	isHead             bool
 	buffer             bytes.Buffer
 	contentType        string
 	handlerStatus      int
@@ -132,12 +197,17 @@ type sniffCompressWriter struct {
 	forceRaw           bool
 }
 
-func newSniffCompressWriter(w http.ResponseWriter, encoding string) *sniffCompressWriter {
+func newSniffCompressWriter(w http.ResponseWriter, encoding string, isHead bool) *sniffCompressWriter {
 	return &sniffCompressWriter{
 		ResponseWriter: w,
 		encoding:       encoding,
+		isHead:         isHead,
 		handlerStatus:  http.StatusOK,
 	}
+}
+
+func statusForbidsBody(status int) bool {
+	return (status >= 100 && status < 200) || status == http.StatusNoContent || status == http.StatusNotModified
 }
 
 func (g *sniffCompressWriter) WriteHeader(code int) {
@@ -220,42 +290,57 @@ func (g *sniffCompressWriter) finish() {
 		return
 	}
 	body := g.buffer.Bytes()
-	if g.encoding == "" || len(body) < minCompressJSON || !isJSONContentType(g.contentType) {
-		g.emitRaw()
-		_, _ = g.ResponseWriter.Write(body)
-		return
+	noBody := statusForbidsBody(g.handlerStatus)
+	if g.encoding != "" && !noBody && len(body) >= minCompressJSON && isJSONContentType(g.contentType) {
+		var compressed bytes.Buffer
+		if err := writeCompressed(&compressed, g.encoding, body); err == nil {
+			header := g.ResponseWriter.Header()
+			header.Set("Content-Encoding", g.encoding)
+			header.Set("Content-Length", strconv.Itoa(compressed.Len()))
+			g.emitted = true
+			g.ResponseWriter.WriteHeader(g.handlerStatus)
+			if !g.isHead && compressed.Len() > 0 {
+				_, _ = g.ResponseWriter.Write(compressed.Bytes())
+			}
+			return
+		}
 	}
 
 	header := g.ResponseWriter.Header()
-	header.Set("Content-Encoding", g.encoding)
-	header.Del("Content-Length")
-	g.ResponseWriter.WriteHeader(g.handlerStatus)
-	writeCompressed(g.ResponseWriter, g.encoding, body)
+	if !noBody {
+		header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	g.emitRaw()
+	if !g.isHead && !noBody && len(body) > 0 {
+		_, _ = g.ResponseWriter.Write(body)
+	}
 }
 
-func writeCompressed(w io.Writer, encoding string, body []byte) {
+func writeCompressed(w io.Writer, encoding string, body []byte) error {
 	switch encoding {
 	case httpx.EncodingBrotli:
 		bw := brotliWriterPool.Get().(*brotli.Writer)
 		bw.Reset(w)
+		defer func() {
+			bw.Reset(io.Discard)
+			brotliWriterPool.Put(bw)
+		}()
 		if _, err := bw.Write(body); err != nil {
 			_ = bw.Close()
-			return
+			return err
 		}
-		if err := bw.Close(); err != nil {
-			return
-		}
-		brotliWriterPool.Put(bw)
+		return bw.Close()
 	default:
 		gz := gzipWriterPool.Get().(*gzip.Writer)
 		gz.Reset(w)
+		defer func() {
+			gz.Reset(io.Discard)
+			gzipWriterPool.Put(gz)
+		}()
 		if _, err := gz.Write(body); err != nil {
 			_ = gz.Close()
-			return
+			return err
 		}
-		if err := gz.Close(); err != nil {
-			return
-		}
-		gzipWriterPool.Put(gz)
+		return gz.Close()
 	}
 }

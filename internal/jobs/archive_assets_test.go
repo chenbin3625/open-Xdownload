@@ -168,7 +168,7 @@ func TestArchiveBodySurvivesMediaFailureAndOfflineRetryDeduplicates(t *testing.T
 		t.Fatalf("media failure: %+v %v", stats, err)
 	}
 	archived, err := store.GetTweet(ctx, tweet.ID)
-	if err != nil || archived.Text != tweet.Text || archived.MediaStatus != "partial" {
+	if err != nil || archived.Text != tweet.Text || archived.MediaStatus != "failed" {
 		t.Fatalf("body lost: %+v %v", archived, err)
 	}
 	failedRelated, err := store.GetTweet(ctx, "122")
@@ -369,7 +369,7 @@ func TestMediaOnlyArchiveKeepsMediaStatusAndSupportsRetry(t *testing.T) {
 		t.Fatalf("media-only failure: %+v %v", stats, err)
 	}
 	archived, err := store.GetTweet(ctx, tweet.ID)
-	if err != nil || archived.BodyStatus != "not_requested" || archived.MediaStatus != "partial" {
+	if err != nil || archived.BodyStatus != "not_requested" || archived.MediaStatus != "failed" {
 		t.Fatalf("media-only status: %+v %v", archived, err)
 	}
 	if len(archived.JobIDs) != 1 {
@@ -547,7 +547,8 @@ func TestFailedQueueRetryUpdatesArchivedMediaResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			if scenario.code != http.StatusOK && !scenario.empty {
-				if _, err := store.CreateFailedMedia(ctx, storage.FailedMedia{JobID: original.ID, MediaURL: server.URL + "/failed.png", Error: "offline"}); err != nil {
+				seedErr := fmt.Sprintf("download failed: HTTP %d", scenario.code)
+				if _, err := store.CreateFailedMedia(ctx, storage.FailedMedia{JobID: original.ID, MediaURL: server.URL + "/failed.png", Error: seedErr}); err != nil {
 					t.Fatal(err)
 				}
 			}

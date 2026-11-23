@@ -3,7 +3,7 @@ import { KeyRound, LogOut } from "lucide-react";
 import React, { useContext, useId, useState } from "react";
 import { changeAccountPassword, logoutAccount } from "../../lib/api";
 import { invalidateSession } from "../../lib/session";
-import { AccountContext } from "../auth/AuthGate";
+import { AccountContext, markIntentionalSessionInvalidation } from "../auth/AuthGate";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { Field, Input } from "../semi/controls";
 import { Modal } from "../semi/overlays";
@@ -18,6 +18,8 @@ export function AccountSecurity({ compact = false }: { compact?: boolean }) {
   const [confirmation, setConfirmation] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [logoutPending, setLogoutPending] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
 
   function close() {
     if (pending) return;
@@ -39,6 +41,7 @@ export function AccountSecurity({ compact = false }: { compact?: boolean }) {
     setPending(true);
     try {
       await changeAccountPassword(currentPassword, newPassword);
+      markIntentionalSessionInvalidation();
       invalidateSession();
     } catch (error) {
       setError(error instanceof Error ? error.message : t("修改密码失败"));
@@ -51,17 +54,21 @@ export function AccountSecurity({ compact = false }: { compact?: boolean }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="min-w-0 break-all text-sm text-fg-muted">{username}</p>
         <div className="flex flex-wrap gap-2">
-          <Button type="tertiary" icon={<KeyRound className="size-4" />} onClick={() => setOpen(true)}>{t("修改密码")}</Button>
-          <Button type="tertiary" icon={<LogOut className="size-4" />} disabled={pending} onClick={async () => {
-            setPending(true);
-            setError("");
-            try { await logoutAccount(); invalidateSession(); }
-            catch (error) { setError(error instanceof Error ? error.message : t("退出登录失败")); }
-            finally { setPending(false); }
+          <Button type="tertiary" icon={<KeyRound className="size-4" />} disabled={logoutPending} onClick={() => { setError(""); setOpen(true); }}>{t("修改密码")}</Button>
+          <Button type="tertiary" icon={<LogOut className="size-4" />} loading={logoutPending} disabled={logoutPending || pending} aria-busy={logoutPending} onClick={async () => {
+            setLogoutPending(true);
+            setLogoutError("");
+            try {
+              await logoutAccount();
+              markIntentionalSessionInvalidation();
+              invalidateSession();
+            }
+            catch (error) { setLogoutError(error instanceof Error ? error.message : t("退出登录失败")); }
+            finally { setLogoutPending(false); }
           }}>{t("退出登录")}</Button>
         </div>
       </div>
-      {!open && error && <p role="alert" className="text-sm text-danger-strong">{error}</p>}
+      {logoutError && <p role="alert" className="text-sm text-danger-strong">{logoutError}</p>}
       <Modal open={open} onClose={close} title={t("修改密码")} description={t("修改成功后需重新登录。")} footer={<>
         <Button type="tertiary" onClick={close} disabled={pending}>{t("取消")}</Button>
         <Button htmlType="submit" form={formId} theme="solid" icon={<KeyRound className="size-4" />} loading={pending} disabled={pending} aria-busy={pending}>{t("修改密码")}</Button>

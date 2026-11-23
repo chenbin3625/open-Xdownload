@@ -18,62 +18,91 @@ import (
 const (
 	// guestTokenTTL 是 guest token 的缓存时长。
 	guestTokenTTL = time.Hour
+	// guestTokenFetchTimeout 是后台共享激活 guest token 的超时上限。
+	guestTokenFetchTimeout = 30 * time.Second
 	// rateLimitFallback 是响应未带 x-rate-limit-reset 时的默认锁定时长。
 	rateLimitFallback = time.Minute
+	// maxRateLimitWait 限制异常或畸形限流头导致超长锁定。
+	maxRateLimitWait = 24 * time.Hour
 )
 
-// guestTokens 缓存 guest token。并发请求共享同一次激活请求。
+type guestTokenCall struct {
+	done  chan struct{}
+	token string
+	err   error
+}
+
+// guestTokens 缓存 guest token。并发请求共享同一次激活请求及其结果。
 type guestTokens struct {
 	mu       sync.Mutex
 	token    string
 	expires  time.Time
-	fetching chan struct{}
+	fetching *guestTokenCall
 }
 
 // guestToken 返回缓存中的 token，过期时重新激活。
 func (e *Engine) guestToken(ctx context.Context, proxy string) (string, error) {
-	for {
-		e.guest.mu.Lock()
-		if e.guest.token != "" && e.now().Before(e.guest.expires) {
-			token := e.guest.token
-			e.guest.mu.Unlock()
-			return token, nil
-		}
-		if e.guest.fetching != nil {
-			wait := e.guest.fetching
-			e.guest.mu.Unlock()
-			select {
-			case <-wait:
-				continue
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-		}
-		wait := make(chan struct{})
-		e.guest.fetching = wait
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	e.guest.mu.Lock()
+	if e.guest.token != "" && e.now().Before(e.guest.expires) {
+		token := e.guest.token
 		e.guest.mu.Unlock()
-
-		token, ttl, err := e.fetchGuestToken(ctx, proxy)
-
-		e.guest.mu.Lock()
-		if err == nil {
-			e.guest.token = token
-			e.guest.expires = e.now().Add(ttl)
-		}
-		e.guest.fetching = nil
-		close(wait)
-		e.guest.mu.Unlock()
-		if err != nil {
-			return "", err
-		}
 		return token, nil
+	}
+	if call := e.guest.fetching; call != nil {
+		e.guest.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.token, call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	call := &guestTokenCall{done: make(chan struct{})}
+	e.guest.fetching = call
+	e.guest.mu.Unlock()
+
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), guestTokenFetchTimeout)
+	go func() {
+		defer cancel()
+		var token string
+		var ttl time.Duration
+		var err error
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("%w: panic: %v", errFetchGuestToken, r)
+			}
+			e.guest.mu.Lock()
+			if err == nil {
+				e.guest.token = token
+				e.guest.expires = e.now().Add(ttl)
+			}
+			if e.guest.fetching == call {
+				e.guest.fetching = nil
+			}
+			call.token, call.err = token, err
+			close(call.done)
+			e.guest.mu.Unlock()
+		}()
+		token, ttl, err = e.fetchGuestToken(fetchCtx, proxy)
+	}()
+
+	select {
+	case <-call.done:
+		return call.token, call.err
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
 }
 
-func (e *Engine) invalidateGuestToken() {
+func (e *Engine) invalidateGuestToken(failedToken string) {
 	e.guest.mu.Lock()
-	e.guest.token = ""
-	e.guest.expires = time.Time{}
+	if e.guest.token == failedToken {
+		e.guest.token = ""
+		e.guest.expires = time.Time{}
+	}
 	e.guest.mu.Unlock()
 }
 
@@ -146,7 +175,7 @@ func (s *source) guestGraphQL(ctx context.Context, path string, values url.Value
 			}
 			// guest token 可能已过期：换一个再试一次。
 			refreshed = true
-			s.engine.invalidateGuestToken()
+			s.engine.invalidateGuestToken(token)
 			token, err = s.engine.guestToken(ctx, s.proxy)
 			if err != nil {
 				return nil, err
@@ -181,6 +210,13 @@ func (s *source) guestGraphQL(ctx context.Context, path string, values url.Value
 				s.engine.slowXRequests()
 				return nil, &xapi.RateLimitedError{Path: queueForPath(path), RetryAt: rateLimitReset(reply.header, s.engine.now()), Cause: apiErr}
 			}
+			if transient < 2 && xapi.IsTransientError(apiErr) {
+				transient++
+				if err := s.engine.retrySleep(ctx, transient-1); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			return nil, apiErr
 		}
 		return reply.payload, nil
@@ -188,6 +224,11 @@ func (s *source) guestGraphQL(ctx context.Context, path string, values url.Value
 }
 
 func (s *source) doGuestRequest(ctx context.Context, path string, values url.Values, token string) (*response, error) {
+	if !s.engine.opts.DisablePacing {
+		if _, _, ok := splitGraphQLPath(path); ok {
+			s.engine.queryIDs.ensureFresh(ctx, s.engine, s.proxy)
+		}
+	}
 	transport, err := s.engine.transport(s.proxy)
 	if err != nil {
 		return nil, err
@@ -215,7 +256,11 @@ func (s *source) doGuestRequest(ctx context.Context, path string, values url.Val
 	if err := s.engine.paceProcess(ctx); err != nil {
 		return nil, err
 	}
-	return doRequest(newHTTPClient(transport), request), nil
+	reply := doRequest(newHTTPClient(transport), request)
+	if reply.err != nil {
+		return nil, reply.err
+	}
+	return reply, nil
 }
 
 func guestHTTPError(reply *response) error {
@@ -226,20 +271,50 @@ func guestHTTPError(reply *response) error {
 	return httpErr
 }
 
-// rateLimitReset 解析 x-rate-limit-reset（unix 秒）与 Retry-After，缺失时用默认值。
+// rateLimitReset 解析 x-rate-limit-reset（unix 秒或毫秒）与 Retry-After，缺失时用默认值，并限制最长 24 小时。
 func rateLimitReset(header http.Header, now time.Time) time.Time {
+	now = now.UTC()
+	maxReset := now.Add(maxRateLimitWait)
 	if header != nil {
 		if raw := strings.TrimSpace(header.Get("X-Rate-Limit-Reset")); raw != "" {
-			if unix, err := strconv.ParseInt(raw, 10, 64); err == nil {
-				reset := time.Unix(unix, 0).UTC()
-				if reset.After(now) {
-					return reset
+			if unix, err := strconv.ParseInt(raw, 10, 64); err == nil && unix > 0 {
+				if unix > 1_000_000_000_000 {
+					if unix >= maxReset.UnixMilli() {
+						return maxReset
+					}
+					if reset := time.UnixMilli(unix).UTC(); reset.After(now) {
+						return reset
+					}
+				} else {
+					if unix >= maxReset.Unix() {
+						return maxReset
+					}
+					if reset := time.Unix(unix, 0).UTC(); reset.After(now) {
+						return reset
+					}
 				}
+			} else if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-") {
+				return maxReset
 			}
 		}
 		if raw := strings.TrimSpace(header.Get("Retry-After")); raw != "" {
-			if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds > 0 {
+				maxSeconds := int64(maxRateLimitWait / time.Second)
+				if seconds > maxSeconds {
+					seconds = maxSeconds
+				}
 				return now.Add(time.Duration(seconds) * time.Second)
+			} else if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-") {
+				return maxReset
+			}
+			if at, err := http.ParseTime(raw); err == nil {
+				at = at.UTC()
+				if at.After(now) {
+					if at.After(maxReset) {
+						return maxReset
+					}
+					return at
+				}
 			}
 		}
 	}

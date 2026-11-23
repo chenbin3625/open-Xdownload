@@ -69,3 +69,47 @@ it("filters schedules by target and restores the list from an empty result", asy
   await user.click(screen.getByRole("button", { name: "清除筛选" }));
   expect(screen.getByRole("button", { name: "Mixed archive" })).toBeTruthy();
 });
+
+it("disables per-target remove buttons while saving an edited schedule", async () => {
+  const user = userEvent.setup();
+  let finish!: (value: api.ArchiveSchedule) => void;
+  vi.mocked(api.updateArchiveSchedule).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  renderSchedules();
+  await user.click(screen.getByRole("button", { name: "编辑计划 Mixed archive" }));
+  const removeBtn = screen.getByRole("button", { name: "移除目标 1" }) as HTMLButtonElement;
+  expect(removeBtn.disabled).toBe(false);
+  await user.click(screen.getByRole("button", { name: "保存计划" }));
+  await waitFor(() => expect((screen.getByRole("button", { name: "移除目标 1" }) as HTMLButtonElement).disabled).toBe(true));
+  await act(async () => finish(schedule));
+});
+
+it("does not coerce cleared interval to 0 and trims target inputs before submission", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.updateArchiveSchedule).mockResolvedValue(schedule);
+  renderSchedules();
+
+  await user.click(screen.getByRole("button", { name: "编辑计划 Mixed archive" }));
+  const intervalInput = screen.getByRole("spinbutton", { name: "调度频率 (分钟)" }) as HTMLInputElement;
+  await user.clear(intervalInput);
+  expect(intervalInput.value).toBe("");
+  expect((screen.getByRole("button", { name: "保存计划" }) as HTMLButtonElement).disabled).toBe(true);
+
+  await user.type(intervalInput, "30");
+  const nameInput = screen.getByRole("textbox", { name: "计划名称" });
+  await user.clear(nameInput);
+  await user.type(nameInput, "  Trimmed schedule  ");
+  const targetInput = screen.getByRole("textbox", { name: "目标 1" });
+  await user.clear(targetInput);
+  await user.type(targetInput, "  @charlie  ");
+
+  await user.click(screen.getByRole("button", { name: "保存计划" }));
+  await waitFor(() => expect(api.updateArchiveSchedule).toHaveBeenCalledWith(1, {
+    name: "Trimmed schedule",
+    enabled: false,
+    intervalMinutes: 30,
+    items: [
+      { ...schedule.items[0], input: "@charlie", title: undefined },
+      schedule.items[1],
+    ],
+  }));
+});

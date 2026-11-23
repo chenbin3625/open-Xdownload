@@ -137,6 +137,45 @@ describe("CreateJobModal", () => {
     errorToast.mockRestore();
   });
 
+  it.each(["success", "error"])("still surfaces %s toast when closed while submission is in flight", async (outcome) => {
+    let resolveCreate!: (job: api.Job) => void;
+    let rejectCreate!: (error: Error) => void;
+    vi.mocked(api.createJob).mockImplementation(() => new Promise((resolve, reject) => {
+      resolveCreate = resolve;
+      rejectCreate = reject;
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const successToast = vi.spyOn(toast, "success");
+    const errorToast = vi.spyOn(toast, "error");
+    function Harness() {
+      const [open, setOpen] = React.useState(true);
+      return <CreateJobModal open={open} initialKind="tweet_link" onClose={() => setOpen(false)} />;
+    }
+    renderWithProviders(<QueryClientProvider client={client}><Harness /></QueryClientProvider>);
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText("https://x.com/username/status/1234567890"), "https://x.com/first/status/1");
+    await user.click(screen.getByRole("button", { name: /立即下载/ }));
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    await act(async () => {
+      if (outcome === "success") {
+        resolveCreate({ id: 1, kind: "tweet_link", status: "pending", input: "", title: "", progress: 0, message: "", createdAt: "", updatedAt: "" });
+      } else {
+        rejectCreate(new Error("boom"));
+      }
+    });
+
+    if (outcome === "success") {
+      await waitFor(() => expect(successToast).toHaveBeenCalledWith(expect.objectContaining({ message: "任务创建成功" })));
+    } else {
+      await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    }
+    successToast.mockRestore();
+    errorToast.mockRestore();
+  });
+
   it("drops schedule wording once the single-tweet tab is selected", async () => {
     const user = userEvent.setup();
     renderModal({ initialKind: "schedule" });
@@ -235,7 +274,7 @@ describe("CreateJobModal", () => {
     await waitFor(() => expect(api.createJob).toHaveBeenCalledWith("tweet_link", "https://x.com/OpenAI/status/123", expect.any(String), { archiveMode: "both", backfill: false }));
   });
 
-  it("submits batchSize for tweet-mode schedules", async () => {
+  it("submits batchSize for tweet-mode schedules and avoids duplicate field ids or overridden modal width", async () => {
     const user = userEvent.setup();
     vi.mocked(api.createArchiveSchedule).mockResolvedValue({
       id: 1, name: "weekly", enabled: true, intervalMinutes: 360,
@@ -243,9 +282,20 @@ describe("CreateJobModal", () => {
     });
     renderModal({ initialKind: "schedule" });
 
+    // Modal width passed via Semi width prop rather than overridden utility class
+    const dialog = screen.getByRole("dialog");
+    expect((dialog.parentElement as HTMLElement | null)?.style.width).toBe("min(92vw, 44rem)");
+
     await user.type(screen.getByPlaceholderText(/elonmusk/), "alice");
+    await user.click(screen.getByRole("combobox", { name: "常用执行频率" }));
+    await user.click(screen.getByRole("option", { name: "自定义" }));
     await user.click(screen.getByRole("combobox", { name: "每轮目标范围" }));
     await user.click(screen.getByRole("option", { name: "限制数量" }));
+
+    // Ensure no duplicate IDs inside the dialog when both multi-control Field blocks render secondary NumberInputs
+    const ids = Array.from(dialog.querySelectorAll<HTMLElement>("[id]")).map(el => el.id);
+    expect(new Set(ids).size).toBe(ids.length);
+
     const input = screen.getByRole("spinbutton", { name: "每轮最多用户数" });
     await user.clear(input);
     await user.type(input, "50");
@@ -254,6 +304,76 @@ describe("CreateJobModal", () => {
     await waitFor(() => expect(api.createArchiveSchedule).toHaveBeenCalledTimes(1));
     expect(api.createArchiveSchedule).toHaveBeenCalledWith(expect.objectContaining({
       items: [expect.objectContaining({ input: "alice", batchSize: 50 })],
+    }));
+  });
+
+  it("computes effectiveBackfill as false for tweet_link and media-only mode, and resets options on success", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.createJob).mockResolvedValue({
+      id: 21, kind: "tweet_link", status: "pending", input: "", title: "", progress: 0,
+      message: "", createdAt: "", updatedAt: "",
+    });
+    vi.mocked(api.createJobsBatch).mockResolvedValue([{
+      id: 22, kind: "user", status: "pending", input: "alice", title: "alice", progress: 0,
+      message: "", createdAt: "", updatedAt: "",
+    }]);
+
+    function Harness() {
+      const [open, setOpen] = React.useState(true);
+      return <>
+        <button onClick={() => setOpen(true)}>Open</button>
+        <CreateJobModal open={open} onClose={() => setOpen(false)} />
+      </>;
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderWithProviders(<QueryClientProvider client={client}><Harness /></QueryClientProvider>);
+
+    // Enable backfill on user tab, then switch to tweet_link
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("tab", { name: /单条推文/ }));
+    await user.type(screen.getByPlaceholderText("https://x.com/username/status/1234567890"), "https://x.com/OpenAI/status/9");
+    await user.click(screen.getByRole("button", { name: /立即下载/ }));
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledWith("tweet_link", "https://x.com/OpenAI/status/9", expect.any(String), { archiveMode: "both", backfill: false }));
+
+    // Reopen and verify backfill was reset to false
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+
+    // Enable backfill, switch archiveMode to media, and submit batch
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("combobox", { name: "归档内容" }));
+    await user.click(screen.getByRole("option", { name: "仅媒体" }));
+    await user.type(screen.getByPlaceholderText(/elonmusk/), "alice");
+    await user.click(screen.getByRole("button", { name: /批量下载/ }));
+
+    await waitFor(() => expect(api.createJobsBatch).toHaveBeenCalledWith({
+      items: [{ kind: "user", input: "alice", archiveMode: "media", backfill: false }],
+    }));
+  });
+
+  it("allows clearing custom intervalMinutes without snapping back and guards duplicate parseTweet", async () => {
+    let resolveParse!: (tweet: api.TweetData) => void;
+    vi.mocked(api.parseTweetLink).mockImplementation(() => new Promise(r => { resolveParse = r; }));
+    const user = userEvent.setup();
+    renderModal({ initialKind: "schedule" });
+
+    await user.type(screen.getByPlaceholderText(/elonmusk/), "alice");
+    await user.click(screen.getByRole("combobox", { name: "常用执行频率" }));
+    await user.click(screen.getByRole("option", { name: "自定义" }));
+    const intervalInput = screen.getByRole("spinbutton", { name: "调度频率 (分钟)" }) as HTMLInputElement;
+    await user.clear(intervalInput);
+    expect(intervalInput.value).toBe("");
+    expect(screen.getByRole("button", { name: /保存定时计划/ }).hasAttribute("disabled")).toBe(true);
+
+    // Switch to tweet_link and press Enter twice while parse is pending
+    await user.click(screen.getByRole("tab", { name: /单条推文/ }));
+    const tweetInput = screen.getByPlaceholderText("https://x.com/username/status/1234567890");
+    await user.type(tweetInput, "https://x.com/OpenAI/status/1{Enter}{Enter}");
+    expect(api.parseTweetLink).toHaveBeenCalledTimes(1);
+    await act(async () => resolveParse({
+      id: "1", url: "https://x.com/OpenAI/status/1", text: "ok", createdAt: "",
+      author: { id: "OpenAI", screenName: "OpenAI", name: "OpenAI" }, media: [],
     }));
   });
 });

@@ -1,13 +1,16 @@
 package parser
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/tidwall/gjson"
 )
 
@@ -618,5 +621,231 @@ func TestMediaIDSnowflakeFirstAndStableHashFallback(t *testing.T) {
 	items := parseSyndicationMedia(payload, ParseOptions{})
 	if len(items) != 1 || !strings.HasPrefix(items[0].ID, "url-") {
 		t.Fatalf("syndication photo ID = %+v, want stable url-<hash>", items)
+	}
+}
+
+func TestParseSyndicationTweetDoesNotMutateClientEnforcesRedirectAndLimit(t *testing.T) {
+	redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://attacker.example/other", http.StatusFound)
+	}))
+	defer redirectServer.Close()
+
+	service := NewService()
+	service.syndicationURL = redirectServer.URL
+	callerCheckCalled := false
+	callerClient := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			callerCheckCalled = true
+			return nil
+		},
+	}
+	origCheck := callerClient.CheckRedirect
+	origTransport := callerClient.Transport
+
+	if _, err := service.ParseTweetLinkWithClient(context.Background(), "https://x.com/a/status/101", callerClient, ParseOptions{}); err == nil {
+		t.Fatal("expected foreign redirect from syndication endpoint to be rejected")
+	}
+	if callerCheckCalled {
+		t.Fatal("restricted redirect check should reject before caller CheckRedirect runs")
+	}
+	if callerClient.Transport != origTransport || callerClient.CheckRedirect == nil {
+		t.Fatal("caller http.Client was mutated")
+	}
+	// Verify callerClient.CheckRedirect is still the original function.
+	_ = origCheck(nil, nil)
+	if !callerCheckCalled {
+		t.Fatal("callerClient.CheckRedirect was replaced")
+	}
+
+	// Oversized response body (>4MB) must return ErrBodyTooLarge instead of silent truncation.
+	largeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte{'a'}, (4<<20)+10))
+	}))
+	defer largeServer.Close()
+	service.syndicationURL = largeServer.URL
+	if _, err := service.ParseTweetLinkWithClient(context.Background(), "https://x.com/a/status/102", largeServer.Client(), ParseOptions{}); !errors.Is(err, httpx.ErrBodyTooLarge) {
+		t.Fatalf("oversized syndication err = %v, want ErrBodyTooLarge", err)
+	}
+}
+
+func TestGraphQLVideoDeduplicatesThumbnailPhoto(t *testing.T) {
+	result := gjson.Parse(`{
+		"__typename": "Tweet",
+		"rest_id": "300",
+		"core": {"user_results": {"result": {"legacy": {"name": "User", "screen_name": "user"}}}},
+		"legacy": {
+			"full_text": "video tweet",
+			"created_at": "Tue Jan 12 23:02:33 +0000 2021",
+			"extended_entities": {"media": [{
+				"id_str": "999000",
+				"type": "video",
+				"media_url_https": "https://pbs.twimg.com/ext_tw_video_thumb/999000/pu/img/thumb.jpg",
+				"video_info": {"variants": [
+					{"bitrate": 2176000, "content_type": "video/mp4", "url": "https://video.twimg.com/ext_tw_video/999000/pu/vid/1280x720/v.mp4"}
+				]}
+			}]},
+			"entities": {"media": [{
+				"id_str": "999000",
+				"type": "photo",
+				"media_url_https": "https://pbs.twimg.com/ext_tw_video_thumb/999000/pu/img/thumb.jpg"
+			}]}
+		}
+	}`)
+	tweet, err := TweetFromGraphQLResult("", "user", "300", result)
+	if err != nil {
+		t.Fatalf("TweetFromGraphQLResult: %v", err)
+	}
+	if len(tweet.Media) != 1 || tweet.Media[0].Type != MediaVideo {
+		t.Fatalf("expected 1 video media without duplicate thumbnail photo, got %#v", tweet.Media)
+	}
+}
+
+func TestIsPhotoMediaURLBlocksTrailingDotAndDotDotTraversal(t *testing.T) {
+	if isPhotoMediaURL("https://pbs.twimg.com./profile_images/1/avatar.jpg") {
+		t.Fatal("trailing dot pbs.twimg.com. must not bypass profile_images check")
+	}
+	if isPhotoMediaURL("https://pbs.twimg.com/media/../profile_images/1/avatar.jpg") {
+		t.Fatal("dot-dot traversal must not bypass /media/ prefix check")
+	}
+	if !isPhotoMediaURL("https://pbs.twimg.com/media/abc.jpg") {
+		t.Fatal("valid pbs.twimg.com/media/ path rejected")
+	}
+}
+
+func TestCollectMediaURLsHandlesEscapedUnicodeQuery(t *testing.T) {
+	unifiedCard := `{"component_objects":{"c1":{"data":{"image_url":"https://pbs.twimg.com/media/abc?name=small&format=jpg"}}}}`
+	result := gjson.Parse(`{
+		"__typename": "Tweet",
+		"rest_id": "400",
+		"core": {"user_results": {"result": {"legacy": {"name": "User", "screen_name": "user"}}}},
+		"legacy": {"full_text": "card", "created_at": "Tue Jan 12 23:02:33 +0000 2021"},
+		"card": {"legacy": {"binding_values": [
+			{"key": "unified_card", "value": {"string_value": ` + strconv.Quote(unifiedCard) + `}}
+		]}}
+	}`)
+	tweet, err := TweetFromGraphQLResult("", "user", "400", result)
+	if err != nil {
+		t.Fatalf("TweetFromGraphQLResult: %v", err)
+	}
+	urls := tweet.BestMediaURLs()
+	want := "https://pbs.twimg.com/media/abc?name=small&format=jpg"
+	if len(urls) != 1 || urls[0] != want {
+		t.Fatalf("urls = %#v, want [%q]", urls, want)
+	}
+}
+
+func TestTweetRelationsSkipNullAndEmptyObjects(t *testing.T) {
+	gql := gjson.Parse(`{
+		"rest_id": "500",
+		"legacy": {"full_text": "main", "created_at": "Tue Jan 12 23:02:33 +0000 2021"},
+		"quoted_tweet_results": {"result": null},
+		"quoted_status_result": {"result": {"rest_id": "501", "legacy": {"full_text": "quoted", "created_at": "Tue Jan 12 23:01:33 +0000 2021"}}}
+	}`)
+	tweet, err := TweetFromGraphQLResultWithOptions("", "user", "500", gql, ParseOptions{RequireRelated: true})
+	if err != nil || tweet.QuotedTweetID != "501" || len(tweet.Related) != 1 {
+		t.Fatalf("GraphQL null relation not skipped: %+v, %v", tweet, err)
+	}
+
+	syn := gjson.Parse(`{
+		"id_str": "500",
+		"text": "main",
+		"created_at": "2026-11-10T12:00:00.000Z",
+		"user": {"id_str": "1", "screen_name": "user"},
+		"quoted_tweet": {},
+		"quoted_status": {"id_str": "501", "text": "quoted", "created_at": "2026-11-10T11:00:00.000Z", "user": {"id_str": "2", "screen_name": "other"}}
+	}`)
+	synTweet, err := tweetFromSyndication("", "user", "500", syn, ParseOptions{RequireRelated: true})
+	if err != nil || synTweet.QuotedTweetID != "501" || len(synTweet.Related) != 1 {
+		t.Fatalf("syndication empty relation not skipped: %+v, %v", synTweet, err)
+	}
+}
+
+func TestBestVariantIsMP4VariantPatternAndV8Base36Overflow(t *testing.T) {
+	// Bitrate tie broken by resolutionPixels.
+	best := BestVariant([]MediaVariant{
+		{URL: "https://video.twimg.com/ext_tw_video/1/pu/vid/640x360/low.mp4", ContentType: "video/mp4", Bitrate: 0},
+		{URL: "https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/high.mp4", ContentType: "video/mp4", Bitrate: 0},
+	})
+	if best.URL != "https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/high.mp4" {
+		t.Fatalf("BestVariant tie-break = %q, want 1280x720", best.URL)
+	}
+
+	if isMP4Variant(MediaVariant{URL: "https://video.twimg.com/clip.mp4/playlist.m3u8", ContentType: "application/x-mpegURL"}) {
+		t.Fatal("non-mp4 ContentType must be rejected")
+	}
+	if isMP4Variant(MediaVariant{URL: "https://video.twimg.com/clip.mp4.m3u8"}) {
+		t.Fatal(".mp4.m3u8 must be rejected")
+	}
+	if !mediaURLPattern.MatchString("HTTPS://PBS.TWIMG.COM/media/foo.jpg") {
+		t.Fatal("mediaURLPattern must match case-insensitively")
+	}
+	if _, ok := v8Base36(1e20); ok {
+		t.Fatal("v8Base36(1e20) should return ok=false rather than overflowing int64")
+	}
+}
+
+func TestExtractTweetURLRestrictsScreenNameAndWebStatus(t *testing.T) {
+	for _, raw := range []string{
+		"https://x.com/i/web/status/12345",
+		"https://x.com/I/WEB/status/12345?s=20",
+		"https://twitter.com/i/web/status/12345",
+	} {
+		user, id, err := ExtractTweetURL(raw)
+		if err != nil || user != "" || id != "12345" {
+			t.Fatalf("ExtractTweetURL(%q) = (%q, %q, %v), want (\"\", \"12345\", nil)", raw, user, id, err)
+		}
+	}
+	for _, invalid := range []string{
+		"https://x.com/../status/12345",
+		"https://x.com/./status/12345",
+		"https://x.com/user-name/status/12345",
+		"https://x.com/abcdefghijklmnop/status/12345",
+		"https://x.com/a%2Fb/status/12345",
+	} {
+		if user, id, err := ExtractTweetURL(invalid); err == nil {
+			t.Fatalf("ExtractTweetURL(%q) = (%q, %q, nil), want error", invalid, user, id)
+		}
+	}
+	for _, badFallback := range []string{"..", ".", "i/web", "bad-name", "abcdefghijklmnop"} {
+		if author := parseAuthor(gjson.Parse(`{}`), badFallback); author.ScreenName != "" {
+			t.Fatalf("parseAuthor fallback %q leaked into ScreenName=%q", badFallback, author.ScreenName)
+		}
+	}
+}
+
+func TestMediaFromURLInspectsPathExtensionOnly(t *testing.T) {
+	for _, bypass := range []string{
+		"https://pbs.twimg.com/profile_images/1/avatar.jpg?x=.mp4",
+		"https://pbs.twimg.com/profile_images/1/avatar.jpg#.mp4",
+		"https://pbs.twimg.com/card_img/1/banner.png?fake=.mp4",
+	} {
+		if m := mediaFromURL(bypass); m.URL != "" || m.BestURL != "" {
+			t.Fatalf("mediaFromURL(%q) = %+v, want empty (must not bypass photo whitelist via query/fragment .mp4)", bypass, m)
+		}
+	}
+	video := mediaFromURL("https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/clip.mp4?tag=12")
+	if video.Type != MediaVideo || video.BestURL == "" {
+		t.Fatalf("mediaFromURL valid mp4 = %+v, want MediaVideo", video)
+	}
+}
+
+func TestMediaURLPatternTightBoundaries(t *testing.T) {
+	text := `{"u":"https://pbs.twimg.com/media/abc.jpg","v":"https://video.twimg.com/ext_tw_video/1/v.mp4"}; see (https://pbs.twimg.com/media/def.png), https://pbs.twimg.com/media/ghi.jpg! https://pbs.twimg.com/media/jkl.jpg... https://pbs.twimg.com.evil.com/media/nope.jpg`
+	got := mediaURLPattern.FindAllString(text, -1)
+	want := []string{
+		"https://pbs.twimg.com/media/abc.jpg",
+		"https://video.twimg.com/ext_tw_video/1/v.mp4",
+		"https://pbs.twimg.com/media/def.png",
+		"https://pbs.twimg.com/media/ghi.jpg",
+		"https://pbs.twimg.com/media/jkl.jpg",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("mediaURLPattern.FindAllString = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("match[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

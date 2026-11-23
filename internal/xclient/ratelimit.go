@@ -2,11 +2,17 @@ package xclient
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+// maxRateLimitWait caps externally supplied Retry-After / X-Rate-Limit-Reset
+// headers so a malformed or millisecond timestamp cannot lock a client for years.
+const maxRateLimitWait = 24 * time.Hour
 
 type rateLimitState struct {
 	remaining   int
@@ -22,6 +28,7 @@ type rateLimiter struct {
 	limits        map[string]rateLimitState
 	lastPrune     time.Time
 	accountUntil  time.Time
+	wafUntil      time.Time
 	limitedStreak int
 	lastLimited   time.Time
 }
@@ -125,6 +132,7 @@ func (rl *rateLimiter) pacingOnly(path string) bool {
 }
 
 func (rl *rateLimiter) after(path string, header http.Header) {
+	now := time.Now()
 	limitRaw := header.Get("X-Rate-Limit-Limit")
 	remainingRaw := header.Get("X-Rate-Limit-Remaining")
 	resetRaw := header.Get("X-Rate-Limit-Reset")
@@ -133,32 +141,36 @@ func (rl *rateLimiter) after(path string, header http.Header) {
 		// 否则 before() 不会阻塞、do() 仅以固定退避重试，对活动 429 形成速射。
 		if ra := parseRetryAfter(header); ra > 0 {
 			rl.mu.Lock()
-			rl.limits[path] = rateLimitState{remaining: 0, limit: 1, reset: time.Now().Add(ra), ready: true}
+			state := rl.limits[path]
+			state.remaining = 0
+			state.limit = max(1, state.limit)
+			state.reset = maxTime(state.reset, now.Add(ra))
+			state.ready = true
+			rl.limits[path] = state
 			rl.mu.Unlock()
 		}
 		return
 	}
-	limit, err := strconv.Atoi(limitRaw)
+	limit, err := strconv.Atoi(strings.TrimSpace(limitRaw))
 	if err != nil {
 		return
 	}
-	remaining, err := strconv.Atoi(remainingRaw)
+	remaining, err := strconv.Atoi(strings.TrimSpace(remainingRaw))
 	if err != nil {
 		return
 	}
-	resetUnix, err := strconv.ParseInt(resetRaw, 10, 64)
-	if err != nil {
+	reset, ok := parseRateLimitReset(resetRaw, now)
+	if !ok {
 		return
 	}
-	reset := time.Unix(resetUnix, 0)
 	if limit <= 0 {
 		return
 	}
 	remaining = max(0, min(remaining, limit))
 	var next time.Time
-	if remaining > max(1, limit/50) && time.Now().Before(reset) {
-		interval := time.Duration(float64(time.Until(reset)) / (float64(remaining) * 0.8))
-		next = time.Now().Add(max(3*time.Second, interval))
+	if remaining > max(1, limit/50) && now.Before(reset) {
+		interval := time.Duration(float64(reset.Sub(now)) / (float64(remaining) * 0.8))
+		next = now.Add(max(3*time.Second, interval))
 	}
 	rl.mu.Lock()
 	failures := rl.limits[path].failures
@@ -215,10 +227,54 @@ func (rl *rateLimiter) markAccountCooldown(block time.Duration) {
 	rl.accountUntil = maxTime(rl.accountUntil, time.Now().Add(block))
 }
 
+func (rl *rateLimiter) markWAFCooldown(path string, block time.Duration) {
+	if block <= 0 {
+		block = time.Minute
+	}
+	now := time.Now()
+	until := now.Add(block)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.accountUntil = maxTime(rl.accountUntil, until)
+	rl.wafUntil = maxTime(rl.wafUntil, until)
+	state := rl.limits[path]
+	if state.limit <= 0 {
+		state.limit = 1
+	}
+	state.remaining = 0
+	state.reset = maxTime(state.reset, until)
+	state.ready = true
+	rl.limits[path] = state
+}
+
+func (rl *rateLimiter) isWAFBlocked() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return !rl.wafUntil.IsZero() && time.Now().Before(rl.wafUntil.Add(5*time.Second))
+}
+
+func (rl *rateLimiter) hasActiveBlocks(now time.Time) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if !rl.accountUntil.IsZero() && rl.accountUntil.Add(5*time.Second).After(now) {
+		return true
+	}
+	if !rl.wafUntil.IsZero() && rl.wafUntil.Add(5*time.Second).After(now) {
+		return true
+	}
+	for path := range rl.limits {
+		if rl.readyAtLocked(path, now).After(now) {
+			return true
+		}
+	}
+	return false
+}
+
 func (rl *rateLimiter) succeeded(path string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	rl.limitedStreak = 0
+	rl.wafUntil = time.Time{}
 	state, ok := rl.limits[path]
 	if ok {
 		state.failures = 0
@@ -265,22 +321,56 @@ func (rl *rateLimiter) refund(path string) {
 	}
 }
 
+// parseRateLimitReset 解析 X-Rate-Limit-Reset（秒级或毫秒级 Unix 时间戳），
+// 并将复位时间封顶在 now+maxRateLimitWait，防止异常大值或毫秒时间戳锁死客户端。
+func parseRateLimitReset(raw string, now time.Time) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	maxReset := now.Add(maxRateLimitWait)
+	resetUnix, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-") {
+			return maxReset, true
+		}
+		return time.Time{}, false
+	}
+	if resetUnix <= 0 {
+		return time.Time{}, false
+	}
+	var reset time.Time
+	if resetUnix > 1_000_000_000_000 {
+		reset = time.UnixMilli(resetUnix)
+	} else {
+		reset = time.Unix(resetUnix, 0)
+	}
+	if reset.After(maxReset) {
+		return maxReset, true
+	}
+	return reset, true
+}
+
 // parseRetryAfter 解析 Retry-After 响应头（秒数或 HTTP-date），无法解析返回 0。
-// 保留完整冷却期限；长等待由调度器延迟入队，不占用任务执行槽。
+// 保留服务器冷却期限，但封顶在 maxRateLimitWait（24 小时），避免异常头值锁死账号数百年。
 func parseRetryAfter(header http.Header) time.Duration {
-	raw := header.Get("Retry-After")
+	raw := strings.TrimSpace(header.Get("Retry-After"))
 	if raw == "" {
 		return 0
 	}
 	if secs, err := strconv.ParseUint(raw, 10, 64); err == nil {
-		const maxDuration = time.Duration(1<<63 - 1)
-		if secs > uint64(maxDuration/time.Second) {
-			return maxDuration
+		if secs > uint64(maxRateLimitWait/time.Second) {
+			return maxRateLimitWait
 		}
 		return time.Duration(secs) * time.Second
+	} else if errors.Is(err, strconv.ErrRange) {
+		return maxRateLimitWait
 	}
 	if t, err := http.ParseTime(raw); err == nil {
 		if d := time.Until(t); d > 0 {
+			if d > maxRateLimitWait {
+				return maxRateLimitWait
+			}
 			return d
 		}
 	}
@@ -303,8 +393,17 @@ func (rl *rateLimiter) blockedReset(paths ...string) (time.Time, bool) {
 	found := false
 	now := time.Now()
 	if len(paths) > 0 {
-		reset := rl.readyAtLocked(paths[0], now)
-		return reset, reset.After(now)
+		for _, path := range paths {
+			reset := rl.readyAtLocked(path, now)
+			if !reset.After(now) {
+				continue
+			}
+			if !found || reset.Before(earliest) {
+				earliest = reset
+				found = true
+			}
+		}
+		return earliest, found
 	}
 	for path := range rl.limits {
 		reset := rl.readyAtLocked(path, now)
@@ -325,6 +424,7 @@ func (rl *rateLimiter) blockedReset(paths ...string) (time.Time, bool) {
 func (rl *rateLimiter) snapshot() []RateLimitSnapshot {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	now := time.Now()
 	items := make([]RateLimitSnapshot, 0, len(rl.limits))
 	for path, state := range rl.limits {
 		if !state.ready {
@@ -335,10 +435,10 @@ func (rl *rateLimiter) snapshot() []RateLimitSnapshot {
 			Limit:     state.limit,
 			Remaining: state.remaining,
 			Reset:     state.reset,
-			Blocked:   rl.readyAtLocked(path, time.Now()).After(time.Now()),
+			Blocked:   rl.readyAtLocked(path, now).After(now),
 		})
 	}
-	if rl.accountUntil.After(time.Now()) {
+	if rl.accountUntil.After(now) {
 		items = append(items, RateLimitSnapshot{Path: "*", Reset: rl.accountUntil, Blocked: true})
 	}
 	return items

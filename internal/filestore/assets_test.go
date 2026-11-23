@@ -2,7 +2,10 @@ package filestore
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,5 +182,250 @@ func TestS3AssetConditionalWriteAndSeek(t *testing.T) {
 	data, err := io.ReadAll(file)
 	if err != nil || size != 16 || string(data) != "-video" {
 		t.Fatalf("S3 seek: %q %d %v", data, size, err)
+	}
+}
+
+func TestOpenAssetValidatesRootAndAbs(t *testing.T) {
+	ctx := context.Background()
+	if _, _, err := OpenAsset(ctx, config.StorageTarget{Type: "local", Root: "relative/dir"}, "a.jpg"); err == nil {
+		t.Fatal("expected error for relative root")
+	}
+	if _, _, err := OpenAsset(ctx, config.StorageTarget{Type: "local", Root: "/"}, "a.jpg"); err == nil {
+		t.Fatal("expected error for filesystem root")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if _, _, err := OpenAsset(ctx, config.StorageTarget{Type: "local", Root: home}, "a.jpg"); err == nil {
+			t.Fatal("expected error for home directory root")
+		}
+	}
+}
+
+func TestS3ClientValidationAndLRUCache(t *testing.T) {
+	invalidTargets := []config.StorageTarget{
+		{Type: "s3", Endpoint: "ftp://s3.example.com"},
+		{Type: "s3", Endpoint: "https://s3.example.com?foo=bar"},
+		{Type: "s3", Endpoint: "https://s3.example.com#frag"},
+		{Type: "s3", Endpoint: "https://s3.example.com/subpath"},
+		{Type: "s3", Endpoint: "http://169.254.169.254:9000"},
+		{Type: "s3", Endpoint: "http://[fe80::1]:9000"},
+		{Type: "s3", Endpoint: "http://[fd00:ec2::254]:9000"},
+		{Type: "s3", Endpoint: "http://100.100.100.200:9000"},
+		{Type: "s3", Endpoint: "http://[::ffff:100.100.100.200]:9000"},
+		{Type: "s3", Endpoint: "http://0.0.0.0:9000"},
+		{Type: "s3", Endpoint: "http://[::]:9000"},
+		{Type: "s3", Endpoint: "http://0xa9fea9fe:9000"},
+		{Type: "s3", Endpoint: "http://0251.0376.0251.0376:9000"},
+		{Type: "s3", Endpoint: "http://2852039166:9000"},
+		{Type: "s3", Endpoint: "http://0x64.0x64.0x64.0xc8:9000"},
+	}
+	for _, target := range invalidTargets {
+		if _, err := S3Client(target); err == nil {
+			t.Errorf("S3Client(%q) = nil error, want rejection", target.Endpoint)
+		}
+	}
+
+	s3Clients.Lock()
+	s3Clients.byKey = map[s3ClientKey]*s3ClientEntry{}
+	s3Clients.seq = 0
+	s3Clients.Unlock()
+
+	for i := 0; i < maxS3Clients+5; i++ {
+		target := config.StorageTarget{
+			Type:      "s3",
+			Endpoint:  "https://s3.example.com",
+			Region:    "us-east-1",
+			AccessKey: fmt.Sprintf("ak-%d", i),
+			SecretKey: fmt.Sprintf("sk-%d", i),
+		}
+		if _, err := S3Client(target); err != nil {
+			t.Fatalf("S3Client(%d) err = %v", i, err)
+		}
+	}
+	s3Clients.Lock()
+	cacheLen := len(s3Clients.byKey)
+	s3Clients.Unlock()
+	if cacheLen > maxS3Clients {
+		t.Fatalf("S3Client cache size = %d, want <= %d", cacheLen, maxS3Clients)
+	}
+}
+
+func TestS3PutAssetRetries409AndReturnsEmptyKeyOnError(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			attempts++
+			if attempts == 1 {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`<Error><Code>ConditionalRequestConflict</Code></Error>`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`<Error><Code>InternalError</Code></Error>`))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	source := filepath.Join(t.TempDir(), "src.jpg")
+	if err := os.WriteFile(source, []byte("img"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := config.StorageTarget{
+		Type:      "s3",
+		Endpoint:  server.URL,
+		Region:    "us-east-1",
+		Bucket:    "bkt",
+		AccessKey: "ak",
+		SecretKey: "sk",
+	}
+	gotKey, err := PutAsset(context.Background(), target, "dir/file.jpg", source, "image/jpeg", "asset-1")
+	if err == nil {
+		t.Fatal("expected S3 error on 500")
+	}
+	if gotKey != "" {
+		t.Fatalf("PutAsset returned non-empty key %q on error", gotKey)
+	}
+	if attempts < 2 {
+		t.Fatalf("expected 409 ConditionalRequestConflict retry, attempts = %d", attempts)
+	}
+}
+
+func TestPutAssetSanitizesAssetIDNonceAndRejectsNonRegular(t *testing.T) {
+	root := t.TempDir()
+	target := config.StorageTarget{ID: "local", Type: "local", Root: root}
+	ctx := context.Background()
+
+	// Non-regular source (directory) must be rejected.
+	dirSrc := t.TempDir()
+	if _, err := PutAsset(ctx, target, "dir/file.jpg", dirSrc, "image/jpeg", "id1"); err == nil {
+		t.Fatal("expected non-regular source rejection")
+	}
+
+	source := filepath.Join(t.TempDir(), "src.jpg")
+	if err := os.WriteFile(source, []byte("bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := PutAsset(ctx, target, "sub/item.jpg", source, "image/jpeg", "../bad/id")
+	if err != nil || first != "sub/item.jpg" {
+		t.Fatalf("first PutAsset = %q, %v", first, err)
+	}
+	// Seed a stale .part file; nonce ensures PutAsset doesn't fail with EEXIST.
+	if err := os.WriteFile(filepath.Join(root, "sub", ".asset-__bad_id.part"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := PutAsset(ctx, target, "sub/item.jpg", source, "image/jpeg", "../bad/id")
+	if err != nil {
+		t.Fatalf("second PutAsset with traversal assetID failed: %v", err)
+	}
+	if !strings.HasPrefix(second, "sub/item_") || !validAssetKey(second) {
+		t.Fatalf("unexpected collision key %q", second)
+	}
+}
+
+func TestPutAssetMultiCollisionTopLevelAndTempCleanup(t *testing.T) {
+	root := t.TempDir()
+	target := config.StorageTarget{ID: "local", Type: "local", Root: root}
+	ctx := context.Background()
+
+	source := filepath.Join(t.TempDir(), "src.jpg")
+	if err := os.WriteFile(source, []byte("payload-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Top-level key (parentDir == ".") must work cleanly.
+	topKey, err := PutAsset(ctx, target, "top.jpg", source, "image/jpeg", "a1")
+	if err != nil || topKey != "top.jpg" {
+		t.Fatalf("top-level PutAsset = %q, %v", topKey, err)
+	}
+
+	// Pre-populate 3 colliding candidates; PutAsset writes temp once and publishes at attempt 3.
+	subDir := filepath.Join(root, "sub")
+	if err := os.MkdirAll(subDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		cand := assetCollisionCandidate("sub/item.jpg", "id1", i)
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(cand)), []byte(fmt.Sprintf("existing-%d", i)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := PutAsset(ctx, target, "sub/item.jpg", source, "image/jpeg", "id1")
+	if err != nil {
+		t.Fatalf("multi-collision PutAsset err = %v", err)
+	}
+	if want := assetCollisionCandidate("sub/item.jpg", "id1", 3); got != want {
+		t.Fatalf("multi-collision key = %q, want %q", got, want)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(got))); err != nil || string(data) != "payload-bytes" {
+		t.Fatalf("published asset content = %q, %v", data, err)
+	}
+	if leftover, _ := filepath.Glob(filepath.Join(subDir, ".asset-*.part")); len(leftover) != 0 {
+		t.Fatalf("leftover temp files after success: %v", leftover)
+	}
+
+	// Exhaust all 10 candidates: must fail and clean up the single temp file.
+	for i := 4; i < 10; i++ {
+		cand := assetCollisionCandidate("sub/item.jpg", "id1", i)
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(cand)), []byte("busy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := PutAsset(ctx, target, "sub/item.jpg", source, "image/jpeg", "id1"); err == nil {
+		t.Fatal("expected collision exhaustion error")
+	}
+	if leftover, _ := filepath.Glob(filepath.Join(subDir, ".asset-*.part")); len(leftover) != 0 {
+		t.Fatalf("leftover temp files after exhaustion: %v", leftover)
+	}
+}
+
+func TestTemplatePathAndSegmentEdgeCases(t *testing.T) {
+	if validAssetKey(".") {
+		t.Fatal(`validAssetKey(".") = true, want false`)
+	}
+	if validAssetKey("a/b\x00c") {
+		t.Fatal("validAssetKey with NUL = true, want false")
+	}
+	if got := cleanAssetSegment("CONIN$"); got != "_CONIN$" {
+		t.Fatalf("cleanAssetSegment(CONIN$) = %q", got)
+	}
+	if got := cleanAssetSegment("CONOUT$.txt"); got != "_CONOUT$.txt" {
+		t.Fatalf("cleanAssetSegment(CONOUT$.txt) = %q", got)
+	}
+	if got := cleanAssetSegment("CON .jpg"); got != "_CON .jpg" {
+		t.Fatalf("cleanAssetSegment('CON .jpg') = %q", got)
+	}
+
+	// Leading dots mixed with Unicode whitespace / format controls must never yield hidden .preview-* names.
+	for _, raw := range []string{
+		". .preview-123",
+		"\u00a0.preview-123",
+		"\u3000.\u200b.preview-123",
+		"\u200d.preview-123",
+		"\ufeff\u202e.xdl-123",
+	} {
+		seg := cleanAssetSegment(raw)
+		if strings.HasPrefix(seg, ".") {
+			t.Fatalf("cleanAssetSegment(%q) = %q starts with dot", raw, seg)
+		}
+		key, err := TemplatePath(config.AssetRule{FilenameTemplate: "{text}.{ext}"}, config.AssetImage, parser.TweetData{Text: raw}, parser.Media{}, 0, "jpg")
+		if err != nil || strings.HasPrefix(filepath.Base(key), ".") {
+			t.Fatalf("TemplatePath(%q) = %q, %v; must not start with dot", raw, key, err)
+		}
+	}
+
+	key, err := TemplatePath(config.AssetRule{FilenameTemplate: "{tweet_id}.{ext}"}, config.AssetImage, parser.TweetData{ID: "123"}, parser.Media{}, 0, "")
+	if err != nil || key != "123" {
+		t.Fatalf("empty ext TemplatePath = %q, %v; want '123'", key, err)
+	}
+	longDotted := "v1." + strings.Repeat("x", 300)
+	key2, err := TemplatePath(config.AssetRule{FilenameTemplate: strings.Repeat("p", 200) + "{text}_{ext}"}, config.AssetImage, parser.TweetData{Text: longDotted}, parser.Media{}, 0, "jpg")
+	if err != nil || !strings.HasSuffix(key2, "_jpg") || len(key2) > config.MaxFilenameLength {
+		t.Fatalf("{text}_{ext} truncation failed: %q, %v", key2, err)
 	}
 }

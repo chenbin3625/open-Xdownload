@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -14,9 +15,18 @@ func acquireDataLock(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	for {
+		err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return file, nil
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
 		_ = file.Close()
-		return nil, fmt.Errorf("data directory is already in use: %w", err)
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return nil, fmt.Errorf("data directory is already in use: %w", err)
+		}
+		return nil, fmt.Errorf("lock data directory: %w", err)
 	}
-	return file, nil
 }

@@ -5,11 +5,11 @@ import { act, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { renderWithProviders, screen } from "../../test/render";
-import { getStorage, getTweets, saveStorage, type StorageDocument } from "../../lib/archive";
+import { getStorage, getTweets, migrateStorage, saveStorage, type StorageDocument } from "../../lib/archive";
 import { api } from "../../lib/api";
 import { StorageManagement } from "./StorageManagement";
 
-vi.mock("../../lib/archive", async original => ({ ...await original<typeof import("../../lib/archive")>(), getStorage: vi.fn(), getTweets: vi.fn(), saveStorage: vi.fn() }));
+vi.mock("../../lib/archive", async original => ({ ...await original<typeof import("../../lib/archive")>(), getStorage: vi.fn(), getTweets: vi.fn(), saveStorage: vi.fn(), migrateStorage: vi.fn() }));
 vi.mock("../../lib/api", async original => ({ ...await original<typeof import("../../lib/api")>(), api: vi.fn() }));
 
 const document: StorageDocument = {
@@ -22,7 +22,10 @@ const document: StorageDocument = {
 
 function renderStorage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return renderWithProviders(<QueryClientProvider client={client}><StorageManagement /></QueryClientProvider>);
+  return {
+    client,
+    ...renderWithProviders(<QueryClientProvider client={client}><StorageManagement /></QueryClientProvider>),
+  };
 }
 beforeEach(() => {
   vi.clearAllMocks();
@@ -193,4 +196,37 @@ it("copies the default rule when customizing a media type and restores inheritan
   expect(vi.mocked(saveStorage).mock.calls[1][0].rules.image).toBeUndefined();
   expect(screen.queryByRole("combobox", { name: "图片原文件 命名策略" })).toBeNull();
   expect(within(screen.getByRole("group", { name: "图片原文件" })).getByText(/命名策略: 媒体编号/)).toBeTruthy();
+});
+
+it("disables migration Popconfirm when disabled or dirty", async () => {
+  const user = userEvent.setup();
+  renderStorage();
+  const migrateBtn = await screen.findByRole("button", { name: "迁移历史资源" });
+  expect(migrateBtn.hasAttribute("disabled")).toBe(true);
+  await user.click(migrateBtn);
+  expect(screen.queryByText("将历史资源复制到已保存的存储策略？")).toBeNull();
+  expect(migrateStorage).not.toHaveBeenCalled();
+});
+
+it("does not mark StorageManagement dirty when switching FilenameStrategy to custom without changing template", async () => {
+  const user = userEvent.setup();
+  renderStorage();
+  await user.click(await screen.findByRole("button", { name: "展开默认规则" }));
+  expect(screen.queryByText("尚未保存")).toBeNull();
+  expect(screen.getByRole("button", { name: "保存存储设置" }).hasAttribute("disabled")).toBe(true);
+
+  await user.click(screen.getByRole("combobox", { name: "命名策略" }));
+  await user.click(screen.getByRole("option", { name: "自定义组合" }));
+
+  expect(screen.queryByText("尚未保存")).toBeNull();
+  expect(screen.getByRole("button", { name: "保存存储设置" }).hasAttribute("disabled")).toBe(true);
+});
+
+it("invalidates local-directories cache when reopening the local directory picker modal", async () => {
+  const user = userEvent.setup();
+  const { client } = renderStorage();
+  const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+  const browseBtn = await screen.findByRole("button", { name: "选择目录" });
+  await user.click(browseBtn);
+  expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["local-directories"] });
 });

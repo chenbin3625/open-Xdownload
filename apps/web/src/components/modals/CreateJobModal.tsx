@@ -5,12 +5,11 @@ import {
   Link as LinkIcon,
   List as ListIcon,
   Plus,
-  Sparkles,
   User,
   UserPlus,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   createArchiveSchedule,
   createJob,
@@ -28,7 +27,6 @@ import Button from "@douyinfe/semi-ui/lib/es/button";
 import RadioGroup from "@douyinfe/semi-ui/lib/es/radio/radioGroup";
 import { Checkbox, Tabs, type TabItem, Field, Input, NumberInput, Select, Textarea } from "../semi/controls";
 import { Modal } from "../semi/overlays";
-import { Spinner } from "../semi/feedback";
 import { Tag } from "../semi/data";
 import { toast } from "../semi/toast";
 
@@ -311,6 +309,8 @@ export function CreateJobModal({
 }: CreateJobModalProps) {
   useTranslation();
   const queryClient = useQueryClient();
+  const customIntervalId = useId();
+  const batchSizeId = useId();
   const [activeTab, setActiveTab] = useState<string>("user");
   const [archiveMode, setArchiveMode] = useState<ArchiveMode>("both");
   const [backfill, setBackfill] = useState(false);
@@ -326,8 +326,23 @@ export function CreateJobModal({
 
   const [isSchedule, setIsSchedule] = useState(false);
   const [scheduleName, setScheduleName] = useState("");
-  const [intervalMinutes, setIntervalMinutes] = useState(360);
+  const [intervalMinutes, setIntervalMinutes] = useState<number | null>(360);
   const [customFrequency, setCustomFrequency] = useState(false);
+  const openRef = useRef(open);
+  openRef.current = open;
+
+  const resetDraftAndOptions = () => {
+    setTweetUrl("");
+    setBatchInputs({});
+    setScheduleName("");
+    setIsSchedule(false);
+    setArchiveMode("both");
+    setBackfill(false);
+    setBatchSize(0);
+    setLimitTargets(false);
+    setIntervalMinutes(360);
+    setCustomFrequency(false);
+  };
 
   useEffect(() => {
     parseSequence.current += 1;
@@ -355,6 +370,7 @@ export function CreateJobModal({
 
   // 单条推文不支持定时计划：切到该标签时勾选状态保留（切回可恢复），但不参与任何展示与提交。
   const scheduleMode = isSchedule && activeTab !== "tweet_link";
+  const effectiveBackfill = activeTab !== "tweet_link" && archiveMode !== "media" && backfill;
 
   const currentBatchSummary = useMemo(() => {
     if (activeTab === "tweet_link") return { items: [], recognized: 0, pendingValidation: 0, duplicates: 0, invalid: 0, lines: [] };
@@ -364,9 +380,12 @@ export function CreateJobModal({
   const currentBatchItems = currentBatchSummary.items;
 
   function removeBatchLine(kind: BatchKind, lineNumber: number) {
-    const lines = (batchInputs[kind] ?? "").split(/\r?\n/);
-    lines.splice(lineNumber - 1, 1);
-    setBatchInputs(current => ({ ...current, [kind]: lines.join("\n") }));
+    setBatchInputs(current => {
+      const lines = (current[kind] ?? "").split(/\r?\n/);
+      if (lineNumber < 1 || lineNumber > lines.length) return current;
+      lines.splice(lineNumber - 1, 1);
+      return { ...current, [kind]: lines.join("\n") };
+    });
   }
 
   const parseMutation = useMutation({
@@ -385,7 +404,7 @@ export function CreateJobModal({
   });
 
   const createJobsMutation = useMutation({
-    onMutate: () => ({ sequence: createSequence.current, scheduleMode, intervalMinutes }),
+    onMutate: () => ({ sequence: createSequence.current, scheduleMode, intervalMinutes: intervalMinutes ?? 0 }),
     mutationFn: async () => {
       if (activeTab === "tweet_link") {
         const targetUrl = normalizeTweetURL(tweetUrl);
@@ -393,7 +412,7 @@ export function CreateJobModal({
         const title = parsedTweet
           ? t("推文 @{{value0}} ({{value1}})", { value0: parsedTweet.author.screenName, value1: parsedTweet.id })
           : `Tweet ${targetUrl.split("/").pop() || targetUrl}`;
-        return [await createJob("tweet_link", targetUrl, title, { archiveMode, backfill })];
+        return [await createJob("tweet_link", targetUrl, title, { archiveMode, backfill: effectiveBackfill })];
       }
 
       if (currentBatchItems.length === 0) {
@@ -401,6 +420,9 @@ export function CreateJobModal({
       }
 
       if (scheduleMode) {
+        if (intervalMinutes === null || !Number.isInteger(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 43200) {
+          throw new Error(t("调度频率 (分钟)"));
+        }
         const payload: ArchiveScheduleRequest = {
           name:
             scheduleName.trim() ||
@@ -408,35 +430,42 @@ export function CreateJobModal({
           enabled: true,
           intervalMinutes,
           items: currentBatchItems.map(item => ({
-            ...item, archiveMode, backfill,
-            batchSize: archiveMode === "media" ? 0 : batchSize,
+            ...item, archiveMode, backfill: effectiveBackfill,
+            batchSize: archiveMode === "media" || !limitTargets ? 0 : batchSize,
           })),
         };
         await createArchiveSchedule(payload);
         return [];
       }
 
-      return await createJobsBatch({ items: currentBatchItems.map(item => ({ ...item, archiveMode, backfill })) });
+      return await createJobsBatch({ items: currentBatchItems.map(item => ({ ...item, archiveMode, backfill: effectiveBackfill })) });
     },
     onSuccess: (jobs, _variables, request) => {
       void invalidateWorkbenchQueries(queryClient);
-      if (request?.sequence !== createSequence.current) return;
-      if (request.scheduleMode) {
-        toast.success({
-          message: t("定时归档计划已保存"),
-          description: formatIntervalMinutes(request.intervalMinutes),
-        });
-      } else {
-        toast.success({
-          message: t("任务创建成功"),
-          description: t("已成功入库 {{value0}} 个任务并开始后台下载", { value0: jobs.length }),
-        });
+      const isCurrent = request?.sequence === createSequence.current;
+      // 弹窗在提交期间被关闭且未重新打开时，仍然提示提交结果并重置草稿，避免静默丢失反馈。
+      if (isCurrent || !openRef.current) {
+        if (request?.scheduleMode) {
+          toast.success({
+            message: t("定时归档计划已保存"),
+            description: formatIntervalMinutes(request.intervalMinutes),
+          });
+        } else {
+          toast.success({
+            message: t("任务创建成功"),
+            description: t("已成功入库 {{value0}} 个任务并开始后台下载", { value0: jobs.length }),
+          });
+        }
+        resetDraftAndOptions();
+        if (isCurrent) {
+          handleClose();
+        }
       }
-      setTweetUrl(""); setBatchInputs({}); setScheduleName(""); setIsSchedule(false);
-      handleClose();
     },
     onError: (error, _variables, request) => {
-      if (request?.sequence === createSequence.current) notifyError(t("创建失败"))(error);
+      if (request?.sequence === createSequence.current || !openRef.current) {
+        notifyError(t("创建失败"))(error);
+      }
     },
   });
 
@@ -449,6 +478,7 @@ export function CreateJobModal({
   };
 
   const handleParseTweet = () => {
+    if (parseMutation.isPending) return;
     const trimmed = normalizeTweetURL(tweetUrl);
     if (!trimmed) return;
     setParsedTweet(null);
@@ -505,7 +535,8 @@ export function CreateJobModal({
     <Modal
       open={open}
       onClose={handleClose}
-      className="create-job-modal sm:w-[min(92vw,44rem)]"
+      width="min(92vw, 44rem)"
+      className="create-job-modal"
       title={
         <div className="flex items-center gap-3">
           <div className="flex size-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600">
@@ -533,7 +564,7 @@ export function CreateJobModal({
               {t("取消")}</Button>
             <Button
               theme="solid"
-              disabled={!canSubmit || createJobsMutation.isPending || scheduleMode && (!Number.isInteger(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 43200 || archiveMode !== "media" && limitTargets && (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1000))}
+              disabled={!canSubmit || createJobsMutation.isPending || (scheduleMode && (intervalMinutes === null || !Number.isInteger(intervalMinutes) || intervalMinutes < 5 || intervalMinutes > 43200 || (archiveMode !== "media" && limitTargets && (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1000))))}
               loading={createJobsMutation.isPending}
               aria-busy={createJobsMutation.isPending}
               onClick={() => createJobsMutation.mutate()}
@@ -585,13 +616,14 @@ export function CreateJobModal({
                   />
                 </Field>
                 <Field label={t("执行频率")}>
-                  <Select ariaLabel={t("常用执行频率")} value={!customFrequency && [30, 60, 360, 720, 1440].includes(intervalMinutes) ? String(intervalMinutes) : "custom"} onChange={value => { setCustomFrequency(value === "custom"); if (value !== "custom") setIntervalMinutes(Number(value)); }} options={[30, 60, 360, 720, 1440].map(value => ({ value: String(value), label: formatIntervalMinutes(value) })).concat([{ value: "custom", label: t("自定义") }])} />
-                  {(customFrequency || ![30, 60, 360, 720, 1440].includes(intervalMinutes)) && <NumberInput
+                  <Select ariaLabel={t("常用执行频率")} value={!customFrequency && intervalMinutes !== null && [30, 60, 360, 720, 1440].includes(intervalMinutes) ? String(intervalMinutes) : "custom"} onChange={value => { setCustomFrequency(value === "custom"); if (value !== "custom") setIntervalMinutes(Number(value)); }} options={[30, 60, 360, 720, 1440].map(value => ({ value: String(value), label: formatIntervalMinutes(value) })).concat([{ value: "custom", label: t("自定义") }])} />
+                  {(customFrequency || intervalMinutes === null || ![30, 60, 360, 720, 1440].includes(intervalMinutes)) && <NumberInput
+                    id={customIntervalId}
                     min={5}
                     aria-label={t("调度频率 (分钟)")}
                     max={43200}
                     value={intervalMinutes}
-                    onChange={(val) => setIntervalMinutes(val ?? 360)}
+                    onChange={(val) => setIntervalMinutes(val)}
                     addonAfter={t("分钟")}
                   />}
                 </Field>
@@ -600,7 +632,8 @@ export function CreateJobModal({
                     <Select ariaLabel={t("每轮目标范围")} value={limitTargets ? "limited" : "all"} onChange={value => { setLimitTargets(value === "limited"); setBatchSize(value === "all" ? 0 : 50); }} options={[{ value: "all", label: t("全部目标") }, { value: "limited", label: t("限制数量") }]} />
                     {limitTargets && <>
                     <NumberInput
-                      min={0}
+                      id={batchSizeId}
+                      min={1}
                       aria-label={t("每轮最多用户数")}
                       max={1000}
                       value={batchSize || null}

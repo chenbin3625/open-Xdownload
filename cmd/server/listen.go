@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -16,10 +17,11 @@ type listenOptions struct {
 }
 
 func (o listenOptions) validate() error {
-	if o.addr != "" {
-		if _, err := net.ResolveTCPAddr("tcp", o.addr); err != nil {
-			return fmt.Errorf("invalid listen address: %w", err)
-		}
+	if strings.TrimSpace(o.addr) == "" {
+		return fmt.Errorf("listen address must not be empty")
+	}
+	if _, err := net.ResolveTCPAddr("tcp", o.addr); err != nil {
+		return fmt.Errorf("invalid listen address: %w", err)
 	}
 	if (o.certFile == "") != (o.keyFile == "") {
 		return fmt.Errorf("tls-cert and tls-key must both be set")
@@ -62,7 +64,7 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 func withHTTP3AltSvc(next http.Handler, port string, available ...*atomic.Bool) http.Handler {
 	value := altSvcHeader(port)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(available) > 0 && !available[0].Load() {
+		if len(available) > 0 && available[0] != nil && !available[0].Load() {
 			w.Header().Set("Alt-Svc", "clear")
 		} else {
 			w.Header().Set("Alt-Svc", value)
@@ -81,6 +83,9 @@ func listenTCP(addr string) (net.Listener, error) {
 // ServeTLS; for plain HTTP it uses Serve.
 func serveHTTP(server *http.Server, ln net.Listener, opts listenOptions) error {
 	if opts.tlsEnabled() {
+		if server.TLSConfig != nil && len(server.TLSConfig.Certificates) > 0 {
+			return server.ServeTLS(ln, "", "")
+		}
 		return server.ServeTLS(ln, opts.certFile, opts.keyFile)
 	}
 	return server.Serve(ln)

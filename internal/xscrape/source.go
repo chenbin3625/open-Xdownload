@@ -3,6 +3,7 @@ package xscrape
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/url"
 	"sync"
@@ -38,19 +39,62 @@ func (r accountRequester) GraphQL(ctx context.Context, path string, values url.V
 	return r.source.doPinned(ctx, r.account, http.MethodGet, path, values, nil)
 }
 
+func (r accountRequester) viewerKey() string {
+	return xapi.ViewerKey(r.account.AuthToken)
+}
+
+type poolPageRequester struct {
+	source  *source
+	account storage.XAccount
+}
+
+func (r *poolPageRequester) GraphQL(ctx context.Context, path string, values url.Values) ([]byte, error) {
+	payload, account, err := r.source.graphQLWithAccount(ctx, path, values, nil)
+	if err != nil {
+		return nil, err
+	}
+	r.account = account
+	return payload, nil
+}
+
+func (r *poolPageRequester) viewerKey() string {
+	return xapi.ViewerKey(r.account.AuthToken)
+}
+
+type pageViewerRequester interface {
+	xapi.Requester
+	viewerKey() string
+}
+
 func (s *source) doPinned(ctx context.Context, account storage.XAccount, method, path string, query, form url.Values) ([]byte, error) {
+	current, err := s.engine.store.GetXAccount(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !current.Active {
+		return nil, xapi.ErrClientDisabled
+	}
 	queue := queueForPath(path)
-	if locked, until, err := s.engine.accountLockUntil(ctx, account.ID, queue); err != nil {
+	if locked, until, err := s.engine.accountLockUntil(ctx, current.ID, queue); err != nil {
 		return nil, err
 	} else if locked {
 		return nil, &xapi.RateLimitedError{Path: queue, RetryAt: until, PoolExhausted: true}
 	}
-	_, release, waited, err := s.engine.slots.acquire(ctx, account.ID)
+	_, release, waited, err := s.engine.slots.acquire(ctx, current.ID)
 	if err != nil {
 		return nil, err
 	}
 	if waited {
-		if locked, until, err := s.engine.accountLockUntil(ctx, account.ID, queue); err != nil {
+		current, err = s.engine.store.GetXAccount(ctx, current.ID)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		if !current.Active {
+			release()
+			return nil, xapi.ErrClientDisabled
+		}
+		if locked, until, err := s.engine.accountLockUntil(ctx, current.ID, queue); err != nil {
 			release()
 			return nil, err
 		} else if locked {
@@ -58,7 +102,7 @@ func (s *source) doPinned(ctx context.Context, account storage.XAccount, method,
 			return nil, &xapi.RateLimitedError{Path: queue, RetryAt: until, PoolExhausted: true}
 		}
 	}
-	return s.executeAccountRequest(ctx, account, release, queue, method, path, query, form, true)
+	return s.executeAccountRequest(ctx, current, release, queue, method, path, query, form, true)
 }
 
 func (s *source) GetUserByInput(ctx context.Context, input string) (xapi.User, error) {
@@ -141,7 +185,7 @@ func (s *source) GetFollowingPage(ctx context.Context, user xapi.User, cursor, v
 		}
 		preferred = account
 	}
-	requester, account, err := s.pageRequester(ctx, viewerKey, preferred, xapi.FollowingPath)
+	requester, err := s.pageRequester(ctx, viewerKey, preferred)
 	if err != nil {
 		return xapi.UserPage{}, err
 	}
@@ -150,12 +194,12 @@ func (s *source) GetFollowingPage(ctx context.Context, user xapi.User, cursor, v
 	if err != nil {
 		return xapi.UserPage{}, err
 	}
-	page.ViewerKey = xapi.ViewerKey(account.AuthToken)
+	page.ViewerKey = requester.viewerKey()
 	return page, nil
 }
 
 func (s *source) userPage(ctx context.Context, viewerKey, path, instructions string, variables map[string]any, cursor string) (xapi.UserPage, error) {
-	requester, account, err := s.pageRequester(ctx, viewerKey, storage.XAccount{}, path)
+	requester, err := s.pageRequester(ctx, viewerKey, storage.XAccount{})
 	if err != nil {
 		return xapi.UserPage{}, err
 	}
@@ -163,29 +207,24 @@ func (s *source) userPage(ctx context.Context, viewerKey, path, instructions str
 	if err != nil {
 		return xapi.UserPage{}, err
 	}
-	page.ViewerKey = xapi.ViewerKey(account.AuthToken)
+	page.ViewerKey = requester.viewerKey()
 	return page, nil
 }
 
 // pageRequester 解析分页请求使用的账号：viewerKey 优先，其次 preferred（主账号），
-// 否则从账号池选一个。
-func (s *source) pageRequester(ctx context.Context, viewerKey string, preferred storage.XAccount, path string) (xapi.Requester, storage.XAccount, error) {
+// 否则经账号池（支持故障转移）选号并绑定实际成功账号的 ViewerKey。
+func (s *source) pageRequester(ctx context.Context, viewerKey string, preferred storage.XAccount) (pageViewerRequester, error) {
 	if viewerKey != "" {
 		account, err := s.accountByViewerKey(ctx, viewerKey)
 		if err != nil {
-			return nil, storage.XAccount{}, err
+			return nil, err
 		}
-		return accountRequester{source: s, account: account}, account, nil
+		return accountRequester{source: s, account: account}, nil
 	}
 	if preferred.ID != 0 {
-		return accountRequester{source: s, account: preferred}, preferred, nil
+		return accountRequester{source: s, account: preferred}, nil
 	}
-	account, release, err := s.engine.nextAccount(ctx, queueForPath(path), map[int64]bool{})
-	if err != nil {
-		return nil, storage.XAccount{}, err
-	}
-	release()
-	return accountRequester{source: s, account: account}, account, nil
+	return &poolPageRequester{source: s}, nil
 }
 
 func (s *source) accountByViewerKey(ctx context.Context, viewerKey string) (storage.XAccount, error) {
@@ -221,17 +260,30 @@ func (s *source) primaryAccount(ctx context.Context) (storage.XAccount, error) {
 // lookupFetcher 在目标账号受年龄限制时累积排除当前账号并换号重试。
 func (s *source) lookupFetcher() xapi.LookupFetcher {
 	excluded := map[int64]bool{}
-	return func(ctx context.Context, path string, values url.Values, _ []byte) ([]byte, bool, error) {
-		payload, account, err := s.graphQLWithAccount(ctx, path, values, excluded)
+	return func(ctx context.Context, path string, values url.Values, last []byte) ([]byte, bool, error) {
+		payload, account, err := s.graphQLWithAccount(ctx, path, values, maps.Clone(excluded))
 		if err != nil {
+			if len(last) > 0 && ctx.Err() == nil && !xapi.IsRateLimitError(err) && !xapi.IsAllClientsRateLimited(err) {
+				return last, false, nil
+			}
 			return nil, false, err
 		}
 		if !xapi.AgeRestrictedPayload(payload) {
 			return payload, false, nil
 		}
 		excluded[account.ID] = true
-		active, err := s.engine.activeAccountCount(ctx)
-		if err != nil || len(excluded) >= active {
+		accounts, err := s.engine.store.ListXAccounts(ctx)
+		if err != nil {
+			return payload, false, nil
+		}
+		hasCandidate := false
+		for _, candidate := range accounts {
+			if candidate.Active && !excluded[candidate.ID] {
+				hasCandidate = true
+				break
+			}
+		}
+		if !hasCandidate {
 			return payload, false, nil
 		}
 		return payload, true, nil

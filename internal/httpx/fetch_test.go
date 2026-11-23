@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -41,5 +42,39 @@ func TestRestrictRedirectsRejectsForeignHosts(t *testing.T) {
 	if err == nil {
 		response.Body.Close()
 		t.Fatal("redirect to a non-allowed host must be refused")
+	}
+}
+
+func TestCopyLimitedHandlesNegativeAndMaxInt64(t *testing.T) {
+	var out bytes.Buffer
+	if _, err := CopyLimited(&out, bytes.NewReader([]byte("a")), -1); !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("limit=-1 err = %v, want ErrBodyTooLarge", err)
+	}
+	if _, err := CopyLimited(&out, bytes.NewReader(nil), math.MinInt64); !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("limit=MinInt64 err = %v, want ErrBodyTooLarge", err)
+	}
+	out.Reset()
+	n, err := CopyLimited(&out, bytes.NewReader([]byte("hello")), math.MaxInt64)
+	if err != nil || n != 5 || out.String() != "hello" {
+		t.Fatalf("limit=MaxInt64 got n=%d err=%v out=%q", n, err, out.String())
+	}
+}
+
+func TestRestrictRedirectsRejectsIntermediateHTTPSDowngradeAndGuardsNil(t *testing.T) {
+	RestrictRedirects(nil, nil)
+
+	client := &http.Client{}
+	RestrictRedirects(client, nil)
+	req, _ := http.NewRequest(http.MethodGet, "https://pbs.twimg.com/a.jpg", nil)
+	if err := client.CheckRedirect(req, nil); err == nil {
+		t.Fatal("nil allowedHost must reject redirect")
+	}
+
+	RestrictRedirects(client, func(string) bool { return true })
+	hop0, _ := http.NewRequest(http.MethodGet, "http://pbs.twimg.com/start", nil)
+	hop1, _ := http.NewRequest(http.MethodGet, "https://pbs.twimg.com/secure", nil)
+	hop2, _ := http.NewRequest(http.MethodGet, "http://pbs.twimg.com/downgrade", nil)
+	if err := client.CheckRedirect(hop2, []*http.Request{hop0, hop1}); err == nil {
+		t.Fatal("HTTPS->HTTP downgrade after initial HTTP hop must be rejected")
 	}
 }

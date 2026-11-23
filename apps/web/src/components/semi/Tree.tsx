@@ -27,6 +27,17 @@ export function Tree({ nodes, expandedKeys, selectedKey, onExpandedChange, onSel
   const expanded = useRef(expandedKeys);
   expanded.current = expandedKeys;
   const [loading, setLoading] = useState<string[]>([]);
+  const loadingKeysRef = useRef<Set<string>>(new Set());
+
+  function treeData(items: TreeNode[]): TreeNode[] {
+    return items.map(node => ({
+      ...node,
+      isLeaf: node.isLeaf ?? (node.children ? node.children.length === 0 : !loadChildren),
+      children: node.children ? treeData(node.children) : undefined,
+    }));
+  }
+
+  const normalizedNodes = treeData(nodes);
   const visible: TreeNode[] = [];
   const parents = new Map<string, string>();
 
@@ -37,7 +48,7 @@ export function Tree({ nodes, expandedKeys, selectedKey, onExpandedChange, onSel
       if (expandedKeys.includes(item.key)) visit(item.children ?? [], item.key);
     }
   }
-  visit(nodes);
+  visit(normalizedNodes);
 
   useLayoutEffect(() => {
     root.current?.querySelector('[role="tree"]')?.setAttribute("aria-label", t("目录树"));
@@ -49,28 +60,23 @@ export function Tree({ nodes, expandedKeys, selectedKey, onExpandedChange, onSel
   });
 
   async function expand(node: TreeNode, open: boolean) {
+    if (open && node.isLeaf) return;
     if (open && loadChildren && !node.children && !node.isLeaf) {
-      if (loading.includes(node.key)) return;
-      setLoading(current => [...current, node.key]);
+      if (loadingKeysRef.current.has(node.key)) return;
+      loadingKeysRef.current.add(node.key);
+      setLoading(current => current.includes(node.key) ? current : [...current, node.key]);
       try {
         await loadChildren(node);
       } catch (error) {
         onLoadError?.(node, error);
         return;
       } finally {
+        loadingKeysRef.current.delete(node.key);
         setLoading(current => current.filter(key => key !== node.key));
       }
     }
     expanded.current = open ? [...new Set([...expanded.current, node.key])] : expanded.current.filter(key => key !== node.key);
     onExpandedChange(expanded.current);
-  }
-
-  function treeData(items: TreeNode[]): TreeNode[] {
-    return items.map(node => ({
-      ...node,
-      isLeaf: node.isLeaf ?? (node.children ? node.children.length === 0 : !loadChildren),
-      children: node.children ? treeData(node.children) : undefined,
-    }));
   }
 
   return <div ref={root} onFocus={e => {
@@ -102,7 +108,7 @@ export function Tree({ nodes, expandedKeys, selectedKey, onExpandedChange, onSel
     }
   }}>
     <STree
-      treeData={treeData(nodes)}
+      treeData={normalizedNodes}
       keyMaps={{ label: "title", value: "key" }}
       loadData={loadChildren ? async () => {} : undefined}
       expandAction="doubleClick"

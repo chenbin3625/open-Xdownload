@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,10 @@ import (
 	"html"
 	"io"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -23,11 +26,13 @@ import (
 )
 
 var (
-	tweetURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/([^/?#]+|i/web)/status/([0-9]+)(?:[/?#]|$)`)
+	tweetURLPattern   = regexp.MustCompile(`(?i)^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/([a-z0-9_]{1,15}|i/web)/status/([0-9]+)(?:[/?#]|$)`)
+	screenNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
 	// 仅匹配主机为 twimg.com（及其子域 pbs./video. 等）的 URL：主机部分必须紧跟 :// 之后，
 	// 避免 `http://攻击者/?pbs.twimg.com=x.mp4` 这类把 twimg.com 放在 query 里的伪造 URL
 	// 被提取并随后由 downloader 拉取（SSRF，如云元数据端点）。
-	mediaURLPattern = regexp.MustCompile(`https?://(?:[a-z0-9-]+\.)*twimg\.com(?:/[^\s"'<>\\]*)?`)
+	// 同时避免吞入尾随的 JSON/正文标点（引号、逗号、括号、句点等）。
+	mediaURLPattern = regexp.MustCompile(`(?i)https?://(?:[a-z0-9-]+\.)*twimg\.com/(?:[^\s"'<>\\{}\[\]()\x60,;]*[^\s"'<>\\{}\[\]()\x60,;.:!?])`)
 	// qualityPattern 匹配 video.twimg.com 路径中的分辨率段，如 1280x720。
 	qualityPattern = regexp.MustCompile(`(?i)^(\d{2,5})x(\d{2,5})$`)
 )
@@ -55,10 +60,29 @@ type ParseOptions struct {
 }
 
 func NewService() *Service {
-	return &Service{
-		client:         httpx.Client("", 20*time.Second),
+	client := httpx.Client("", 20*time.Second)
+	s := &Service{
+		client:         client,
 		syndicationURL: syndicationTweetResultURL,
 	}
+	httpx.RestrictRedirects(client, s.isAllowedSyndicationRedirectHost)
+	return s
+}
+
+func (s *Service) isAllowedSyndicationRedirectHost(host string) bool {
+	if httpx.IsTwimgHost(host) {
+		return true
+	}
+	if s != nil && s.syndicationURL != "" {
+		if u, err := url.Parse(s.syndicationURL); err == nil {
+			configured := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+			candidate := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+			if configured != "" && candidate == configured {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Service) ParseTweetLink(ctx context.Context, rawURL string) (TweetData, error) {
@@ -97,6 +121,14 @@ func TweetFromGraphQLResultWithOptions(rawURL string, fallbackUsername string, f
 	return tweetFromResult(rawURL, fallbackUsername, fallbackID, result, options)
 }
 
+func validScreenNameFallback(username string) string {
+	username = strings.TrimSpace(username)
+	if !screenNamePattern.MatchString(username) {
+		return ""
+	}
+	return username
+}
+
 func ExtractTweetURL(rawURL string) (string, string, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -110,7 +142,7 @@ func ExtractTweetURL(rawURL string) (string, string, error) {
 	if len(matches) != 3 {
 		return "", "", errors.New("请输入 x.com 或 twitter.com 的推文链接")
 	}
-	return matches[1], matches[2], nil
+	return validScreenNameFallback(matches[1]), matches[2], nil
 }
 
 func BestVariant(variants []MediaVariant) MediaVariant {
@@ -126,10 +158,15 @@ func BestVariant(variants []MediaVariant) MediaVariant {
 		return MediaVariant{}
 	}
 	sort.SliceStable(allowed, func(i, j int) bool {
-		if allowed[i].Bitrate == allowed[j].Bitrate {
-			return allowed[i].ContentType > allowed[j].ContentType
+		if allowed[i].Bitrate != allowed[j].Bitrate {
+			return allowed[i].Bitrate > allowed[j].Bitrate
 		}
-		return allowed[i].Bitrate > allowed[j].Bitrate
+		pi := resolutionPixels(allowed[i].URL)
+		pj := resolutionPixels(allowed[j].URL)
+		if pi != pj {
+			return pi > pj
+		}
+		return allowed[i].ContentType > allowed[j].ContentType
 	})
 	// 只接受 mp4：没有 mp4 时不退回 HLS（m3u8）。项目里没有 HLS 下载实现，退回只会
 	// 把一个文本播放列表当成视频存下来。
@@ -207,7 +244,7 @@ func tweetFromResultDepth(rawURL string, fallbackUsername string, fallbackID str
 		} {
 			for _, nestedPath := range relation.paths {
 				nested := result.Get(nestedPath)
-				if !nested.Exists() {
+				if isEmptyResult(nested) || isEmptyResult(unwrapTweetResult(nested)) {
 					continue
 				}
 				nestedTweet, nestedErr := tweetFromResultDepth("", "", "", nested, options, depth+1)
@@ -237,7 +274,7 @@ func parseAuthor(result gjson.Result, fallbackUsername string) Author {
 		ScreenName: firstString(result.Get("core.screen_name"), legacy.Get("screen_name")),
 	}
 	if author.ScreenName == "" {
-		author.ScreenName = fallbackUsername
+		author.ScreenName = validScreenNameFallback(fallbackUsername)
 	}
 	return author
 }
@@ -338,10 +375,29 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 			client = httpx.Client("", 20*time.Second)
 		}
 	}
+	effectiveClient := *client
+	if effectiveClient.Transport == nil {
+		if fallback, tErr := httpx.Transport(""); tErr == nil {
+			effectiveClient.Transport = httpx.GuardedRoundTripper(fallback)
+		}
+	} else {
+		effectiveClient.Transport = httpx.GuardedRoundTripper(effectiveClient.Transport)
+	}
+	origCheckRedirect := client.CheckRedirect
+	httpx.RestrictRedirects(&effectiveClient, s.isAllowedSyndicationRedirectHost)
+	if origCheckRedirect != nil {
+		restrictedCheck := effectiveClient.CheckRedirect
+		effectiveClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if err := restrictedCheck(req, via); err != nil {
+				return err
+			}
+			return origCheckRedirect(req, via)
+		}
+	}
 	if err := httpx.WaitXRequest(ctx); err != nil {
 		return TweetData{}, err
 	}
-	response, err := client.Do(request)
+	response, err := effectiveClient.Do(request)
 	if err != nil {
 		return TweetData{}, err
 	}
@@ -350,12 +406,14 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 		if response.StatusCode == http.StatusTooManyRequests {
 			httpx.SlowXRequests()
 		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 		return TweetData{}, fmt.Errorf("X 推文详情请求失败: HTTP %d", response.StatusCode)
 	}
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
+	var buf bytes.Buffer
+	if _, err := httpx.CopyLimited(&buf, response.Body, 4<<20); err != nil {
 		return TweetData{}, err
 	}
+	payload := buf.Bytes()
 	if !json.Valid(payload) {
 		return TweetData{}, errors.New("X 推文详情返回了非 JSON 内容")
 	}
@@ -389,7 +447,7 @@ func tweetFromSyndicationDepth(rawURL string, fallbackUsername string, fallbackI
 		ScreenName: result.Get("user.screen_name").String(),
 	}
 	if author.ScreenName == "" {
-		author.ScreenName = fallbackUsername
+		author.ScreenName = validScreenNameFallback(fallbackUsername)
 	}
 	createdAt, err := tweetCreatedAt(result.Get("created_at").String(), time.RFC3339Nano, id)
 	if err != nil {
@@ -418,7 +476,7 @@ func tweetFromSyndicationDepth(rawURL string, fallbackUsername string, fallbackI
 		} {
 			for _, relationPath := range relation.paths {
 				nested := result.Get(relationPath)
-				if !nested.Exists() {
+				if isEmptyResult(nested) || isEmptyResult(unwrapSyndicationResult(nested)) {
 					continue
 				}
 				nestedTweet, nestedErr := tweetFromSyndicationDepth("", "", "", nested, options, depth+1)
@@ -682,9 +740,6 @@ func collectMediaURLs(result gjson.Result, items *[]Media, seen map[string]struc
 	if result.Type != gjson.JSON {
 		return
 	}
-	for _, rawURL := range mediaURLPattern.FindAllString(result.Raw, -1) {
-		appendScannedMedia(items, seen, mediaFromURL(rawURL))
-	}
 	result.ForEach(func(_, value gjson.Result) bool {
 		collectMediaURLs(value, items, seen, depth+1)
 		return true
@@ -767,9 +822,8 @@ func mediaFromURL(rawURL string) Media {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" || !isTwimgHost(parsed.Hostname()) {
 		return Media{}
 	}
-	lower := strings.ToLower(rawURL)
 	kind := MediaPhoto
-	if strings.Contains(lower, ".mp4") {
+	if strings.EqualFold(path.Ext(parsed.Path), ".mp4") {
 		kind = MediaVideo
 	} else if !isPhotoMediaURL(rawURL) {
 		return Media{}
@@ -793,8 +847,7 @@ func mediaFromURL(rawURL string) Media {
 
 // isTwimgHost 报告 host 是否为 twimg.com 或其子域（pbs.twimg.com / video.twimg.com 等）。
 func isTwimgHost(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
+	return httpx.IsTwimgHost(host)
 }
 
 // isTwimgMediaURL 报告 rawURL 是否可解析且主机为 twimg.com（或其子域），供从 JSON 中
@@ -818,9 +871,9 @@ var tweetPhotoPathPrefixes = []string{
 	"/tweet_video_thumb/",
 }
 
-func isTweetPhotoPath(path string) bool {
+func isTweetPhotoPath(p string) bool {
 	for _, prefix := range tweetPhotoPathPrefixes {
-		if strings.HasPrefix(path, prefix) {
+		if strings.HasPrefix(p, prefix) {
 			return true
 		}
 	}
@@ -836,11 +889,12 @@ func isPhotoMediaURL(rawURL string) bool {
 	if !isTwimgHost(parsed.Hostname()) {
 		return false
 	}
-	host := strings.ToLower(parsed.Hostname())
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(parsed.Hostname()), "."))
 	if host == "pbs.twimg.com" || strings.HasSuffix(host, ".pbs.twimg.com") {
 		// pbs 上除了推文媒体还有头像（profile_images）、横幅（profile_banners）、链接卡片
 		// 配图（card_img）等：卡片兜底扫描整段 JSON 时只能接受推文媒体目录。
-		return isTweetPhotoPath(parsed.Path)
+		cleaned := path.Clean("/" + strings.TrimPrefix(parsed.Path, "/"))
+		return isTweetPhotoPath(cleaned)
 	}
 	switch strings.ToLower(pathExtension(parsed.Path)) {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif":
@@ -867,7 +921,27 @@ func appendUniqueMedia(items *[]Media, seen map[string]struct{}, mediaItems []Me
 		if _, ok := seen[key]; ok {
 			continue
 		}
+		if media.Type == MediaPhoto && media.ID != "" && !strings.HasPrefix(media.ID, "url-") {
+			if _, ok := seen["video-id:"+media.ID]; ok {
+				continue
+			}
+		}
 		seen[key] = struct{}{}
+		if media.Type == MediaVideo || media.Type == MediaGIF {
+			if media.ID != "" && !strings.HasPrefix(media.ID, "url-") {
+				seen["video-id:"+media.ID] = struct{}{}
+			}
+			if media.PreviewURL != "" {
+				if previewKey := downloader.MediaIdentity(media.PreviewURL); previewKey != "" {
+					seen[previewKey] = struct{}{}
+				}
+			}
+			if media.URL != "" {
+				if urlKey := downloader.MediaIdentity(media.URL); urlKey != "" {
+					seen[urlKey] = struct{}{}
+				}
+			}
+		}
 		*items = append(*items, media)
 	}
 }
@@ -933,8 +1007,38 @@ func rawMediaKey(media Media) string {
 	return ""
 }
 
+func isEmptyResult(r gjson.Result) bool {
+	if !r.Exists() || r.Type == gjson.Null {
+		return true
+	}
+	if r.IsObject() && len(r.Map()) == 0 {
+		return true
+	}
+	return false
+}
+
 func isMP4Variant(variant MediaVariant) bool {
-	return strings.Contains(strings.ToLower(variant.ContentType), "mp4") || strings.Contains(strings.ToLower(variant.URL), ".mp4")
+	if ct := strings.TrimSpace(variant.ContentType); ct != "" {
+		mediaType, _, err := mime.ParseMediaType(ct)
+		if err != nil {
+			mediaType = strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
+		}
+		if mediaType != "video/mp4" && mediaType != "application/mp4" {
+			return false
+		}
+		if parsed, err := url.Parse(variant.URL); err == nil {
+			ext := strings.ToLower(path.Ext(parsed.Path))
+			if ext != "" && ext != ".mp4" {
+				return false
+			}
+		}
+		return true
+	}
+	parsed, err := url.Parse(variant.URL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(path.Ext(parsed.Path), ".mp4")
 }
 
 func firstResult(values ...gjson.Result) gjson.Result {
@@ -969,7 +1073,11 @@ func v8Base36(value float64) (string, bool) {
 	if negative {
 		value = -value
 	}
+	const maxSafeInt64Float = 9223372036854775808.0 // 2^63
 	integer := math.Floor(value)
+	if integer >= maxSafeInt64Float {
+		return "", false
+	}
 	fraction := value - integer
 	// 只计算到 double 精度：半个 ulp。
 	delta := 0.5 * (math.Nextafter(value, math.Inf(1)) - value)
@@ -1011,6 +1119,9 @@ func v8Base36(value float64) (string, bool) {
 				break
 			}
 		}
+	}
+	if integer >= maxSafeInt64Float {
+		return "", false
 	}
 	text := strconv.FormatInt(int64(integer), 36)
 	var builder strings.Builder

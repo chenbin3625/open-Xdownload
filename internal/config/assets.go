@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 type AssetKind string
@@ -153,10 +154,10 @@ func (d StorageDocument) Validate() error {
 			}
 		case "s3":
 			u, err := url.Parse(t.Endpoint)
-			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+			if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 				return fmt.Errorf("S3 endpoint 无效")
 			}
-			if t.Bucket == "" || strings.ContainsAny(t.Bucket, "/\\") {
+			if !isValidS3Bucket(t.Bucket) {
 				return fmt.Errorf("S3 bucket 无效")
 			}
 		default:
@@ -168,34 +169,78 @@ func (d StorageDocument) Validate() error {
 			}
 		}
 	}
+	if !seen[d.Default.TargetID] {
+		return fmt.Errorf("存储目标不存在: %s", d.Default.TargetID)
+	}
+	if err := validateAssetRuleTemplates(d.Default); err != nil {
+		return err
+	}
+	checkedKinds := make(map[AssetKind]bool, len(AssetKinds)+len(d.Rules))
+	for _, kind := range AssetKinds {
+		checkedKinds[kind] = true
+	}
 	for kind := range d.Rules {
-		valid := false
-		for _, k := range append(AssetKinds, legacyAssetKinds...) {
-			valid = valid || kind == k
-		}
-		if !valid {
+		if !isKnownAssetKind(kind) {
 			return fmt.Errorf("无效的资产分类: %s", kind)
 		}
+		checkedKinds[kind] = true
 	}
-	for _, kind := range AssetKinds {
+	for kind := range checkedKinds {
 		r, _, err := d.Rule(kind)
 		if err != nil {
 			return err
 		}
-		if err := ValidateAssetTemplate(r.DirectoryTemplate, false); err != nil {
+		if err := validateAssetRuleTemplates(r); err != nil {
 			return err
-		}
-		if err := ValidateAssetTemplate(r.FilenameTemplate, true); err != nil {
-			return err
-		}
-		if err := ValidateAssetTemplate(r.Prefix, false); err != nil {
-			return err
-		}
-		if strings.ContainsAny(r.Prefix, "{}") {
-			return fmt.Errorf("根前缀不支持模板变量")
 		}
 	}
 	return nil
+}
+
+func isKnownAssetKind(kind AssetKind) bool {
+	for _, k := range AssetKinds {
+		if kind == k {
+			return true
+		}
+	}
+	for _, k := range legacyAssetKinds {
+		if kind == k {
+			return true
+		}
+	}
+	return false
+}
+
+func validateAssetRuleTemplates(r AssetRule) error {
+	if err := ValidateAssetTemplate(r.DirectoryTemplate, false); err != nil {
+		return err
+	}
+	if err := ValidateAssetTemplate(r.FilenameTemplate, true); err != nil {
+		return err
+	}
+	if err := ValidateAssetTemplate(r.Prefix, false); err != nil {
+		return err
+	}
+	if strings.ContainsAny(r.Prefix, "{}") {
+		return fmt.Errorf("根前缀不支持模板变量")
+	}
+	return nil
+}
+
+func isValidS3Bucket(bucket string) bool {
+	if bucket == "" || bucket == "." || bucket == ".." || strings.Contains(bucket, "..") {
+		return false
+	}
+	for _, r := range bucket {
+		if r < 0x20 || r == 0x7f || unicode.IsSpace(r) {
+			return false
+		}
+		switch r {
+		case '/', '\\', '?', '#':
+			return false
+		}
+	}
+	return true
 }
 
 func (d StorageDocument) Redacted() StorageDocument {
@@ -212,6 +257,7 @@ func (d StorageDocument) Redacted() StorageDocument {
 }
 
 func MergeStorageSecrets(next, old StorageDocument) (StorageDocument, error) {
+	next.Targets = append([]StorageTarget(nil), next.Targets...)
 	for i := range next.Targets {
 		t := &next.Targets[i]
 		var prior StorageTarget
@@ -238,5 +284,8 @@ func MergeStorageSecrets(next, old StorageDocument) (StorageDocument, error) {
 			}
 		}
 	}
-	return next, next.Validate()
+	if err := next.Validate(); err != nil {
+		return StorageDocument{}, err
+	}
+	return next, nil
 }

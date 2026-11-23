@@ -5,7 +5,7 @@ import {
   Save,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   configQueryRoot,
   updateConfig,
@@ -34,46 +34,36 @@ export function ConfigForm({
 }) {
   useTranslation();
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState(() => normalizeConfig(config));
-  const draftBase = useRef(draft);
-  const [draftDirty, setDraftDirty] = useState(false);
+  const [draftBase, setDraftBase] = useState(() => normalizeConfig(config));
+  const [draft, setDraft] = useState(() => draftBase);
+  const draftDirty = useMemo(
+    () => configSyncKey(normalizeConfig(draft)) !== configSyncKey(normalizeConfig(draftBase)),
+    [draft, draftBase],
+  );
   // GET/PUT 响应可能带 envOverridden: string[]（camelCase 字段名），
   // 用于在对应输入框下标注"由环境变量提供"。字段缺失时按空数组处理。
   const envOverridden = readEnvOverridden(config);
-  const [pendingSavedConfigKey, setPendingSavedConfigKey] = useState("");
-  const pendingSavedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const configVersion = useRef(0);
-  const savedConfigVersion = useRef(0);
+  const latestConfigRef = useRef(config);
+  latestConfigRef.current = config;
+  // 保存成功后记录当时 props 里的旧快照键，直到真正收到不同的服务端新数据时才解除屏蔽；
+  // 避免 refetch 缓慢或失败时盲目回滚表单到保存前的旧 props。
+  const ignoredPreSaveKeyRef = useRef<string | null>(null);
   const draftRevision = useRef(0);
 
   useEffect(() => {
     const normalized = normalizeConfig(config);
     const configKey = configSyncKey(normalized);
-    if (pendingSavedConfigKey) {
-      if (pendingSavedConfigKey === configKey) {
-        setPendingSavedConfigKey("");
-        if (pendingSavedTimer.current) {
-          clearTimeout(pendingSavedTimer.current);
-          pendingSavedTimer.current = null;
-        }
-        draftBase.current = normalized;
-        setDraft(normalized);
+    if (ignoredPreSaveKeyRef.current !== null) {
+      if (configKey === ignoredPreSaveKeyRef.current) {
+        return;
       }
-      return;
+      ignoredPreSaveKeyRef.current = null;
     }
     if (!draftDirty) {
-      draftBase.current = normalized;
+      setDraftBase(normalized);
       setDraft(normalized);
     }
-  }, [config, draftDirty, pendingSavedConfigKey]);
-
-  useEffect(() => {
-    configVersion.current += 1;
-  }, [config]);
-
-  useEffect(() => () => {
-    if (pendingSavedTimer.current) clearTimeout(pendingSavedTimer.current);
-  }, []);
+  }, [config, draftDirty]);
 
   useEffect(() => {
     if (!draftDirty) return;
@@ -86,16 +76,7 @@ export function ConfigForm({
 
   function updateDraft(action: React.SetStateAction<AppConfig>) {
     draftRevision.current += 1;
-    setPendingSavedConfigKey("");
-    if (pendingSavedTimer.current) {
-      clearTimeout(pendingSavedTimer.current);
-      pendingSavedTimer.current = null;
-    }
-    setDraft(current => {
-      const next = typeof action === "function" ? action(current) : action;
-      setDraftDirty(configSyncKey(normalizeConfig(next)) !== configSyncKey(normalizeConfig(draftBase.current)));
-      return next;
-    });
+    setDraft(action);
   }
 
   const mutation = useMutation({
@@ -103,20 +84,14 @@ export function ConfigForm({
     onMutate: () => ({ revision: draftRevision.current, draft }),
     onSuccess: (updated, _submitted, submitted) => {
       const normalized = normalizeConfig(updated);
-      draftBase.current = normalized;
+      const currentPropKey = configSyncKey(normalizeConfig(latestConfigRef.current));
+      const savedKey = configSyncKey(normalized);
+      setDraftBase(normalized);
       if (submitted?.revision === draftRevision.current) {
-        setPendingSavedConfigKey(configSyncKey(normalized));
-        savedConfigVersion.current = configVersion.current;
-        if (pendingSavedTimer.current) clearTimeout(pendingSavedTimer.current);
-        pendingSavedTimer.current = setTimeout(() => {
-          pendingSavedTimer.current = null;
-          if (savedConfigVersion.current !== configVersion.current) {
-            setPendingSavedConfigKey("");
-          }
-        }, 3_000);
+        ignoredPreSaveKeyRef.current = savedKey !== currentPropKey ? currentPropKey : null;
         setDraft(normalized);
-        setDraftDirty(false);
       } else if (submitted) {
+        ignoredPreSaveKeyRef.current = savedKey !== currentPropKey ? currentPropKey : null;
         setDraft(current => ({ ...normalized, ...configDiff(submitted.draft, current) }));
       }
       void queryClient.invalidateQueries({ queryKey: configQueryRoot });
@@ -130,14 +105,10 @@ export function ConfigForm({
   // dirty 时由 Popconfirm 二次确认（见下方按钮），避免误点丢掉未保存的修改。
   function reloadConfig() {
     draftRevision.current += 1;
-    setPendingSavedConfigKey("");
-    if (pendingSavedTimer.current) {
-      clearTimeout(pendingSavedTimer.current);
-      pendingSavedTimer.current = null;
-    }
-    setDraftDirty(false);
-    draftBase.current = normalizeConfig(config);
-    setDraft(draftBase.current);
+    ignoredPreSaveKeyRef.current = null;
+    const normalized = normalizeConfig(config);
+    setDraftBase(normalized);
+    setDraft(normalized);
     onRefresh?.();
   }
 
@@ -187,7 +158,7 @@ export function ConfigForm({
             loading={mutation.isPending}
             disabled={mutation.isPending}
             aria-busy={mutation.isPending}
-            onClick={() => mutation.mutate(configDiff(draftBase.current, draft))}
+            onClick={() => mutation.mutate(configDiff(draftBase, draft))}
           >
             {t("保存")}</Button>
         </div>

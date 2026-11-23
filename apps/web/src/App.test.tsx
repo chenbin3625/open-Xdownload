@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { AppErrorBoundary } from "./App";
 import { TooltipProvider } from "./components/semi";
 import type { Job } from "./lib/api";
 
@@ -192,5 +192,168 @@ describe("App 的 URL 状态", () => {
 
     await waitFor(() => expect(window.location.search).toContain("kind=videos"));
     expect(window.location.pathname).toBe("/gallery");
+  });
+
+  it("keeps manualRefreshPending active across rapid double-clicks until every refresh settles", async () => {
+    const configPayload = {
+      downloadDir: "/downloads",
+      maxConcurrency: 1,
+      proxyUrl: "",
+      autoRetryFailed: true,
+      autoFollowProtected: false,
+      includeNestedTweetMedia: false,
+      incrementalArchive: false,
+      fileNamingMode: "tweet_text",
+      maxFilenameLength: 120,
+      storageType: "local",
+    };
+    const baseFetch = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/config") {
+        return json(configPayload);
+      }
+      return baseFetch(input, init);
+    });
+
+    window.history.replaceState(null, "", "/settings");
+    renderApp();
+    await screen.findByRole("heading", { name: "下载与归档" });
+
+    const resolvers: Array<() => void> = [];
+    const origInvalidate = QueryClient.prototype.invalidateQueries;
+    const invalidateSpy = vi.spyOn(QueryClient.prototype, "invalidateQueries").mockImplementation(function (this: QueryClient, filters, options) {
+      if (Array.isArray(filters?.queryKey) && filters.queryKey[0] === "config") {
+        return new Promise<void>((resolve) => {
+          resolvers.push(resolve);
+        });
+      }
+      return origInvalidate.call(this, filters, options);
+    });
+
+    try {
+      const getRefreshBtn = () => screen.getByRole("button", { name: "刷新数据" }) as HTMLButtonElement;
+      act(() => {
+        getRefreshBtn().click();
+        getRefreshBtn().click();
+      });
+
+      await waitFor(() => expect(resolvers).toHaveLength(2));
+      expect(getRefreshBtn().getAttribute("aria-busy")).toBe("true");
+
+      await act(async () => {
+        resolvers[0]();
+      });
+      expect(getRefreshBtn().getAttribute("aria-busy")).toBe("true");
+
+      await act(async () => {
+        resolvers[1]();
+      });
+      await waitFor(() => expect(getRefreshBtn().getAttribute("aria-busy")).toBe("false"));
+    } finally {
+      invalidateSpy.mockRestore();
+    }
+  });
+
+  it("does not resurrect the deleted newest job on Page 1 when refetch returns empty", async () => {
+    let deleted = false;
+    const baseFetch = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/jobs/2" && init?.method === "DELETE") {
+        deleted = true;
+        return json({ ok: true });
+      }
+      if (url.pathname === "/api/jobs") {
+        const items = deleted ? [] : [jobs[1]];
+        return json({
+          items,
+          page: 1,
+          pageSize: 10,
+          total: items.length,
+          counts: { all: items.length, active: 0, completed: 0, failed: items.length },
+        });
+      }
+      if (url.pathname === "/api/dashboard/meta") {
+        return json({
+          stats: { total: deleted ? 0 : 1, active: 0, completed: 0, failed: deleted ? 0 : 1 },
+          failedTweetCount: 0,
+        });
+      }
+      return baseFetch(input, init);
+    });
+
+    const user = userEvent.setup();
+    renderApp();
+    await screen.findByText("失败任务");
+
+    await user.click(screen.getByRole("button", { name: "删除任务" }));
+    const confirmBtn = await screen.findByRole("button", { name: "删除" });
+    await user.click(confirmBtn);
+
+    await waitFor(() => expect(screen.queryByText("失败任务")).toBeNull());
+    await user.click(screen.getByRole("button", { name: "刷新数据" }));
+    await waitFor(() => expect(screen.getByText("暂无任务")).toBeTruthy());
+    expect(screen.queryByText("失败任务")).toBeNull();
+  });
+
+  it("does not reset deep-linked /tasks?page=3 to page 1 before dashboard meta finishes loading", async () => {
+    let resolveMeta!: (res: Response) => void;
+    const baseFetch = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/api/jobs") {
+        const page = Number(url.searchParams.get("page") ?? "1");
+        const pageSize = Number(url.searchParams.get("pageSize") ?? "10");
+        return json({ items: [jobs[0]], page, pageSize });
+      }
+      if (url.pathname === "/api/dashboard/meta") {
+        return await new Promise<Response>((resolve) => {
+          resolveMeta = resolve;
+        });
+      }
+      return baseFetch(input, init);
+    });
+
+    window.history.replaceState(null, "", "/tasks?page=3");
+    renderApp();
+    await screen.findByText("成功任务");
+    await waitFor(() => expect(resolveMeta).toBeTypeOf("function"));
+
+    expect(window.location.search).toContain("page=3");
+
+    await act(async () => {
+      resolveMeta(json({
+        stats: { total: 35, active: 0, completed: 35, failed: 0 },
+        failedTweetCount: 0,
+      }));
+    });
+    expect(window.location.search).toContain("page=3");
+  });
+
+  it("AppErrorBoundary catches render errors without white-screening and recovers on retry", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let shouldThrow = true;
+    function FlakyChild() {
+      if (shouldThrow) throw new Error("boom render failure");
+      return <div>recovered view</div>;
+    }
+    try {
+      const user = userEvent.setup();
+      render(
+        <AppErrorBoundary fullScreen>
+          <FlakyChild />
+        </AppErrorBoundary>,
+      );
+      expect(screen.getAllByRole("alert").length).toBeGreaterThan(0);
+      expect(screen.getByText("页面渲染出现异常")).toBeTruthy();
+      expect(screen.getByText("boom render failure")).toBeTruthy();
+
+      shouldThrow = false;
+      await user.click(screen.getByRole("button", { name: "重试" }));
+      expect(screen.getByText("recovered view")).toBeTruthy();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

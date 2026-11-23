@@ -24,13 +24,8 @@ type MediaSync struct {
 	UpdatedAt       time.Time `json:"updatedAt" db:"updated_at"`
 }
 
-// GetMediaSync 读取用户媒体时间线游标；不存在时自动创建空行。
+// GetMediaSync 读取用户媒体时间线游标；不存在时返回空状态且不写入数据库。
 func (s *Store) GetMediaSync(ctx context.Context, userID string) (MediaSync, error) {
-	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO media_sync(user_id, updated_at) VALUES(?, ?)
-ON CONFLICT(user_id) DO NOTHING`, userID, time.Now().UTC()); err != nil {
-		return MediaSync{}, err
-	}
 	state := MediaSync{}
 	err := s.db.GetContext(ctx, &state, `SELECT * FROM media_sync WHERE user_id = ?`, userID)
 	if errors.Is(err, sql.ErrNoRows) {

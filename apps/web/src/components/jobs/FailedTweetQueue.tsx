@@ -1,14 +1,13 @@
 import { t, useTranslation } from "../../lib/i18n";
 import { AlertCircle, RotateCcw, Trash2 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   clearFailedTweets,
   deleteFailedTweet,
   getFailedTweets,
   retryFailedTweets,
   type Dashboard,
-  type FailedTweet,
 } from "../../lib/api";
 import {
   AppPagination,
@@ -31,6 +30,7 @@ export function FailedTweetQueue({ total }: { total: number }) {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [deletingIds, setDeletingIds] = useState<Set<number>>(() => new Set());
 
   const failedTweetsQuery = useQuery({
     queryKey: [...failedTweetQueryRoot, page, pageSize],
@@ -46,6 +46,15 @@ export function FailedTweetQueue({ total }: { total: number }) {
 
   const pageItems = failedTweetsQuery.data?.items ?? [];
   const pagination = failedTweetsQuery.data?.pagination ?? fallbackPagination;
+
+  useEffect(() => {
+    const maxPage = Math.max(1, pagination.totalPages);
+    if (page > maxPage) {
+      setPage(maxPage);
+    } else if (failedTweetsQuery.isSuccess && !failedTweetsQuery.isFetching && page > 1 && pageItems.length === 0) {
+      setPage((current) => Math.max(1, current - 1));
+    }
+  }, [page, pagination.totalPages, failedTweetsQuery.isSuccess, failedTweetsQuery.isFetching, pageItems.length]);
 
   const refreshFailedTweets = () => {
     queryClient.invalidateQueries({ queryKey: failedTweetQueryRoot });
@@ -67,9 +76,24 @@ export function FailedTweetQueue({ total }: { total: number }) {
 
   const removeOne = useMutation({
     mutationFn: deleteFailedTweet,
+    onMutate: (id) => {
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+    },
+    onSettled: (_data, _error, id) => {
+      setDeletingIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
     onSuccess: () => {
       if (page > 1 && pageItems.length <= 1) {
-        setPage(page - 1);
+        setPage((current) => Math.max(1, current - 1));
       }
       refreshFailedTweets();
       toast.success({ message: t("失败记录已删除") });
@@ -108,7 +132,7 @@ export function FailedTweetQueue({ total }: { total: number }) {
             description={t("确认删除全部失败推文记录？")}
             okText={t("清空")}
             cancelText={t("取消")}
-            disabled={pagination.total === 0}
+            disabled={pagination.total === 0 || clearAll.isPending}
             onConfirm={() => clearAll.mutate()}
           >
             <Button
@@ -184,15 +208,18 @@ export function FailedTweetQueue({ total }: { total: number }) {
                     description={t("确认删除这条失败记录？")}
                     okText={t("删除")}
                     cancelText={t("取消")}
-                    onConfirm={() => removeOne.mutate(item.id)}
+                    disabled={deletingIds.has(item.id)}
+                    onConfirm={() => {
+                      if (!deletingIds.has(item.id)) removeOne.mutate(item.id);
+                    }}
                   >
                     <Button
                       theme="borderless"
                       type="danger"
                       icon={<Trash2 className="size-4 text-danger" />}
-                      loading={removeOne.isPending && removeOne.variables === item.id}
-                      disabled={removeOne.isPending && removeOne.variables === item.id}
-                      aria-busy={removeOne.isPending && removeOne.variables === item.id}
+                      loading={deletingIds.has(item.id)}
+                      disabled={deletingIds.has(item.id)}
+                      aria-busy={deletingIds.has(item.id)}
                       aria-label={t("删除此条记录")}
                     />
                   </Popconfirm>

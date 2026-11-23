@@ -115,7 +115,7 @@
   table-layout: fixed;
 }
 
-.task-table .semi-table-expand-cell {
+.task-table .semi-table-row-expand > .semi-table-row-cell {
   padding: 0 16px 16px;
 }
 

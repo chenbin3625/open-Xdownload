@@ -276,13 +276,12 @@
   background: var(--surface-muted);
 }
 
-.tweet-media-count-1,
-.tweet-media-count-2 {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .tweet-media-count-1 {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.tweet-media-count-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .tweet-media-count-3 {
@@ -324,7 +323,9 @@
 }
 
 .tweet-media img,
-.tweet-media video {
+.tweet-media video,
+.tweet-quote-media img,
+.tweet-quote-media video {
   display: block;
   width: 100%;
   height: 100%;
@@ -464,10 +465,7 @@
   grid-row: span 2;
 }
 
-.tweet-quote-media .tweet-media-item {
-  aspect-ratio: 16 / 10;
-}
-
+.tweet-quote-media.tweet-media-count-1 .tweet-media-item,
 .tweet-quote-media.tweet-media-count-2 .tweet-media-item {
   aspect-ratio: 16 / 10;
 }

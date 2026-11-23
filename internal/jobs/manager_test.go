@@ -348,6 +348,7 @@ func TestDownloadMediaSkipsExistingTweetMedia(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("media"))
 	}))
 	defer server.Close()
@@ -395,6 +396,7 @@ func TestDownloadMediaRedownloadsStaleTweetMediaRecord(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("media"))
 	}))
 	defer server.Close()
@@ -454,6 +456,7 @@ func TestDownloadMediaSuffixedPathWhenAnotherTweetOwnsFilename(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(bodies[r.URL.Path])
 	}))
 	defer server.Close()
@@ -1243,6 +1246,7 @@ func TestDownloadMediaSkipsSameMediaWithSameNameAndSize(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("shared media"))
 	}))
 	defer server.Close()
@@ -1305,6 +1309,7 @@ func TestDownloadMediaFindsLiveCopyBeyondStaleHistory(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("shared media"))
 	}))
 	defer server.Close()
@@ -1354,6 +1359,7 @@ func TestDownloadMediaFindsLiveCopyBeyondStaleHistory(t *testing.T) {
 func TestDownloadMediaReusesMatchingContentBeyondStaleHistory(t *testing.T) {
 	body := []byte("identical bytes")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -1557,6 +1563,7 @@ func TestDownloadMediaConcurrentDifferentURLsReuseSameContent(t *testing.T) {
 func TestDownloadMediaPersistsCompletedDownloadAfterCancellation(t *testing.T) {
 	body := []byte("completed video")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -1620,6 +1627,7 @@ func TestDownloadMediaSkipsSameMediaAcrossDirectories(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("viral media"))
 	}))
 	defer server.Close()
@@ -1678,6 +1686,7 @@ func TestDownloadMediaSameMediaDifferentNameSkips(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("shared media"))
 	}))
 	defer server.Close()
@@ -1873,6 +1882,7 @@ func TestDownloadMediaJobSkipsAlreadyDownloadedURL(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("media"))
 	}))
 	defer server.Close()
@@ -1926,6 +1936,7 @@ func TestDownloadMediaConcurrentSameTargetDownloadsOnce(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		w.Header().Set("Content-Type", "video/mp4")
 		_, _ = w.Write([]byte("viral media"))
 	}))
 	defer server.Close()
@@ -2780,6 +2791,7 @@ func TestArchiveTweetsAdvancesCursorToSeenIDForSkippedTweets(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
 		_, _ = w.Write([]byte("jpeg"))
 	}))
 	defer server.Close()

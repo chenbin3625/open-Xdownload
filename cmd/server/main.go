@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -97,12 +98,18 @@ func run() int {
 		listen.keyFile = keyFile
 		log.Printf("tls-auto: using %s", certFile)
 	}
+	var tlsCertPair *tls.Certificate
 	if listen.tlsEnabled() {
-		if _, err := tls.LoadX509KeyPair(listen.certFile, listen.keyFile); err != nil {
+		cert, err := tls.LoadX509KeyPair(listen.certFile, listen.keyFile)
+		if err != nil {
 			log.Printf("load TLS: %v", err)
 			return 1
 		}
+		tlsCertPair = &cert
 	}
+
+	var bgWG sync.WaitGroup
+	defer bgWG.Wait()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -111,7 +118,11 @@ func run() int {
 	if err := syncEnvXAccounts(ctx, store); err != nil {
 		log.Printf("sync env x accounts: %v", err)
 	}
-	go purgeExpiredXAccountLocks(ctx, store)
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		purgeExpiredXAccountLocks(ctx, store)
+	}()
 
 	eventBus := jobs.NewEventBus()
 	resolver := parser.NewService()
@@ -150,12 +161,23 @@ func run() int {
 		handler = withHTTP3AltSvc(handler, listenPort(boundAddr), h3Available)
 	}
 	server := newHTTPServer(boundAddr, handler)
+	if tlsCertPair != nil {
+		server.TLSConfig.Certificates = []tls.Certificate{*tlsCertPair}
+	}
 	// Shutdown 不会取消处理中请求的 ctx：关闭事件总线让 /api/events 长连接立即结束，
 	// 否则只要浏览器开着页面，Shutdown 就要等满超时，manager.Stop() 来不及执行。
 	server.RegisterOnShutdown(eventBus.CloseAll)
 	var http3Server http3Closer
+	var h3Conn net.PacketConn
 	if listen.tlsEnabled() {
-		http3Server = newHTTP3Server(boundAddr, handler, server.TLSConfig)
+		pc, err := net.ListenPacket("udp", boundAddr)
+		if err != nil {
+			log.Printf("http3: bind udp %s: %v (TCP server continues)", boundAddr, err)
+		} else {
+			h3Conn = pc
+			http3Server = newHTTP3Server(boundAddr, handler, server.TLSConfig)
+			h3Available.Store(true)
+		}
 	}
 
 	manager.Start(ctx)
@@ -164,7 +186,7 @@ func run() int {
 	}
 	log.Printf("open-Xdownload version=%s commit=%s date=%s", version, commit, date)
 	log.Printf("open-Xdownload API listening on %s://%s", listen.scheme(), ln.Addr().(*net.TCPAddr).String())
-	if listen.tlsEnabled() {
+	if h3Available.Load() {
 		log.Printf("HTTP/2 + HTTP/3 enabled (UDP %s)", boundAddr)
 	}
 
@@ -172,17 +194,20 @@ func run() int {
 	// never block even if main is not reading yet.
 	errCh := make(chan error, 2)
 
+	bgWG.Add(1)
 	go func() {
+		defer bgWG.Done()
 		if err := serveHTTP(server, ln, listen); err != nil && !isHTTPServerClosed(err) {
 			log.Printf("serve: %v", err)
 			errCh <- err
 			stop()
 		}
 	}()
-	if http3Server != nil {
+	if http3Server != nil && h3Conn != nil {
+		bgWG.Add(1)
 		go func() {
-			h3Available.Store(true)
-			if err := http3Server.ListenAndServeTLS(listen.certFile, listen.keyFile); err != nil && !isHTTPServerClosed(err) {
+			defer bgWG.Done()
+			if err := http3Server.Serve(h3Conn); err != nil && !isHTTPServerClosed(err) {
 				h3Available.Store(false)
 				// HTTP/3 is optional — log a warning but let TCP continue serving.
 				log.Printf("http3: %v (TCP server continues)", err)
@@ -192,23 +217,32 @@ func run() int {
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
+		_ = server.Close()
 	}
+	cancel()
 	if http3Server != nil {
-		if err := http3Server.Close(); err != nil {
+		h3ShutdownCtx, h3Cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if err := http3Server.Shutdown(h3ShutdownCtx); err != nil {
 			log.Printf("http3 shutdown: %v", err)
+			_ = http3Server.Close()
 		}
+		h3Cancel()
 	}
+	if h3Conn != nil {
+		_ = h3Conn.Close()
+	}
+	bgWG.Wait()
 	// 等待调度循环与活跃任务退出，再让 defer store.Close() 关闭数据库，
 	// 避免 task goroutine 仍在写库时 DB 被关闭。
 	drained := manager.Stop()
 	// 服务端致命错误优先：即使排空也失败，仍然以非零退出，便于 docker/systemd 发现异常。
+	exitCode := 0
 	select {
 	case err := <-errCh:
 		if err != nil {
-			return 1
+			exitCode = 1
 		}
 	default:
 	}
@@ -216,11 +250,11 @@ func run() int {
 		// 主动停机（SIGTERM/SIGINT）时个别任务可能来不及收尾：只告警、以 0 退出，
 		// 不能把"按了停止"编码成失败，否则 systemd Restart=on-failure /
 		// docker --restart=on-failure 会把正常停机当成崩溃反复重启。
-		// 这里立刻退出以保留仍可能写库的 worker，避免与 store.Close() 抢写。
+		// 致命错误仍以非零退出，但同样不能触发 defer store.Close() 与未退净的 worker 抢写。
 		log.Printf("warning: 停机超时，仍有任务未退净；跳过数据库关闭直接退出（WAL 可在下次启动恢复）")
-		os.Exit(0)
+		os.Exit(exitCode)
 	}
-	return 0
+	return exitCode
 }
 
 func envOrDefault(key string, fallback string) string {

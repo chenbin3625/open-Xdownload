@@ -1,5 +1,7 @@
 {
   "有 {{count}} 条新记录": "有 {{count}} 条新记录",
+  "有 {{count}} 条新记录_one": "有 {{count}} 条新记录",
+  "有 {{count}} 条新记录_other": "有 {{count}} 条新记录",
   "筛选": "筛选",
   "推文编号": "推文编号",
   "全部账号": "全部账号",
@@ -125,7 +127,7 @@
   "重试任务已创建": "重试任务已创建",
   "查看新任务": "查看新任务",
   "概览": "概览",
-  "文件": "文件",
+  "文件列表": "文件",
   "错误与日志": "错误与日志",
   "暂无错误与日志": "暂无错误与日志",
   "暂无状态说明": "暂无状态说明",
@@ -144,7 +146,7 @@
   "archive.allTweets": "全部推文",
   "archive.hideRetweets": "隐藏转推",
   "archive.onlyRetweets": "仅转推",
-  "archive.repostedFrom": "转推了 @{{author}}",
+  "archive.repostedFrom": "@{{author}} 转推了",
   "archive.replyingTo": "回复 @{{author}}",
   "archive.replyingToUnknown": "回复的推文未归档",
   "archive.quoteUnavailable": "引用推文 {{id}} 未归档",
@@ -160,6 +162,8 @@
   "archive.expandText": "展开全文",
   "archive.collapseText": "收起全文",
   "archive.total": "共 {{count}} 条推文",
+  "archive.total_one": "共 {{count}} 条推文",
+  "archive.total_other": "共 {{count}} 条推文",
   "archive.clearFilters": "清除筛选",
   "archive.taskFilter": "任务 #{{id}}",
   "archive.tweetFilter": "推文 {{id}}",
@@ -756,5 +760,10 @@
   "已创建 {{value0}} 个重试任务，{{value1}} 个失败": "已创建 {{value0}} 个重试任务，{{value1}} 个失败",
   "扩展名": "扩展名",
   "隐藏": "隐藏",
-  "显示": "显示"
+  "显示": "显示",
+  "页面渲染出现异常": "页面渲染出现异常",
+  "请尝试刷新页面": "请尝试刷新页面",
+  "刷新页面": "刷新页面",
+  "调度频率需在 5 至 43200 分钟之间": "调度频率需在 5 至 43200 分钟之间",
+  "请填写完整的计划名称和目标": "请填写完整的计划名称和目标"
 }

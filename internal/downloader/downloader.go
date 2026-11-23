@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -135,9 +136,17 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 	defer response.Body.Close()
 	if mediaType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type")); parseErr == nil {
 		mediaType = strings.ToLower(mediaType)
-		if mediaType == "text/html" || mediaType == "application/json" || mediaType == "application/xml" {
+		if mediaType == "text/html" ||
+			mediaType == "text/xml" ||
+			mediaType == "text/plain" ||
+			mediaType == "application/json" ||
+			mediaType == "application/xml" ||
+			mediaType == "application/xhtml+xml" {
 			return Result{}, fmt.Errorf("媒体响应 Content-Type 无效: %s", response.Header.Get("Content-Type"))
 		}
+	}
+	if response.ContentLength == 0 {
+		return Result{}, fmt.Errorf("媒体响应 Content-Length 为 0: %s", rawURL)
 	}
 	const maxMediaBytes = 4 << 30
 	if response.ContentLength > maxMediaBytes {
@@ -160,6 +169,7 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 		// 磁盘上已存在的完整文件可能属于其他推文（同名文本命名导致路径冲突）：此时既不能
 		// 跳过也不能覆盖，需要照常下载并发布到带编号后缀的路径，保证两个推文的媒体都在。
 		if options.ExistingFileOwner == nil || options.ExistingFileOwner(basePath) {
+			_ = response.Body.Close()
 			existing.ContentHash, err = existingContentHash(existing.Path, options.ExistingContentHash)
 			if err != nil {
 				return Result{}, err
@@ -221,7 +231,7 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 	if skipped {
 		// 冲突分支在磁盘上发现了完整文件：返回它的哈希，而不是刚下载的临时文件哈希
 		// （两者内容可能不同，例如同名但内容不同的媒体）。
-		result.ContentHash, err = existingContentHash(result.Path, options.ExistingContentHash)
+		result.ContentHash, err = existingContentHash(result.Path, "")
 		if err != nil {
 			return Result{}, err
 		}
@@ -242,7 +252,11 @@ func looksLikeNonMediaPayload(path string) bool {
 	defer file.Close()
 	prefix, _ := io.ReadAll(io.LimitReader(file, 512))
 	body := strings.ToLower(strings.TrimSpace(string(prefix)))
-	return strings.HasPrefix(body, "<html") || strings.HasPrefix(body, "<!doctype") || strings.HasPrefix(body, "{") || strings.HasPrefix(body, "[")
+	return strings.HasPrefix(body, "<html") ||
+		strings.HasPrefix(body, "<!doctype") ||
+		strings.HasPrefix(body, "<?xml") ||
+		strings.HasPrefix(body, "{") ||
+		strings.HasPrefix(body, "[")
 }
 
 // existingContentHash 返回已存在完整文件的内容哈希：优先用调用方已知的哈希
@@ -280,10 +294,10 @@ func existingFileState(path string, contentLength int64) (Result, bool, bool, er
 	if info.IsDir() || !info.Mode().IsRegular() {
 		return Result{}, false, false, nil
 	}
-	if contentLength < 0 {
+	if contentLength <= 0 || info.Size() <= 0 {
 		return Result{}, false, true, nil
 	}
-	if contentLength >= 0 && info.Size() != contentLength {
+	if info.Size() != contentLength {
 		return Result{}, false, true, nil
 	}
 	return Result{Path: path, Bytes: info.Size(), Skipped: true}, true, false, nil
@@ -305,10 +319,10 @@ func publishTempFile(tempPath string, basePath string, bytes int64, contentLengt
 		if handled {
 			return Result{Path: candidate, Bytes: bytes}, false, nil
 		}
-		// 冲突分支：candidate 已存在（硬链接报 EEXIST，或退化路径下 Lstat 命中），
-		// 与原有 os.IsExist 分支行为一致：必要时先处理崩溃残留覆盖，再尝试下一编号。
+		// 冲突分支：candidate 已存在（硬链接报 EEXIST，或退化路径命中），
+		// 必要时用 os.Rename 原子替换属于本次下载的残缺目标，避免 Remove+Link 空窗。
 		if index == 0 && replaceBase && !triedReplaceBase {
-			result, complete, removed, err := removeIncompleteLocalTarget(candidate, contentLength)
+			result, complete, replace, err := existingFileState(candidate, contentLength)
 			if err != nil {
 				return Result{}, false, err
 			}
@@ -317,8 +331,11 @@ func publishTempFile(tempPath string, basePath string, bytes int64, contentLengt
 				return result, true, nil
 			}
 			triedReplaceBase = true
-			if removed {
-				index--
+			if replace {
+				if err := os.Rename(tempPath, candidate); err != nil {
+					return Result{}, false, err
+				}
+				return Result{Path: candidate, Bytes: bytes}, false, nil
 			}
 		}
 	}
@@ -328,16 +345,18 @@ func publishTempFile(tempPath string, basePath string, bytes int64, contentLengt
 // linkFile 是 os.Link 的间接引用，便于测试注入不支持硬链接的错误。
 var linkFile = os.Link
 
+var errNoReplaceUnsupported = errors.New("RENAME_NOREPLACE unsupported")
+
 // publishFile 尝试把 tempPath 发布为 candidate：优先走硬链接（原子，且绝不覆盖
 // 已有文件）。在不支持硬链接的文件系统（exFAT/FAT32、部分网络盘/FUSE 挂载）上
-// os.Link 会返回 EPERM/EOPNOTSUPP 等错误，此时退化为先用 O_EXCL 原子占位，再
-// os.Rename 替换占位文件，保住不覆盖已有文件的语义。
+// os.Link 会返回 EPERM/EOPNOTSUPP 等错误，优先尝试原子 renameat2(RENAME_NOREPLACE)
+// 避免留下 0 字节占位文件；不支持时再退化为 O_EXCL 占位 + os.Rename。
 // 返回 handled=false 且 err=nil 表示 candidate 已存在（文件名冲突），调用方应继续
 // 尝试下一个编号后缀；返回 err 非 nil 表示发布失败。
 func publishFile(tempPath string, candidate string, bytes int64) (bool, error) {
 	err := linkFile(tempPath, candidate)
 	if err == nil {
-		if err := os.Remove(tempPath); err != nil {
+		if err := os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
 			return false, err
 		}
 		return true, nil
@@ -347,6 +366,13 @@ func publishFile(tempPath string, candidate string, bytes int64) (bool, error) {
 	}
 	if !hardLinksUnsupported(err) {
 		return false, err
+	}
+	if renameErr := renameNoReplace(tempPath, candidate); renameErr == nil {
+		return true, nil
+	} else if os.IsExist(renameErr) {
+		return false, nil
+	} else if !errors.Is(renameErr, errNoReplaceUnsupported) {
+		return false, renameErr
 	}
 	// 先创建独占占位文件。即使多个进程同时发布同一候选名，也只有一个能拿到占位，
 	// 之后 Rename 只会替换我们自己创建的占位文件，而不会覆盖原有文件。
@@ -378,17 +404,6 @@ func hardLinksUnsupported(err error) bool {
 		errors.Is(err, syscall.EXDEV)
 }
 
-func removeIncompleteLocalTarget(path string, contentLength int64) (Result, bool, bool, error) {
-	result, complete, replace, err := existingFileState(path, contentLength)
-	if err != nil || complete || !replace {
-		return result, complete, false, err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return Result{}, false, false, err
-	}
-	return Result{}, false, true, nil
-}
-
 func suffixedPath(path string, index int, maxFilenameLength int) string {
 	if index == 0 {
 		return path
@@ -401,14 +416,14 @@ func suffixedPath(path string, index int, maxFilenameLength int) string {
 }
 
 func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (*http.Response, error) {
-	requestURL := rawURL
+	requestURL := strings.TrimSpace(rawURL)
 	if options.LargePhoto {
-		requestURL = largePhotoURL(rawURL)
+		requestURL = largePhotoURL(requestURL)
 	}
 	// 初始 URL 与重定向使用同一套主机白名单：解析出的 X 媒体 URL 已在 parser 侧过滤，
 	// 但下载器是最后一道 SSRF 边界，任何调用方（任务、重试、测试工具）都不应能把
 	// 请求发到非 twimg.com 主机。
-	parsedURL, err := url.Parse(strings.TrimSpace(requestURL))
+	parsedURL, err := url.Parse(requestURL)
 	if err != nil {
 		return nil, fmt.Errorf("媒体 URL 无效: %w", err)
 	}
@@ -426,10 +441,14 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 	if err != nil {
 		return nil, err
 	}
-	// 空代理也必须使用 httpx.Transport，确保直连和代理两条路径都经过拨号防护。
+	timeout := defaultDownloadTimeout
+	if d != nil && d.client != nil {
+		timeout = d.client.Timeout
+	}
+	// 空代理也必须使用 httpx.Transport + GuardedRoundTripper，确保直连与代理路径均受保护。
 	client := &http.Client{
-		Timeout:   d.client.Timeout,
-		Transport: transport,
+		Timeout:   timeout,
+		Transport: httpx.GuardedRoundTripper(transport),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("媒体重定向超过 10 次")
@@ -440,8 +459,12 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 				return fmt.Errorf("拒绝非 HTTP 媒体重定向: %s", req.URL.String())
 			}
-			if via[0].URL.Scheme == "https" && req.URL.Scheme == "http" {
-				return errors.New("拒绝 HTTPS 媒体降级重定向")
+			if strings.EqualFold(req.URL.Scheme, "http") {
+				for _, prev := range via {
+					if prev != nil && prev.URL != nil && strings.EqualFold(prev.URL.Scheme, "https") {
+						return errors.New("拒绝 HTTPS 媒体降级重定向")
+					}
+				}
 			}
 			if !d.hostAllowed(req.URL.Hostname()) {
 				return fmt.Errorf("拒绝媒体重定向到非 twimg.com 域名: %s", req.URL.Hostname())
@@ -477,8 +500,7 @@ func transportForProxy(proxyURL string) (*http.Transport, error) {
 // 内的等价判断）。本轮只统一 downloader 内部的两处调用点，未做跨包去重；统一时抽到
 // internal/httpx 或独立的 twimg 白名单包，避免任一包先改导致漂移。
 func isAllowedTwimgHost(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	return host == "twimg.com" || strings.HasSuffix(host, ".twimg.com")
+	return httpx.IsTwimgHost(host)
 }
 
 // isPhotoSizingHost 报告该主机是否用 ?name= 表示图片尺寸。仅 pbs.twimg.com（图片与
@@ -533,7 +555,7 @@ func mediaExtension(rawURL string, contentType string) string {
 				return ext
 			}
 		}
-		if ext := normalizeMediaExtension(filepath.Ext(parsed.Path)); ext != "" {
+		if ext := normalizeMediaExtension(path.Ext(parsed.Path)); ext != "" {
 			return ext
 		}
 	}
@@ -630,7 +652,7 @@ func MediaIdentity(rawURL string) string {
 	// 将路径扩展名和 format 参数统一表示，避免将 JPG 与 PNG 当成同一份文件。
 	mediaFormat := query.Get("format")
 	if mediaFormat == "" {
-		mediaFormat = filepath.Ext(parsed.Path)
+		mediaFormat = path.Ext(parsed.Path)
 	}
 	if ext := normalizeMediaExtension(mediaFormat); ext != "" {
 		query.Set("format", strings.TrimPrefix(ext, "."))
@@ -644,7 +666,7 @@ func MediaIdentity(rawURL string) string {
 		query.Del("name")
 	}
 	parsed.Scheme = "https"
-	parsed.Host = strings.ToLower(parsed.Hostname())
+	parsed.Host = strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
 	parsed.User = nil
 	parsed.Path = stripMediaExtension(parsed.Path)
 	parsed.RawPath = ""
@@ -667,7 +689,7 @@ func videoMediaID(parsed *url.URL) string {
 	if host != "video.twimg.com" && !strings.HasSuffix(host, ".video.twimg.com") {
 		return ""
 	}
-	if !strings.EqualFold(filepath.Ext(parsed.Path), ".mp4") {
+	if !strings.EqualFold(path.Ext(parsed.Path), ".mp4") {
 		return ""
 	}
 	// 至少要有 <类型>/<媒体ID>/<文件>：只有两段的路径不是变体 URL，无法确认 ID 的含义。
@@ -696,7 +718,7 @@ func isDecimalID(value string) bool {
 // stripMediaExtension 去掉路径末尾的媒体扩展名（.jpg/.mp4 等），使 `.jpg` 与
 // `?format=jpg` 两种写法收敛到同一个身份；非媒体扩展名与空路径原样保留。
 func stripMediaExtension(pathValue string) string {
-	rawExt := filepath.Ext(pathValue)
+	rawExt := path.Ext(pathValue)
 	if normalizeMediaExtension(rawExt) == "" {
 		return pathValue
 	}
@@ -728,28 +750,32 @@ func NormalizeMediaURL(rawURL string) string {
 	return parsed.String()
 }
 
+func isFilenameEdgeTrimRune(r rune) bool {
+	return r == '.' || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
+}
+
 // sanitizeFilename 把任意提示文本清理成可跨平台安全落盘的文件名基名。
-// 处理：控制字符（含 NUL/换行）、路径分隔符与 Windows 非法字符、隐藏文件前导点、
-// Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9/CONIN$/CONOUT$）、结尾点与空格
+// 处理：控制字符（含 NUL/换行/Unicode 格式控制符）、Unicode 空白、路径分隔符与 Windows 非法字符、
+// 隐藏文件前导点（含与空白交替的前导点）、Windows 保留设备名
+// （CON/PRN/AUX/NUL/COM1-9/LPT1-9/CONIN$/CONOUT$）、结尾点与空白
 // （Windows 会静默截断，导致同名冲突）。清理后为空时返回 ""，由调用方退回 "media"。
 func sanitizeFilename(name string) string {
 	name = strings.TrimSpace(name)
 	name = unsupportedFilenameChars.ReplaceAllString(name, "")
-	// 先删控制字符再处理空白：\r\n\t 之外还有大量 C0/DEL 控制符会破坏日志与终端，
-	// 也会被 Windows 拒绝。
+	// 先删控制字符与格式控制符再规范空白：\r\n\t 之外还有大量 C0/DEL/Cf 控制符会破坏日志与终端，
+	// 也会被 Windows 拒绝或伪造扩展名；保留 U+200D 以不破坏合法 Emoji ZWJ 组合。
 	name = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != '\u200d') {
 			return -1
+		}
+		if unicode.IsSpace(r) {
+			return ' '
 		}
 		return r
 	}, name)
-	name = strings.TrimSpace(name)
 
-	// Strip leading dots to prevent hidden files on Unix.
-	name = strings.TrimLeft(name, ".")
-	// Windows 不允许文件名以点或空格结尾（. 与空格会被静默丢弃），这里显式去掉。
-	name = strings.TrimRight(name, ". ")
-	name = strings.TrimSpace(name)
+	// 同步去掉前导与结尾的点/空白/格式符，防止 ". .preview-" 或 "\u00a0.preview-" 留下隐藏文件前缀。
+	name = strings.TrimFunc(name, isFilenameEdgeTrimRune)
 	if name == "" {
 		return ""
 	}
@@ -757,7 +783,7 @@ func sanitizeFilename(name string) string {
 	// Detect Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
 	// If the base name (without extension) matches, prefix with underscore.
 	base, _, _ := strings.Cut(name, ".")
-	if isWindowsReservedName(base) {
+	if isWindowsReservedName(strings.TrimRightFunc(base, unicode.IsSpace)) {
 		name = "_" + name
 	}
 
@@ -801,7 +827,7 @@ func normalizedMaxFilenameLength(value int) int {
 
 func composeFilename(stem string, ext string, suffix string, maxFilenameLength int) string {
 	maxFilenameLength = normalizedMaxFilenameLength(maxFilenameLength)
-	stem = strings.TrimSpace(stem)
+	stem = strings.TrimFunc(stem, isFilenameEdgeTrimRune)
 	if stem == "" {
 		stem = "media"
 	}
@@ -815,11 +841,28 @@ func composeFilename(stem string, ext string, suffix string, maxFilenameLength i
 	if available < 1 {
 		available = 1
 	}
-	stem = truncateUTF8Bytes(stem, available)
+	stem = strings.TrimFunc(truncateUTF8Bytes(stem, available), isFilenameEdgeTrimRune)
 	if stem == "" {
 		stem = truncateUTF8Bytes("media", available)
 	}
-	return stem + suffix + ext
+	base, _, _ := strings.Cut(stem+suffix, ".")
+	if isWindowsReservedName(strings.TrimRightFunc(base, unicode.IsSpace)) {
+		if len(stem)+1 <= available {
+			stem = "_" + stem
+		} else if available > 1 {
+			if trimmed := strings.TrimFunc(truncateUTF8Bytes(stem, available-1), isFilenameEdgeTrimRune); trimmed != "" {
+				stem = "_" + trimmed
+			}
+		}
+	}
+	out := stem + suffix + ext
+	if ext == "" {
+		out = strings.TrimFunc(out, isFilenameEdgeTrimRune)
+		if out == "" {
+			out = "media"
+		}
+	}
+	return out
 }
 
 func truncateUTF8Bytes(value string, maxBytes int) string {

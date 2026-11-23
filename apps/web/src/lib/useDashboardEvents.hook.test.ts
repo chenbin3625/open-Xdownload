@@ -159,3 +159,94 @@ describe("useDashboardEvents 手动重连", () => {
     expect(invalidatedRoots(queryClient)).toEqual([...roots]);
   });
 });
+
+describe("useDashboardEvents buffered job.updated ordering", () => {
+  it("discards buffered update for a deleted job and flushes pending updates before job.created", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const jobsKey = [...jobsQueryRoot, 1, 10, "all", "all", ""];
+    const job1 = {
+      id: 1, kind: "tweet_link" as const, status: "downloading" as const, input: "u1", title: "Job 1",
+      progress: 0.1, message: "", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z",
+    };
+    const job2 = {
+      id: 2, kind: "tweet_link" as const, status: "downloading" as const, input: "u2", title: "Job 2",
+      progress: 0.1, message: "", createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z",
+    };
+    queryClient.setQueryData(jobsKey, {
+      items: [job2, job1], page: 1, pageSize: 10, total: 2,
+      counts: { all: 2, active: 2, completed: 0, failed: 0 },
+    });
+    queryClient.setQueryData(dashboardMetaQueryRoot, {
+      stats: { total: 2, active: 2, completed: 0, failed: 0 },
+      failedTweetCount: 0,
+    });
+
+    renderHook(() => useDashboardEvents(queryClient, vi.fn()));
+    const source = latestSource();
+    act(() => source.open());
+
+    // Queue a non-terminal job.updated for job1 carrying stale meta (total=2)
+    act(() => {
+      source.onmessage?.({
+        data: JSON.stringify({
+          type: "job.updated",
+          payload: { ...job1, progress: 0.6, updatedAt: "2026-01-01T00:00:05Z" },
+          meta: { stats: { total: 2, active: 2, completed: 0, failed: 0 }, failedTweetCount: 0 },
+        }),
+      });
+    });
+
+    // Before 250ms elapses, job1 is deleted with newer meta (total=1)
+    act(() => {
+      source.onmessage?.({
+        data: JSON.stringify({
+          type: "job.deleted",
+          jobId: 1,
+          meta: { stats: { total: 1, active: 1, completed: 0, failed: 0 }, failedTweetCount: 0 },
+        }),
+      });
+    });
+
+    // Advance past 250ms debounce: stale buffered job.updated must NOT overwrite total=1
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(queryClient.getQueryData<{ stats: { total: number; active: number } }>(dashboardMetaQueryRoot)?.stats).toMatchObject({
+      total: 1,
+      active: 1,
+    });
+
+    // Now queue a non-terminal update for job2 (stale meta total=1), then immediately receive job.created (total=2)
+    act(() => {
+      source.onmessage?.({
+        data: JSON.stringify({
+          type: "job.updated",
+          payload: { ...job2, progress: 0.8, updatedAt: "2026-01-01T00:00:10Z" },
+          meta: { stats: { total: 1, active: 1, completed: 0, failed: 0 }, failedTweetCount: 0 },
+        }),
+      });
+      source.onmessage?.({
+        data: JSON.stringify({
+          type: "job.created",
+          payload: {
+            id: 3, kind: "tweet_link", status: "pending", input: "u3", title: "Job 3",
+            progress: 0, message: "", createdAt: "2026-01-01T00:00:11Z", updatedAt: "2026-01-01T00:00:11Z",
+          },
+          meta: { stats: { total: 2, active: 2, completed: 0, failed: 0 }, failedTweetCount: 0 },
+        }),
+      });
+    });
+
+    // Job2 update was flushed synchronously before job.created, and job.created meta wins even after 500ms
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    const page = queryClient.getQueryData<{ items: Array<{ id: number; progress: number }> }>(jobsKey);
+    expect(page?.items.find((item) => item.id === 2)?.progress).toBe(0.8);
+    expect(page?.items.some((item) => item.id === 3)).toBe(true);
+    expect(queryClient.getQueryData<{ stats: { total: number; active: number } }>(dashboardMetaQueryRoot)?.stats).toMatchObject({
+      total: 2,
+      active: 2,
+    });
+  });
+});

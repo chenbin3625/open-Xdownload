@@ -15,10 +15,10 @@ import (
 const bootstrapScriptID = "app-bootstrap"
 
 type appBootstrap struct {
-	Jobs      *jobListPage              `json:"jobs,omitempty"`
-	Meta      *dashboardMeta            `json:"meta,omitempty"`
-	Schedules []storage.ArchiveSchedule `json:"schedules,omitempty"`
-	Config    *config.AppConfig         `json:"config,omitempty"`
+	Jobs      *jobListPage               `json:"jobs,omitempty"`
+	Meta      *dashboardMeta             `json:"meta,omitempty"`
+	Schedules *[]storage.ArchiveSchedule `json:"schedules,omitempty"`
+	Config    *config.AppConfig          `json:"config,omitempty"`
 }
 
 func includeWorkbenchBootstrap(path string) bool {
@@ -78,7 +78,7 @@ func (s *Server) loadAppBootstrap(ctx context.Context, path string, page, pageSi
 		} else {
 			payload.Jobs = &jobs
 			payload.Meta = &meta
-			payload.Schedules = schedules
+			payload.Schedules = &schedules
 			loaded = true
 		}
 	}

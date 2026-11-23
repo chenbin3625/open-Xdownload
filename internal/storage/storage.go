@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -72,9 +73,11 @@ type Store struct {
 	libraryCacheOK        bool
 	libraryCacheLimit     int
 	libraryCacheTruncated bool
+	libraryCacheGenBuilt  uint64
 	libraryUsersCache     []LibraryUserSummary
 	libraryUsersCacheAt   time.Time
 	libraryUsersCacheOK   bool
+	libraryUsersCacheGen  uint64
 	// libraryCacheGen 每次失效递增；回填缓存前校验代数未变，避免查询期间新写入触发
 	// 的失效被随后到期的旧数据覆盖（脏缓存最长持续一个 TTL）。
 	libraryCacheGen atomic.Uint64
@@ -94,6 +97,16 @@ const storedConfigCacheTTL = time.Second
 // MaxLibraryDownloadsLimit 是媒体归档库单次返回的记录上限。前端在客户端做全部
 // 筛选/计数/搜索，因此总是请求全量；该上限只为超大规模归档约束响应与缓存体积。
 const MaxLibraryDownloadsLimit = 100000
+
+// sortableTimestampLayout is a fixed-width UTC RFC3339Nano timestamp layout.
+// Unlike Go's time.RFC3339Nano (which omits trailing fractional zeros so 'Z' > '.'),
+// every value formatted with this layout has identical width and sorts identically
+// under SQLite BINARY collation and chronological order.
+const sortableTimestampLayout = "2006-01-02T15:04:05.000000000Z"
+
+func formatSortableTime(t time.Time) string {
+	return t.UTC().Format(sortableTimestampLayout)
+}
 
 // _txlock=immediate 让所有事务以 BEGIN IMMEDIATE 开始：事务里"先读后写"若用默认的
 // BEGIN DEFERRED，事务先以读者身份启动，写第一条语句时才尝试升级为写者，而
@@ -535,11 +548,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	if err := s.runMigrationOnce("drop_unique_users_screen_name", s.dropUniqueUsersScreenName); err != nil {
 		return err
 	}
-	// 归档用户的实体目录改为跟随媒体存储规则（默认 <root>/image/<handle>、
-	// <root>/video/<handle>），旧库里的 <root>/users 行需要改写到新目录并保留游标。
-	if err := s.runMigrationOnce("user_entities_kind_dirs", s.migrateUserEntitiesToKindDirs); err != nil {
-		return err
-	}
 	// user_previous_names 只被触发器写入、全仓库没有任何读取方（死表），删除以停止
 	// 无意义写入；触发器必须先于表删除。
 	if err := s.runMigrationOnce("drop_user_previous_names", s.dropUserPreviousNames); err != nil {
@@ -557,6 +565,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return err
 	}
 	if err := s.migrateAssets(); err != nil {
+		return err
+	}
+	// 归档用户的实体目录改为跟随媒体存储规则（默认 <root>/image/<handle>、
+	// <root>/video/<handle>），旧库里的 <root>/users 行需要改写到新目录并保留游标。
+	// 必须在 migrateAssets() 之后执行，确保 pre-v7 升级时 storage_versions 表已存在。
+	if err := s.runMigrationOnce("user_entities_kind_dirs", s.migrateUserEntitiesToKindDirs); err != nil {
 		return err
 	}
 	if err := s.migrateXAccounts(); err != nil {
@@ -1086,29 +1100,49 @@ CREATE INDEX IF NOT EXISTS idx_users_screen_name ON users (screen_name);`)
 // 模板按资源类型分目录时迁移；无法确定目标目录时保持原样。磁盘上的旧 users 目录不会
 // 被删除，由用户自行清理。
 func (s *Store) migrateUserEntitiesToKindDirs(exec migrationExecutor) error {
-	var root string
-	if err := exec.Get(&root, `SELECT download_dir FROM app_config WHERE id = 1`); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
+	var storedRoot string
+	if err := exec.Get(&storedRoot, `SELECT download_dir FROM app_config WHERE id = 1`); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	root = strings.TrimSpace(root)
-	if root == "" {
+	storedRoot = strings.TrimSpace(storedRoot)
+	effectiveRoot := strings.TrimSpace(config.EffectiveDownloadDir(config.AppConfig{DownloadDir: storedRoot}))
+	normalizeRoot := func(raw string) string {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return ""
+		}
+		if abs, err := filepath.Abs(raw); err == nil {
+			return filepath.Clean(abs)
+		}
+		return filepath.Clean(raw)
+	}
+	effectiveRoot = normalizeRoot(effectiveRoot)
+	storedRoot = normalizeRoot(storedRoot)
+	oldParents := make([]string, 0, 2)
+	seenParents := make(map[string]struct{}, 2)
+	for _, r := range []string{effectiveRoot, storedRoot} {
+		if r == "" {
+			continue
+		}
+		p := filepath.Join(r, "users")
+		if _, dup := seenParents[p]; dup {
+			continue
+		}
+		seenParents[p] = struct{}{}
+		oldParents = append(oldParents, p)
+	}
+	if len(oldParents) == 0 {
 		return nil
 	}
-	if abs, err := filepath.Abs(root); err == nil {
-		root = abs
-	}
 	var raw string
+	var document config.StorageDocument
 	if err := exec.Get(&raw, `SELECT document FROM storage_versions ORDER BY version DESC LIMIT 1`); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil
+			document = config.DefaultStorage(effectiveRoot)
+		} else {
+			return err
 		}
-		return err
-	}
-	var document config.StorageDocument
-	if err := json.Unmarshal([]byte(raw), &document); err != nil || !document.Enabled {
+	} else if err := json.Unmarshal([]byte(raw), &document); err != nil || !document.Enabled {
 		return nil
 	}
 
@@ -1118,8 +1152,9 @@ func (s *Store) migrateUserEntitiesToKindDirs(exec migrationExecutor) error {
 	}
 	renderDirs := func(screen string) ([]kindDir, bool) {
 		dirs := make([]kindDir, 0, len(config.AssetKinds))
+		seen := make(map[string]struct{}, len(config.AssetKinds))
 		for _, kind := range config.AssetKinds {
-			rule, _, err := document.Rule(kind)
+			rule, target, err := document.Rule(kind)
 			if err != nil {
 				return nil, false
 			}
@@ -1127,8 +1162,29 @@ func (s *Store) migrateUserEntitiesToKindDirs(exec migrationExecutor) error {
 			if !ok {
 				return nil, false
 			}
-			full := filepath.Join(root, filepath.FromSlash(rel))
-			dirs = append(dirs, kindDir{parent: filepath.Dir(full), name: filepath.Base(full)})
+			var kd kindDir
+			if target.Type == "s3" {
+				kd = kindDir{
+					parent: path.Join("s3:"+target.ID, path.Dir(rel)),
+					name:   path.Base(rel),
+				}
+			} else {
+				targetRoot := normalizeRoot(target.Root)
+				if targetRoot == "" {
+					targetRoot = effectiveRoot
+				}
+				if targetRoot == "" {
+					return nil, false
+				}
+				full := filepath.Join(targetRoot, filepath.FromSlash(rel))
+				kd = kindDir{parent: filepath.Dir(full), name: filepath.Base(full)}
+			}
+			key := kd.parent + "\x00" + kd.name
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			dirs = append(dirs, kd)
 		}
 		return dirs, len(dirs) > 0
 	}
@@ -1143,47 +1199,59 @@ func (s *Store) migrateUserEntitiesToKindDirs(exec migrationExecutor) error {
 		LastFullScanAt  sql.NullTime  `db:"last_full_scan_at"`
 	}
 	now := time.Now().UTC()
-	oldParent := filepath.Join(root, "users")
-	lastID := int64(0)
-	for {
-		rows := []oldEntity{}
-		if err := exec.Select(&rows, `
+	for _, oldParent := range oldParents {
+		lastID := int64(0)
+		for {
+			rows := []oldEntity{}
+			if err := exec.Select(&rows, `
 SELECT ue.id, ue.user_id, COALESCE(u.screen_name, '') AS screen_name,
 	ue.latest_release_time, ue.media_count, ue.last_seen_tweet_id, ue.last_full_scan_at
 FROM user_entities ue LEFT JOIN users u ON u.id = ue.user_id
 WHERE ue.parent_dir = ? AND ue.id > ?
 ORDER BY ue.id
 LIMIT 1000`, oldParent, lastID); err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			break
-		}
-		for _, row := range rows {
-			lastID = row.ID
-			if row.ScreenName == "" {
-				continue
-			}
-			dirs, ok := renderDirs(row.ScreenName)
-			if !ok {
-				continue
-			}
-			primary := dirs[0]
-			// 旧行升级为主目录行；若目标目录已有行（升级中途曾被新代码写过），删掉旧的
-			// 重复行，保留目标行里可能更新的游标。
-			if _, err := exec.Exec(`DELETE FROM user_entities WHERE user_id = ? AND parent_dir = ? AND id <> ?`, row.UserID, primary.parent, row.ID); err != nil {
 				return err
 			}
-			if _, err := exec.Exec(`UPDATE user_entities SET parent_dir = ?, name = ? WHERE id = ?`, primary.parent, primary.name, row.ID); err != nil {
-				return err
+			if len(rows) == 0 {
+				break
 			}
-			for _, extra := range dirs[1:] {
-				if _, err := exec.Exec(`
+			for _, row := range rows {
+				lastID = row.ID
+				if row.ScreenName == "" {
+					continue
+				}
+				dirs, ok := renderDirs(row.ScreenName)
+				if !ok {
+					continue
+				}
+				primary := dirs[0]
+				// 旧行升级为主目录行；若目标目录已有行（升级中途曾被新代码写过），把旧行上
+				// 不冲突的 failed_tweets 迁移过去再删掉旧行，保留目标行及其游标。
+				var targetID int64
+				err := exec.Get(&targetID, `SELECT id FROM user_entities WHERE user_id = ? AND parent_dir = ?`, row.UserID, primary.parent)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if err == nil && targetID != row.ID {
+					if _, err := exec.Exec(`UPDATE OR IGNORE failed_tweets SET entity_id = ? WHERE entity_id = ?`, targetID, row.ID); err != nil {
+						return err
+					}
+					if _, err := exec.Exec(`DELETE FROM user_entities WHERE id = ?`, row.ID); err != nil {
+						return err
+					}
+				} else {
+					if _, err := exec.Exec(`UPDATE user_entities SET parent_dir = ?, name = ? WHERE id = ?`, primary.parent, primary.name, row.ID); err != nil {
+						return err
+					}
+				}
+				for _, extra := range dirs[1:] {
+					if _, err := exec.Exec(`
 INSERT OR IGNORE INTO user_entities
 	(user_id, name, parent_dir, latest_release_time, media_count, last_seen_tweet_id, last_full_scan_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					row.UserID, extra.name, extra.parent, row.LatestRelease, row.MediaCount, row.LastSeenTweetID, row.LastFullScanAt, now); err != nil {
-					return err
+						row.UserID, extra.name, extra.parent, row.LatestRelease, row.MediaCount, row.LastSeenTweetID, row.LastFullScanAt, now); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -1422,7 +1490,12 @@ func (s *Store) UpdateConfigPatch(ctx context.Context, fields map[string]json.Ra
 
 func (s *Store) updateConfig(ctx context.Context, cfg config.AppConfig, fields map[string]json.RawMessage) (config.AppConfig, error) {
 	s.configMu.Lock()
-	defer s.configMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.configMu.Unlock()
+		}
+	}()
 	// 单连接 + 事务：把"读取当前值 → 合并占位符/还原 URL 凭据 → 写回"封装在一个事务里，
 	// 避免两个并发 PUT /api/config 各自读到旧值再先后写回，导致其中一方的新凭据被静默覆盖。
 	tx, err := s.db.BeginTxx(ctx, nil)
@@ -1481,22 +1554,31 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 	}
 
 	_, err = tx.NamedExecContext(ctx, `
-	UPDATE app_config SET
-		download_dir = :download_dir,
-		max_concurrency = :max_concurrency,
-		proxy_url = :proxy_url,
-		auth_token = :auth_token,
-			csrf_token = :csrf_token,
-			additional_cookies = :additional_cookies,
-			auto_retry_failed = :auto_retry_failed,
-			auto_follow_protected = :auto_follow_protected,
-			include_nested_tweet_media = :include_nested_tweet_media,
-			incremental_archive = :incremental_archive,
-			file_naming_mode = :file_naming_mode,
-			max_filename_length = :max_filename_length,
-			storage_type = :storage_type,
-			updated_at = :updated_at
-		WHERE id = 1`, map[string]any{
+	INSERT INTO app_config (
+		id, download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
+		additional_cookies, auto_retry_failed, auto_follow_protected,
+		include_nested_tweet_media, incremental_archive,
+		file_naming_mode, max_filename_length, storage_type, updated_at
+	) VALUES (
+		1, :download_dir, :max_concurrency, :proxy_url, :auth_token, :csrf_token,
+		:additional_cookies, :auto_retry_failed, :auto_follow_protected,
+		:include_nested_tweet_media, :incremental_archive,
+		:file_naming_mode, :max_filename_length, :storage_type, :updated_at
+	) ON CONFLICT(id) DO UPDATE SET
+		download_dir = excluded.download_dir,
+		max_concurrency = excluded.max_concurrency,
+		proxy_url = excluded.proxy_url,
+		auth_token = excluded.auth_token,
+		csrf_token = excluded.csrf_token,
+		additional_cookies = excluded.additional_cookies,
+		auto_retry_failed = excluded.auto_retry_failed,
+		auto_follow_protected = excluded.auto_follow_protected,
+		include_nested_tweet_media = excluded.include_nested_tweet_media,
+		incremental_archive = excluded.incremental_archive,
+		file_naming_mode = excluded.file_naming_mode,
+		max_filename_length = excluded.max_filename_length,
+		storage_type = excluded.storage_type,
+		updated_at = excluded.updated_at`, map[string]any{
 		"download_dir":               cfg.DownloadDir,
 		"max_concurrency":            cfg.MaxConcurrency,
 		"proxy_url":                  cfg.ProxyURL,
@@ -1520,6 +1602,8 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 	}
 	s.cachedStored = &cfg
 	s.cachedStoredAt = time.Now()
+	locked = false
+	s.configMu.Unlock()
 	s.invalidateLibraryDownloadsCache()
 	// 可信根只增不减会永久扩大媒体库的解析面；按最近使用/最长前缀保留有限条数。
 	// 清理失败不影响已提交的配置保存。
@@ -1633,6 +1717,11 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 		if err := s.db.SelectContext(ctx, &paths, `SELECT DISTINCT file_path FROM downloads WHERE file_path<>''`); err != nil {
 			return err
 		}
+		seenDirs := make(map[string]struct{}, len(knownRoots))
+		for _, root := range knownRoots {
+			seenDirs[filepath.Clean(root)] = struct{}{}
+		}
+		var missingPaths []string
 		unresolved := false
 		for _, filePath := range paths {
 			if !filepath.IsAbs(filePath) || !IsLibraryMediaPath(filePath) {
@@ -1648,15 +1737,23 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 			if covered {
 				continue
 			}
+			root := filepath.Dir(filepath.Clean(filePath))
+			if _, seen := seenDirs[root]; seen {
+				continue
+			}
 			info, err := os.Lstat(filePath)
 			if err != nil {
-				unresolved = true
+				if errors.Is(err, os.ErrNotExist) {
+					missingPaths = append(missingPaths, filePath)
+				} else {
+					unresolved = true
+				}
 				continue
 			}
 			if !info.Mode().IsRegular() {
 				continue
 			}
-			root := filepath.Dir(filepath.Clean(filePath))
+			seenDirs[root] = struct{}{}
 			resolvedRoot, err := filepath.EvalSymlinks(root)
 			if err != nil || !sameFilesystemPath(root, resolvedRoot) {
 				continue
@@ -1666,6 +1763,26 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 			}
 			if _, err := s.db.ExecContext(ctx, `INSERT INTO download_roots(path,last_seen_at) VALUES(?,?) ON CONFLICT(path) DO NOTHING`, root, time.Now().UTC()); err != nil {
 				return err
+			}
+			knownRoots = append(knownRoots, root)
+		}
+		if !unresolved {
+			for _, filePath := range missingPaths {
+				root := filepath.Dir(filepath.Clean(filePath))
+				if _, seen := seenDirs[root]; seen {
+					continue
+				}
+				covered := false
+				for _, known := range knownRoots {
+					if relative, err := filepath.Rel(known, filePath); err == nil && filepath.IsLocal(relative) {
+						covered = true
+						break
+					}
+				}
+				if !covered {
+					unresolved = true
+					break
+				}
 			}
 		}
 		if !unresolved {
@@ -1684,23 +1801,66 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 // 未被文件引用的根数量限制在 MaxDownloadRoots。keep 和下载记录仍引用的根永远保留；其余按 last_seen_at 降序，
 // 同时间按路径长度降序（更长/更具体的根优先）。返回删除行数。
 func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, error) {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
 	type rootRow struct {
 		Path     string       `db:"path"`
 		LastSeen sql.NullTime `db:"last_seen_at"`
 	}
 	rows := []rootRow{}
-	if err := s.db.SelectContext(ctx, &rows, `SELECT path, last_seen_at FROM download_roots`); err != nil {
+	if err := tx.SelectContext(ctx, &rows, `SELECT path, last_seen_at FROM download_roots`); err != nil {
 		return 0, err
 	}
-	keepSet := make(map[string]struct{}, len(keep))
-	for _, root := range keep {
-		if strings.TrimSpace(root) == "" {
-			continue
+	keepSet := make(map[string]struct{}, len(keep)+4)
+	addKeep := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
 		}
-		if abs, err := filepath.Abs(root); err == nil {
+		if abs, err := filepath.Abs(raw); err == nil {
 			keepSet[filepath.Clean(abs)] = struct{}{}
 		}
 	}
+	for _, root := range keep {
+		addKeep(root)
+	}
+	// 自动保护当前配置目录、环境变量下载目录与活跃存储策略（最新版及被资产/活跃任务引用的版本）的本地/NAS 根，
+	// 防止任意调用方漏传 keep 时把仍在使用的存储根误删。
+	var storedDir string
+	if err := tx.GetContext(ctx, &storedDir, `SELECT download_dir FROM app_config WHERE id = 1`); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	addKeep(storedDir)
+	addKeep(config.EffectiveDownloadDir(config.AppConfig{DownloadDir: storedDir}))
+
+	var activeDocs []string
+	if err := tx.SelectContext(ctx, &activeDocs, `
+SELECT document FROM storage_versions
+WHERE version = (SELECT MAX(version) FROM storage_versions)
+   OR version IN (SELECT DISTINCT policy_version FROM assets)
+   OR version IN (
+       SELECT DISTINCT js.policy_version FROM job_storage js
+       JOIN jobs j ON j.id = js.job_id
+       WHERE j.status IN (`+activeJobStatusesSQL+`)
+   )`); err != nil {
+		return 0, err
+	}
+	for _, rawDoc := range activeDocs {
+		var doc config.StorageDocument
+		if err := json.Unmarshal([]byte(rawDoc), &doc); err != nil {
+			continue
+		}
+		for _, target := range doc.Targets {
+			if target.Type == "local" || target.Type == "nas" {
+				addKeep(target.Root)
+			}
+		}
+	}
+
 	type candidate struct {
 		path     string
 		lastSeen time.Time
@@ -1711,7 +1871,10 @@ func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, err
 	keptCount := 0
 	for _, row := range rows {
 		clean := filepath.Clean(row.Path)
-		if rootErr := validateTrustedDownloadRoot(row.Path); rootErr != nil {
+		if abs, err := filepath.Abs(row.Path); err == nil {
+			clean = filepath.Clean(abs)
+		}
+		if rootErr := validateTrustedDownloadRoot(clean); rootErr != nil {
 			remove = append(remove, row.Path)
 			continue
 		}
@@ -1723,7 +1886,7 @@ func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, err
 			// 上界取"前缀最后一个字节 +1"：BINARY 排序下所有以 prefix 开头的字符串
 			// 都落在 [prefix, 上界) 内，且不会误伤兄弟目录（/data 与 /data2）。
 			upper := prefix[:len(prefix)-1] + string(prefix[len(prefix)-1]+1)
-			if err := s.db.GetContext(ctx, &kept, `SELECT EXISTS(SELECT 1 FROM downloads WHERE file_path >= ? AND file_path < ?)`, prefix, upper); err != nil {
+			if err := tx.GetContext(ctx, &kept, `SELECT EXISTS(SELECT 1 FROM downloads WHERE file_path >= ? AND file_path < ?)`, prefix, upper); err != nil {
 				return 0, err
 			}
 		}
@@ -1744,17 +1907,19 @@ func (s *Store) PruneDownloadRoots(ctx context.Context, keep []string) (int, err
 		}
 		return candidates[i].path < candidates[j].path
 	})
-	limit := MaxDownloadRoots
-	if keptCount > limit {
-		limit = keptCount
-	}
+	// MaxDownloadRoots 只限制未被保护/未被文件引用的历史根数量，受保护根数量再多也不应把
+	// 未引用根的配额挤压成 0。
+	limit := keptCount + MaxDownloadRoots
 	for index := limit; index < len(candidates); index++ {
 		remove = append(remove, candidates[index].path)
 	}
 	for _, path := range remove {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM download_roots WHERE path = ?`, path); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM download_roots WHERE path = ?`, path); err != nil {
 			return 0, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return len(remove), nil
 }
@@ -1784,7 +1949,7 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
 		limit = 100
 	}
 	jobs := []Job{}
-	err := s.db.SelectContext(ctx, &jobs, `SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?`, limit)
+	err := s.db.SelectContext(ctx, &jobs, `SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
 	return jobs, err
 }
 
@@ -1835,7 +2000,13 @@ func (s *Store) ListJobsPageFiltered(ctx context.Context, limit int, page int, f
 		result.Total = result.Counts.All
 	}
 
+	if page-1 > math.MaxInt/limit {
+		return result, nil
+	}
 	offset := (page - 1) * limit
+	if offset >= result.Total {
+		return result, nil
+	}
 	if err := s.db.SelectContext(ctx, &result.Items, `
 SELECT * FROM jobs
 WHERE `+baseWhere+`
@@ -1932,7 +2103,33 @@ func (s *Store) ClaimPendingJobs(ctx context.Context, limit int) ([]Job, error) 
 		}
 		jobs = append(jobs, job)
 	}
-	return jobs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(jobs) > 1 {
+		sort.Slice(jobs, func(i, j int) bool {
+			pi := jobs[i].EnqueueNS + jobSourcePriorityOffsetNS(jobs[i].Source)
+			pj := jobs[j].EnqueueNS + jobSourcePriorityOffsetNS(jobs[j].Source)
+			if pi != pj {
+				return pi < pj
+			}
+			return jobs[i].ID < jobs[j].ID
+		})
+	}
+	return jobs, nil
+}
+
+func jobSourcePriorityOffsetNS(source JobSource) int64 {
+	switch source {
+	case JobSourceSchedule:
+		return 1800000000000
+	case JobSourceAutoRetry:
+		return 3600000000000
+	case JobSourceMaintenance:
+		return 7200000000000
+	default:
+		return 0
+	}
 }
 
 func (s *Store) UpdateJob(ctx context.Context, job Job) error {
@@ -1974,7 +2171,7 @@ func (s *Store) CancelJob(ctx context.Context, id int64) (Job, error) {
 	// 两步之间与 worker 的终态保存竞争（worker 把任务标为 completed 后，这里不会再覆盖）。
 	job := Job{}
 	err := s.db.GetContext(ctx, &job, `
-UPDATE jobs SET status = ?, message = ?, progress = 1, error = '', updated_at = ?
+UPDATE jobs SET status = ?, message = ?, progress = 1, error = '', available_at = NULL, available_ns = 0, updated_at = ?
 	WHERE id = ? AND status IN (`+activeJobStatusesSQL+`)
 	RETURNING *`,
 		JobCanceled, "已取消", time.Now().UTC(), id)
@@ -2039,6 +2236,7 @@ WHERE job_id = ? AND EXISTS (
 		`DELETE FROM failed_media WHERE job_id = ?`,
 		`DELETE FROM failed_tweets WHERE job_id = ?`,
 		`DELETE FROM job_checkpoints WHERE job_id = ?`,
+		`DELETE FROM job_checkpoint_tasks WHERE job_id = ?`,
 		`DELETE FROM tweet_jobs WHERE job_id = ?`,
 		`DELETE FROM job_storage WHERE job_id = ?`,
 		`DELETE FROM media_assets WHERE job_id = ?`,
@@ -2170,6 +2368,13 @@ func (s *Store) requeueJobAt(ctx context.Context, id int64, availableAt time.Tim
 	if deferSeconds < 0 {
 		deferSeconds = 0
 	}
+	var availableAtArg any
+	var availableNS int64
+	if !availableAt.IsZero() {
+		utc := availableAt.UTC()
+		availableAtArg = utc
+		availableNS = utc.UnixNano()
+	}
 	job := Job{}
 	err := s.db.GetContext(ctx, &job, `
 UPDATE jobs SET
@@ -2183,7 +2388,7 @@ UPDATE jobs SET
 	deferred_seconds = deferred_seconds + ?,
 	updated_at = ?
 WHERE id = ? AND status IN (`+activeJobStatusesSQL+`)
-RETURNING *`, JobPending, message, availableAt.UTC(), availableAt.UTC().UnixNano(), now, now.UnixNano(), deferSeconds, now, id)
+RETURNING *`, JobPending, message, availableAtArg, availableNS, now, now.UnixNano(), deferSeconds, now, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -2399,7 +2604,7 @@ func (s *Store) ListArchiveSchedules(ctx context.Context) ([]ArchiveSchedule, er
 	items := []ArchiveSchedule{}
 	if err := s.db.SelectContext(ctx, &items, `
 SELECT * FROM archive_schedules
-ORDER BY enabled DESC, next_run_at ASC, updated_at DESC`); err != nil {
+ORDER BY enabled DESC, next_run_at ASC, updated_at DESC, id ASC`); err != nil {
 		return nil, err
 	}
 	items, err := hydrateArchiveSchedules(items)
@@ -2417,7 +2622,7 @@ func (s *Store) ListDueArchiveSchedules(ctx context.Context, now time.Time, limi
 	if err := s.db.SelectContext(ctx, &items, `
 SELECT * FROM archive_schedules
 WHERE enabled = 1 AND next_run_at <= ?
-ORDER BY next_run_at ASC
+ORDER BY next_run_at ASC, id ASC
 LIMIT ?`, now.UTC(), limit); err != nil {
 		return nil, err
 	}
@@ -2588,7 +2793,6 @@ func (s *Store) claimArchiveScheduleJobs(ctx context.Context, snapshot ArchiveSc
 UPDATE archive_schedules SET
 	last_run_at = ?,
 	next_run_at = ?,
-	last_job_ids = '[]',
 	claim_version = claim_version + 1,
 	updated_at = ?
 WHERE id = ?`,
@@ -2610,19 +2814,20 @@ WHERE id = ?`,
 	if err != nil {
 		return nil, err
 	}
-	jobIDs := make([]int64, 0, len(schedule.Items))
-	for _, job := range jobs {
-		jobIDs = append(jobIDs, job.ID)
-	}
-	lastJobIDs, err := json.Marshal(jobIDs)
-	if err != nil {
-		return nil, err
-	}
-	_, err = tx.ExecContext(ctx, `
+	if len(jobs) > 0 {
+		jobIDs := make([]int64, 0, len(jobs))
+		for _, job := range jobs {
+			jobIDs = append(jobIDs, job.ID)
+		}
+		lastJobIDs, err := json.Marshal(jobIDs)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = tx.ExecContext(ctx, `
 UPDATE archive_schedules SET last_job_ids = ?, updated_at = ? WHERE id = ?`,
-		string(lastJobIDs), runAt, schedule.ID)
-	if err != nil {
-		return nil, err
+			string(lastJobIDs), runAt, schedule.ID); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -2630,14 +2835,18 @@ UPDATE archive_schedules SET last_job_ids = ?, updated_at = ? WHERE id = ?`,
 	return jobs, nil
 }
 
-func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (DownloadRecord, error) {
-	now := time.Now().UTC()
+type sqlxContextGetter interface {
+	GetContext(ctx context.Context, dest any, query string, args ...any) error
+}
+
+func createDownloadTx(ctx context.Context, getter sqlxContextGetter, record DownloadRecord) (DownloadRecord, error) {
+	now := formatSortableTime(time.Now())
 	// 媒体身份键：同一媒体内容的稳定键，供跨推文/跨目录复用查找（见 FindDownloadsByMediaKey）。
 	record.MediaKey = downloader.MediaIdentity(record.MediaURL)
 	// 统一 trim，避免空白 tweet_id 绕过唯一索引导致重复行。
 	record.TweetID = strings.TrimSpace(record.TweetID)
 	if record.TweetID != "" {
-		err := s.db.GetContext(ctx, &record, `
+		err := getter.GetContext(ctx, &record, `
 	INSERT INTO downloads (job_id, tweet_id, media_url, media_key, content_hash, preview_url, file_path, bytes, created_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(tweet_id, media_url) WHERE tweet_id <> '' DO UPDATE SET
@@ -2649,13 +2858,10 @@ func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (Down
 		created_at = excluded.created_at
 	RETURNING *`,
 			record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.ContentHash, record.PreviewURL, record.FilePath, record.Bytes, now)
-		if err == nil {
-			s.markLibraryDownloadsCacheStale()
-		}
 		return record, err
 	}
 	// tweet_id 为空（直接媒体 URL 任务）：按 media_url 去重，避免同一 URL 重复跑产生重复行。
-	err := s.db.GetContext(ctx, &record, `
+	err := getter.GetContext(ctx, &record, `
 INSERT INTO downloads (job_id, tweet_id, media_url, media_key, content_hash, preview_url, file_path, bytes, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
@@ -2667,10 +2873,15 @@ ON CONFLICT(media_url) WHERE tweet_id = '' AND media_url <> '' DO UPDATE SET
 	created_at = excluded.created_at
 RETURNING *`,
 		record.JobID, record.TweetID, record.MediaURL, record.MediaKey, record.ContentHash, record.PreviewURL, record.FilePath, record.Bytes, now)
+	return record, err
+}
+
+func (s *Store) CreateDownload(ctx context.Context, record DownloadRecord) (DownloadRecord, error) {
+	created, err := createDownloadTx(ctx, s.db, record)
 	if err == nil {
 		s.markLibraryDownloadsCacheStale()
 	}
-	return record, err
+	return created, err
 }
 
 func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord, error) {
@@ -2678,7 +2889,7 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 		limit = 100
 	}
 	items := []DownloadRecord{}
-	err := s.db.SelectContext(ctx, &items, `SELECT * FROM downloads ORDER BY created_at DESC LIMIT ?`, limit)
+	err := s.db.SelectContext(ctx, &items, `SELECT * FROM downloads ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC LIMIT ?`, limit)
 	return items, err
 }
 
@@ -2701,8 +2912,11 @@ func (s *Store) ListLibraryDownloadsWithStatus(ctx context.Context, limit int) (
 	s.invalidateStaleLibraryDownloadsCache()
 	// Only cache misses wait for the builder; recheck after acquiring its lock.
 	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			s.invalidateStaleLibraryDownloadsCache()
+		}
 		s.libraryCacheMu.RLock()
-		if s.libraryCacheOK && time.Since(s.libraryCacheAt) < libraryDownloadsCacheTTL && s.libraryCacheLimit >= limit {
+		if s.libraryCacheOK && s.libraryCacheGenBuilt == s.libraryCacheGen.Load() && !s.libraryStale.Load() && time.Since(s.libraryCacheAt) < libraryDownloadsCacheTTL && s.libraryCacheLimit >= limit {
 			cached := s.libraryCache
 			truncated := s.libraryCacheTruncated || len(cached) > limit
 			if len(cached) > limit {
@@ -2725,7 +2939,7 @@ func (s *Store) ListLibraryDownloadsWithStatus(ctx context.Context, limit int) (
 	err := s.db.SelectContext(ctx, &items, `
 SELECT d.*, COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
 FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id
-ORDER BY d.created_at DESC, d.id DESC LIMIT ?`, limit+1)
+ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', d.created_at), d.created_at) DESC, d.created_at DESC, d.id DESC LIMIT ?`, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2835,7 +3049,7 @@ func collectOrphanLibraryFiles(ctx context.Context, root string, known map[strin
 func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, error) {
 	s.invalidateStaleLibraryDownloadsCache()
 	s.libraryCacheMu.RLock()
-	if s.libraryUsersCacheOK && time.Since(s.libraryUsersCacheAt) < libraryDownloadsCacheTTL {
+	if s.libraryUsersCacheOK && s.libraryUsersCacheGen == s.libraryCacheGen.Load() && !s.libraryStale.Load() && time.Since(s.libraryUsersCacheAt) < libraryDownloadsCacheTTL {
 		cached := append([]LibraryUserSummary(nil), s.libraryUsersCache...)
 		s.libraryCacheMu.RUnlock()
 		return cached, nil
@@ -2843,16 +3057,15 @@ func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, err
 	s.libraryCacheMu.RUnlock()
 
 	// 复用媒体库快照：它已经流式扫描过 downloads 并按 file_path 去重、按目录前缀补全
-	// 归属。此前这里再做一次全表查询 + Go 聚合（10 万条约 0.5s）。
+	// 归属，并包含已归属到用户目录的磁盘孤儿文件。
 	snap, err := s.librarySnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	generation := snap.gen
-	items := snap.entries
 
 	users := []User{}
-	if err := s.db.SelectContext(ctx, &users, `SELECT * FROM users`); err != nil {
+	if err := s.db.SelectContext(ctx, &users, `SELECT * FROM users ORDER BY updated_at ASC, id ASC`); err != nil {
 		return nil, err
 	}
 	byScreenName := make(map[string]User, len(users))
@@ -2860,32 +3073,32 @@ func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, err
 		byScreenName[strings.ToLower(user.ScreenName)] = user
 	}
 
-	type aggregate struct {
-		screenName  string
-		mediaCount  int
-		totalBytes  int64
-		latestAt    time.Time
-		displayName string
-	}
-	aggregates := map[string]*aggregate{}
-	for _, item := range items {
-		if item.UserScreenName == "" {
-			continue
+	aggregates := snap.userAggregates
+	if aggregates == nil {
+		aggregates = map[string]*libraryUserAggregate{}
+		addItems := func(items []DownloadRecord) {
+			for _, item := range items {
+				if item.UserScreenName == "" {
+					continue
+				}
+				key := strings.ToLower(item.UserScreenName)
+				entry := aggregates[key]
+				if entry == nil {
+					entry = &libraryUserAggregate{screenName: item.UserScreenName}
+					aggregates[key] = entry
+				}
+				entry.mediaCount++
+				entry.totalBytes += item.Bytes
+				if item.CreatedAt.After(entry.latestAt) {
+					entry.latestAt = item.CreatedAt
+				}
+				if entry.displayName == "" {
+					entry.displayName = item.UserName
+				}
+			}
 		}
-		key := strings.ToLower(item.UserScreenName)
-		entry := aggregates[key]
-		if entry == nil {
-			entry = &aggregate{screenName: item.UserScreenName}
-			aggregates[key] = entry
-		}
-		entry.mediaCount++
-		entry.totalBytes += item.Bytes
-		if item.CreatedAt.After(entry.latestAt) {
-			entry.latestAt = item.CreatedAt
-		}
-		if entry.displayName == "" {
-			entry.displayName = item.UserName
-		}
+		addItems(snap.entries)
+		addItems(snap.orphans)
 	}
 
 	summaries := make([]LibraryUserSummary, 0, len(aggregates))
@@ -2909,14 +3122,18 @@ func (s *Store) ListLibraryUsers(ctx context.Context) ([]LibraryUserSummary, err
 		})
 	}
 	sort.Slice(summaries, func(i, j int) bool {
-		return summaries[i].LatestAt.After(summaries[j].LatestAt)
+		if !summaries[i].LatestAt.Equal(summaries[j].LatestAt) {
+			return summaries[i].LatestAt.After(summaries[j].LatestAt)
+		}
+		return strings.ToLower(summaries[i].ScreenName) < strings.ToLower(summaries[j].ScreenName)
 	})
 
 	s.libraryCacheMu.Lock()
-	if s.libraryCacheGen.Load() == generation {
+	if s.libraryCacheGen.Load() == generation && !s.libraryStale.Load() {
 		s.libraryUsersCache = append([]LibraryUserSummary(nil), summaries...)
 		s.libraryUsersCacheAt = time.Now()
 		s.libraryUsersCacheOK = true
+		s.libraryUsersCacheGen = generation
 	}
 	s.libraryCacheMu.Unlock()
 	return summaries, nil
@@ -2973,7 +3190,7 @@ ORDER BY ue.id`)
 
 func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int, truncated bool, generation uint64) {
 	s.libraryCacheMu.Lock()
-	if s.libraryCacheGen.Load() != generation {
+	if s.libraryCacheGen.Load() != generation || s.libraryStale.Load() {
 		// 查询期间发生过失效：本结果可能缺少新记录，放弃回填，避免脏缓存。
 		s.libraryCacheMu.Unlock()
 		return
@@ -2983,6 +3200,7 @@ func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int, truncat
 	s.libraryCacheOK = true
 	s.libraryCacheLimit = limit
 	s.libraryCacheTruncated = truncated
+	s.libraryCacheGenBuilt = generation
 	s.libraryCacheMu.Unlock()
 }
 
@@ -2995,15 +3213,22 @@ func (s *Store) invalidateLibraryDownloadsCache() {
 	s.libraryCacheOK = false
 	s.libraryCacheLimit = 0
 	s.libraryCacheTruncated = false
+	s.libraryCacheGenBuilt = 0
 	s.libraryUsersCache = nil
 	s.libraryUsersCacheAt = time.Time{}
 	s.libraryUsersCacheOK = false
+	s.libraryUsersCacheGen = 0
 	s.libraryCacheMu.Unlock()
+	s.librarySnapMu.Lock()
+	s.librarySnap = nil
+	s.librarySnapMu.Unlock()
 }
 
-// markLibraryDownloadsCacheStale 标记缓存待失效。真正的失效在读取路径上执行
-// （见 invalidateStaleLibraryDownloadsCache），因此下一次读取一定看到新数据。
+// markLibraryDownloadsCacheStale 标记缓存待失效并推进代数。真正的清理在读取路径上执行
+// （见 invalidateStaleLibraryDownloadsCache），因此并发构造的旧快照不会覆盖新写入，
+// 下一次读取也一定会看到新数据。
 func (s *Store) markLibraryDownloadsCacheStale() {
+	s.libraryCacheGen.Add(1)
 	s.libraryStale.Store(true)
 }
 
@@ -3079,11 +3304,40 @@ func deriveVideoPreviewURL(mediaURL string) string {
 func videoThumbImagePath(videoPath string, thumbExt string) string {
 	slash := strings.LastIndex(videoPath, "/")
 	dir, file := videoPath[:slash+1], videoPath[slash+1:]
-	stem := strings.TrimSuffix(file, filepath.Ext(file))
-	if index := strings.Index(strings.ToLower(dir), "/vid/"); index >= 0 {
+	stem := strings.TrimSuffix(file, path.Ext(file))
+	if index := indexASCIIFold(dir, "/vid/"); index >= 0 {
 		dir = dir[:index+1] + "img/"
 	}
 	return dir + stem + thumbExt
+}
+
+// indexASCIIFold performs a case-insensitive ASCII search while preserving exact
+// 1:1 byte offsets in s, avoiding panics when Unicode strings expand on ToLower.
+func indexASCIIFold(s, lowerSub string) int {
+	if len(lowerSub) == 0 {
+		return 0
+	}
+	if len(lowerSub) > len(s) {
+		return -1
+	}
+	limit := len(s) - len(lowerSub)
+	for i := 0; i <= limit; i++ {
+		matched := true
+		for j := 0; j < len(lowerSub); j++ {
+			b := s[i+j]
+			if b >= 'A' && b <= 'Z' {
+				b += 'a' - 'A'
+			}
+			if b != lowerSub[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return i
+		}
+	}
+	return -1
 }
 
 // UpdateDownloadPreviewURL backfills a stored preview URL for records created
@@ -3174,29 +3428,31 @@ func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []
 	// 会把 failed_media 整段挤掉（排序键 sort_order 让 downloads 永远排在 failed 之前）。
 	err := s.db.SelectContext(ctx, &rows, `
 SELECT * FROM (
-	SELECT 1 AS sort_order, 'download' AS record_kind, id, job_id,
-		tweet_id, media_url, preview_url, file_path, bytes, NULL AS error, created_at
-	FROM downloads
-	WHERE job_id = ?
-	ORDER BY created_at DESC
-	LIMIT ?
+	SELECT * FROM (
+		SELECT 1 AS sort_order, 'download' AS record_kind, id, job_id,
+			tweet_id, media_url, preview_url, file_path, bytes, NULL AS error, created_at
+		FROM downloads
+		WHERE job_id = ?
+		ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC
+		LIMIT ?
+	)
+	UNION ALL
+	SELECT * FROM (
+		SELECT 2 AS sort_order, 'failed' AS record_kind, id, job_id,
+			NULL AS tweet_id, media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes, error, created_at
+		FROM failed_media
+		WHERE job_id = ?
+		ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC
+		LIMIT ?
+	)
+	UNION ALL
+	SELECT 0 AS sort_order, 'job' AS record_kind, id, id AS job_id,
+		NULL AS tweet_id, NULL AS media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes,
+		NULL AS error, NULL AS created_at
+	FROM jobs
+	WHERE id = ?
 )
-UNION ALL
-SELECT * FROM (
-	SELECT 2 AS sort_order, 'failed' AS record_kind, id, job_id,
-		NULL AS tweet_id, media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes, error, created_at
-	FROM failed_media
-	WHERE job_id = ?
-	ORDER BY created_at DESC
-	LIMIT ?
-)
-UNION ALL
-SELECT 0 AS sort_order, 'job' AS record_kind, id, id AS job_id,
-	NULL AS tweet_id, NULL AS media_url, NULL AS preview_url, NULL AS file_path, NULL AS bytes,
-	NULL AS error, NULL AS created_at
-FROM jobs
-WHERE id = ?
-ORDER BY sort_order, created_at DESC`, jobID, MaxJobFilesPerKind+1, jobID, MaxJobFilesPerKind+1, jobID)
+ORDER BY sort_order, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC`, jobID, MaxJobFilesPerKind+1, jobID, MaxJobFilesPerKind+1, jobID)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -3252,7 +3508,7 @@ func (s *Store) ListDownloadsForJobs(ctx context.Context, jobIDs []int64) ([]Dow
 	query, args, err := sqlx.In(`
 SELECT * FROM downloads
 WHERE job_id IN (?)
-ORDER BY job_id DESC, created_at DESC`, jobIDs)
+ORDER BY job_id DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC`, jobIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -3272,13 +3528,14 @@ const (
 	downloadByMediaURLQuery   = `SELECT * FROM downloads WHERE tweet_id = '' AND media_url = ? AND media_url <> ''`
 )
 
-func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, error) {
+func getDownloadByTweetMediaTx(ctx context.Context, getter sqlxContextGetter, tweetID string, mediaURL string) (*DownloadRecord, error) {
+	tweetID = strings.TrimSpace(tweetID)
 	record := DownloadRecord{}
 	query, args := downloadByTweetMediaQuery, []any{tweetID, mediaURL}
 	if tweetID == "" {
 		query, args = downloadByMediaURLQuery, []any{mediaURL}
 	}
-	err := s.db.GetContext(ctx, &record, query, args...)
+	err := getter.GetContext(ctx, &record, query, args...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -3286,6 +3543,10 @@ func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, med
 		return nil, err
 	}
 	return &record, nil
+}
+
+func (s *Store) GetDownloadByTweetMedia(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, error) {
+	return getDownloadByTweetMediaTx(ctx, s.db, tweetID, mediaURL)
 }
 
 // MaxMediaCopyLookup 是单页上限；调用方可继续翻页查找仍存在的副本。
@@ -3390,6 +3651,7 @@ LEFT JOIN downloads d ON d.tweet_id = '' AND d.media_url = request.media_url AND
 )
 
 func (s *Store) GetMediaDownloadState(ctx context.Context, tweetID string, mediaURL string) (*DownloadRecord, bool, error) {
+	tweetID = strings.TrimSpace(tweetID)
 	row := mediaDownloadStateRow{}
 	query, args := mediaDownloadStateByTweetQuery, []any{tweetID, mediaURL}
 	if tweetID == "" {
@@ -3440,12 +3702,29 @@ func (s *Store) HasFailedMediaForURL(ctx context.Context, mediaURL string) (bool
 	return exists, err
 }
 
+// HasPermanentFailedMediaForURL 报告 failed_media 表中是否已有该 media_url 的永久性失败记录
+// （HTTP 404 / 410 或 403 DMCA），用于区分瞬态网络抖动与真实的永久不可用二次确认。
+func (s *Store) HasPermanentFailedMediaForURL(ctx context.Context, mediaURL string) (bool, error) {
+	var errs []string
+	if err := s.db.SelectContext(ctx, &errs, `SELECT error FROM failed_media WHERE media_url = ?`, mediaURL); err != nil {
+		return false, err
+	}
+	for _, errMsg := range errs {
+		lower := strings.ToLower(errMsg)
+		if strings.Contains(lower, "http 404") || strings.Contains(lower, "http 410") ||
+			(strings.Contains(lower, "http 403") && strings.Contains(lower, "dmca")) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) ListFailedMedia(ctx context.Context, limit int) ([]FailedMedia, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
 	items := []FailedMedia{}
-	err := s.db.SelectContext(ctx, &items, `SELECT * FROM failed_media ORDER BY created_at DESC LIMIT ?`, limit)
+	err := s.db.SelectContext(ctx, &items, `SELECT * FROM failed_media ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
 	return items, err
 }
 
@@ -3456,7 +3735,7 @@ func (s *Store) ListFailedMediaForJobs(ctx context.Context, jobIDs []int64) ([]F
 	query, args, err := sqlx.In(`
 SELECT * FROM failed_media
 WHERE job_id IN (?)
-ORDER BY job_id DESC, created_at DESC`, jobIDs)
+ORDER BY job_id DESC, created_at DESC, id DESC`, jobIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -3794,6 +4073,7 @@ const (
 )
 
 func (s *Store) HasDownload(ctx context.Context, tweetID string, mediaURL string) (bool, error) {
+	tweetID = strings.TrimSpace(tweetID)
 	var count int
 	// 谓词同 downloadByTweetMediaQuery，避免全表扫描。
 	query, args := hasDownloadByTweetMediaQuery, []any{tweetID, mediaURL}
@@ -3894,6 +4174,18 @@ func (s *Store) ReserveAutomaticRetryJob(ctx context.Context) (*Job, error) {
 	}
 	defer tx.Rollback()
 
+	// 先检查全部活跃的失败重试任务（而不仅是 id 最大的那一行），避免历史残留的活跃重试行
+	// 与新复用行并发运行。
+	var activeRetry int
+	if err := tx.GetContext(ctx, &activeRetry, `
+SELECT COUNT(*) FROM jobs WHERE kind = ? AND status IN (`+activeJobStatusesSQL+`)`,
+		JobKindFailedRetry); err != nil {
+		return nil, err
+	}
+	if activeRetry > 0 {
+		return nil, tx.Commit()
+	}
+
 	current := Job{}
 	err = tx.GetContext(ctx, &current, `
 SELECT * FROM jobs WHERE kind = ? AND input = ? ORDER BY id DESC LIMIT 1`,
@@ -3926,6 +4218,12 @@ RETURNING *`, JobKindFailedRetry, JobPending, AutomaticFailedRetryInput, now, no
 	}
 	reset := Job{}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM job_storage WHERE job_id=?`, current.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_checkpoints WHERE job_id=?`, current.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_checkpoint_tasks WHERE job_id=?`, current.ID); err != nil {
 		return nil, err
 	}
 	// 复用旧行时必须刷新 enqueued_at：否则本轮重试会凭原始 created_at 反复插到
@@ -3972,7 +4270,7 @@ func (s *Store) ListFailedTweetsForRetry(ctx context.Context, limit int, force b
 	}
 	items := []FailedTweet{}
 	now := time.Now().UTC()
-	err := s.db.SelectContext(ctx, &items, `SELECT * FROM failed_tweets WHERE (? OR next_retry_at IS NULL OR next_retry_at <= ?) ORDER BY updated_at ASC LIMIT ?`, force, now, limit)
+	err := s.db.SelectContext(ctx, &items, `SELECT * FROM failed_tweets WHERE (? OR next_retry_at IS NULL OR next_retry_at <= ?) ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', updated_at), updated_at) ASC, updated_at ASC, id ASC LIMIT ?`, force, now, limit)
 	return items, err
 }
 
@@ -4023,7 +4321,7 @@ FROM failed_tweets ft
 LEFT JOIN jobs j ON j.id = ft.job_id
 LEFT JOIN user_entities ue ON ue.id = ft.entity_id
 LEFT JOIN users u ON u.id = ue.user_id
-ORDER BY ft.updated_at ASC
+ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ft.updated_at), ft.updated_at) ASC, ft.updated_at ASC, ft.id ASC
 LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err

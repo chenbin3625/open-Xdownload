@@ -58,7 +58,7 @@ import {
   jobStatusBucket,
   retryableStatuses,
 } from "../lib/jobStatus";
-import { invalidateWorkbenchQueries } from "../lib/useDashboardEvents";
+import { invalidateWorkbenchQueries, removeJobFromCaches } from "../lib/useDashboardEvents";
 import { useBreakpointUp } from "../lib/useMediaQuery";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { Drawer, Tooltip, Popconfirm } from "../components/semi/overlays";
@@ -102,6 +102,7 @@ export interface TaskCenterPageProps {
   /** 受控的关键词筛选；传入后由服务端分页筛选。 */
   searchKeyword?: string;
   onSearchKeywordChange?: (keyword: string) => void;
+  onClearFilters?: () => void;
   filterCounts?: { all: number; active: number; completed: number; failed: number };
 }
 
@@ -148,6 +149,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
   onKindFilterChange,
   searchKeyword: controlledSearchKeyword,
   onSearchKeywordChange,
+  onClearFilters,
   filterCounts,
 }: TaskCenterPageProps) {
   const { i18n } = useTranslation();
@@ -186,6 +188,28 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
     if (pagination.page > 1) onPageChange(1);
   };
 
+  const clearFilters = () => {
+    lastSyncedSearchRef.current = "";
+    setSearchInput("");
+    if (onClearFilters) {
+      if (controlledStatusFilter === undefined) setLocalStatusFilter("all");
+      if (controlledKindFilter === undefined) setLocalKindFilter("all");
+      if (controlledSearchKeyword === undefined) setLocalSearchKeyword("");
+      onClearFilters();
+      return;
+    }
+    changeSearchKeyword("");
+    changeKindFilter("all");
+    changeStatusFilter("all");
+  };
+
+  const pageRef = useRef(pagination.page);
+  pageRef.current = pagination.page;
+  const onPageChangeRef = useRef(onPageChange);
+  onPageChangeRef.current = onPageChange;
+
+  const externalSearchChanged = searchKeyword !== lastSyncedSearchRef.current;
+
   // 外部值（URL 回退、清除筛选）变化时同步回输入框；自己防抖发出的值不回灌，
   // 避免 flush 时覆盖用户已经继续输入的新内容。
   useEffect(() => {
@@ -195,30 +219,124 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
   }, [searchKeyword]);
 
   useEffect(() => {
+    if (externalSearchChanged) return;
+    if (debouncedSearchInput !== searchInput) return;
     if (debouncedSearchInput === lastSyncedSearchRef.current) return;
     lastSyncedSearchRef.current = debouncedSearchInput;
     if (controlledSearchKeyword === undefined) setLocalSearchKeyword(debouncedSearchInput);
     onSearchKeywordChange?.(debouncedSearchInput);
-    if (pagination.page > 1) onPageChange(1);
-  }, [debouncedSearchInput, controlledSearchKeyword, onSearchKeywordChange, onPageChange, pagination.page]);
+    if (pageRef.current > 1) onPageChangeRef.current(1);
+  }, [debouncedSearchInput, searchInput, controlledSearchKeyword, onSearchKeywordChange]);
+
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [detailSnapshot, setDetailSnapshot] = useState<Job | null>(null);
   const [retryCreatedJobId, setRetryCreatedJobId] = useState<number | null>(null);
   const [selectedJobIds, setSelectedJobIds] = useState<Set<number>>(new Set());
-  const detailJob = jobs.find(job => job.id === detailId);
-  const openJobDetails = useCallback((id: number) => { setRetryCreatedJobId(null); setDetailId(id); }, []);
+  const [cancelingJobIds, setCancelingJobIds] = useState<Set<number>>(() => new Set());
+  const [removingJobIds, setRemovingJobIds] = useState<Set<number>>(() => new Set());
 
-  useEffect(() => { setSelectedJobIds(new Set()); }, [pagination.page, pagination.pageSize, statusFilter, kindFilter, filterKeyword]);
+  const detailIdRef = useRef(detailId);
+  detailIdRef.current = detailId;
+  const jobsRef = useRef(jobs);
+  jobsRef.current = jobs;
+  const tableLoadingRef = useRef(tableLoading);
+  tableLoadingRef.current = tableLoading;
+  const cancelingIdsRef = useRef(new Set<number>());
+  const removingIdsRef = useRef(new Set<number>());
+
+  const liveDetailJob = detailId === null ? undefined : jobs.find(job => job.id === detailId);
+  const detailJob = liveDetailJob ?? (detailId !== null && detailSnapshot?.id === detailId ? detailSnapshot : undefined);
+
   useEffect(() => {
-    setSelectedJobIds(current => {
-      const visible = new Set(jobs.map(job => job.id));
-      const next = new Set([...current].filter(id => visible.has(id)));
-      return next.size === current.size ? current : next;
-    });
-  }, [jobs]);
+    if (liveDetailJob && liveDetailJob !== detailSnapshot) {
+      setDetailSnapshot(liveDetailJob);
+    }
+  }, [liveDetailJob, detailSnapshot]);
+
+  useEffect(() => {
+    if (detailId !== null && !detailJob) {
+      setDetailId(null);
+      setDetailSnapshot(null);
+      setRetryCreatedJobId(null);
+    }
+  }, [detailId, detailJob]);
+
+  const openJobDetails = useCallback((id: number) => {
+    const target = jobsRef.current.find(job => job.id === id) ?? null;
+    setRetryCreatedJobId(null);
+    setDetailSnapshot(target);
+    setDetailId(target ? id : null);
+  }, []);
+
+  const closeJobDetails = useCallback(() => {
+    setDetailId(null);
+    setDetailSnapshot(null);
+    setRetryCreatedJobId(null);
+  }, []);
 
   const isJobFailed = (job: Job) =>
     job.status === "failed" ||
     job.status === "completed_with_errors";
+
+  const filteredJobs = useMemo(() => {
+    const keyword = filterKeyword.trim().toLowerCase();
+    if (serverFiltering) return jobs;
+    return jobs.filter((job) => {
+      if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
+        return false;
+      }
+      if (statusFilter === "completed" && job.status !== "completed") {
+        return false;
+      }
+      if (statusFilter === "failed" && !isJobFailed(job)) {
+        return false;
+      }
+      if (kindFilter !== "all" && job.kind !== kindFilter) {
+        return false;
+      }
+      if (!keyword) {
+        return true;
+      }
+      return (
+        (job.title || "").toLowerCase().includes(keyword) ||
+        (job.input || "").toLowerCase().includes(keyword) ||
+        String(job.id).includes(keyword) ||
+        (job.error || "").toLowerCase().includes(keyword) ||
+        (job.message || "").toLowerCase().includes(keyword)
+      );
+    });
+  }, [jobs, statusFilter, kindFilter, filterKeyword, serverFiltering]);
+
+  useEffect(() => {
+    setSelectedJobIds(new Set());
+  }, [pagination.page, pagination.pageSize, statusFilter, kindFilter, filterKeyword]);
+
+  useEffect(() => {
+    if (tableLoading) {
+      setSelectedJobIds(current => (current.size === 0 ? current : new Set()));
+      return;
+    }
+    setSelectedJobIds(current => {
+      if (current.size === 0) return current;
+      const visible = new Set(filteredJobs.map(job => job.id));
+      const next = new Set([...current].filter(id => visible.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [filteredJobs, tableLoading]);
+
+  const markCanceling = useCallback((ids: number[], active: boolean) => {
+    ids.forEach(id => {
+      if (active) cancelingIdsRef.current.add(id);
+      else cancelingIdsRef.current.delete(id);
+    });
+    setCancelingJobIds(new Set(cancelingIdsRef.current));
+  }, []);
+
+  const markRemoving = useCallback((id: number, active: boolean) => {
+    if (active) removingIdsRef.current.add(id);
+    else removingIdsRef.current.delete(id);
+    setRemovingJobIds(new Set(removingIdsRef.current));
+  }, []);
 
   const cancel = useMutation({
     mutationFn: cancelJob,
@@ -227,12 +345,15 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
       toast.success({ message: t("任务已取消") });
     },
     onError: notifyError(t("取消失败")),
+    onSettled: (_data, _error, jobId) => {
+      markCanceling([jobId], false);
+    },
   });
 
   const retry = useMutation({
     mutationFn: retryJob,
     onSuccess: (job, retriedId) => {
-      if (detailId === retriedId) setRetryCreatedJobId(job.id);
+      if (detailIdRef.current === retriedId) setRetryCreatedJobId(job.id);
       void invalidateWorkbenchQueries(queryClient);
       toast.success({ message: t("已创建重试任务 #{{value0}}", { value0: job.id }), description: <a href={`/tasks?q=${job.id}`} className="text-brand-600">{t("查看新任务")}</a> });
     },
@@ -270,7 +391,10 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
       }
     },
     onError: notifyError(t("批量取消失败")),
-    onSettled: () => { void invalidateWorkbenchQueries(queryClient); },
+    onSettled: (_data, _error, ids) => {
+      markCanceling(ids, false);
+      void invalidateWorkbenchQueries(queryClient);
+    },
   });
 
   const bulkRetry = useMutation({
@@ -309,11 +433,24 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
 
   const removeJob = useMutation({
     mutationFn: deleteJob,
-    onSuccess: () => {
+    onSuccess: (_result, deletedId) => {
+      if (detailIdRef.current === deletedId) {
+        closeJobDetails();
+      }
+      setSelectedJobIds(current => {
+        if (!current.has(deletedId)) return current;
+        const next = new Set(current);
+        next.delete(deletedId);
+        return next;
+      });
+      removeJobFromCaches(queryClient, deletedId);
       void invalidateWorkbenchQueries(queryClient);
       toast.success({ message: t("任务已删除") });
     },
     onError: notifyError(t("删除失败")),
+    onSettled: (_data, _error, deletedId) => {
+      markRemoving(deletedId, false);
+    },
   });
 
   const retryAllFailed = useMutation({
@@ -328,34 +465,30 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
     onError: notifyError(t("重试失败")),
   });
 
-  const filteredJobs = useMemo(() => {
-    const keyword = filterKeyword.trim().toLowerCase();
-    if (serverFiltering) return jobs;
-    return jobs.filter((job) => {
-      if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
-        return false;
-      }
-      if (statusFilter === "completed" && job.status !== "completed") {
-        return false;
-      }
-      if (statusFilter === "failed" && !isJobFailed(job)) {
-        return false;
-      }
-      if (kindFilter !== "all" && job.kind !== kindFilter) {
-        return false;
-      }
-      if (!keyword) {
-        return true;
-      }
-      return (
-        (job.title || "").toLowerCase().includes(keyword) ||
-        (job.input || "").toLowerCase().includes(keyword) ||
-        String(job.id).includes(keyword) ||
-        (job.error || "").toLowerCase().includes(keyword) ||
-        (job.message || "").toLowerCase().includes(keyword)
-      );
-    });
-  }, [jobs, statusFilter, kindFilter, filterKeyword, serverFiltering]);
+  const handleCancelJob = useCallback((id: number) => {
+    if (tableLoadingRef.current || cancelingIdsRef.current.has(id) || removingIdsRef.current.has(id)) return;
+    markCanceling([id], true);
+    cancel.mutate(id);
+  }, [cancel.mutate, markCanceling]);
+
+  const handleRemoveJob = useCallback((id: number) => {
+    if (tableLoadingRef.current || removingIdsRef.current.has(id) || cancelingIdsRef.current.has(id)) return;
+    markRemoving(id, true);
+    removeJob.mutate(id);
+  }, [markRemoving, removeJob.mutate]);
+
+  const handleBulkCancel = useCallback((ids: number[]) => {
+    if (tableLoadingRef.current) return;
+    const eligible = ids.filter(id => !cancelingIdsRef.current.has(id) && !removingIdsRef.current.has(id));
+    if (eligible.length === 0) return;
+    markCanceling(eligible, true);
+    bulkCancel.mutate(eligible);
+  }, [bulkCancel.mutate, markCanceling]);
+
+  const handleBulkRetry = useCallback((ids: number[]) => {
+    if (tableLoadingRef.current || ids.length === 0) return;
+    bulkRetry.mutate(ids);
+  }, [bulkRetry.mutate]);
 
   const hasActiveFilter =
     statusFilter !== "all" || kindFilter !== "all" || filterKeyword.trim() !== "";
@@ -381,13 +514,14 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
     failed: bucketCounts.failed,
   };
 
-  const selectedJobs = jobs.filter(job => selectedJobIds.has(job.id));
+  const selectedJobs = filteredJobs.filter(job => selectedJobIds.has(job.id));
   const cancelableSelectedIds = selectedJobs.filter(job => cancelableStatuses.includes(job.status)).map(job => job.id);
   const retryableSelectedIds = selectedJobs.filter(job => retryableStatuses.includes(job.status)).map(job => job.id);
   const allVisibleSelected = filteredJobs.length > 0 && filteredJobs.every(job => selectedJobIds.has(job.id));
   const filteredJobsRef = useRef(filteredJobs);
   filteredJobsRef.current = filteredJobs;
   const toggleSelected = useCallback((id: number, checked: boolean) => {
+    if (tableLoadingRef.current) return;
     setSelectedJobIds(current => {
       const next = new Set(current);
       if (checked) next.add(id); else next.delete(id);
@@ -395,6 +529,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
     });
   }, []);
   const toggleAllVisible = useCallback((checked: boolean) => {
+    if (tableLoadingRef.current) return;
     setSelectedJobIds(current => {
       const next = new Set(current);
       filteredJobsRef.current.forEach(job => checked ? next.add(job.id) : next.delete(job.id));
@@ -411,64 +546,67 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
   };
 
   // 把 mutation 的瞬时状态收敛成标量，列定义不必随 useMutation 返回的新对象每次重建。
-  const cancelPendingId = cancel.isPending ? cancel.variables : undefined;
   const retryPendingId = retry.isPending ? retry.variables : undefined;
-  const removePendingId = removeJob.isPending ? removeJob.variables : undefined;
 
-  const renderJobActions = useCallback((record: Job, includeDetails = false) => (
-    <div className="flex items-center justify-end gap-1.5">
-      {includeDetails && (
-        <Button
-          theme="borderless"
-          type="tertiary"
-          icon={<FolderCheck className="size-4" />}
-          aria-label={t("查看任务详情")}
-          onClick={() => openJobDetails(record.id)}
-        >
-          {t("详情")}
-        </Button>
-      )}
-      {cancelableStatuses.includes(record.status) && (
-        <Button
-          type="danger"
-          loading={cancelPendingId === record.id}
-          disabled={cancelPendingId === record.id}
-          aria-busy={cancelPendingId === record.id}
-          onClick={() => cancel.mutate(record.id)}
-        >
-          {t("取消")}</Button>
-      )}
-      {retryableStatuses.includes(record.status) && (
-        <Button
-          type="tertiary"
-          loading={retryPendingId === record.id}
-          aria-busy={retryPendingId === record.id}
-          disabled={retryPendingId !== undefined}
-          onClick={() => retry.mutate(record.id)}
-        >
-          {t("重试")}</Button>
-      )}
-      {isJobTerminal(record.status) && (
-        <Popconfirm
-          title={t("删除任务")}
-          description={t("确定删除任务 #JOB-{{value0}}？该任务的下载索引会一并移除，磁盘上的媒体文件不受影响。", { value0: record.id })}
-          okText={t("删除")}
-          cancelText={t("取消")}
-          onConfirm={() => removeJob.mutate(record.id)}
-        >
+  const renderJobActions = useCallback((record: Job, includeDetails = false) => {
+    const isCanceling = cancelingJobIds.has(record.id);
+    const isRemoving = removingJobIds.has(record.id);
+    const isRowMutating = isCanceling || isRemoving;
+    return (
+      <div className="flex items-center justify-end gap-1.5">
+        {includeDetails && (
           <Button
             theme="borderless"
+            type="tertiary"
+            icon={<FolderCheck className="size-4" />}
+            aria-label={t("查看任务详情")}
+            onClick={() => openJobDetails(record.id)}
+          >
+            {t("详情")}
+          </Button>
+        )}
+        {cancelableStatuses.includes(record.status) && (
+          <Button
             type="danger"
-            icon={<Trash2 className="size-4 text-danger" />}
-            loading={removePendingId === record.id}
-            disabled={removePendingId === record.id}
-            aria-busy={removePendingId === record.id}
-            aria-label={t("删除任务")}
-          />
-        </Popconfirm>
-      )}
-    </div>
-  ), [cancelPendingId, cancel.mutate, openJobDetails, removeJob.mutate, removePendingId, retry.mutate, retryPendingId]);
+            loading={isCanceling}
+            disabled={tableLoading || isRowMutating}
+            aria-busy={isCanceling}
+            onClick={() => handleCancelJob(record.id)}
+          >
+            {t("取消")}</Button>
+        )}
+        {retryableStatuses.includes(record.status) && (
+          <Button
+            type="tertiary"
+            loading={retryPendingId === record.id}
+            aria-busy={retryPendingId === record.id}
+            disabled={tableLoading || retryPendingId !== undefined || isRowMutating}
+            onClick={() => retry.mutate(record.id)}
+          >
+            {t("重试")}</Button>
+        )}
+        {isJobTerminal(record.status) && (
+          <Popconfirm
+            title={t("删除任务")}
+            description={t("确定删除任务 #JOB-{{value0}}？该任务的下载索引会一并移除，磁盘上的媒体文件不受影响。", { value0: record.id })}
+            okText={t("删除")}
+            cancelText={t("取消")}
+            onConfirm={() => handleRemoveJob(record.id)}
+          >
+            <Button
+              theme="borderless"
+              type="danger"
+              icon={<Trash2 className="size-4 text-danger" />}
+              loading={isRemoving}
+              disabled={tableLoading || isRowMutating}
+              aria-busy={isRemoving}
+              aria-label={t("删除任务")}
+            />
+          </Popconfirm>
+        )}
+      </div>
+    );
+  }, [cancelingJobIds, handleCancelJob, handleRemoveJob, openJobDetails, removingJobIds, retry.mutate, retryPendingId, tableLoading]);
 
   const columns = useMemo<TableColumn<Job>[]>(() => [
     {
@@ -477,7 +615,8 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
         <Checkbox
           aria-label={t("选择当前页任务")}
           checked={allVisibleSelected}
-          indeterminate={selectedJobIds.size > 0 && !allVisibleSelected}
+          indeterminate={selectedJobs.length > 0 && !allVisibleSelected}
+          disabled={tableLoading || filteredJobs.length === 0}
           onChange={event => toggleAllVisible(event.target.checked === true)}
         />
       ),
@@ -486,6 +625,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
         <Checkbox
           aria-label={t("选择任务 #{{value0}}", { value0: record.id })}
           checked={selectedJobIds.has(record.id)}
+          disabled={tableLoading}
           onChange={event => toggleSelected(record.id, event.target.checked === true)}
         />
       ),
@@ -521,7 +661,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
       align: "right",
       render: record => renderJobActions(record, true),
     },
-  ], [allVisibleSelected, i18n.resolvedLanguage, openJobDetails, renderJobActions, selectedJobIds, toggleAllVisible, toggleSelected]);
+  ], [allVisibleSelected, filteredJobs.length, i18n.resolvedLanguage, openJobDetails, renderJobActions, selectedJobIds, selectedJobs.length, tableLoading, toggleAllVisible, toggleSelected]);
 
   const summaryLabel = hasActiveFilter
     ? serverFiltering
@@ -700,16 +840,16 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
         </div>
       </div>
 
-      {selectedJobIds.size > 0 && (
+      {selectedJobs.length > 0 && (
         <div className="task-bulk-toolbar" role="toolbar" aria-label={t("批量操作")}>
-          <span className="text-xs text-fg-muted">{t("已选择 {{value0}} 个任务", { value0: selectedJobIds.size })}</span>
+          <span className="text-xs text-fg-muted">{t("已选择 {{value0}} 个任务", { value0: selectedJobs.length })}</span>
           {cancelableSelectedIds.length > 0 && (
             <Button
               type="danger"
               size="small"
               loading={bulkCancel.isPending}
-              disabled={bulkCancel.isPending || bulkRetry.isPending}
-              onClick={() => bulkCancel.mutate(cancelableSelectedIds)}
+              disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending}
+              onClick={() => handleBulkCancel(cancelableSelectedIds)}
             >
               {t("批量取消")}
             </Button>
@@ -719,13 +859,13 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
               size="small"
               type="tertiary"
               loading={bulkRetry.isPending}
-              disabled={bulkCancel.isPending || bulkRetry.isPending}
-              onClick={() => bulkRetry.mutate(retryableSelectedIds)}
+              disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending}
+              onClick={() => handleBulkRetry(retryableSelectedIds)}
             >
               {t("批量重试")}
             </Button>
           )}
-          <Button size="small" type="tertiary" onClick={() => setSelectedJobIds(new Set())}>{t("清除选择")}</Button>
+          <Button size="small" type="tertiary" disabled={tableLoading} onClick={() => setSelectedJobIds(new Set())}>{t("清除选择")}</Button>
         </div>
       )}
 
@@ -735,7 +875,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
           <LoadingOverlay loading={tableLoading}>
             {filteredJobs.length === 0 ? (
               <Empty description={hasActiveFilter ? t(serverFiltering ? "没有匹配的任务" : "本页没有匹配的任务") : t("暂无任务")}>
-                {hasActiveFilter && <Button onClick={() => { changeSearchKeyword(""); changeKindFilter("all"); changeStatusFilter("all"); }}>{t("清除筛选")}</Button>}
+                {hasActiveFilter && <Button onClick={clearFilters}>{t("清除筛选")}</Button>}
               </Empty>
             ) : (
               <ul aria-label={t("任务列表")} className="mobile-job-list">
@@ -744,6 +884,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
                     key={job.id}
                     job={job}
                     selected={selectedJobIds.has(job.id)}
+                    selectionDisabled={tableLoading}
                     onSelect={toggleSelected}
                     renderActions={renderJobActions}
                     onOpenDetails={openJobDetails}
@@ -765,11 +906,11 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
             footer={paginationFooter}
           />
       )}
-      <Drawer open={Boolean(detailJob)} onClose={() => { setDetailId(null); setRetryCreatedJobId(null); }} width="min(100vw, 860px)" title={detailJob?.title || t("任务详情")} className="task-detail-drawer">
+      <Drawer open={Boolean(detailJob)} onClose={closeJobDetails} width="min(100vw, 860px)" title={detailJob?.title || t("任务详情")} className="task-detail-drawer">
         {detailJob && <>
           <JobProgress job={detailJob} />
           {retryCreatedJobId && <Alert type="success" message={t("重试任务已创建")} action={<a href={`/tasks?q=${retryCreatedJobId}`} className="text-brand-600">{t("查看新任务")}</a>} />}
-          <ExpandedJobDetails job={detailJob} onRetry={() => retry.mutate(detailJob.id)} retryingJobId={retry.isPending ? retry.variables : undefined} />
+          <ExpandedJobDetails key={detailJob.id} job={detailJob} onRetry={() => retry.mutate(detailJob.id)} retryingJobId={retry.isPending ? retry.variables : undefined} />
         </>}
       </Drawer>
     </div>
@@ -841,12 +982,14 @@ const JobProgress = React.memo(function JobProgress({ job }: { job: Job }) {
 const MobileJobCard = React.memo(function MobileJobCard({
   job,
   selected,
+  selectionDisabled,
   onSelect,
   renderActions,
   onOpenDetails,
 }: {
   job: Job;
   selected: boolean;
+  selectionDisabled: boolean;
   onSelect: (id: number, checked: boolean) => void;
   renderActions: (job: Job, includeDetails?: boolean) => React.ReactNode;
   onOpenDetails: (id: number) => void;
@@ -859,6 +1002,7 @@ const MobileJobCard = React.memo(function MobileJobCard({
           <Checkbox
             aria-label={t("选择任务 #{{value0}}", { value0: job.id })}
             checked={selected}
+            disabled={selectionDisabled}
             onChange={event => onSelect(job.id, event.target.checked === true)}
           />
           <div className="min-w-0 flex-1">
@@ -1066,8 +1210,15 @@ function ExpandedJobDetails({
     job.status === "completed_with_errors";
 
   const [activeTab, setActiveTab] = useState<string>(hasJobError ? "overview" : "files");
+  const hasManualTabSelectionRef = useRef(false);
+
+  const handleTabChange = useCallback((tab: string) => {
+    hasManualTabSelectionRef.current = true;
+    setActiveTab(tab);
+  }, []);
 
   React.useEffect(() => {
+    if (hasManualTabSelectionRef.current) return;
     if (downloads.length === 0 && failed.length > 0) {
       setActiveTab("errors");
     } else if (downloads.length > 0 && failed.length === 0 && !hasJobError) {
@@ -1255,10 +1406,10 @@ function ExpandedJobDetails({
       )}
       <Tabs
         value={activeTab}
-        onChange={setActiveTab}
+        onChange={handleTabChange}
         items={[
           { key: "overview", label: t("概览"), children: <div className="space-y-3"><p className="text-xs text-fg-muted">{job.message || t("暂无状态说明")}</p>{hasJobError ? <JobErrorAlert job={job} /> : <Empty description={t("任务未报告错误")} />}</div> },
-          { key: "files", label: <span className="flex items-center gap-1.5"><span>{t("文件")}</span><Tag tone="success" size="sm" className="tabular-nums">{downloads.length}</Tag></span>, children: renderFilesContent() },
+          { key: "files", label: <span className="flex items-center gap-1.5"><span>{t("文件列表")}</span><Tag tone="success" size="sm" className="tabular-nums">{downloads.length}</Tag></span>, children: renderFilesContent() },
           { key: "errors", label: <span className="flex items-center gap-1.5"><span className={failed.length || hasJobError ? "text-danger" : ""}>{t("错误与日志")}</span>{(failed.length > 0 || hasJobError) && <Tag tone="danger" size="sm" className="tabular-nums">{failed.length || 1}</Tag>}</span>, children: renderErrorsContent() },
         ]}
       />

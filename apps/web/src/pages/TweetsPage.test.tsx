@@ -5,7 +5,7 @@ import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { renderWithProviders, screen } from "../test/render";
-import { getTweetAuthors, getTweetProgress, getTweets, retryTweetMedia, type ArchivedTweet } from "../lib/archive";
+import { getTweetAuthors, getTweetProgress, getTweets, retryTweetMedia, tweetsQueryKey, type ArchivedTweet } from "../lib/archive";
 import { api, type Job } from "../lib/api";
 import { TweetsPage } from "./TweetsPage";
 
@@ -153,7 +153,7 @@ it("shows reposted text once while preserving the source and other related tweet
   expect(screen.queryByText("RT @bob: Original reposted text")).toBeNull();
   expect(screen.getByText("Additional quoted context")).toBeTruthy();
   expect(screen.getByRole("link", { name: /转推来源.*122/ }).getAttribute("href")).toBe("/tweets?id=122");
-  expect(screen.getByText("转推了 @bob")).toBeTruthy();
+  expect(screen.getByText("@alice 转推了")).toBeTruthy();
 });
 
 it("expands clipped text and keeps the chosen layout and page in the URL", async () => {
@@ -249,4 +249,179 @@ it("lays out multiple archived media as an X-style grid with an overflow count",
   expect(media.querySelectorAll(".tweet-media-item").length).toBe(4);
   expect(within(media).getByText("+2")).toBeTruthy();
   expect(container.querySelector(".tweet-entry footer")).toBeNull();
+});
+
+it("encodes related ids and rejects non-http original URLs in detail drawer", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getTweets).mockResolvedValue({
+    items: [{
+      ...tweet,
+      url: "javascript:alert(1)",
+      quotedTweetId: "122#frag",
+      related: [{
+        ...tweet.related![0],
+        id: "122#frag",
+      }],
+    }],
+    pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+  });
+  renderArchive();
+  await screen.findByText("Quoted text available offline");
+  await user.click(screen.getByRole("button", { name: "查看归档详情" }));
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByRole("link", { name: "@bob" }).getAttribute("href")).toBe("/tweets?id=122%23frag");
+  expect(within(dialog).queryByRole("link", { name: "archive.original" })).toBeNull();
+});
+
+it("ignores stale manual refresh responses after filters change", async () => {
+  let resolveRefresh!: (page: { items: ArchivedTweet[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }) => void;
+  let call = 0;
+  vi.mocked(getTweets).mockImplementation(async (query) => {
+    call += 1;
+    if (query.get("retweets") === "exclude") {
+      return {
+        items: [{ ...tweet, id: "999", text: "Filtered result", related: [] }],
+        pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+      };
+    }
+    if (call === 2) {
+      return await new Promise(resolve => { resolveRefresh = resolve; });
+    }
+    return {
+      items: [{ ...tweet, id: "111", text: "Initial result", related: [] }],
+      pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+    };
+  });
+
+  const user = userEvent.setup();
+  renderArchive();
+  await screen.findByText("Initial result");
+
+  await user.click(screen.getByRole("button", { name: "刷新数据" }));
+  await waitFor(() => expect(resolveRefresh).toBeTypeOf("function"));
+
+  await user.click(screen.getByRole("radio", { name: "隐藏转推" }));
+  await screen.findByText("Filtered result");
+
+  await act(async () => {
+    resolveRefresh({
+      items: [{ ...tweet, id: "111", text: "Stale initial result", related: [] }],
+      pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+    });
+  });
+
+  expect(screen.getByText("Filtered result")).toBeTruthy();
+  expect(screen.queryByText("Stale initial result")).toBeNull();
+});
+
+it("sanitizes invalid retweets and dates from query and replaces an empty snapshot immediately", async () => {
+  window.history.replaceState(null, "", "/tweets?view=comfortable&retweets=bogus&from=2026-02-30&to=bad");
+  let empty = true;
+  vi.mocked(getTweets).mockImplementation(async () => ({
+    items: empty ? [] : [{ ...tweet, id: "200", text: "Newly archived tweet", related: [] }],
+    pagination: { page: 1, pageSize: 20, total: empty ? 0 : 1, totalPages: 1 },
+  }));
+
+  const user = userEvent.setup();
+  renderArchive();
+  await screen.findByText("没有符合条件的归档推文");
+
+  const firstQuery = vi.mocked(getTweets).mock.calls[0][0];
+  expect(firstQuery.get("retweets")).toBeNull();
+  expect(firstQuery.get("from")).toBeNull();
+  expect(firstQuery.get("to")).toBeNull();
+
+  empty = false;
+  await user.click(screen.getByRole("button", { name: "刷新数据" }));
+  await screen.findByText("Newly archived tweet");
+  expect(screen.queryByText(/有 \d+ 条新记录/)).toBeNull();
+});
+
+it("remounts video element when stepping between two videos in MediaModal", async () => {
+  vi.mocked(getTweets).mockResolvedValue({
+    items: [{
+      ...tweet,
+      downloads: [
+        { ...tweet.downloads[0], id: 70, filePath: "asset:video/v1.mp4", fileUrl: "/api/assets/v1", assetUrls: {} },
+        { ...tweet.downloads[0], id: 71, filePath: "asset:video/v2.mp4", fileUrl: "/api/assets/v2", assetUrls: {} },
+      ],
+    }],
+    pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+  });
+  const user = userEvent.setup();
+  renderArchive();
+  await screen.findByText(tweet.text, { collapseWhitespace: false, trim: false });
+  await user.click(screen.getAllByRole("button", { name: /播放视频/ })[0]);
+  const firstVideo = document.querySelector("[role=dialog] video");
+  expect(firstVideo?.getAttribute("src")).toBe("/api/assets/v1");
+
+  await user.click(screen.getByRole("button", { name: "下一个媒体" }));
+  const secondVideo = document.querySelector("[role=dialog] video");
+  expect(secondVideo?.getAttribute("src")).toBe("/api/assets/v2");
+  expect(secondVideo).not.toBe(firstVideo);
+});
+
+it("recursively normalizes related tweets with null media without crashing", async () => {
+  vi.mocked(getTweets).mockResolvedValue({
+    items: [{
+      ...tweet,
+      related: [{
+        ...tweet.related![0],
+        media: null as unknown as ArchivedTweet["media"],
+        related: [{
+          ...tweet.related![0],
+          id: "121",
+          text: "Deeply nested quote",
+          media: null as unknown as ArchivedTweet["media"],
+        }],
+      }],
+    }],
+    pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+  });
+  renderArchive();
+  expect(await screen.findByText("Quoted text available offline")).toBeTruthy();
+});
+
+it("drops deleted tweets during snapshot merge even when new tweets arrive and clamps page to totalPages", async () => {
+  const tweetA: ArchivedTweet = { ...tweet, id: "a", text: "Tweet Alpha", related: [] };
+  const tweetB: ArchivedTweet = { ...tweet, id: "b", text: "Tweet Beta", related: [] };
+  const tweetC: ArchivedTweet = { ...tweet, id: "c", text: "Tweet Gamma", related: [] };
+  const tweetD: ArchivedTweet = { ...tweet, id: "d", text: "Tweet Delta", related: [] };
+
+  let step = 0;
+  vi.mocked(getTweets).mockImplementation(async (query) => {
+    const requested = Number(query.get("page") ?? 1);
+    if (requested > 1 && step >= 2) {
+      return { items: [], pagination: { page: requested, pageSize: 20, total: 1, totalPages: 1 } };
+    }
+    if (step === 0) {
+      return { items: [tweetA, tweetB], pagination: { page: 1, pageSize: 20, total: 2, totalPages: 1 } };
+    }
+    if (step === 1) {
+      // Tweet Beta deleted while Gamma + Delta added -> total rises from 2 to 3, but Beta is gone
+      return { items: [tweetC, tweetD, tweetA], pagination: { page: 1, pageSize: 20, total: 3, totalPages: 1 } };
+    }
+    return { items: [tweetA], pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 } };
+  });
+
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  renderWithProviders(<QueryClientProvider client={client}><TweetsPage /></QueryClientProvider>);
+  await screen.findByText("Tweet Alpha");
+  expect(screen.getByText("Tweet Beta")).toBeTruthy();
+
+  step = 1;
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: tweetsQueryKey });
+  });
+  await waitFor(() => expect(screen.queryByText("Tweet Beta")).toBeNull());
+  expect(screen.getByText("Tweet Alpha")).toBeTruthy();
+  expect(screen.getByText("有 2 条新记录")).toBeTruthy();
+
+  // Navigate to page 3 when totalPages is 1 -> should clamp back to page 1
+  step = 2;
+  act(() => {
+    window.history.replaceState(null, "", "/tweets?page=3");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await waitFor(() => expect(new URLSearchParams(window.location.search).get("page")).toBeNull());
 });

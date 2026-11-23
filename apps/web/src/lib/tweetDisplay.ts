@@ -8,7 +8,7 @@ export type TweetTextToken =
 
 // 一次扫描出所有可能实体；边界与尾随标点在下面逐条校验。
 const entityPattern = /(https?:\/\/[^\s<>"'`]+|@\w{1,15}|#[\p{L}\p{M}\p{N}_]+)/giu;
-const trailingPunctuation = /[.,;:!?)\]}>'"」』】、。，；：！？…]+$/u;
+const trailingPunctuation = /[.,;:!?)\]}'"」』】、。，；：！？…]+$/u;
 
 function entityHref(value: string) {
   if (/^https?:\/\//i.test(value)) return value;
@@ -40,7 +40,7 @@ export function tokenizeTweetText(text: string): TweetTextToken[] {
     }
     if (!value) continue;
     if (start > cursor) tokens.push({ type: "text", value: text.slice(cursor, start) });
-    tokens.push({ type: raw.startsWith("http") ? "url" : raw.startsWith("@") ? "mention" : "hashtag", value, href: entityHref(value) });
+    tokens.push({ type: /^https?:\/\//i.test(raw) ? "url" : raw.startsWith("@") ? "mention" : "hashtag", value, href: entityHref(value) });
     cursor = start + value.length;
   }
   if (cursor < text.length) tokens.push({ type: "text", value: text.slice(cursor) });
@@ -104,9 +104,11 @@ export function mediaKey(rawURL: string) {
   }
 }
 
-function mediaKeys(media: Media) {
+function mediaKeys(media: Media | null | undefined) {
   const keys = new Set<string>();
-  for (const url of [media.bestUrl, media.url, ...(media.variants ?? []).map(variant => variant.url)]) {
+  if (!media) return keys;
+  const variants = Array.isArray(media.variants) ? media.variants : [];
+  for (const url of [media.bestUrl, media.url, ...variants.map(variant => variant?.url)]) {
     if (url) keys.add(mediaKey(url));
   }
   return keys;
@@ -119,20 +121,23 @@ function mediaKeys(media: Media) {
 export function splitRelatedDownloads(downloads: DownloadRecord[], related: TweetData[]) {
   const used = new Set<number>();
   const byRelated = new Map<string, DownloadRecord[]>();
-  for (const item of related) {
-    const keys = new Set(item.media.flatMap(media => [...mediaKeys(media)]));
+  const safeDownloads = Array.isArray(downloads) ? downloads : [];
+  for (const item of Array.isArray(related) ? related : []) {
+    const itemMedia = Array.isArray(item?.media) ? item.media : [];
+    const keys = new Set(itemMedia.flatMap(media => [...mediaKeys(media)]));
     if (!keys.size) continue;
-    const records = downloads.filter(record => !used.has(record.id) && keys.has(mediaKey(record.mediaUrl)));
+    const records = safeDownloads.filter(record => !used.has(record.id) && keys.has(mediaKey(record.mediaUrl)));
     records.forEach(record => used.add(record.id));
     if (records.length) byRelated.set(item.id, records);
   }
-  return { main: downloads.filter(record => !used.has(record.id)), byRelated };
+  return { main: safeDownloads.filter(record => !used.has(record.id)), byRelated };
 }
 
 /** 找到下载记录对应的原始媒体，用来区分视频/动图与普通图片。 */
 export function mediaOfRecord(tweet: TweetData, record: DownloadRecord): Media | undefined {
   const key = mediaKey(record.mediaUrl);
-  return tweet.media.find(media => mediaKeys(media).has(key));
+  const mediaList = Array.isArray(tweet?.media) ? tweet.media : [];
+  return mediaList.find(media => mediaKeys(media).has(key));
 }
 
 export interface TweetDisplay {
@@ -174,7 +179,7 @@ export function resolveTweetDisplay(tweet: TweetData): TweetDisplay {
   }
   return {
     tweet: shown,
-    repostedBy: original ? { name: tweet.author.name || tweet.author.screenName, screenName: tweet.author.screenName } : undefined,
+    repostedBy: original ? { name: tweet.author?.name || tweet.author?.screenName || "", screenName: tweet.author?.screenName || "" } : undefined,
     replyTo,
     replyToId: replyToId && !replyTo ? replyToId : undefined,
     quotes,

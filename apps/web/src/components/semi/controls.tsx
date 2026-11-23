@@ -1,4 +1,4 @@
-import React, { createContext, forwardRef, useContext, useId, useLayoutEffect, useState, useRef } from "react";
+import React, { createContext, forwardRef, useContext, useEffect, useId, useLayoutEffect, useState, useRef } from "react";
 import SButton from "@douyinfe/semi-ui/lib/es/button";
 import SCheckbox from "@douyinfe/semi-ui/lib/es/checkbox";
 // 只取 Label：整个 Form 入口会连带 Upload/Cascader/Slider 等字段组件（约 300 KB）。
@@ -27,36 +27,66 @@ export interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElem
   onClear?: () => void; containerClassName?: string;
   mode?: "password";
 }
-export const Input = forwardRef<HTMLInputElement, InputProps>(function Input({ size, onChange, onPressEnter, containerClassName, className, id, allowClear, onClear, mode, suffix, ...props }, ref) {
+export const Input = forwardRef<HTMLInputElement, InputProps>(function Input({ size, onChange, onPressEnter, containerClassName, className, id, allowClear, onClear, mode, suffix, readOnly, ...props }, ref) {
   const fieldId = useFieldId();
   const [visible, setVisible] = useState(false);
   const [internalValue, setInternalValue] = useState(props.defaultValue ?? "");
   const value = props.value ?? internalValue;
   const generatedId = useId(); const inputId = id ?? fieldId ?? generatedId;
-  const actions = <>{allowClear && value !== "" && !props.disabled && <SButton theme="borderless" type="tertiary" size="small" icon={<X size={14} />} aria-label={t("清空")} onClick={() => { setInternalValue(""); onClear?.(); onChange?.({ target: { value: "" } } as React.ChangeEvent<HTMLInputElement>); }} />}{mode === "password" && <SButton theme="borderless" type="tertiary" size="small" icon={visible ? <EyeOff size={14} /> : <Eye size={14} />} aria-label={t(visible ? "隐藏" : "显示")} aria-pressed={visible} onClick={() => setVisible(v => !v)} />}{suffix}</>;
-  return <SInput {...props as React.ComponentProps<typeof SInput>} value={value as string | number} id={inputId} type={mode === "password" ? visible ? "text" : "password" : props.type} size={size === "sm" ? "small" : "default"} className={cn(containerClassName, className)} suffix={allowClear || mode || suffix ? actions : undefined} onChange={(v, event) => { setInternalValue(v); onChange?.(event); }} onEnterPress={e => { if (!e.nativeEvent.isComposing) onPressEnter?.(e); }} ref={ref} />;
+  const actions = <>{allowClear && value !== "" && !props.disabled && !readOnly && <SButton theme="borderless" type="tertiary" size="small" icon={<X size={14} />} aria-label={t("清空")} onClick={() => { setInternalValue(""); onClear?.(); const target = { value: "" } as HTMLInputElement; onChange?.({ target, currentTarget: target } as React.ChangeEvent<HTMLInputElement>); }} />}{mode === "password" && <SButton theme="borderless" type="tertiary" size="small" icon={visible ? <EyeOff size={14} /> : <Eye size={14} />} aria-label={t(visible ? "隐藏" : "显示")} aria-pressed={visible} onClick={() => setVisible(v => !v)} />}{suffix}</>;
+  return <SInput {...props as React.ComponentProps<typeof SInput>} readonly={readOnly} value={value as string | number} id={inputId} type={mode === "password" ? visible ? "text" : "password" : props.type} size={size === "sm" ? "small" : "default"} className={cn(containerClassName, className)} suffix={allowClear || mode || suffix ? actions : undefined} onChange={(v, event) => { setInternalValue(v); onChange?.(event); }} onEnterPress={e => { if (!e.nativeEvent.isComposing) onPressEnter?.(e); }} ref={ref} />;
 });
 export const PasswordInput = forwardRef<HTMLInputElement, InputProps>((props, ref) => <Input {...props} ref={ref} mode="password" />);
 export interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement> { containerClassName?: string }
-export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea({ onChange, containerClassName, className, id, ...props }, ref) {
+export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea({ onChange, containerClassName, className, id, readOnly, ...props }, ref) {
   const fieldId = useFieldId();
-  return <TextArea {...props as React.ComponentProps<typeof TextArea>} id={id ?? fieldId} className={cn(containerClassName, className)} onChange={(_, event) => onChange?.(event as unknown as React.ChangeEvent<HTMLTextAreaElement>)} ref={ref} />;
+  return <TextArea {...props as React.ComponentProps<typeof TextArea>} readonly={readOnly} id={id ?? fieldId} className={cn(containerClassName, className)} onChange={(_, event) => onChange?.(event as unknown as React.ChangeEvent<HTMLTextAreaElement>)} ref={ref} />;
 });
 export interface NumberInputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "size" | "value" | "onChange"> { value: number | null; onChange: (v: number | null) => void; size?: "sm" | "md"; addonAfter?: React.ReactNode }
 export const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(function NumberInput({ value, onChange, size, addonAfter, id, ...props }, ref) {
-  const fieldId = useFieldId(); return <InputNumber {...props as React.ComponentProps<typeof InputNumber>} id={id ?? fieldId} value={value ?? ""} forwardedRef={ref as React.ComponentProps<typeof InputNumber>["forwardedRef"]} onChange={v => onChange(v === "" ? null : Number(v))} size={size === "sm" ? "small" : "default"} suffix={addonAfter} />;
+  const fieldId = useFieldId(); return <InputNumber {...props as React.ComponentProps<typeof InputNumber>} id={id ?? fieldId} value={value ?? ""} forwardedRef={ref as React.ComponentProps<typeof InputNumber>["forwardedRef"]} onChange={v => { if (v === "" || v === null || v === undefined || (typeof v === "string" && v.trim() === "")) { onChange(null); return; } const parsed = typeof v === "number" ? v : Number(v); onChange(Number.isFinite(parsed) ? parsed : null); }} size={size === "sm" ? "small" : "default"} suffix={addonAfter} />;
 });
 export interface SelectOption { value: string; label: string }
 interface SelectProps { value: string; onChange: (value: string) => void; options: SelectOption[]; placeholder?: string; size?: "sm" | "md"; className?: string; ariaLabel?: string; id?: string; disabled?: boolean; motion?: boolean }
+function normalizeSelectValue(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value);
+}
 export function Select({ onChange, options, size, ariaLabel, id, ...props }: SelectProps) {
   const fieldId = useFieldId(); const labelId = useId();
-  return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} id={id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} optionList={options.map(option => ({ ...option, showTick: false }))} onChange={value => onChange(String(value))} size={size === "sm" ? "small" : "default"} /></>;
+  const select = useRef<SSelect>(null); const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const handleEsc = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      select.current?.close();
+      select.current?.triggerRef.current?.focus();
+    };
+    window.addEventListener("keydown", handleEsc, true);
+    return () => window.removeEventListener("keydown", handleEsc, true);
+  }, [open]);
+  return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} ref={select} id={id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} onDropdownVisibleChange={setOpen} optionList={options.map(option => ({ ...option, showTick: false }))} onChange={value => onChange(normalizeSelectValue(value))} size={size === "sm" ? "small" : "default"} /></>;
 }
 export function SearchSelect({ searchPlaceholder, onChange, options, size, ariaLabel, ...props }: SelectProps & { searchPlaceholder?: string }) {
   const fieldId = useFieldId(); const labelId = useId();
   const select = useRef<SSelect>(null); const [open, setOpen] = useState(false);
   const listId = `${labelId}-listbox`;
   const searchLabel = [ariaLabel, searchPlaceholder ?? t("搜索...")].filter(Boolean).join(" ");
+  useEffect(() => {
+    if (!open) return;
+    const handleEsc = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      select.current?.close();
+      select.current?.triggerRef.current?.focus();
+    };
+    window.addEventListener("keydown", handleEsc, true);
+    return () => window.removeEventListener("keydown", handleEsc, true);
+  }, [open]);
   useLayoutEffect(() => {
     if (!open) return;
     const observer = new MutationObserver(labelList);
@@ -71,9 +101,11 @@ export function SearchSelect({ searchPlaceholder, onChange, options, size, ariaL
   return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} ref={select} id={props.id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} filter searchPosition="dropdown" onDropdownVisibleChange={setOpen} inputProps={{ autoFocus: true, role: "combobox", "aria-label": searchLabel, "aria-expanded": open, "aria-controls": listId, "aria-autocomplete": "list", onKeyDownCapture: event => {
     if (event.key === "Escape" && !event.nativeEvent.isComposing) {
       event.preventDefault(); event.stopPropagation();
+      event.nativeEvent.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation?.();
       select.current?.close(); select.current?.triggerRef.current?.focus();
     }
-  } }} searchPlaceholder={searchPlaceholder ?? t("搜索...")} emptyContent={t("无匹配项")} optionList={options.map(option => ({ ...option, showTick: false }))} onChange={value => onChange(String(value))} size={size === "sm" ? "small" : "default"} /></>;
+  } }} searchPlaceholder={searchPlaceholder ?? t("搜索...")} emptyContent={t("无匹配项")} optionList={options.map(option => ({ ...option, showTick: false }))} onChange={value => onChange(normalizeSelectValue(value))} size={size === "sm" ? "small" : "default"} /></>;
 }
 export function Switch({ ariaLabel, onChange, ...props }: { checked: boolean; onChange: (v: boolean) => void; loading?: boolean; disabled?: boolean; ariaLabel?: string }) { return <SSwitch {...props} disabled={props.disabled || props.loading} aria-label={ariaLabel} onChange={checked => onChange(checked)} />; }
 export function Checkbox({ onChange, label, ariaLabel, ...props }: { checked: boolean; onChange: (v: boolean) => void; label?: React.ReactNode; ariaLabel?: string; id?: string }) { return <SCheckbox {...props} aria-label={ariaLabel} onChange={e => onChange(e.target.checked === true)}>{label}</SCheckbox>; }

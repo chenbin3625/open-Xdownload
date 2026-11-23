@@ -50,6 +50,33 @@ describe("Select", () => {
     expect(trigger.id).not.toBe("");
     expect(label.closest("label")?.htmlFor).toBe(trigger.id);
   });
+
+  it("does not stringify null or undefined values into literal strings", () => {
+    const { rerender } = render(
+      <Select
+        ariaLabel="状态"
+        value={null as unknown as string}
+        placeholder="请选择"
+        onChange={() => {}}
+        options={options}
+      />,
+    );
+    const trigger = screen.getByRole("combobox", { name: "状态" });
+    expect(trigger.textContent).not.toContain("null");
+    expect(trigger.textContent).toContain("请选择");
+
+    rerender(
+      <Select
+        ariaLabel="状态"
+        value={undefined as unknown as string}
+        placeholder="请选择"
+        onChange={() => {}}
+        options={options}
+      />,
+    );
+    expect(trigger.textContent).not.toContain("undefined");
+    expect(trigger.textContent).toContain("请选择");
+  });
 });
 
 describe("Checkbox", () => {
@@ -155,4 +182,3 @@ describe("SearchSelect", () => {
     expect(trigger.className).toContain("semi-select-small");
   });
 });
-

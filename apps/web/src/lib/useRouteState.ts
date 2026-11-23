@@ -171,7 +171,7 @@ export function buildRoutePath(state: RouteQueryState) {
     for (const key of ["from", "to", "minBytes", "maxBytes"] as const) {
       if (gallery[key] !== "") params.set(key, gallery[key]);
     }
-  } else if (section === "tweets" && typeof window !== "undefined" && window.location.pathname === "/tweets") {
+  } else if (section === "tweets" && typeof window !== "undefined" && normalizePathname(window.location.pathname) === "/tweets") {
     new URLSearchParams(window.location.search).forEach((value, key) => params.set(key, value));
   }
 
@@ -315,7 +315,8 @@ export function useRouteState() {
       if (route.section !== stateRef.current.section) {
         const guard = new Event("settings:before-navigate", { cancelable: true });
         if (!window.dispatchEvent(guard) && !window.confirm(t("放弃未保存的修改？"))) {
-          updateBrowserRoute(stateRef.current, true);
+          // 取消离开时用 pushState 恢复当前受保护页面，避免 replaceState 覆写掉上一条历史记录。
+          updateBrowserRoute(stateRef.current, false);
           return;
         }
       }
@@ -399,10 +400,29 @@ export function useRouteState() {
    * 媒体库筛选/页码统一入口：一次更新同时改 state 与 URL，避免"新筛选 + 旧页码"多发一次请求。
    * 搜索框逐字符输入用 replace 模式，避免把每个字符都压进浏览器历史。
    */
+  const clearJobFilters = useCallback(() => {
+    setJobStatus(defaultJobStatus);
+    setJobKind(defaultJobKind);
+    setJobSearch(defaultJobSearch);
+    setJobPage(defaultJobPage);
+    if (isTaskCenterSection(stateRef.current.section)) {
+      pushRoute({
+        jobStatus: defaultJobStatus,
+        jobKind: defaultJobKind,
+        jobSearch: defaultJobSearch,
+        jobPage: defaultJobPage,
+      });
+    }
+  }, [pushRoute]);
+
   const handleGalleryChange = useCallback(
     (patch: Partial<GalleryRouteState>, options?: { replace?: boolean }) => {
       // 先算结果再 setState：history 写入是副作用，不能放进 updater（StrictMode 会双调用）。
-      const next = { ...stateRef.current.gallery, ...patch };
+      const sanitizedPatch =
+        "search" in patch
+          ? { ...patch, search: parseSearchKeyword(patch.search ?? null) }
+          : patch;
+      const next = { ...stateRef.current.gallery, ...sanitizedPatch };
       const nextState = { ...stateRef.current, gallery: next };
       stateRef.current = nextState;
       setGallery(next);
@@ -439,6 +459,7 @@ export function useRouteState() {
     handleJobStatusChange,
     handleJobKindChange,
     handleJobSearchChange,
+    clearJobFilters,
     handleGalleryChange,
     syncServerPage,
   };

@@ -1,7 +1,15 @@
 import { afterEach, beforeEach } from "vitest";
-import i18n from "../lib/i18n";
+import i18n, { resetLanguagePreference } from "../lib/i18n";
 
 beforeEach(async () => {
+  resetLanguagePreference();
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.clear();
+    }
+  } catch {
+    // Ignore when storage is unavailable or mocked to throw.
+  }
   await i18n.changeLanguage("zh-CN");
 });
 
@@ -10,9 +18,15 @@ beforeEach(async () => {
 afterEach(async () => {
   if (typeof document === "undefined") return;
   const { act, cleanup } = await import("@testing-library/react");
-  const { Notification } = await import("@douyinfe/semi-ui");
-  await act(async () => { Notification.destroyAll(); });
-  cleanup();
+  try {
+    const { default: Notification } = await import("@douyinfe/semi-ui/lib/es/notification");
+    await act(async () => {
+      Notification.destroyAll();
+      await Promise.resolve();
+    });
+  } finally {
+    cleanup();
+  }
 });
 
 // jsdom 不实现 ResizeObserver / DOMRect.fromRect，浮层定位依赖它们。
@@ -62,6 +76,18 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 }
 
 if (typeof document !== "undefined") {
-  const { Notification } = await import("@douyinfe/semi-ui");
-  Notification.defaultProps = { ...Notification.defaultProps, duration: 0, motion: false };
+  const [{ default: Notification }, { default: semiGlobal }] = await Promise.all([
+    import("@douyinfe/semi-ui/lib/es/notification"),
+    import("@douyinfe/semi-ui/lib/es/_utils/semi-global"),
+  ]);
+  Notification.config({ duration: 0 });
+  const notificationOverrides = {
+    ...semiGlobal.config.overrideDefaultProps?.Notification,
+    duration: 0,
+    motion: false,
+  } as NonNullable<NonNullable<typeof semiGlobal.config.overrideDefaultProps>["Notification"]>;
+  semiGlobal.config.overrideDefaultProps = {
+    ...semiGlobal.config.overrideDefaultProps,
+    Notification: notificationOverrides,
+  };
 }

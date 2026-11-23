@@ -19,8 +19,9 @@ describe("Input", () => {
     expect(onPressEnter).toHaveBeenCalledTimes(1);
   });
 
-  it("allowClear 有值才显示清除按钮，点击后清空", async () => {
+  it("allowClear 有值才显示清除按钮，点击后清空并提供 currentTarget", async () => {
     const user = userEvent.setup();
+    const onChangeSpy = vi.fn();
     function Harness() {
       const [value, setValue] = useState("");
       return (
@@ -28,7 +29,13 @@ describe("Input", () => {
           aria-label="关键词"
           allowClear
           value={value}
-          onChange={(event) => setValue(event.target.value)}
+          onChange={(event) => {
+            onChangeSpy({
+              targetValue: event.target.value,
+              currentTargetValue: event.currentTarget.value,
+            });
+            setValue(event.target.value);
+          }}
         />
       );
     }
@@ -41,6 +48,29 @@ describe("Input", () => {
     await user.click(screen.getByRole("button", { name: "清空" }));
 
     expect((input as HTMLInputElement).value).toBe("");
+    expect(onChangeSpy).toHaveBeenLastCalledWith({
+      targetValue: "",
+      currentTargetValue: "",
+    });
+  });
+
+  it("Input 与 Textarea 支持 forwardRef 并透传 readOnly", () => {
+    const inputRef = React.createRef<HTMLInputElement>();
+    const textareaRef = React.createRef<HTMLTextAreaElement>();
+    render(
+      <>
+        <Input ref={inputRef} aria-label="只读输入" value="locked" readOnly allowClear onChange={() => {}} />
+        <Textarea ref={textareaRef} aria-label="只读多行" value="locked-area" readOnly onChange={() => {}} />
+      </>,
+    );
+
+    const input = screen.getByLabelText("只读输入") as HTMLInputElement;
+    const textarea = screen.getByLabelText("只读多行") as HTMLTextAreaElement;
+    expect(inputRef.current).toBe(input);
+    expect(textareaRef.current).toBe(textarea);
+    expect(input.readOnly).toBe(true);
+    expect(textarea.readOnly).toBe(true);
+    expect(screen.queryByRole("button", { name: "清空" })).toBeNull();
   });
 });
 
@@ -106,6 +136,16 @@ describe("NumberInput", () => {
     fireEvent.keyDown(input, { key: "ArrowDown", keyCode: 40 });
     fireEvent.keyDown(input, { key: "ArrowDown", keyCode: 40 });
     expect((input as HTMLInputElement).value).toBe("2");
+  });
+
+  it("非数字或部分输入转发 null 而不是 NaN", () => {
+    const onChange = vi.fn();
+    render(<NumberInput aria-label="并发数" value={null} onChange={onChange} />);
+    const input = screen.getByLabelText("并发数");
+    fireEvent.change(input, { target: { value: "-" } });
+    expect(onChange).toHaveBeenLastCalledWith(null);
+    fireEvent.change(input, { target: { value: "abc" } });
+    expect(onChange).toHaveBeenLastCalledWith(null);
   });
 });
 

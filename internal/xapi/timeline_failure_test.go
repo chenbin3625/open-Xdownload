@@ -49,8 +49,13 @@ func TestUserMediaTimelineParseFailureAccounting(t *testing.T) {
 			skippedIDs: []string{"300"},
 		},
 		{
-			name:       "unavailable tweet is not a malformed tweet",
+			name:    "only unavailable tweet is tolerated",
+			results: []string{`{"rest_id":"299","__typename":"TweetUnavailable"}`},
+		},
+		{
+			name:       "unavailable tweet does not mask all malformed candidates",
 			results:    []string{`{"rest_id":"300"}`, `{"rest_id":"299","__typename":"TweetUnavailable"}`},
+			wantError:  true,
 			skippedIDs: []string{"300"},
 		},
 	} {

@@ -218,8 +218,15 @@ func TestPruneDownloadRootsRemovesUnsafeAndCaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(roots) > MaxDownloadRoots {
-		t.Fatalf("roots = %d, want <= %d", len(roots), MaxDownloadRoots)
+	// Protected root (current) does not consume the MaxDownloadRoots unreferenced quota.
+	unreferenced := 0
+	for _, root := range roots {
+		if filepath.Clean(root) != filepath.Clean(current) {
+			unreferenced++
+		}
+	}
+	if unreferenced > MaxDownloadRoots {
+		t.Fatalf("unreferenced roots = %d, want <= %d (total=%d)", unreferenced, MaxDownloadRoots, len(roots))
 	}
 	for _, root := range roots {
 		if root == string(filepath.Separator) {

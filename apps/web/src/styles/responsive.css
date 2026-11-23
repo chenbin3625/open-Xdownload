@@ -38,10 +38,6 @@
     justify-content: flex-end;
   }
 
-  .storage-media-field > div:first-child {
-    display: flex;
-  }
-
   .storage-inherited-summary,
   .storage-media-row > .storage-preview-row {
     grid-column: 1 / -1;
@@ -242,6 +238,7 @@
   }
 
   .settings-general-bar .settings-account-shortcut {
+    padding-block: 0;
     padding-left: 0;
     border-left: 0;
   }
@@ -250,18 +247,6 @@
     padding-block: 20px;
   }
 
-  .settings-general-bar .settings-account-shortcut {
-    padding-block: 0;
-  }
-
-}
-
-/* ---------------- ≤359.98px：极窄屏 ---------------- */
-
-@media (max-width: 359.98px) {
-  .task-center .toolbar-status .semi-radioGroup {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 /* ---------------- ≤639.98px：手机 ---------------- */
@@ -386,7 +371,7 @@
     aspect-ratio: 4 / 3;
   }
 
-  .semi-description-grid {
+  .semi-description-grid.semi-descriptions-double tbody {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -406,9 +391,36 @@
     row-gap: 6px;
   }
 
-  .semi-pagination-item,
-  .semi-pagination-prev,
-  .semi-pagination-next {
+  .account-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 16px;
+  }
+
+  .account-overview > div {
+    padding-inline: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .account-overview > div + div {
+    border-left: 0;
+  }
+
+  .account-overview > div:nth-child(even) {
+    padding-left: 16px;
+    border-left: 1px solid var(--line);
+  }
+
+  .semi-page-item,
+  .semi-page-prev,
+  .semi-page-next {
     min-width: 32px;
+  }
+}
+
+/* ---------------- ≤359.98px：极窄屏 ---------------- */
+
+@media (max-width: 359.98px) {
+  .task-center .toolbar-status .semi-radioGroup {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

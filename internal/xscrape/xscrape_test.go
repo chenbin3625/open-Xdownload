@@ -333,7 +333,7 @@ func TestGraphQLUnauthorizedWithValidProbeKeepsAccountAndCaches(t *testing.T) {
 	}
 }
 
-func TestGraphQLUnauthorizedUnconfirmedDoesNotLock(t *testing.T) {
+func TestGraphQLUnauthorizedUnconfirmedAppliesShortLock(t *testing.T) {
 	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == probePath {
 			writeJSON(w, http.StatusInternalServerError, `{"error":"boom"}`)
@@ -357,8 +357,8 @@ func TestGraphQLUnauthorizedUnconfirmedDoesNotLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(locks) != 0 {
-		t.Fatalf("locks = %+v, want no wildcard lock", locks)
+	if len(locks) != 1 || locks[0].Queue != "*" || !locks[0].Until.Equal(h.clock.Now().Add(forbiddenLock)) {
+		t.Fatalf("locks = %+v, want a 5 minute wildcard lock", locks)
 	}
 }
 

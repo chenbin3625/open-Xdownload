@@ -13,9 +13,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -56,63 +58,244 @@ func IsBlockedTargetError(err error) bool {
 	return errors.As(err, &target)
 }
 
-// BlockedIP 报告 ip 是否为链路本地地址（169.254.0.0/16 等）。
-// 环回地址与私网地址不拦截。
+var (
+	awsIPv6IMDS     = netip.MustParseAddr("fd00:ec2::254")
+	alibabaIMDSIPv4 = netip.MustParseAddr("100.100.100.200")
+)
+
+// BlockedIP 报告 ip 是否为禁止访问的目标地址：链路本地地址（169.254.0.0/16、fe80::/10）、
+// 未指定地址（0.0.0.0、::）、以及云元数据专用地址（AWS IPv6 IMDS fd00:ec2::254、
+// 阿里云 IMDS 100.100.100.200）。环回地址与普通私网地址不拦截。
 func BlockedIP(ip net.IP) bool {
-	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-}
-
-// lookupIPs 把 host 解析为 IP 列表；host 本身是 IP 字面量时直接返回。
-func lookupIPs(ctx context.Context, host string) ([]net.IP, error) {
-	if ip := net.ParseIP(host); ip != nil {
-		return []net.IP{ip}, nil
+	if len(ip) == 0 {
+		return false
 	}
-	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
 	}
-	ips := make([]net.IP, 0, len(addresses))
-	for _, address := range addresses {
-		ips = append(ips, address.IP)
-	}
-	return ips, nil
-}
-
-// guardedDial 在拨号前校验目标 IP，拒绝链路本地地址。host:port 形式的 address 输入。
-func guardedDial(ctx context.Context, network string, address string, timeout time.Duration) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := lookupIPs(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	blocked := make([]net.IP, 0, len(ips))
-	allowed := make([]net.IP, 0, len(ips))
-	for _, ip := range ips {
-		if BlockedIP(ip) {
-			blocked = append(blocked, ip)
-		} else {
-			allowed = append(allowed, ip)
+	if addr, ok := netip.AddrFromSlice(ip); ok {
+		unmapped := addr.Unmap()
+		if unmapped.IsUnspecified() || unmapped == awsIPv6IMDS || unmapped == alibabaIMDSIPv4 {
+			return true
 		}
 	}
-	if len(allowed) == 0 {
-		return nil, &blockedTargetError{host: host}
+	return false
+}
+
+// BlockedHost 报告主机字面量是否为受禁 IP（含 IPv6 Zone、IPv4-mapped IPv6）或
+// 非规范数值 IPv4（如十进制/十六进制/八进制简写），供 S3Client 等调用方复用一致策略。
+func BlockedHost(host string) bool {
+	return blockedLiteralOrNonCanonicalHost(host)
+}
+
+var lookupHostIPAddrs = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// lookupIPAddrs 把 host 解析为带 Zone 的 IP 列表；host 本身是 IP 字面量时直接返回。
+func lookupIPAddrs(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if addr, err := netip.ParseAddr(strings.TrimSuffix(host, ".")); err == nil {
+		unmapped := addr.Unmap()
+		return []net.IPAddr{{IP: net.IP(unmapped.AsSlice()), Zone: unmapped.Zone()}}, nil
 	}
-	dialer := &net.Dialer{Timeout: timeout}
+	return lookupHostIPAddrs(ctx, host)
+}
+
+func partitionIPAddrs(network string, addrs []net.IPAddr) ([]net.IPAddr, []net.IPAddr) {
+	if len(addrs) <= 1 || strings.HasSuffix(network, "4") || strings.HasSuffix(network, "6") {
+		return addrs, nil
+	}
+	firstIsV4 := addrs[0].IP.To4() != nil
+	var primaries, fallbacks []net.IPAddr
+	for _, addr := range addrs {
+		if (addr.IP.To4() != nil) == firstIsV4 {
+			primaries = append(primaries, addr)
+		} else {
+			fallbacks = append(fallbacks, addr)
+		}
+	}
+	return primaries, fallbacks
+}
+
+func dialSerial(ctx context.Context, dialer *net.Dialer, network string, addrs []net.IPAddr, port string, totalBudget time.Duration) (net.Conn, error) {
 	var lastErr error
-	for _, ip := range allowed {
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	for i, addr := range addrs {
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, err
+		}
+		attemptCtx := ctx
+		var cancelAttempt context.CancelFunc
+		remainingAddrs := len(addrs) - i
+		if remainingAddrs > 1 {
+			attemptTimeout := 10 * time.Second
+			if totalBudget > 0 {
+				if perAddr := totalBudget / time.Duration(len(addrs)); perAddr < attemptTimeout {
+					attemptTimeout = perAddr
+				}
+			}
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					if lastErr != nil {
+						return nil, lastErr
+					}
+					return nil, context.DeadlineExceeded
+				}
+				if share := remaining / time.Duration(remainingAddrs); share < attemptTimeout {
+					attemptTimeout = share
+				}
+				if attemptTimeout < 50*time.Millisecond && remaining > 50*time.Millisecond {
+					attemptTimeout = 50 * time.Millisecond
+				}
+			} else if attemptTimeout < 50*time.Millisecond {
+				attemptTimeout = 50 * time.Millisecond
+			}
+			if attemptTimeout > 0 {
+				attemptCtx, cancelAttempt = context.WithTimeout(ctx, attemptTimeout)
+			}
+		}
+		conn, err := dialer.DialContext(attemptCtx, network, net.JoinHostPort(addr.String(), port))
+		if cancelAttempt != nil {
+			cancelAttempt()
+		}
 		if err == nil {
 			return conn, nil
 		}
 		lastErr = err
 	}
-	if lastErr == nil {
+	return nil, lastErr
+}
+
+// guardDialSocketControl 在底层 socket connect 前做最终 IP 校验，作为 DNS 解析过滤之后的纵深兜底。
+func guardDialSocketControl(_ string, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if BlockedIP(net.IP(addr.Unmap().AsSlice())) {
+			return &blockedTargetError{host: host}
+		}
+	}
+	return nil
+}
+
+// guardedDial 在拨号前校验目标 IP，拒绝链路本地地址。host:port 形式的 address 输入。
+// 支持 IPv6 Zone 保留、单次尝试超时上限及 Happy Eyeballs 双栈回退。
+func guardedDial(ctx context.Context, network string, address string, timeout time.Duration) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := lookupIPAddrs(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make([]net.IPAddr, 0, len(addrs))
+	for _, addr := range addrs {
+		if addr.IP != nil && !BlockedIP(addr.IP) {
+			allowed = append(allowed, addr)
+		}
+	}
+	if len(allowed) == 0 {
 		return nil, &blockedTargetError{host: host}
 	}
-	return nil, lastErr
+	dialCtx := ctx
+	var cancelDial context.CancelFunc
+	if timeout > 0 {
+		dialCtx, cancelDial = context.WithTimeout(ctx, timeout)
+		defer cancelDial()
+	}
+	dialer := &net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
+		Control:   guardDialSocketControl,
+	}
+	primaries, fallbacks := partitionIPAddrs(network, allowed)
+	if len(fallbacks) == 0 {
+		conn, err := dialSerial(dialCtx, dialer, network, primaries, port, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	}
+
+	fallbackDelay := 300 * time.Millisecond
+	if timeout > 0 && fallbackDelay > timeout/2 {
+		fallbackDelay = timeout / 2
+		if fallbackDelay < 10*time.Millisecond {
+			fallbackDelay = 10 * time.Millisecond
+		}
+	}
+	raceCtx, cancelRace := context.WithCancel(dialCtx)
+	defer cancelRace()
+
+	type dialResult struct {
+		conn    net.Conn
+		err     error
+		primary bool
+	}
+	results := make(chan dialResult, 2)
+	primaryFailed := make(chan struct{})
+
+	go func() {
+		conn, err := dialSerial(raceCtx, dialer, network, primaries, port, timeout)
+		if conn != nil {
+			cancelRace()
+		} else {
+			close(primaryFailed)
+		}
+		results <- dialResult{conn: conn, err: err, primary: true}
+	}()
+
+	go func() {
+		timer := time.NewTimer(fallbackDelay)
+		defer timer.Stop()
+		select {
+		case <-raceCtx.Done():
+			results <- dialResult{err: raceCtx.Err(), primary: false}
+			return
+		case <-primaryFailed:
+		case <-timer.C:
+		}
+		if raceCtx.Err() != nil {
+			results <- dialResult{err: raceCtx.Err(), primary: false}
+			return
+		}
+		conn, err := dialSerial(raceCtx, dialer, network, fallbacks, port, timeout)
+		if conn != nil {
+			cancelRace()
+		}
+		results <- dialResult{conn: conn, err: err, primary: false}
+	}()
+
+	var won net.Conn
+	var primaryErr, fallbackErr error
+	for range 2 {
+		res := <-results
+		if res.conn != nil {
+			if won == nil {
+				won = res.conn
+				cancelRace()
+			} else {
+				_ = res.conn.Close()
+			}
+		} else if res.primary {
+			primaryErr = res.err
+		} else {
+			fallbackErr = res.err
+		}
+	}
+	if won != nil {
+		return won, nil
+	}
+	if primaryErr != nil {
+		return nil, primaryErr
+	}
+	return nil, fallbackErr
 }
 
 // guardDialContext 是 http.Transport.DialContext 的拦截实现（附加稳定超时与 KeepAlive）。
@@ -158,6 +341,7 @@ func Transport(proxyURL string) (*http.Transport, error) {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           guardDialContext,
+		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,
 		IdleConnTimeout:       30 * time.Second,
@@ -204,6 +388,9 @@ func Client(proxyURL string, timeout time.Duration) *http.Client {
 // GuardedRoundTripper 给任意 RoundTripper 套上"目标主机字面量为链路本地 IP 时拒绝"
 // 的防护。供不使用 Client() 的调用方（例如自带 Transport 的下载器）复用。
 func GuardedRoundTripper(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
 	return guardedRoundTripper{base: base}
 }
 
@@ -213,11 +400,69 @@ type guardedRoundTripper struct {
 
 func (t guardedRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	if request != nil && request.URL != nil {
-		if ip := net.ParseIP(request.URL.Hostname()); ip != nil && BlockedIP(ip) {
-			return nil, &blockedTargetError{host: request.URL.Hostname()}
+		host := request.URL.Hostname()
+		if blockedLiteralOrNonCanonicalHost(host) {
+			return nil, &blockedTargetError{host: host}
 		}
 	}
-	return t.base.RoundTrip(request)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(request)
+}
+
+func blockedLiteralOrNonCanonicalHost(host string) bool {
+	trimmed := strings.TrimSpace(host)
+	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		trimmed = trimmed[1 : len(trimmed)-1]
+	}
+	trimmed = strings.TrimSuffix(trimmed, ".")
+	if trimmed == "" {
+		return false
+	}
+	if addr, err := netip.ParseAddr(trimmed); err == nil {
+		unmapped := addr.Unmap()
+		return BlockedIP(net.IP(unmapped.AsSlice()))
+	}
+	return isNonCanonicalNumericIPv4(trimmed)
+}
+
+func isNonCanonicalNumericIPv4(host string) bool {
+	parts := strings.Split(host, ".")
+	if len(parts) < 1 || len(parts) > 4 {
+		return false
+	}
+	for _, part := range parts {
+		if !isNumericIPv4Part(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isNumericIPv4Part(part string) bool {
+	if part == "" {
+		return false
+	}
+	if strings.HasPrefix(part, "0x") || strings.HasPrefix(part, "0X") {
+		if len(part) <= 2 {
+			return false
+		}
+		for i := 2; i < len(part); i++ {
+			c := part[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+		return true
+	}
+	for i := 0; i < len(part); i++ {
+		if part[i] < '0' || part[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 type errorRoundTripper struct {

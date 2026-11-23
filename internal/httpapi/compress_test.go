@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -59,12 +60,12 @@ func TestCompressJSONBrotli(t *testing.T) {
 	if !strings.Contains(strings.Join(response.Header().Values("Vary"), ","), "Accept-Encoding") {
 		t.Fatalf("Vary = %v, want Accept-Encoding", response.Header().Values("Vary"))
 	}
-	if response.Header().Get("Content-Length") != "" {
-		t.Fatalf("Content-Length should be absent for compressed JSON")
-	}
 	body, err := io.ReadAll(response.Result().Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
+	}
+	if got := response.Header().Get("Content-Length"); got != strconv.Itoa(len(body)) {
+		t.Fatalf("Content-Length = %q, want %d", got, len(body))
 	}
 	if got := decodeCompressed(t, body, "br"); !strings.Contains(got, `"payload"`) {
 		t.Fatalf("decoded body does not look like JSON: %q", got[:min(120, len(got))])

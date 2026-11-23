@@ -2,7 +2,7 @@ import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } f
 import { ChevronDown, ChevronUp, Copy, CornerUpLeft, ExternalLink, FileText, Play, RefreshCw, Repeat2 } from "lucide-react";
 import type { DownloadRecord, Media, TweetData } from "../../lib/api";
 import type { ArchivedTweet } from "../../lib/archive";
-import { t } from "../../lib/i18n";
+import { t, useTranslation } from "../../lib/i18n";
 import { copyToClipboard, formatDateTime } from "../common/CommonUI";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { Avatar, Tag } from "../semi/data";
@@ -28,6 +28,7 @@ function Highlighted({ value, highlight }: { value: string; highlight: string })
 
 /** 正文：@、#、链接按 X 的方式成为实体，其余文本原样保留。 */
 export function TweetText({ text, compact, highlight = "" }: { text: string; compact: boolean; highlight?: string }) {
+  useTranslation();
   const body = useRef<HTMLParagraphElement>(null);
   const id = useId();
   const [expanded, setExpanded] = useState(false);
@@ -55,6 +56,28 @@ export function TweetText({ text, compact, highlight = "" }: { text: string; com
 
 const videoFile = /\.(mp4|webm|mov|m4v|ogv)$/i;
 
+interface MediaSourceCandidate {
+  url: string;
+  remote: boolean;
+}
+
+function sanitizeMediaSrc(raw: string | null | undefined): MediaSourceCandidate | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    return { url: trimmed, remote: false };
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return { url: parsed.toString(), remote: true };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 function recordType(tweet: TweetData, record: DownloadRecord): Media["type"] {
   return mediaOfRecord(tweet, record)?.type ?? (videoFile.test(record.filePath) ? "video" : "photo");
 }
@@ -68,24 +91,34 @@ function MediaTile({ tweet, owner, record, overflow = 0, onOpen }: {
 }) {
   const type = recordType(tweet, record);
   const video = type === "video" || type === "animated_gif" || videoFile.test(record.filePath);
-  const localSrc = record.fileUrl ?? `/api/library/downloads/${record.id}/file`;
-  // 网格/卡片里优先用 X 图床的小图变体，失败再回退本地原文件。
-  const remoteSrc = useMemo(() => smallTwimgUrl(record.previewUrl), [record.previewUrl]);
-  const [imageSrc, setImageSrc] = useState(remoteSrc ?? localSrc);
-  useEffect(() => { setImageSrc(remoteSrc ?? localSrc); }, [remoteSrc, localSrc]);
-  const posterCandidates = useMemo(() => {
-    const list: { url: string; remote: boolean }[] = [];
-    if (record.assetUrls?.thumbnail) {
-      list.push({ url: record.assetUrls.thumbnail, remote: false });
-    }
-    if (record.id > 0) {
-      const localPreview = `/api/library/downloads/${record.id}/preview`;
-      if (!list.some(item => item.url === localPreview)) {
-        list.push({ url: localPreview, remote: false });
+  const imageCandidates = useMemo(() => {
+    const list: MediaSourceCandidate[] = [];
+    const push = (candidate?: MediaSourceCandidate) => {
+      if (candidate && !list.some(item => item.url === candidate.url)) {
+        list.push(candidate);
       }
+    };
+    // 网格/卡片里优先用 X 图床的小图变体，失败再回退本地原文件。
+    push(sanitizeMediaSrc(smallTwimgUrl(record.previewUrl)));
+    push(sanitizeMediaSrc(record.fileUrl) ?? { url: `/api/library/downloads/${record.id}/file`, remote: false });
+    return list;
+  }, [record.fileUrl, record.id, record.previewUrl]);
+  const [imageIndex, setImageIndex] = useState(0);
+  useEffect(() => { setImageIndex(0); }, [record.fileUrl, record.id, record.previewUrl]);
+  const currentImage = imageIndex < imageCandidates.length ? imageCandidates[imageIndex] : imageCandidates[imageCandidates.length - 1];
+  const posterCandidates = useMemo(() => {
+    const list: MediaSourceCandidate[] = [];
+    const push = (candidate?: MediaSourceCandidate) => {
+      if (candidate && !list.some(item => item.url === candidate.url)) {
+        list.push(candidate);
+      }
+    };
+    push(sanitizeMediaSrc(record.assetUrls?.thumbnail));
+    if (record.id > 0) {
+      push({ url: `/api/library/downloads/${record.id}/preview`, remote: false });
     }
     if (record.previewUrl && !videoFile.test(record.previewUrl.split(/[?#]/)[0])) {
-      list.push({ url: smallTwimgUrl(record.previewUrl) ?? record.previewUrl, remote: true });
+      push(sanitizeMediaSrc(smallTwimgUrl(record.previewUrl) ?? record.previewUrl));
     }
     return list;
   }, [record.assetUrls?.thumbnail, record.id, record.previewUrl]);
@@ -109,10 +142,11 @@ function MediaTile({ tweet, owner, record, overflow = 0, onOpen }: {
         )
       ) : (
         <img
-          src={imageSrc}
+          src={currentImage.url}
           loading="lazy"
           decoding="async"
-          onError={() => { if (imageSrc !== localSrc) setImageSrc(localSrc); }}
+          referrerPolicy={currentImage.remote ? "no-referrer" : undefined}
+          onError={() => setImageIndex(current => current + 1 < imageCandidates.length ? current + 1 : current)}
           alt={`${owner.screenName} · ${owner.id}`}
         />
       )}
@@ -149,6 +183,7 @@ function QuoteCard({ quote, quoteDownloads, compact, highlight, onOpen }: {
   onOpen: (record: DownloadRecord) => void;
 }) {
   const shown = quoteDownloads.slice(0, compact ? 2 : 3);
+  const hidden = quoteDownloads.length - shown.length;
   return <div className="tweet-quote">
     <div className="tweet-quote-header">
       <TweetAvatar name={quote.author.name} screenName={quote.author.screenName} size="small" />
@@ -160,7 +195,7 @@ function QuoteCard({ quote, quoteDownloads, compact, highlight, onOpen }: {
     </div>
     <TweetText text={quote.text} compact={compact} highlight={highlight} />
     {shown.length > 0 && <div className={`tweet-quote-media tweet-media-count-${Math.min(shown.length, 3)}`} data-count={shown.length}>
-      {shown.map(record => <MediaTile key={record.id} tweet={quote} owner={quote.author} record={record} onOpen={onOpen} />)}
+      {shown.map((record, index) => <MediaTile key={record.id} tweet={quote} owner={quote.author} record={record} overflow={index === shown.length - 1 ? hidden : 0} onOpen={onOpen} />)}
     </div>}
   </div>;
 }
@@ -176,15 +211,18 @@ export const TweetCard = React.memo(function TweetCard({ tweet, compact, highlig
   onRetry: (id: string) => void;
   retryPending: boolean;
 }) {
+  useTranslation();
   const display = resolveTweetDisplay(tweet);
   const shown = display.tweet;
   const { main, byRelated } = splitRelatedDownloads(tweet.downloads, display.quotes);
   const owner = { screenName: shown.author.screenName, id: shown.id };
-  const retryable = shown.media.length > 0 && !["completed", "not_requested"].includes(tweet.mediaStatus);
+  const hasMedia = shown.media.length > 0 || display.quotes.some(q => q.media.length > 0);
+  const retryable = hasMedia && !["completed", "not_requested"].includes(tweet.mediaStatus);
+  const safeOriginalUrl = /^https?:\/\//i.test(shown.url ?? "") ? shown.url : undefined;
   return <article className="tweet-entry">
     {display.repostedBy && <a className="tweet-context" href={`/tweets?id=${encodeURIComponent(tweet.retweetedTweetId ?? "")}`}>
       <Repeat2 size={14} aria-hidden="true" />
-      <span>{t("archive.repostedFrom", { author: shown.author.screenName })}</span>
+      <span>{t("archive.repostedFrom", { author: display.repostedBy.screenName })}</span>
     </a>}
     <div className="tweet-layout">
       <div className="tweet-avatar"><TweetAvatar name={shown.author.name} screenName={shown.author.screenName} /></div>
@@ -213,7 +251,7 @@ export const TweetCard = React.memo(function TweetCard({ tweet, compact, highlig
         <div className="tweet-toolbar" role="group" aria-label={t("archive.actions")}>
           <Tooltip content={t("查看归档详情")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<FileText size={16} />} aria-label={t("查看归档详情")} onClick={() => onOpenDetail(tweet.id)} /></Tooltip>
           <Tooltip content={t("复制正文")}><Button className="tweet-action" theme="borderless" type="tertiary" icon={<Copy size={16} />} aria-label={t("复制正文")} onClick={() => void copyToClipboard(shown.text, t("正文"))} /></Tooltip>
-          <Tooltip content={t("archive.original")}><a className="tweet-action tweet-original semi-button semi-button-borderless semi-button-tertiary semi-button-with-icon-only" aria-label={t("archive.original")} href={shown.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a></Tooltip>
+          {safeOriginalUrl ? <Tooltip content={t("archive.original")}><a className="tweet-action tweet-original semi-button semi-button-borderless semi-button-tertiary semi-button-with-icon-only" aria-label={t("archive.original")} href={safeOriginalUrl} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a></Tooltip> : <Button className="tweet-action tweet-original" theme="borderless" type="tertiary" icon={<ExternalLink size={16} />} aria-label={t("archive.original")} disabled />}
           {retryable && <Button className="tweet-retry" size="small" theme="borderless" type="tertiary" icon={<RefreshCw size={14} />} loading={retryPending} disabled={retryPending} aria-busy={retryPending} onClick={() => onRetry(tweet.id)}>{t("archive.retryMedia")}</Button>}
           <div className="tweet-relations">{[["replyToId", "archive.reply"], ["quotedTweetId", "archive.quote"], ["retweetedTweetId", "archive.retweet"]].map(([key, label]) => tweet[key as "replyToId" | "quotedTweetId" | "retweetedTweetId"] ? <a key={key} href={`/tweets?id=${encodeURIComponent(tweet[key as "replyToId"]!)}`}>{t(label)} {tweet[key as "replyToId"]}</a> : null)}</div>
           <div className="tweet-archive-meta"><time dateTime={tweet.archivedAt}>{t("归档于")} {formatDateTime(tweet.archivedAt)}</time><span>{tweet.downloads.length} {t("个文件")}</span>{tweet.jobIds.length > 0 && <a href={`/tasks?q=${tweet.jobIds[0]}`}>{t("来源任务")} #{tweet.jobIds[0]}</a>}</div>

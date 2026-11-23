@@ -11,11 +11,12 @@ import (
 	"testing"
 
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
+	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 )
 
 func TestPublicTweetRequestOmitsEmptyCookies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "Bearer "+guestBearer {
+		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "Bearer "+xapi.GuestBearer() {
 			t.Errorf("public request must omit empty cookies and retain bearer authentication")
 		}
 		if r.Header.Get("Content-Type") != "application/json" {

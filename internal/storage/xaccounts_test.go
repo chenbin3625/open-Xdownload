@@ -226,12 +226,24 @@ func TestEarliestXAccountUnlock(t *testing.T) {
 	if err != nil || !ok || !until.UTC().Equal(second) {
 		t.Fatalf("earliest excluding a2 = %v ok=%v err=%v, want %v", until, ok, err, second)
 	}
-	// '*' 锁也参与最早解锁时间；过期锁不参与。
-	wildcard := base.Add(3 * time.Minute)
-	if err := store.LockXAccount(ctx, a2.ID, "*", wildcard, "401"); err != nil {
+	// 同一账号同时有 queue 锁与更长的 '*' 锁时，解锁时间必须取两者的最大值，
+	// 不能只看较短的 queue 锁而误判该账号已可用。
+	longerWildcard := base.Add(15 * time.Minute)
+	if err := store.LockXAccount(ctx, a2.ID, "*", longerWildcard, "401"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.LockXAccount(ctx, a1.ID, "Other", base.Add(-time.Minute), "expired"); err != nil {
+		t.Fatal(err)
+	}
+	until, ok, err = store.EarliestXAccountUnlock(ctx, "Q", nil, base)
+	if err != nil || !ok || !until.UTC().Equal(second) {
+		t.Fatalf("earliest when a2 has longer wildcard = %v ok=%v err=%v, want a1's %v", until, ok, err, second)
+	}
+
+	// '*' 锁也参与最早解锁时间；过期锁不参与。
+	a3 := mustCreateXAccount(t, store, XAccount{AuthToken: "at-3", CSRFToken: "c3"})
+	wildcard := base.Add(3 * time.Minute)
+	if err := store.LockXAccount(ctx, a3.ID, "*", wildcard, "401"); err != nil {
 		t.Fatal(err)
 	}
 	until, ok, err = store.EarliestXAccountUnlock(ctx, "Q", nil, base)
@@ -531,20 +543,45 @@ func TestUpdateXAccountCredentialsReactivatesSystemDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	token, ct0 := "at-2", "c2"
-	got, err := store.UpdateXAccount(ctx, account.ID, XAccountPatch{AuthToken: &token, CSRFToken: &ct0})
+	// Replacing only ct0 keeps identity (screen_name) and endpoint-specific rate-limit locks,
+	// clearing only the "*" auth lock and reactivating the system-disabled account.
+	ct0Only := "c1-refreshed"
+	got, err := store.UpdateXAccount(ctx, account.ID, XAccountPatch{CSRFToken: &ct0Only})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Active || got.ErrorMsg != "" || got.VerifiedAt.Valid || got.AuthToken != "at-2" {
-		t.Fatalf("system-disabled account after cookie replacement = %+v", got)
+	if !got.Active || got.ErrorMsg != "" || got.VerifiedAt.Valid || got.ScreenName != "alice" {
+		t.Fatalf("system-disabled account after ct0 refresh = %+v", got)
 	}
 	locks, err := store.ListXAccountLocks(ctx, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(locks) != 1 || locks[0].Queue != "UserMedia" {
-		t.Fatalf("locks after cookie replacement = %+v, want only UserMedia", locks)
+		t.Fatalf("locks after ct0 refresh = %+v, want only UserMedia", locks)
+	}
+
+	// Replacing auth_token switches account identity: clears screen_name and ALL old locks.
+	if err := store.LockXAccount(ctx, account.ID, "*", future, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeactivateXAccount(ctx, account.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	token, ct0 := "at-2", "c2"
+	got, err = store.UpdateXAccount(ctx, account.ID, XAccountPatch{AuthToken: &token, CSRFToken: &ct0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Active || got.ErrorMsg != "" || got.VerifiedAt.Valid || got.AuthToken != "at-2" || got.ScreenName != "" {
+		t.Fatalf("system-disabled account after auth_token replacement = %+v", got)
+	}
+	locks, err = store.ListXAccountLocks(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 0 {
+		t.Fatalf("locks after auth_token replacement = %+v, want none", locks)
 	}
 
 	// 手动停用的账号换 Cookie 后保持停用。

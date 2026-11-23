@@ -16,8 +16,10 @@ func TestParseRetryAfterPreservesLongValues(t *testing.T) {
 		expect time.Duration
 	}{
 		{name: "正常秒数原样返回", value: "30", expect: 30 * time.Second},
-		{name: "长冷却原样保留", value: "86400", expect: 24 * time.Hour},
-		{name: "超出时长范围不溢出", value: "18446744073709551615", expect: time.Duration(1<<63 - 1)},
+		{name: "24小时内长冷却原样保留", value: "86400", expect: 24 * time.Hour},
+		{name: "超过24小时封顶为24小时", value: "172800", expect: maxRateLimitWait},
+		{name: "超出时长范围封顶不锁死数百年", value: "18446744073709551615", expect: maxRateLimitWait},
+		{name: "uint64溢出也封顶", value: "99999999999999999999999", expect: maxRateLimitWait},
 		{name: "负数视为无", value: "-5", expect: 0},
 		{name: "缺失视为无", value: "", expect: 0},
 	}
@@ -39,6 +41,10 @@ func TestParseRetryAfterHTTPDatePreservesLongValues(t *testing.T) {
 	header.Set("Retry-After", time.Now().Add(24*time.Hour).UTC().Format(http.TimeFormat))
 	if got := parseRetryAfter(header); got < 24*time.Hour-time.Second || got > 24*time.Hour {
 		t.Fatalf("HTTP-date cooldown = %s, want full 24h", got)
+	}
+	header.Set("Retry-After", time.Now().Add(72*time.Hour).UTC().Format(http.TimeFormat))
+	if got := parseRetryAfter(header); got != maxRateLimitWait {
+		t.Fatalf("HTTP-date 72h cooldown = %s, want capped %s", got, maxRateLimitWait)
 	}
 }
 

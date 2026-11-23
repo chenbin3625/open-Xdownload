@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,5 +127,98 @@ func TestEnvQueryIDOverride(t *testing.T) {
 	t.Setenv("OPEN_XDOWNLOAD_USER_TWEETS_QUERY_ID", "abc")
 	if !envQueryIDOverride("UserTweets") || envQueryIDOverride("UserMedia") {
 		t.Fatal("unexpected env override classification")
+	}
+}
+
+func TestScriptURLsRejectsInsecureSchemeAndNonStandardPorts(t *testing.T) {
+	html := `<script src="http://x.com/a.js"></script>
+		<script src="http://abs.twimg.com/b.js"></script>
+		<script src="https://x.com:8443/c.js"></script>
+		<script src="https://abs.twimg.com:8443/d.js"></script>
+		<script src="https://abs.twimg.com/responsive-web/client-web/ok.js"></script>`
+	scripts := scriptURLs([]byte(html), "https://x.com/")
+	if len(scripts) != 1 || scripts[0] != "https://abs.twimg.com/responsive-web/client-web/ok.js" {
+		t.Fatalf("scripts = %v, want only https default port", scripts)
+	}
+}
+
+func TestEnsureFreshSurvivesCallerCancel(t *testing.T) {
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	var startOnce sync.Once
+	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			startOnce.Do(func() { close(started) })
+			<-gate
+			writeJSON(w, http.StatusOK, `<html><script>var a={operationName:"UserMedia",queryId:"ensureFreshId123"}</script></html>`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	table := &queryIDTable{}
+
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	table.ensureFresh(callerCtx, h.engine, "")
+	<-started
+	cancelCaller()
+
+	// Join via refreshFor404 as another waiter, then release gate.
+	waiterDone := make(chan bool, 1)
+	go func() {
+		waiterDone <- table.refreshFor404(context.Background(), h.engine, "")
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
+
+	if ok := <-waiterDone; !ok {
+		t.Fatal("expected waiter to observe successful discovery after caller canceled")
+	}
+	if got := table.operationID("UserMedia"); got != "ensureFreshId123" {
+		t.Fatalf("UserMedia queryId = %q, want ensureFreshId123", got)
+	}
+	table.mu.Lock()
+	fetched := !table.fetchedAt.IsZero()
+	table.mu.Unlock()
+	if !fetched {
+		t.Fatal("expected fetchedAt to be recorded after caller canceled")
+	}
+}
+
+func TestRefreshFor404WaiterJoinsInflightDiscoveryAndSurvivesLeaderCancel(t *testing.T) {
+	gate := make(chan struct{})
+	var gateOnce sync.Once
+	h := newHarness(t, func(h *testHarness, w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			gateOnce.Do(func() { <-gate })
+			writeJSON(w, http.StatusOK, `<html><script>var a={operationName:"UserMedia",queryId:"freshMediaId123"}</script></html>`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	table := &queryIDTable{}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan bool, 1)
+	go func() {
+		leaderDone <- table.refreshFor404(leaderCtx, h.engine, "")
+	}()
+	time.Sleep(30 * time.Millisecond)
+
+	waiterDone := make(chan bool, 1)
+	go func() {
+		waiterDone <- table.refreshFor404(context.Background(), h.engine, "")
+	}()
+	time.Sleep(30 * time.Millisecond)
+
+	cancelLeader()
+	if got := <-leaderDone; got {
+		t.Fatal("canceled leader should return false")
+	}
+	close(gate)
+	if got := <-waiterDone; !got {
+		t.Fatal("waiter should succeed after leader canceled")
+	}
+	if got := table.operationID("UserMedia"); got != "freshMediaId123" {
+		t.Fatalf("UserMedia queryId = %q, want freshMediaId123", got)
 	}
 }

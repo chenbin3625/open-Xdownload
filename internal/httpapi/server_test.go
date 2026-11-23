@@ -1104,13 +1104,17 @@ func TestResolveLocalLibraryPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := resolveLocalLibraryPath(root, inside); err != nil || got != expected {
-		t.Fatalf("inside = %q, %v; want %q", got, err, expected)
+	expectedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := resolveLocalLibraryPath(root, filepath.Join(t.TempDir(), "b.jpg")); err == nil || errors.Is(err, os.ErrNotExist) {
+	if got, gotRoot, err := resolveLocalLibraryPath(root, inside); err != nil || got != expected || gotRoot != expectedRoot {
+		t.Fatalf("inside = (%q, %q, %v); want (%q, %q, nil)", got, gotRoot, err, expected, expectedRoot)
+	}
+	if _, _, err := resolveLocalLibraryPath(root, filepath.Join(t.TempDir(), "b.jpg")); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("outside err = %v, want non-ErrNotExist rejection", err)
 	}
-	if _, err := resolveLocalLibraryPath(root, filepath.Join(root, "missing.jpg")); !errors.Is(err, os.ErrNotExist) {
+	if _, _, err := resolveLocalLibraryPath(root, filepath.Join(root, "missing.jpg")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing err = %v, want os.ErrNotExist", err)
 	}
 }

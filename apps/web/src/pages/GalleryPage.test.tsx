@@ -159,7 +159,7 @@ it("只有用户名时卡片和预览仍显示已识别的用户", async () => {
 });
 
 it("把搜索词交给服务端分页接口，而不是本地过滤", async () => {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const search = requestParams(input).get("search") ?? "";
     const items = search ? records.filter((item) => item.tweetId.includes(search)) : records;
     return pagedResponse(items);
@@ -542,4 +542,103 @@ it("ignores arrow keys inside contenteditable regions", async () => {
   expect(event.defaultPrevented).toBe(false);
   expect(previewedFile()).toBe("/api/library/downloads/11/file");
   editor.remove();
+});
+
+it("does not get stuck on Applying filters when rangeError occurs after data loaded", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(records)));
+  renderControlled();
+  await screen.findByText("shared.jpg");
+
+  await userEvent.click(screen.getByRole("button", { name: "文件体积（MiB）" }));
+  fireEvent.change(screen.getByRole("spinbutton", { name: "最大体积" }), { target: { value: "1" } });
+  fireEvent.change(screen.getByRole("spinbutton", { name: "最小体积" }), { target: { value: "2" } });
+
+  expect(screen.getByText("最小体积不能大于最大体积")).toBeTruthy();
+  expect(screen.queryByText("正在应用筛选...")).toBeNull();
+});
+
+it("recovers cross-page lightbox state when next page request fails", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const page = Number(requestParams(input).get("page") ?? "1");
+    if (page === 2) throw new Error("网络故障");
+    return pagedResponse([mediaRecords[0]], { page: 1, total: 61, totalPages: 2 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  renderControlled();
+
+  await waitFor(() => expect(screen.getByLabelText("预览视频 clip-a.mp4")).toBeTruthy());
+  await userEvent.click(screen.getByLabelText("预览视频 clip-a.mp4"));
+  await userEvent.click(screen.getByRole("button", { name: "下一个媒体文件" }));
+
+  await waitFor(() => expect(screen.queryByText("加载中...")).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByText("媒体库加载失败")).toBeTruthy();
+});
+
+it("sets no-referrer on remote twimg card thumbnails, encodes tweetId links, and forwards AbortSignal to users query", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/library/users") {
+      return new Response(JSON.stringify({ items: [] }), { headers: { "Content-Type": "application/json" } });
+    }
+    return pagedResponse([{
+      ...records[0],
+      tweetId: "123&evil=1",
+      previewUrl: "https://pbs.twimg.com/media/ABC.jpg",
+    }]);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  renderGallery();
+
+  const img = await screen.findByRole("img", { name: "shared.jpg" });
+  expect(img.getAttribute("referrerpolicy")).toBe("no-referrer");
+  fireEvent.error(img);
+  expect(img.getAttribute("src")).toBe("/api/library/downloads/1/file");
+  expect(img.hasAttribute("referrerpolicy")).toBe(false);
+
+  const cardTweetLink = screen.getByRole("link", { name: "推文归档" });
+  expect(cardTweetLink.getAttribute("href")).toBe("/tweets?id=123%26evil%3D1");
+
+  await userEvent.click(screen.getByRole("button", { name: "查看图片 shared.jpg" }));
+  const modalTweetLink = within(screen.getByRole("dialog")).getByRole("link", { name: "推文归档" });
+  expect(modalTweetLink.getAttribute("href")).toBe("/tweets?id=123%26evil%3D1");
+  await userEvent.keyboard("{Escape}");
+
+  await userEvent.click(screen.getByRole("radio", { name: "按账号" }));
+  await waitFor(() => {
+    const usersCall = fetchMock.mock.calls.find(([req]) => String(req).includes("/api/library/users"));
+    expect(usersCall).toBeTruthy();
+    const [, init] = usersCall as [RequestInfo | URL, RequestInit?];
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+it("staggers batch downloads and delays URL.revokeObjectURL by 60s instead of 0ms", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => pagedResponse(mediaRecords)));
+  const createURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:manifest");
+  const revokeURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+  try {
+    renderControlled();
+    await screen.findByText("clip-a.mp4");
+    await userEvent.click(screen.getByRole("checkbox", { name: "选择本页" }));
+
+    click.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "批量下载" }));
+    // First download fires immediately, second is staggered (150ms)
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 150)).toBe(true);
+
+    setTimeoutSpy.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "导出清单" }));
+    expect(createURL).toHaveBeenCalledTimes(1);
+    expect(revokeURL).not.toHaveBeenCalled();
+    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 60_000)).toBe(true);
+  } finally {
+    setTimeoutSpy.mockRestore();
+    click.mockRestore();
+    createURL.mockRestore();
+    revokeURL.mockRestore();
+  }
 });

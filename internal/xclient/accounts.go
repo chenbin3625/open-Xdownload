@@ -1,15 +1,106 @@
 package xclient
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/xapi"
 )
+
+// proxyDialTimeout 限制账号代理/目标建连的单次拨号时长，避免黑洞或不可达代理
+// 把整次多账号故障切换卡死在 30s+ 的系统默认 TCP 超时里。
+var proxyDialTimeout = 10 * time.Second
+
+// proxyDialTimeoutError 标记单次建连触发了 proxyDialTimeout，而不是调用方 ctx 超时。
+// 实现 net.Error（Timeout=true）但不 Unwrap 为 context.DeadlineExceeded，防止被误判为调用方取消。
+type proxyDialTimeoutError struct {
+	err error
+}
+
+func (e *proxyDialTimeoutError) Error() string {
+	if e == nil || e.err == nil {
+		return "代理连接超时"
+	}
+	return "代理连接超时: " + e.err.Error()
+}
+
+func (e *proxyDialTimeoutError) Timeout() bool   { return true }
+func (e *proxyDialTimeoutError) Temporary() bool { return true }
+
+type cachedAccountTransport struct {
+	transport *http.Transport
+	lastUsed  time.Time
+}
+
+const maxAccountTransports = 8
+
+var accountTransports = struct {
+	sync.Mutex
+	items map[string]*cachedAccountTransport
+}{items: make(map[string]*cachedAccountTransport)}
+
+func accountTransportForProxy(proxyURL string) (*http.Transport, error) {
+	key := strings.TrimSpace(proxyURL)
+	shared, err := httpx.Transport(key)
+	if err != nil {
+		return nil, err
+	}
+	accountTransports.Lock()
+	defer accountTransports.Unlock()
+	if entry, ok := accountTransports.items[key]; ok {
+		entry.lastUsed = time.Now()
+		return entry.transport, nil
+	}
+	cloned := shared.Clone()
+	cloned.DialContext = withProxyDialTimeout(cloned.DialContext)
+	if len(accountTransports.items) >= maxAccountTransports {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, entry := range accountTransports.items {
+			if oldestKey == "" || entry.lastUsed.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = entry.lastUsed
+			}
+		}
+		if oldestKey != "" {
+			accountTransports.items[oldestKey].transport.CloseIdleConnections()
+			delete(accountTransports.items, oldestKey)
+		}
+	}
+	accountTransports.items[key] = &cachedAccountTransport{
+		transport: cloned,
+		lastUsed:  time.Now(),
+	}
+	return cloned, nil
+}
+
+func withProxyDialTimeout(base func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if base == nil {
+		dialer := &net.Dialer{KeepAlive: 30 * time.Second}
+		base = dialer.DialContext
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		timeout := proxyDialTimeout
+		if timeout <= 0 {
+			return base(ctx, network, addr)
+		}
+		dialCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		conn, err := base(dialCtx, network, addr)
+		if err != nil && ctx.Err() == nil && errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
+			return nil, &proxyDialTimeoutError{err: err}
+		}
+		return conn, err
+	}
+}
 
 // Account 是构建 legacy 账号池用的一条账号，由调用方从 x_accounts 读取并转换。
 type Account struct {
@@ -27,7 +118,7 @@ type Account struct {
 
 // Options 调整 legacy 账号池的请求行为。零值即生产配置；字段只用于把请求指向测试服务。
 type Options struct {
-	// BaseURL 是 X 站点根地址（GraphQL、REST、/home 自检），默认 https://x.com。
+	// BaseURL 是 X 站点根地址（GraphQL、REST、登录自检），默认 https://x.com。
 	BaseURL string
 	// Transport 非空时所有请求都使用它，并忽略全局与账号级代理。只用于测试。
 	Transport http.RoundTripper
@@ -92,8 +183,8 @@ func newPool(cfg config.AppConfig, accounts []Account, opts Options) (*Pool, err
 func newAccountClient(account Account, proxyURL string, opts Options) (*Client, error) {
 	var transport http.RoundTripper = opts.Transport
 	if transport == nil {
-		// 复用带连接池与链路本地地址拨号防护的 Transport（M1/S2）；空代理时尊重环境变量代理。
-		shared, err := httpx.Transport(proxyURL)
+		// 复用带连接池、链路本地地址拨号防护（M1/S2）与短拨号超时的 Transport；空代理时尊重环境变量代理。
+		shared, err := accountTransportForProxy(proxyURL)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +229,7 @@ func sortedExtraCookies(extra map[string]string) []*http.Cookie {
 		case "auth_token", "ct0":
 			continue
 		}
-		if !config.IsValidCookieName(name) || strings.ContainsAny(value, ";\r\n") {
+		if !config.IsValidCookieName(name) || hasInvalidCookieValue(value) {
 			continue
 		}
 		names = append(names, name)
@@ -149,4 +240,14 @@ func sortedExtraCookies(extra map[string]string) []*http.Cookie {
 		cookies = append(cookies, &http.Cookie{Name: name, Value: extra[name]})
 	}
 	return cookies
+}
+
+func hasInvalidCookieValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if b < 0x20 || b == 0x7F || b == ';' {
+			return true
+		}
+	}
+	return false
 }

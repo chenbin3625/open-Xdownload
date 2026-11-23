@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
+	"github.com/chenbin3625/open-Xdownload/internal/filestore"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 )
@@ -21,8 +23,12 @@ import (
 // remain available; a recovered job can repeat the scan without moving them again.
 func (m *Manager) processAssetMigration(ctx, saveCtx context.Context, job storage.Job) {
 	document, err := m.store.FreezeJobStorage(saveCtx, job.ID)
-	if err != nil || !document.Enabled {
-		m.fail(saveCtx, job, "", fmt.Errorf("请先启用分类存储: %v", err))
+	if err != nil {
+		m.fail(saveCtx, job, "", err)
+		return
+	}
+	if !document.Enabled {
+		m.fail(saveCtx, job, "", errors.New("请先启用分类存储"))
 		return
 	}
 	roots, err := m.store.DownloadRoots(saveCtx)
@@ -56,6 +62,10 @@ func (m *Manager) processAssetMigration(ctx, saveCtx context.Context, job storag
 			if err := m.migrateDownloadAsset(ctx, saveCtx, job, document, record, roots); err != nil {
 				if ctx.Err() != nil {
 					m.handleInterrupt(ctx, saveCtx, job)
+					return
+				}
+				if isDiskFatalError(err) {
+					m.fail(saveCtx, job, record.MediaURL, fmt.Errorf("磁盘写入失败，中止迁移: %w", err))
 					return
 				}
 				progress.Failed++
@@ -105,11 +115,8 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 	if len(links) == 0 && strings.TrimSpace(record.FilePath) == "" {
 		return fmt.Errorf("历史记录没有资产位置或源文件路径")
 	}
-	kind := config.AssetVideo
 	ext := strings.ToLower(filepath.Ext(record.FilePath))
-	if links[config.AssetImage] != "" || (links[config.AssetVideo] == "" && (isPhotoURL(record.MediaURL) || ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" || ext == ".avif" || ext == ".gif")) {
-		kind = config.AssetImage
-	}
+	kind := classifyMigrationAssetKind(record, links, ext)
 	dir, err := os.MkdirTemp("", "open-xdownload-migration-")
 	if err != nil {
 		return err
@@ -122,11 +129,34 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 		if err != nil {
 			return err
 		}
-		source, err = m.copyAssetToTemp(ctx, original, dir)
-		if err != nil {
+		if original.PolicyVersion == document.Version {
+			if target, found := findStorageTarget(document, original.TargetID, original.TargetVersion); found {
+				file, _, openErr := filestore.OpenAsset(ctx, target, original.Key)
+				if openErr == nil {
+					file.Close()
+					if err := m.store.SetMediaAsset(saveCtx, storage.MediaAsset{MediaKey: key, Kind: kind, AssetID: original.ID, JobID: job.ID, Status: "ready"}); err != nil {
+						return err
+					}
+					return nil
+				}
+				if !isAssetNotExistError(openErr) {
+					return openErr
+				}
+			}
 			original = storage.Asset{}
-			source = assetInput{}
-			err = nil
+		} else {
+			source, err = m.copyAssetToTemp(ctx, original, dir)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if !isAssetNotExistError(err) && !errors.Is(err, errStorageTargetNotFound) {
+					return err
+				}
+				original = storage.Asset{}
+				source = assetInput{}
+				err = nil
+			}
 		}
 	}
 	if source.path == "" {
@@ -171,12 +201,12 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 			}
 			break
 		}
+		if err != nil {
+			return err
+		}
 		if source.path == "" {
 			return fmt.Errorf("历史文件不在可信目录内或不可读取")
 		}
-	}
-	if err != nil {
-		return err
 	}
 	tweet, media, index, err := m.store.AssetContext(saveCtx, key)
 	if err != nil {
@@ -192,6 +222,14 @@ func (m *Manager) migrateDownloadAsset(ctx, saveCtx context.Context, job storage
 	}
 	if archived, loadErr := m.store.GetTweet(saveCtx, record.TweetID); loadErr == nil {
 		tweet = archived.TweetData
+		for i, item := range tweet.Media {
+			itemURL := parser.MediaDownloadURL(item)
+			if (media.ID != "" && item.ID == media.ID) || itemURL == record.MediaURL || (key != "" && downloader.MediaIdentity(itemURL) == key) {
+				media = item
+				index = i
+				break
+			}
+		}
 	}
 	if original.ID == "" || original.PolicyVersion != document.Version {
 		original, err = m.saveAsset(ctx, saveCtx, document, kind, tweet, media, index, source)
@@ -218,4 +256,23 @@ func (r *migrationReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return r.source.Read(p)
+}
+
+func classifyMigrationAssetKind(record storage.DownloadRecord, links map[config.AssetKind]string, ext string) config.AssetKind {
+	if links[config.AssetVideo] != "" {
+		return config.AssetVideo
+	}
+	if links[config.AssetImage] != "" {
+		return config.AssetImage
+	}
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif":
+		return config.AssetImage
+	case ".mp4", ".mov", ".m4v", ".webm", ".ogv", ".mkv", ".avi", ".m3u8":
+		return config.AssetVideo
+	}
+	if isPhotoURL(record.MediaURL) {
+		return config.AssetImage
+	}
+	return config.AssetVideo
 }

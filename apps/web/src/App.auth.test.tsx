@@ -131,7 +131,7 @@ it("ignores a session check that finishes after a newer login", async () => {
   }));
   renderApp();
   await screen.findByRole("heading", { name: "登录" });
-  act(() => window.dispatchEvent(new Event("focus")));
+  act(() => window.dispatchEvent(new StorageEvent("storage", { key: "open-xdownload-session-changed" })));
   await userEvent.type(screen.getByLabelText("用户名"), "owner");
   await userEvent.type(screen.getByLabelText("密码"), "initial-password");
   await userEvent.click(screen.getByRole("button", { name: "登录" }));

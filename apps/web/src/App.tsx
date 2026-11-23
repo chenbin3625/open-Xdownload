@@ -1,6 +1,7 @@
 import { t, useTranslation } from "./lib/i18n";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Button from "@douyinfe/semi-ui/lib/es/button";
 import Layout from "@douyinfe/semi-ui/lib/es/layout";
 import {
   archiveScheduleQueryRoot,
@@ -11,7 +12,6 @@ import {
   getDashboardMeta,
   getJobsPage,
   jobsQueryRoot,
-  type DashboardMeta,
   type JobKind,
   type JobsPage,
 } from "./lib/api";
@@ -44,9 +44,63 @@ import { AuthGate } from "./components/auth/AuthGate";
 // 侧边栏的 overview / workbench / tasks 都指向任务调度中心这一个页面。
 const taskCenterSections = ["overview", "workbench", "tasks"];
 
+export class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode; fullScreen?: boolean },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("Unhandled render error:", error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          role="alert"
+          className={
+            this.props.fullScreen
+              ? "flex min-h-dvh items-center justify-center bg-canvas p-6"
+              : "flex min-h-[16rem] items-center justify-center p-6"
+          }
+        >
+          <div className="w-full max-w-lg space-y-4">
+            <Alert
+              type="error"
+              showIcon
+              message={t("页面渲染出现异常")}
+              description={this.state.error.message || t("请尝试刷新页面")}
+            />
+            <div className="flex justify-end gap-2">
+              <Button type="primary" theme="solid" onClick={() => this.setState({ error: null })}>
+                {t("重试")}
+              </Button>
+              <Button type="tertiary" onClick={() => window.location.reload()}>
+                {t("刷新页面")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   useTranslation();
-  return <AuthGate><Workbench /></AuthGate>;
+  return (
+    <AppErrorBoundary fullScreen>
+      <AuthGate>
+        <Workbench />
+      </AuthGate>
+    </AppErrorBoundary>
+  );
 }
 
 function Workbench() {
@@ -69,6 +123,7 @@ function Workbench() {
     handleJobStatusChange,
     handleJobKindChange,
     handleJobSearchChange,
+    clearJobFilters,
     handleGalleryChange,
     syncServerPage,
   } = useRouteState();
@@ -85,6 +140,7 @@ function Workbench() {
   const [failedDrawerOpen, setFailedDrawerOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
+  const manualRefreshCountRef = useRef(0);
 
   const refreshDashboard = useCallback(
     () => invalidateWorkbenchQueries(queryClient),
@@ -113,7 +169,7 @@ function Workbench() {
       // 请求期间可能已有更新的 SSE 补丁落库，逐条比较 updatedAt，别把进度写回旧值。
       // 已筛选页必须以服务端成员集合为准，避免状态变更后把不匹配的旧任务插回来。
       return jobStatus === "all" && jobKind === "all" && !jobSearch
-        ? mergeNewerJobs(queryClient.getQueryData<JobsPage>(queryKey), page)
+        ? mergeNewerJobs(queryClient.getQueryData<JobsPage>(queryKey), page, queryClient)
         : page;
     },
     placeholderData: (previousData) => previousData,
@@ -149,25 +205,49 @@ function Workbench() {
     enabled: activeSection === "settings",
   });
 
-  // 分页边界校验
+  // 分页边界校验：若当前页响应未携带 total，必须等 meta 成功加载后再裁剪，
+  // 避免直达 /tasks?page=N 时在 meta 未就绪前误重置到第 1 页。
   useEffect(() => {
     if (jobs.isPlaceholderData || !jobs.data) return;
-    const total = jobs.data.total ?? (jobStatus === "all" && jobKind === "all" && !jobSearch ? meta.data?.stats.total ?? 0 : 0);
-    const totalPages = total
+    const isUnfiltered = jobStatus === "all" && jobKind === "all" && !jobSearch;
+    if (jobs.data.total === undefined) {
+      if (!isUnfiltered || !meta.isSuccess || meta.isPlaceholderData || !meta.data) return;
+    }
+    const total = jobs.data.total ?? meta.data?.stats.total;
+    if (total === undefined) return;
+    const totalPages = total > 0
       ? Math.ceil(total / jobPageSize)
       : 1;
     if (jobPage > totalPages) {
       syncServerPage(totalPages);
     }
-  }, [jobPage, jobPageSize, jobStatus, jobKind, jobSearch, jobs.data, jobs.isPlaceholderData, meta.data, syncServerPage]);
+  }, [
+    jobPage,
+    jobPageSize,
+    jobStatus,
+    jobKind,
+    jobSearch,
+    jobs.data,
+    jobs.isPlaceholderData,
+    meta.data,
+    meta.isPlaceholderData,
+    meta.isSuccess,
+    syncServerPage,
+  ]);
 
   const handleManualRefresh = useCallback(() => {
+    manualRefreshCountRef.current += 1;
     setManualRefreshPending(true);
     const task =
       activeSection === "settings"
         ? queryClient.invalidateQueries({ queryKey: configQueryRoot })
         : refreshDashboard();
-    void task.finally(() => setManualRefreshPending(false));
+    void Promise.resolve(task).finally(() => {
+      manualRefreshCountRef.current = Math.max(0, manualRefreshCountRef.current - 1);
+      if (manualRefreshCountRef.current === 0) {
+        setManualRefreshPending(false);
+      }
+    });
   }, [activeSection, queryClient, refreshDashboard]);
 
   const openCreateModal = useCallback((initial = "", kind: JobKind | "schedule" = "user") => {
@@ -285,69 +365,72 @@ function Workbench() {
               />
             )}
 
-            {/* 初始加载骨架屏（仅任务中心；归档计划与媒体库由页面内部骨架屏负责） */}
-            {isTaskCenterActive && !jobs.data && jobs.isLoading && (
-              <ListSkeleton rows={6} avatar={false} />
-            )}
+            <AppErrorBoundary key={activeSection}>
+              {/* 初始加载骨架屏（仅任务中心；归档计划与媒体库由页面内部骨架屏负责） */}
+              {isTaskCenterActive && !jobs.data && jobs.isLoading && (
+                <ListSkeleton rows={6} avatar={false} />
+              )}
 
-            {/* 视图分发：默认首页即为任务调度中心 */}
-            {isTaskCenterActive && !(jobs.isLoading && !jobs.data) && (
-              <TaskCenterPage
-                jobs={jobsData}
-                stats={currentStats}
-                failedTweetCount={failedTweetCount}
-                pagination={currentPagination}
-                tableLoading={jobs.isPlaceholderData}
-                onPageChange={handleJobPageChange}
-                onPageSizeChange={handleJobPageSizeChange}
-                statusFilter={jobStatus}
-                onStatusFilterChange={handleJobStatusChange}
-                kindFilter={jobKind}
-                onKindFilterChange={handleJobKindChange}
-                searchKeyword={jobSearch}
-                onSearchKeywordChange={handleJobSearchChange}
-                filterCounts={jobs.data?.counts}
-                onOpenCreateModal={openDefaultCreateModal}
-                onOpenFailedDrawer={openFailedDrawer}
-              />
-            )}
-
-            {activeSection === "schedules" && (
-              <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
-              <SchedulesPage
-                schedules={schedules.data ?? []}
-                loading={schedules.isLoading}
-                error={schedules.isError ? schedules.error.message : undefined}
-                onOpenCreateModal={openScheduleModal}
-              />
-              </React.Suspense>
-            )}
-
-            {activeSection === "gallery" && (
-              <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
-                <GalleryPage filter={gallery} onFilterChange={handleGalleryChange} />
-              </React.Suspense>
-            )}
-            {activeSection === "tweets" && (
-              <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
-                <TweetsPage realtimeConnected={sseConnected} />
-              </React.Suspense>
-            )}
-
-            {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
-            {activeSection === "settings" && config.isLoading && (
-              <ListSkeleton rows={8} avatar={false} />
-            )}
-
-            {activeSection === "settings" && config.data && (
-              <React.Suspense fallback={<ListSkeleton rows={8} avatar={false} />}>
-                <SettingsPage
-                  config={config.data}
-                  onRefresh={handleManualRefresh}
-                  refreshPending={manualRefreshPending}
+              {/* 视图分发：默认首页即为任务调度中心 */}
+              {isTaskCenterActive && !(jobs.isLoading && !jobs.data) && (
+                <TaskCenterPage
+                  jobs={jobsData}
+                  stats={currentStats}
+                  failedTweetCount={failedTweetCount}
+                  pagination={currentPagination}
+                  tableLoading={jobs.isPlaceholderData}
+                  onPageChange={handleJobPageChange}
+                  onPageSizeChange={handleJobPageSizeChange}
+                  statusFilter={jobStatus}
+                  onStatusFilterChange={handleJobStatusChange}
+                  kindFilter={jobKind}
+                  onKindFilterChange={handleJobKindChange}
+                  searchKeyword={jobSearch}
+                  onSearchKeywordChange={handleJobSearchChange}
+                  onClearFilters={clearJobFilters}
+                  filterCounts={jobs.data?.counts}
+                  onOpenCreateModal={openDefaultCreateModal}
+                  onOpenFailedDrawer={openFailedDrawer}
                 />
-              </React.Suspense>
-            )}
+              )}
+
+              {activeSection === "schedules" && (
+                <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
+                <SchedulesPage
+                  schedules={schedules.data ?? []}
+                  loading={schedules.isLoading}
+                  error={schedules.isError ? schedules.error.message : undefined}
+                  onOpenCreateModal={openScheduleModal}
+                />
+                </React.Suspense>
+              )}
+
+              {activeSection === "gallery" && (
+                <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
+                  <GalleryPage filter={gallery} onFilterChange={handleGalleryChange} />
+                </React.Suspense>
+              )}
+              {activeSection === "tweets" && (
+                <React.Suspense fallback={<ListSkeleton rows={6} avatar={false} />}>
+                  <TweetsPage realtimeConnected={sseConnected} />
+                </React.Suspense>
+              )}
+
+              {/* 设置页加载骨架屏（配置查询在途时避免内容区空白） */}
+              {activeSection === "settings" && config.isLoading && (
+                <ListSkeleton rows={8} avatar={false} />
+              )}
+
+              {activeSection === "settings" && config.data && (
+                <React.Suspense fallback={<ListSkeleton rows={8} avatar={false} />}>
+                  <SettingsPage
+                    config={config.data}
+                    onRefresh={handleManualRefresh}
+                    refreshPending={manualRefreshPending}
+                  />
+                </React.Suspense>
+              )}
+            </AppErrorBoundary>
           </div>
         </main>
         {isCompact && <AppMobileNavigation activeSection={activeSection} onSectionChange={handleSectionChange} />}

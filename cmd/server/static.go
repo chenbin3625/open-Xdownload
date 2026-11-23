@@ -79,16 +79,15 @@ func externalWebApp(webDir string) (http.FileSystem, bool) {
 // webAppCSP 约束 SPA 可加载的资源。构建产物中没有内联可执行脚本（bootstrap 注入
 // 的是 <script type="application/json"> 数据块，不受 script-src 限制），因此
 // script-src 可以收到 'self'。style-src 需要 'unsafe-inline'：antd 的 CSS-in-JS
-// 会在运行时注入 <style>。字体与字体样式表来自 Google Fonts（index.html 中已有
-// preconnect），媒体与图片需允许 twimg 以显示远端海报。
+// 会在运行时注入 <style>。媒体与图片需允许 twimg 以显示远端海报。
 const webAppCSP = "default-src 'self'; " +
 	"base-uri 'self'; " +
 	"object-src 'none'; " +
 	"frame-ancestors 'none'; " +
 	"form-action 'self'; " +
 	"script-src 'self'; " +
-	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src 'self' data: https://fonts.gstatic.com; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"font-src 'self' data:; " +
 	"img-src 'self' data: blob: https://pbs.twimg.com https://*.twimg.com; " +
 	"media-src 'self' blob: https://*.twimg.com; " +
 	"connect-src 'self'"
@@ -156,7 +155,9 @@ func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) 
 
 		// Byte ranges apply to the identity file. Sidecar-only embed has no
 		// identity on disk — ignore Range and serve the negotiated body.
-		if r.Header.Get("Range") != "" && fileExists(fsys, name) {
+		// Skip http.FileServer for index.html because FileServer redirects
+		// .../index.html to ./ with 301, causing an infinite redirect loop on /.
+		if r.Header.Get("Range") != "" && name != "index.html" && !strings.HasSuffix("/"+name, "/index.html") && fileExists(fsys, name) {
 			setCacheControl(w, name)
 			rangeReq := r.Clone(r.Context())
 			rangeReq.URL.Path = "/" + name
@@ -173,10 +174,6 @@ func webAppHandler(api http.Handler, fsys http.FileSystem, inject htmlInjector) 
 }
 
 func serveInjectedHTML(w http.ResponseWriter, r *http.Request, html []byte, encoding string) {
-	body := html
-	if encoding != "" {
-		body = compressBytes(html, encoding)
-	}
 	hasher := fnv.New64a()
 	_, _ = hasher.Write(html)
 	sum := hasher.Sum64()
@@ -196,6 +193,10 @@ func serveInjectedHTML(w http.ResponseWriter, r *http.Request, html []byte, enco
 	if etagMatch(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
+	}
+	body := html
+	if encoding != "" {
+		body = compressBytes(html, encoding)
 	}
 	header.Set("Content-Length", strconv.Itoa(len(body)))
 	if r.Method == http.MethodHead {
@@ -272,7 +273,7 @@ type assetSource struct {
 }
 
 func (a *cachedAsset) ensureIdentity() []byte {
-	if len(a.identity) > 0 {
+	if a.identity != nil {
 		return a.identity
 	}
 	if len(a.brotli) > 0 {
@@ -367,16 +368,18 @@ func (c *assetCache) get(name string) (*cachedAsset, bool) {
 	}
 	c.mu.Unlock()
 
-	identity := readOptional(c.fsys, name)
-	gzipBody := readOptional(c.fsys, name+".gz")
-	brotliBody := readOptional(c.fsys, name+".br")
-	if len(gzipBody) > 0 && len(decompressBytes(gzipBody, httpx.EncodingGzip)) == 0 {
+	identity, hasIdentity := readOptional(c.fsys, name)
+	gzipBody, hasGzip := readOptional(c.fsys, name+".gz")
+	brotliBody, hasBrotli := readOptional(c.fsys, name+".br")
+	if hasGzip && (len(gzipBody) == 0 || decompressBytes(gzipBody, httpx.EncodingGzip) == nil) {
 		gzipBody = nil
+		hasGzip = false
 	}
-	if len(brotliBody) > 0 && len(decompressBytes(brotliBody, httpx.EncodingBrotli)) == 0 {
+	if hasBrotli && (len(brotliBody) == 0 || decompressBytes(brotliBody, httpx.EncodingBrotli) == nil) {
 		brotliBody = nil
+		hasBrotli = false
 	}
-	if len(identity) == 0 && len(gzipBody) == 0 && len(brotliBody) == 0 {
+	if !hasIdentity && !hasGzip && !hasBrotli {
 		return nil, false
 	}
 	// identity 文件存在时始终保留（即使有 sidecar）：identity 请求必须返回 identity
@@ -433,24 +436,27 @@ func isCompressionSidecar(name string) bool {
 const maxStaticAssetBytes = 32 << 20 // 32 MiB
 const maxStaticCacheBytes = 256 << 20
 
-func readOptional(fsys http.FileSystem, name string) []byte {
+func readOptional(fsys http.FileSystem, name string) ([]byte, bool) {
 	file, err := fsys.Open(name)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer file.Close()
 	stat, err := file.Stat()
 	if err != nil || stat.IsDir() {
-		return nil
+		return nil, false
 	}
 	if stat.Size() > maxStaticAssetBytes {
-		return nil
+		return nil, false
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxStaticAssetBytes+1))
-	if err != nil || len(data) == 0 || int64(len(data)) > maxStaticAssetBytes {
-		return nil
+	if err != nil || int64(len(data)) > maxStaticAssetBytes {
+		return nil, false
 	}
-	return data
+	if data == nil {
+		data = []byte{}
+	}
+	return data, true
 }
 
 func contentTypeFor(name string) string {

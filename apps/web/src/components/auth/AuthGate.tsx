@@ -10,10 +10,17 @@ import { Spinner } from "../semi/feedback";
 
 export const AccountContext = createContext("");
 
+let nextInvalidationIntentional = false;
+export function markIntentionalSessionInvalidation() {
+  nextInvalidationIntentional = true;
+}
+
 export function AuthGate({ children }: { children: React.ReactNode }) {
   useTranslation();
   const queryClient = useQueryClient();
   const [session, setSession] = useState<LoginSession | null>(null);
+  const sessionRef = useRef<LoginSession | null>(null);
+  sessionRef.current = session;
   const [loadError, setLoadError] = useState("");
   const [notice, setNotice] = useState("");
   const sessionCheck = useRef(0);
@@ -26,22 +33,29 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       if (check !== sessionCheck.current) return;
       if (!current.authenticated) {
         queryClient.clear();
+      } else {
+        setNotice("");
       }
       setSession(current);
     } catch (error) {
       if (check !== sessionCheck.current) return;
-      setLoadError(error instanceof Error ? error.message : t("无法连接服务器"));
+      if (!sessionRef.current) {
+        setLoadError(error instanceof Error ? error.message : t("无法连接服务器"));
+      }
     }
   }, [queryClient]);
 
   useEffect(() => {
     void checkSession();
-    const invalidated = () => {
+    const invalidated = (event: Event) => {
+      const detail = (event as CustomEvent<{ intentional?: boolean; silent?: boolean }> | undefined)?.detail;
+      const intentional = nextInvalidationIntentional || Boolean(detail?.intentional || detail?.silent);
+      nextInvalidationIntentional = false;
       sessionCheck.current += 1;
       queryClient.clear();
       setSession({ configured: true, authenticated: false });
       setLoadError("");
-      setNotice(t("登录已失效，请重新登录"));
+      setNotice(intentional ? "" : t("登录已失效，请重新登录"));
     };
     const storageChanged = (event: StorageEvent) => {
       if (event.key === sessionChangedKey) {
@@ -51,14 +65,23 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener(sessionInvalidatedEvent, invalidated);
     window.addEventListener("storage", storageChanged);
-    window.addEventListener("focus", checkSession);
     return () => {
       sessionCheck.current += 1;
       window.removeEventListener(sessionInvalidatedEvent, invalidated);
       window.removeEventListener("storage", storageChanged);
-      window.removeEventListener("focus", checkSession);
     };
   }, [checkSession, queryClient]);
+
+  useEffect(() => {
+    if (!session?.authenticated) return;
+    const handleFocus = () => {
+      void checkSession();
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [checkSession, session?.authenticated]);
 
   if (session?.authenticated) {
     return <AccountContext.Provider value={session.username ?? ""}>{children}</AccountContext.Provider>;
@@ -82,6 +105,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             notice={notice}
             onConfigured={() => setSession({ configured: true, authenticated: false })}
             onLogin={(username) => {
+              nextInvalidationIntentional = false;
               sessionCheck.current += 1;
               noteSessionChange();
               queryClient.clear();
@@ -112,16 +136,24 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
     event.preventDefault();
     if (pending) return;
     setError("");
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername) {
+      setUsername("");
+      return;
+    }
     if (setup && password !== confirmation) {
       setError(t("两次输入的密码不一致"));
       return;
     }
     setPending(true);
     try {
-      const result = await loginAccount(username.trim(), password, setup);
+      const result = await loginAccount(trimmedUsername, password, setup);
       onLogin(result.username);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) onConfigured();
+      if (error instanceof ApiError && error.status === 409) {
+        setConfirmation("");
+        onConfigured();
+      }
       setError(error instanceof Error ? error.message : t("登录失败"));
     } finally { setPending(false); }
   }
@@ -134,7 +166,7 @@ function LoginForm({ setup, notice, onLogin, onConfigured }: {
         <Input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required maxLength={64} autoFocus disabled={pending} />
       </Field>
       <Field label={t("密码")}>
-        <Input type="password" autoComplete={setup ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} minLength={setup ? 8 : undefined} required disabled={pending} />
+        <Input key={setup ? "setup" : "login"} type="password" autoComplete={setup ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} minLength={setup ? 8 : undefined} required disabled={pending} />
       </Field>
       {setup && <Field label={t("确认密码")}>
         <Input type="password" autoComplete="new-password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)} minLength={8} required disabled={pending} />

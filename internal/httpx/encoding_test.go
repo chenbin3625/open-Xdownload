@@ -48,3 +48,12 @@ func TestNegotiateEncodingFindsQualityParameterAfterOtherParameters(t *testing.T
 		t.Fatalf("case-insensitive quality parameter was ignored: got %q, want br", got)
 	}
 }
+
+func TestNegotiateEncodingCaseInsensitiveSupportedAndNaNQuality(t *testing.T) {
+	if got := NegotiateEncoding("br, gzip", "BR", "GZIP"); got != "BR" {
+		t.Fatalf("got %q, want BR", got)
+	}
+	if got := NegotiateEncoding("br;q=NaN, gzip", "br", "gzip"); got != "br" {
+		t.Fatalf("q=NaN should be treated as malformed (default 1.0), got %q", got)
+	}
+}

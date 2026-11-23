@@ -1,6 +1,6 @@
 import { t, useTranslation } from "../../lib/i18n";
 import { ArrowUp, Folder, FolderPlus, RefreshCw } from "lucide-react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useRef, useState } from "react";
 import {
   createLocalDirectory,
@@ -31,30 +31,51 @@ export function LocalDirectoryPicker({
   onSelect: (path: string) => void;
 }) {
   useTranslation();
+  const queryClient = useQueryClient();
   const [rootPath, setRootPath] = useState(path);
   const [selectedPath, setSelectedPath] = useState(path);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [treeData, setTreeData] = useState<DirectoryTreeNode[]>([]);
+  const treeDataRef = useRef<DirectoryTreeNode[]>(treeData);
+  treeDataRef.current = treeData;
   const [inlineError, setInlineError] = useState("");
   const nodeLoadControllerRef = useRef<AbortController | null>(null);
+  const lastListingPathRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const listing = useQuery<LocalDirectoryListing>({
     queryKey: ["local-directories", rootPath],
     queryFn: ({ signal }) => listLocalDirectories(rootPath, signal),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   const createDirectory = useMutation({
     mutationFn: createLocalDirectory,
     onSuccess: (data) => {
+      void queryClient.invalidateQueries({ queryKey: ["local-directories"] });
+      if (!mountedRef.current) return;
       setRootPath(data.path);
       setSelectedPath(data.path);
       onSelect(data.path);
       const rootNode = listingToDirectoryTreeRoot(data);
+      lastListingPathRef.current = data.path;
+      treeDataRef.current = [rootNode];
       setTreeData([rootNode]);
       setExpandedKeys([rootNode.key]);
       toast.success({ message: t("目录已创建并选择") });
     },
-    onError: notifyError(t("创建目录失败")),
+    onError: (error) => {
+      if (!mountedRef.current) return;
+      notifyError(t("创建目录失败"))(error);
+    },
   });
 
   const resolvedPath = listing.isError ? rootPath : listing.data?.path ?? rootPath;
@@ -67,15 +88,28 @@ export function LocalDirectoryPicker({
   useEffect(() => {
     const current = listing.data;
     if (listing.isError || !current) {
+      lastListingPathRef.current = null;
+      treeDataRef.current = [];
       setTreeData([]);
       setExpandedKeys([]);
       setInlineError("");
       return;
     }
     const rootNode = listingToDirectoryTreeRoot(current);
-    setTreeData([rootNode]);
-    setExpandedKeys([rootNode.key]);
-    setSelectedPath(rootNode.path);
+    const sameRoot = lastListingPathRef.current === current.path;
+    if (sameRoot) {
+      const merged = mergeDirectoryTreeNodes(treeDataRef.current, [rootNode]);
+      const expandableKeys = collectExpandableLoadedKeys(merged);
+      treeDataRef.current = merged;
+      setTreeData(merged);
+      setExpandedKeys((keys) => keys.filter((key) => expandableKeys.has(key)));
+    } else {
+      lastListingPathRef.current = current.path;
+      treeDataRef.current = [rootNode];
+      setTreeData([rootNode]);
+      setExpandedKeys([rootNode.key]);
+      setSelectedPath(rootNode.path);
+    }
     setInlineError("");
   }, [listing.data, listing.isError]);
 
@@ -83,7 +117,7 @@ export function LocalDirectoryPicker({
     const controller = new AbortController();
     nodeLoadControllerRef.current = controller;
     return () => controller.abort();
-  }, []);
+  }, [rootPath]);
 
   async function loadDirectoryNode(node: TreeNode) {
     const dirNode = node as DirectoryTreeNode;
@@ -93,14 +127,21 @@ export function LocalDirectoryPicker({
     const controller = nodeLoadControllerRef.current;
     try {
       const childListing = await listLocalDirectories(dirNode.path, controller?.signal);
-      if (controller?.signal.aborted) return;
+      if (controller?.signal.aborted || !mountedRef.current) {
+        throw new DOMException("Aborted", "AbortError");
+      }
       const children = childListing.entries.map(directoryEntryToTreeNode);
-      setTreeData((current) => updateDirectoryTreeChildren(current, dirNode.key, children));
+      setTreeData((current) => {
+        const next = updateDirectoryTreeChildren(current, dirNode.key, children);
+        treeDataRef.current = next;
+        return next;
+      });
       setInlineError("");
     } catch (error) {
-      if (controller?.signal.aborted) return;
-      const message = getErrorMessage(error);
-      setInlineError(message);
+      if (!controller?.signal.aborted && mountedRef.current) {
+        setInlineError(getErrorMessage(error));
+      }
+      throw error;
     }
   }
 
@@ -257,4 +298,38 @@ export function updateDirectoryTreeChildren(
     }
     return node;
   });
+}
+
+function mergeDirectoryTreeNodes(
+  previous: DirectoryTreeNode[],
+  fresh: DirectoryTreeNode[],
+): DirectoryTreeNode[] {
+  const prevByKey = new Map(previous.map((node) => [node.key, node]));
+  return fresh.map((node) => {
+    const prev = prevByKey.get(node.key);
+    if (!prev) return node;
+    if (node.children) {
+      return {
+        ...node,
+        children: mergeDirectoryTreeNodes(prev.children ?? [], node.children),
+      };
+    }
+    if (prev.children && !node.isLeaf) {
+      return {
+        ...node,
+        children: prev.children,
+      };
+    }
+    return node;
+  });
+}
+
+function collectExpandableLoadedKeys(nodes: DirectoryTreeNode[], out = new Set<string>()): Set<string> {
+  for (const node of nodes) {
+    if (!node.isLeaf && node.children !== undefined) {
+      out.add(node.key);
+      collectExpandableLoadedKeys(node.children, out);
+    }
+  }
+  return out;
 }

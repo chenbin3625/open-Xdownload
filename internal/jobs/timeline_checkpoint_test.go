@@ -145,16 +145,30 @@ func TestFullTimelineCursorRecoveryDoesNotRepeatSavedTweets(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(store, parser.NewService(), NewEventBus())
-	stats, err := manager.archiveUserWithBudget(ctx, ctx, job, cfg, pool, xclient.User{ID: "42", ScreenName: "author"}, nil, nil, nil)
+	// Fresh scan (startCursor == ""): page 2 invalid cursor must NOT wipe progress back to page 0.
+	stats1, err := manager.archiveUserWithBudget(ctx, ctx, job, cfg, pool, xclient.User{ID: "42", ScreenName: "author"}, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("recover cursor after saving a page: %v", err)
+		t.Fatalf("archiveUserWithBudget returned unexpected fatal error: %v", err)
 	}
-	if stats.Tweets != 2 {
-		t.Fatalf("recovered tweet count = %d, want 2 unique tweets", stats.Tweets)
+	if stats1.Failed != 1 {
+		t.Fatalf("fresh scan page-2 invalid cursor should fail without resetting to page 0, got stats=%+v", stats1)
 	}
 	state, err := store.GetTweetSync(ctx, "42")
+	if err != nil || state.Cursor != "expired" || state.HeadID != "105" || state.Count != 1 || state.Status != "failed" {
+		t.Fatalf("fresh scan progress was wiped instead of preserved: %+v, %v", state, err)
+	}
+	// Resumed scan (startCursor == "expired"): first fetch fails with invalid cursor -> recovers cleanly from top.
+	stats2, err := manager.archiveUserWithBudget(ctx, ctx, job, cfg, pool, xclient.User{ID: "42", ScreenName: "author"}, nil, nil, nil)
+	if err != nil || stats2.Failed != 0 {
+		t.Fatalf("resumed cursor recovery failed: stats=%+v err=%v", stats2, err)
+	}
+	state, err = store.GetTweetSync(ctx, "42")
 	if err != nil || state.LastID != "105" || state.Count != 2 || state.Status != "completed" {
 		t.Fatalf("recovered state = %+v, %v", state, err)
+	}
+	page, err := store.ListTweets(ctx, storage.TweetFilter{Author: "author", PageSize: 10})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("stored tweets = %d (%v), want 2 unique tweets", len(page.Items), err)
 	}
 }
 

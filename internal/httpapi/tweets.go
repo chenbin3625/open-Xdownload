@@ -21,28 +21,41 @@ func (s *Server) listTweets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的转推筛选"))
 		return
 	}
-	for key, target := range map[string]*string{"from": &filter.From, "to": &filter.To} {
+	var fromDate, toDate time.Time
+	for key, target := range map[string]*time.Time{"from": &fromDate, "to": &toDate} {
 		if value := q.Get(key); value != "" {
 			date, err := time.Parse("2006-01-02", value)
 			if err != nil {
-				writeError(w, 400, storage.ErrValidation("无效的日期"))
+				writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的日期"))
 				return
 			}
-			if key == "to" {
-				date = date.AddDate(0, 0, 1)
-			}
-			*target = date.Format(time.RFC3339)
+			*target = date
 		}
 	}
-	filter.JobID, _ = strconv.ParseInt(q.Get("jobId"), 10, 64)
+	if !fromDate.IsZero() && !toDate.IsZero() && fromDate.After(toDate) {
+		writeError(w, http.StatusBadRequest, storage.ErrValidation("开始日期不能晚于结束日期"))
+		return
+	}
+	if !fromDate.IsZero() {
+		filter.From = fromDate.Format(time.RFC3339)
+	}
+	if !toDate.IsZero() {
+		filter.To = toDate.AddDate(0, 0, 1).Format(time.RFC3339)
+	}
+	if rawJobID := q.Get("jobId"); rawJobID != "" {
+		jobID, err := strconv.ParseInt(rawJobID, 10, 64)
+		if err != nil || jobID <= 0 {
+			writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的任务 ID"))
+			return
+		}
+		filter.JobID = jobID
+	}
 	page, err := s.store.ListTweets(r.Context(), filter)
 	if err != nil {
 		writeError(w, 500, err)
 		return
 	}
-	for i := range page.Items {
-		s.enrichDownloads(r, page.Items[i].Downloads)
-	}
+	s.enrichTweetsDownloads(r, page.Items)
 	writeJSON(w, 200, page)
 }
 
@@ -60,6 +73,31 @@ func (s *Server) enrichDownloads(r *http.Request, records []storage.DownloadReco
 		records[i].FileURL = "/api/library/downloads/" + strconv.FormatInt(records[i].ID, 10) + "/file"
 	}
 	s.enrichAssetURLs(r, records)
+}
+
+func (s *Server) enrichTweetsDownloads(r *http.Request, tweets []storage.ArchivedTweet) {
+	var ids []int64
+	for i := range tweets {
+		for j := range tweets[i].Downloads {
+			rec := &tweets[i].Downloads[j]
+			rec.FileURL = "/api/library/downloads/" + strconv.FormatInt(rec.ID, 10) + "/file"
+			if rec.ID > 0 {
+				ids = append(ids, rec.ID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	assetsByID, err := s.store.DownloadAssetsBatch(r.Context(), ids)
+	if err != nil {
+		return
+	}
+	for i := range tweets {
+		if len(tweets[i].Downloads) > 0 {
+			applyAssetURLs(tweets[i].Downloads, assetsByID)
+		}
+	}
 }
 
 func (s *Server) getTweet(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +126,11 @@ func (s *Server) tweetProgress(w http.ResponseWriter, r *http.Request) {
 func (s *Server) retryTweetMedia(w http.ResponseWriter, r *http.Request) {
 	tweet, err := s.store.GetTweet(r.Context(), chi.URLParam(r, "tweetID"))
 	if err != nil {
-		writeError(w, 404, storage.ErrNotFound("推文未归档", err))
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, 404, storage.ErrNotFound("推文未归档", err))
+		} else {
+			writeError(w, 500, err)
+		}
 		return
 	}
 	job, err := s.store.RetryTweetMedia(r.Context(), tweet.ID)

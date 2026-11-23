@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -113,9 +114,11 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	if token == "" {
 		maxAge = -1
 	}
+	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
+	secure := r.TLS != nil || strings.EqualFold(strings.TrimSpace(proto), "https")
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: token, Path: "/", MaxAge: maxAge,
-		HttpOnly: true, Secure: r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"), SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode,
 	})
 }
 
@@ -234,8 +237,7 @@ func (s *Server) setupAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.respondLogin(w, r, account, http.StatusCreated)
-	succeeded = true
+	succeeded = s.respondLogin(w, r, account, http.StatusCreated)
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -275,15 +277,27 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("用户名或密码错误"))
 		return
 	}
-	s.respondLogin(w, r, *account, http.StatusOK)
-	succeeded = true
+	s.authMu.RLock()
+	current, err := s.store.GetAccount(r.Context())
+	if err != nil {
+		s.authMu.RUnlock()
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if current == nil || !hmac.Equal(current.SessionKey, account.SessionKey) {
+		s.authMu.RUnlock()
+		writeError(w, http.StatusUnauthorized, errors.New("用户名或密码错误"))
+		return
+	}
+	succeeded = s.respondLogin(w, r, *current, http.StatusOK)
+	s.authMu.RUnlock()
 }
 
-func (s *Server) respondLogin(w http.ResponseWriter, r *http.Request, account storage.Account, status int) {
+func (s *Server) respondLogin(w http.ResponseWriter, r *http.Request, account storage.Account, status int) bool {
 	token := signSession(account.SessionKey)
 	if err := s.store.CreateSession(r.Context(), token, time.Now()); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
-		return
+		return false
 	}
 	setSessionCookie(w, r, token)
 	result := map[string]any{"username": account.Username}
@@ -291,6 +305,7 @@ func (s *Server) respondLogin(w http.ResponseWriter, r *http.Request, account st
 		result["token"] = token
 	}
 	writeJSON(w, status, result)
+	return true
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -369,18 +384,145 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 // dummyBcryptHash 用于用户名不匹配时跑一次假 hash，防止时序差异泄漏"用户名是否存在"。
 var dummyBcryptHash, _ = bcrypt.GenerateFromPassword([]byte("dummy-timing-defense"), bcrypt.DefaultCost)
 
+func extractRemoteHost(remoteAddr string) string {
+	remote := strings.TrimSpace(remoteAddr)
+	if remote == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(remote)
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.Trim(remote, "[]")
+}
+
+func isTrustedLoginProxy(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	raw := strings.TrimSpace(os.Getenv("OPEN_XDOWNLOAD_TRUSTED_PROXIES"))
+	if raw == "" {
+		return false
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, cidr, err := net.ParseCIDR(entry); err == nil {
+			if cidr.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if trusted := net.ParseIP(strings.Trim(entry, "[]")); trusted != nil && trusted.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseForwardedIP(raw string) net.IP {
+	candidate := strings.TrimSpace(raw)
+	if candidate == "" {
+		return nil
+	}
+	if h, _, err := net.SplitHostPort(candidate); err == nil && h != "" {
+		candidate = h
+	}
+	candidate = strings.Trim(candidate, "[]")
+	return net.ParseIP(candidate)
+}
+
 func loginClientKey(r *http.Request) string {
 	if r == nil {
 		return "unknown"
 	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err == nil && host != "" {
+	host := extractRemoteHost(r.RemoteAddr)
+	if host == "" {
+		return "unknown"
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
 		return host
 	}
-	if remote := strings.TrimSpace(r.RemoteAddr); remote != "" {
-		return remote
+	// 仅在连接来自受信任反向代理（本地回环或 OPEN_XDOWNLOAD_TRUSTED_PROXIES 配置的代理）时
+	// 采信 X-Forwarded-For / X-Real-IP，并从右向左跳过受信任代理跳点取真实对端地址，
+	// 避免客户端伪造左侧头绕过限速，同时防止反代后所有用户共享同一个代理桶而相互锁死或误清他人失败记录。
+	if isTrustedLoginProxy(ip) {
+		if forwarded := forwardedClientIP(r.Header.Values("X-Forwarded-For")); forwarded != "" {
+			return forwarded
+		}
+		if realIP := parseForwardedIP(r.Header.Get("X-Real-IP")); realIP != nil {
+			return realIP.String()
+		}
 	}
-	return "unknown"
+	return ip.String()
+}
+
+func forwardedClientIP(headers []string) string {
+	var fallback string
+	for i := len(headers) - 1; i >= 0; i-- {
+		parts := strings.Split(headers[i], ",")
+		for j := len(parts) - 1; j >= 0; j-- {
+			ip := parseForwardedIP(parts[j])
+			if ip == nil {
+				continue
+			}
+			if !isTrustedLoginProxy(ip) {
+				return ip.String()
+			}
+			if fallback == "" {
+				fallback = ip.String()
+			}
+		}
+	}
+	return fallback
+}
+
+// evictLoginClientBucket 在活跃桶达到上限时淘汰一个旧桶，避免攻击者塞满 4096 个
+// 来源地址造成全局登录 DoS，同时保持内存有界。优先淘汰尚未触发限速的最旧桶，
+// 防止用大量单次探测顶掉已被封禁来源的记录；若全部都已触发限速，再淘汰最旧的桶。
+func evictLoginClientBucket(buckets map[string][]time.Time, cutoff time.Time) {
+	var oldestUnlockedKey string
+	var oldestUnlockedTime time.Time
+	hasOldestUnlocked := false
+	var oldestKey string
+	var oldestTime time.Time
+	hasOldest := false
+	for client, attempts := range buckets {
+		if len(attempts) == 0 {
+			delete(buckets, client)
+			return
+		}
+		last := attempts[len(attempts)-1]
+		if !hasOldest || last.Before(oldestTime) {
+			oldestKey = client
+			oldestTime = last
+			hasOldest = true
+		}
+		active := 0
+		for _, t := range attempts {
+			if t.After(cutoff) {
+				active++
+			}
+		}
+		if active < maxLoginAttempts && (!hasOldestUnlocked || last.Before(oldestUnlockedTime)) {
+			oldestUnlockedKey = client
+			oldestUnlockedTime = last
+			hasOldestUnlocked = true
+		}
+	}
+	if hasOldestUnlocked {
+		delete(buckets, oldestUnlockedKey)
+		return
+	}
+	if hasOldest {
+		delete(buckets, oldestKey)
+	}
 }
 
 // checkLoginRate 在检查时预留额度，失败及尚未完成的请求都计入来源地址限额。
@@ -407,9 +549,15 @@ func (s *Server) checkLoginRate(w http.ResponseWriter, r *http.Request) bool {
 		}
 	}
 	attempts = attempts[:valid]
-	if len(attempts) >= maxLoginAttempts || (len(attempts) == 0 && len(s.loginAttempts) >= maxLoginClients) {
+	if len(attempts) >= maxLoginAttempts {
+		s.loginAttempts[key] = attempts
 		writeError(w, http.StatusTooManyRequests, errors.New("登录尝试过于频繁，请稍后再试"))
 		return false
+	}
+	if len(attempts) == 0 {
+		for len(s.loginAttempts) >= maxLoginClients {
+			evictLoginClientBucket(s.loginAttempts, cutoff)
+		}
 	}
 	s.loginAttempts[key] = append(attempts, now)
 	return true

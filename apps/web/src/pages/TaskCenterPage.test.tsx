@@ -673,3 +673,217 @@ describe("TaskCenterPage 状态兜底", () => {
     expect(screen.getByText("未知")).not.toBeNull();
   });
 });
+
+describe("TaskCenterPage 回归修复", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("翻页或外部回退搜索词时，防抖不会把搜索词或页码重置回旧值", async () => {
+    vi.useFakeTimers();
+    try {
+      const onPageChange = vi.fn();
+      const onSearchKeywordChange = vi.fn();
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } },
+      });
+      const baseProps = {
+        jobs: mockJobs,
+        failedTweetCount: 0,
+        onPageChange,
+        onPageSizeChange: vi.fn(),
+        onOpenCreateModal: vi.fn(),
+        onOpenFailedDrawer: vi.fn(),
+        kindFilter: "all",
+        searchKeyword: "alice",
+        onSearchKeywordChange,
+      };
+      const { rerender } = render(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <TaskCenterPage {...baseProps} pagination={{ page: 1, pageSize: 20, total: 40, totalPages: 2 }} />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+
+      // 模拟用户翻到第 2 页
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <TaskCenterPage {...baseProps} pagination={{ page: 2, pageSize: 20, total: 40, totalPages: 2 }} />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+      expect(onSearchKeywordChange).not.toHaveBeenCalled();
+      expect(onPageChange).not.toHaveBeenCalled();
+
+      // 模拟浏览器后退使外部 searchKeyword 回到空串
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <TaskCenterPage {...baseProps} searchKeyword="" pagination={{ page: 2, pageSize: 20, total: 40, totalPages: 2 }} />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      expect(onSearchKeywordChange).not.toHaveBeenCalled();
+      expect(onPageChange).not.toHaveBeenCalled();
+      expect((screen.getByPlaceholderText("搜索本页任务、用户名或错误...") as HTMLInputElement).value).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("运行中任务更新文件数时不抢占用户手动切换的详情标签，且切换任务后会重置", async () => {
+    const user = userEvent.setup();
+    const running1: Job = { ...mockJobs[0], id: 11, status: "downloading", title: "运行中 1" };
+    const running2: Job = { ...mockJobs[0], id: 12, status: "downloading", title: "运行中 2" };
+    let filesCount = 1;
+    vi.mocked(api.getJobFiles).mockImplementation(async (id) => ({
+      downloads: Array.from({ length: filesCount }, (_, idx) => ({
+        ...mockDownloads[0],
+        id: id * 100 + idx,
+        jobId: id,
+        filePath: `/downloads/f-${id}-${idx}.jpg`,
+      })),
+      failed: [],
+    }));
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const props = {
+      jobs: [running1, running2],
+      failedTweetCount: 0,
+      pagination: { page: 1, pageSize: 20, total: 2, totalPages: 1 },
+      onPageChange: vi.fn(),
+      onPageSizeChange: vi.fn(),
+      onOpenCreateModal: vi.fn(),
+      onOpenFailedDrawer: vi.fn(),
+    };
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <TaskCenterPage {...props} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[0]);
+    await waitFor(() => expect(screen.getByText("f-11-0.jpg")).toBeTruthy());
+
+    // 用户手动切到“概览”
+    await user.click(screen.getByRole("tab", { name: "概览" }));
+    expect(screen.getByText("任务未报告错误")).toBeTruthy();
+
+    // 模拟轮询刷新文件数增加
+    filesCount = 2;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: [...api.jobFilesQueryRoot, 11] });
+    });
+    await waitFor(() => expect(api.getJobFiles).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("tab", { name: "概览" }).getAttribute("aria-selected")).toBe("true");
+
+    // 关闭并打开第二个任务，key 变化应重置标签回默认“文件”
+    await user.keyboard("{Escape}");
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[1]);
+    await waitFor(() => expect(screen.getByText("f-12-0.jpg")).toBeTruthy());
+    expect(screen.getByRole("tab", { name: /文件/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("移动端空状态点击清除筛选时优先调用原子回调 onClearFilters", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    const user = userEvent.setup();
+    const onClearFilters = vi.fn();
+    const onStatusFilterChange = vi.fn();
+    const onKindFilterChange = vi.fn();
+    const onSearchKeywordChange = vi.fn();
+    renderWithClient(
+      <TaskCenterPage
+        jobs={[]}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 0, totalPages: 0 }}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+        statusFilter="failed"
+        kindFilter="user"
+        searchKeyword="alice"
+        onStatusFilterChange={onStatusFilterChange}
+        onKindFilterChange={onKindFilterChange}
+        onSearchKeywordChange={onSearchKeywordChange}
+        onClearFilters={onClearFilters}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(onClearFilters).toHaveBeenCalledTimes(1);
+    expect(onStatusFilterChange).not.toHaveBeenCalled();
+    expect(onKindFilterChange).not.toHaveBeenCalled();
+    expect(onSearchKeywordChange).not.toHaveBeenCalled();
+  });
+
+  it("tableLoading 为 true 时禁用所有批量复选框并清空选择", () => {
+    renderWithClient(
+      <TaskCenterPage
+        jobs={mockJobs}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 3, totalPages: 1 }}
+        tableLoading={true}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+
+    const selectAll = screen.getByRole("checkbox", { name: "选择当前页任务" }) as HTMLInputElement;
+    expect(selectAll.disabled).toBe(true);
+    const rowBox = screen.getByRole("checkbox", { name: "选择任务 #1" }) as HTMLInputElement;
+    expect(rowBox.disabled).toBe(true);
+  });
+
+  it("快速切换详情抽屉任务时不闪退，且阻止同一任务的并发取消操作", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getJobFiles).mockResolvedValue({ downloads: [], failed: [] });
+    let finishCancel!: (job: Job) => void;
+    vi.mocked(api.cancelJob).mockImplementation(() => new Promise((resolve) => { finishCancel = resolve; }));
+
+    const runningJob: Job = { ...mockJobs[0], id: 10, status: "downloading", title: "运行中任务" };
+    renderWithClient(
+      <TaskCenterPage
+        jobs={[runningJob, mockJobs[1]]}
+        failedTweetCount={0}
+        pagination={{ page: 1, pageSize: 20, total: 2, totalPages: 1 }}
+        onPageChange={vi.fn()}
+        onPageSizeChange={vi.fn()}
+        onOpenCreateModal={vi.fn()}
+        onOpenFailedDrawer={vi.fn()}
+      />,
+    );
+
+    // Open job #10, then immediately switch to job #2 without closing
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[0]);
+    expect(within(screen.getByRole("dialog")).getByText("#10")).toBeTruthy();
+
+    await user.click(screen.getAllByRole("button", { name: "查看任务详情" })[1]);
+    expect(within(screen.getByRole("dialog")).getByText("#2")).toBeTruthy();
+
+    await user.keyboard("{Escape}");
+
+    // Clicking cancel twice while in-flight only invokes cancelJob once
+    const cancelBtn = screen.getByRole("button", { name: "取消" }) as HTMLButtonElement;
+    await user.click(cancelBtn);
+    await waitFor(() => expect(cancelBtn.disabled).toBe(true));
+    expect(api.cancelJob).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      finishCancel({ ...runningJob, status: "canceled" });
+    });
+  });
+});

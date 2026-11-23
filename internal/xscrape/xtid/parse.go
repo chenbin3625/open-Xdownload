@@ -15,7 +15,9 @@ var (
 	tagRE          = regexp.MustCompile(`(?is)<[a-zA-Z][^>]*>`)
 	attrRE         = regexp.MustCompile(`(?is)([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>]+))`)
 	animationSVGRE = regexp.MustCompile(`(?is)<svg\b[^>]*\bid\s*=\s*["']loading-x-anim-\d+["'][^>]*>`)
+	svgEndRE       = regexp.MustCompile(`(?i)</svg>`)
 	pathTagRE      = regexp.MustCompile(`(?is)<path\b[^>]*>`)
+	scriptBlockRE  = regexp.MustCompile(`(?is)<script\b[^>]*>(.*?)</script>`)
 
 	// 旧版 webpack 构建直接引用；新版 x-web 也用它命名签名 chunk。
 	indicesFileRE = regexp.MustCompile(`(?:\.{0,2}/)?[\w./-]*?\b(?:ondemand\.s|sign\.o)[\w.-]*\.js`)
@@ -24,8 +26,8 @@ var (
 
 	assetURLRE             = regexp.MustCompile(`https?://[\w.-]+/(?:x-web/[\w./-]+|responsive-web/client-web/[\w./-]+)\.js`)
 	legacyMainRE           = regexp.MustCompile(`/client-web/main\.([^."']+)\.js`)
-	legacyHashMapRE        = regexp.MustCompile(`(\d+):\s*["']([0-9a-f]{7}|[0-9a-f]{16})["']`)
-	legacyAnyMapRE         = regexp.MustCompile(`(\d+):\s*["']([^"']+)["']`)
+	legacyHashMapRE        = regexp.MustCompile(`(?:^|[{,])\s*(\d+):\s*["']([0-9a-f]{7}|[0-9a-f]{16})["']`)
+	legacyAnyMapRE         = regexp.MustCompile(`(?:^|[{,])\s*(\d+):\s*["']([A-Za-z][A-Za-z0-9._~-]{0,127})["']`)
 	legacyHashValueRE      = regexp.MustCompile(`^(?:[0-9a-f]{7}|[0-9a-f]{16})$`)
 	staticImportRE         = regexp.MustCompile(`(?:from\s*|import\s*)["'](\.{1,2}/[^"']+\.js)["']`)
 	dynamicImportRE        = regexp.MustCompile("import\\s*\\(\\s*[`\"'](\\.{1,2}/[^`\"']+\\.js)[`\"']\\s*\\)")
@@ -92,11 +94,11 @@ func parseAnimationPaths(page []byte) ([]string, error) {
 	paths := make([]string, 0, len(locs))
 	for _, loc := range locs {
 		rest := pageStr[loc[1]:]
-		end := strings.Index(strings.ToLower(rest), "</svg>")
-		if end < 0 {
+		endLoc := svgEndRE.FindStringIndex(rest)
+		if endLoc == nil {
 			continue
 		}
-		block := rest[:end]
+		block := rest[:endLoc[0]]
 		tags := pathTagRE.FindAllString(block, -1)
 		if len(tags) < 2 {
 			continue
@@ -164,7 +166,7 @@ func matchesIndicesFile(rawURL string) bool {
 
 // extractScriptURLs 提取首页引用的脚本地址，兼容两种旧 chunk 映射格式：
 // 7 位与 16 位十六进制 hash（twscrape #327/#328 的修复）。
-func extractScriptURLs(page, baseURL string) []string {
+func extractScriptURLs(page string) []string {
 	var urls []string
 	add := func(u string) {
 		u = strings.TrimSpace(u)
@@ -187,34 +189,100 @@ func extractScriptURLs(page, baseURL string) []string {
 		add(legacyScriptBase + "main." + m[1] + ".js")
 	}
 
-	type hashEntry struct {
-		id   string
-		hash string
-	}
-	var hashes []hashEntry
-	seen := make(map[string]bool)
-	for _, m := range legacyHashMapRE.FindAllStringSubmatch(page, -1) {
-		if seen[m[1]] {
+	blocks := legacyScriptBlocks(page)
+	for _, block := range blocks {
+		type hashEntry struct {
+			id   string
+			hash string
+		}
+		var hashes []hashEntry
+		seen := make(map[string]bool)
+		for _, idx := range legacyHashMapRE.FindAllStringSubmatchIndex(block, -1) {
+			if !hasLegacyMapTrailingDelim(block, idx[1]) {
+				continue
+			}
+			id := block[idx[2]:idx[3]]
+			hash := block[idx[4]:idx[5]]
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			hashes = append(hashes, hashEntry{id: id, hash: hash})
+		}
+		if len(hashes) == 0 {
 			continue
 		}
-		seen[m[1]] = true
-		hashes = append(hashes, hashEntry{id: m[1], hash: m[2]})
-	}
-	names := make(map[string]string)
-	for _, m := range legacyAnyMapRE.FindAllStringSubmatch(page, -1) {
-		if legacyHashValueRE.MatchString(m[2]) {
-			continue
+		names := make(map[string]string, len(hashes))
+		for _, idx := range legacyAnyMapRE.FindAllStringSubmatchIndex(block, -1) {
+			if !hasLegacyMapTrailingDelim(block, idx[1]) {
+				continue
+			}
+			id := block[idx[2]:idx[3]]
+			if !seen[id] {
+				continue
+			}
+			name := block[idx[4]:idx[5]]
+			if legacyHashValueRE.MatchString(name) || !isValidLegacyChunkName(name) {
+				continue
+			}
+			existing, ok := names[id]
+			if ok && !isLegacySigningChunkName(name) {
+				continue
+			}
+			if ok && isLegacySigningChunkName(existing) {
+				continue
+			}
+			names[id] = name
 		}
-		names[m[1]] = m[2]
-	}
-	for _, h := range hashes {
-		name := names[h.id]
-		if name == "" {
-			name = h.id
+		for _, h := range hashes {
+			name := names[h.id]
+			if name == "" {
+				name = h.id
+			}
+			add(legacyScriptBase + name + "." + h.hash + "a.js")
 		}
-		add(legacyScriptBase + name + "." + h.hash + "a.js")
 	}
 	return urls
+}
+
+func legacyScriptBlocks(page string) []string {
+	matches := scriptBlockRE.FindAllStringSubmatch(page, -1)
+	if len(matches) == 0 {
+		return []string{page}
+	}
+	blocks := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if strings.TrimSpace(m[1]) != "" {
+			blocks = append(blocks, m[1])
+		}
+	}
+	return blocks
+}
+
+func hasLegacyMapTrailingDelim(text string, pos int) bool {
+	for pos < len(text) {
+		switch text[pos] {
+		case ' ', '\t', '\r', '\n':
+			pos++
+			continue
+		case ',', '}', '<':
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isValidLegacyChunkName(name string) bool {
+	if name == "" || strings.Contains(name, "..") || strings.HasSuffix(name, ".") {
+		return false
+	}
+	return true
+}
+
+func isLegacySigningChunkName(name string) bool {
+	return strings.HasPrefix(name, "ondemand.s") || strings.HasPrefix(name, "sign.o")
 }
 
 // chunkReferences 从脚本内容中提取相对 import，优先返回疑似签名 chunk：

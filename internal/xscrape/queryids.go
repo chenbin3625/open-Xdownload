@@ -45,13 +45,13 @@ var builtinQueryIDs = map[string]string{
 
 // queryIDTable 保存自动发现的 queryId。读路径只加锁查表；发现是后台/单飞任务。
 type queryIDTable struct {
-	mu          sync.Mutex
-	ids         map[string]string
-	fetchedAt   time.Time
-	last404At   time.Time
-	discovering bool
-	done        chan struct{}
-	warned      bool
+	mu            sync.Mutex
+	ids           map[string]string
+	fetchedAt     time.Time
+	last404At     time.Time
+	discovering   bool
+	lastSucceeded bool
+	done          chan struct{}
 }
 
 // rewrite 把 xapi 构造的 GraphQL 路径中的 queryId 换成当前值。环境变量覆盖过的
@@ -80,74 +80,112 @@ func (t *queryIDTable) operationID(operation string) string {
 // ensureFresh 在首次使用和每小时到期时后台发现一次 queryId。发现失败不会影响
 // 请求：始终回退到内置表。
 func (t *queryIDTable) ensureFresh(ctx context.Context, e *Engine, proxy string) {
+	if ctx.Err() != nil {
+		return
+	}
 	t.mu.Lock()
 	if t.discovering || (!t.fetchedAt.IsZero() && e.now().Sub(t.fetchedAt) < queryIDTTL) {
 		t.mu.Unlock()
 		return
 	}
 	t.discovering = true
+	t.lastSucceeded = false
 	done := make(chan struct{})
 	t.done = done
 	t.mu.Unlock()
 
+	// 后台发现由多个并发请求及 refreshFor404 等待者共享：与发起方取消解耦，
+	// 避免单个调用取消中断共享发现或阻止 fetchedAt 更新。
+	discoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryDiscoveryTimeout)
 	go func() {
+		defer cancel()
+		var ids map[string]string
+		var err error
 		defer func() {
+			t.merge(ids)
 			t.mu.Lock()
 			t.discovering = false
-			t.fetchedAt = e.now()
+			if discoveryCtx.Err() == nil {
+				t.fetchedAt = e.now()
+			}
+			t.lastSucceeded = err == nil && len(ids) > 0
 			t.done = nil
 			close(done)
 			t.mu.Unlock()
 		}()
-		discoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryDiscoveryTimeout)
-		defer cancel()
-		ids, err := discoverQueryIDs(discoveryCtx, e, proxy)
+		ids, err = discoverQueryIDs(discoveryCtx, e, proxy)
 		if err != nil {
-			e.logs.printf("queryids", time.Hour, "xscrape: 自动发现 queryId 失败，继续使用内置表: %v", err)
+			if discoveryCtx.Err() == nil {
+				e.logs.printf("queryids", time.Hour, "xscrape: 自动发现 queryId 失败，继续使用内置表: %v", err)
+			}
 		} else if len(ids) == 0 {
 			e.logs.printf("queryids", time.Hour, "xscrape: 首页/脚本中未发现 queryId，继续使用内置表")
 		}
-		t.merge(ids)
 	}()
 }
 
 // refreshFor404 在 GraphQL 返回 404 后同步重新发现（单飞、最多每 10 分钟一次）。
 // 返回是否真的拿到了新结果；无论返回值如何，调用方都会用现有表重试一次。
 func (t *queryIDTable) refreshFor404(ctx context.Context, e *Engine, proxy string) bool {
-	t.mu.Lock()
-	if !t.last404At.IsZero() && e.now().Sub(t.last404At) < queryID404RefreshInterval {
-		t.mu.Unlock()
+	if ctx.Err() != nil {
 		return false
 	}
+	t.mu.Lock()
 	if t.discovering {
 		done := t.done
 		t.mu.Unlock()
 		select {
 		case <-done:
-			return true
+			t.mu.Lock()
+			ok := t.lastSucceeded
+			t.mu.Unlock()
+			return ok
 		case <-ctx.Done():
 			return false
 		}
 	}
+	if !t.last404At.IsZero() && e.now().Sub(t.last404At) < queryID404RefreshInterval {
+		t.mu.Unlock()
+		return false
+	}
 	t.discovering = true
 	t.last404At = e.now()
+	t.lastSucceeded = false
 	done := make(chan struct{})
 	t.done = done
 	t.mu.Unlock()
 
-	// 发现过程会抓首页和最多 24 个脚本；调用方 ctx 可能没有截止时间（任务上下文），
-	// 必须自带超时，否则一次挂起的请求会卡住所有等待该单飞结果的调用方。
-	discoveryCtx, cancel := context.WithTimeout(ctx, queryDiscoveryTimeout)
-	defer cancel()
-	ids, err := discoverQueryIDs(discoveryCtx, e, proxy)
-	t.merge(ids)
-	t.mu.Lock()
-	t.discovering = false
-	t.fetchedAt = e.now()
-	t.done = nil
-	close(done)
-	t.mu.Unlock()
-	return err == nil && len(ids) > 0
+	// 发现过程会抓首页和最多 24 个脚本；使用与 leader 取消解耦的超时上下文，
+	// 避免 leader 取消中断等待者或污染冷却时间戳。
+	discoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryDiscoveryTimeout)
+	go func() {
+		defer cancel()
+		var ids map[string]string
+		var err error
+		defer func() {
+			t.merge(ids)
+			t.mu.Lock()
+			t.discovering = false
+			if discoveryCtx.Err() == nil {
+				t.fetchedAt = e.now()
+			}
+			t.lastSucceeded = err == nil && len(ids) > 0
+			t.done = nil
+			close(done)
+			t.mu.Unlock()
+		}()
+		ids, err = discoverQueryIDs(discoveryCtx, e, proxy)
+	}()
+
+	select {
+	case <-done:
+		t.mu.Lock()
+		ok := t.lastSucceeded
+		t.mu.Unlock()
+		return ok
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (t *queryIDTable) merge(ids map[string]string) {
@@ -211,15 +249,12 @@ func discoverQueryIDs(ctx context.Context, e *Engine, proxy string) (map[string]
 	}
 	request.Header.Set("User-Agent", xapi.UserAgent)
 	request.Header.Set("Accept", "text/html,application/xhtml+xml")
-	reply := doRequest(client, request)
+	reply := doRequestLimited(client, request, discoveryMaxBytes)
 	if reply.err != nil {
 		return nil, reply.err
 	}
 	if reply.status >= 400 {
 		return nil, fmt.Errorf("X 首页返回 HTTP %d", reply.status)
-	}
-	if len(reply.payload) > discoveryMaxBytes {
-		return nil, fmt.Errorf("X 首页超过 %d 字节上限", discoveryMaxBytes)
 	}
 
 	ids := map[string]string{}
@@ -262,10 +297,6 @@ func allQueryIDsFound(ids map[string]string) bool {
 // scriptURLs 提取首页引用的脚本，只保留 X/Twitter 静态资源主机上的 .js。
 func scriptURLs(payload []byte, base string) []string {
 	baseURL, _ := url.Parse(base)
-	baseHost := ""
-	if baseURL != nil {
-		baseHost = strings.ToLower(baseURL.Hostname())
-	}
 	seen := map[string]bool{}
 	scripts := []string{}
 	for _, match := range scriptSrcPattern.FindAllSubmatch(payload, -1) {
@@ -280,11 +311,7 @@ func scriptURLs(payload []byte, base string) []string {
 		if baseURL != nil {
 			parsed = baseURL.ResolveReference(parsed)
 		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			continue
-		}
-		host := strings.ToLower(parsed.Hostname())
-		if host != baseHost && host != "x.com" && host != "www.x.com" && host != "twitter.com" && host != "www.twitter.com" && !strings.HasSuffix(host, ".twimg.com") {
+		if !allowedScriptURL(parsed, baseURL) {
 			continue
 		}
 		if !strings.HasSuffix(strings.ToLower(parsed.Path), ".js") {
@@ -300,44 +327,69 @@ func scriptURLs(payload []byte, base string) []string {
 	return scripts
 }
 
+func allowedScriptURL(parsed, baseURL *url.URL) bool {
+	if parsed == nil || parsed.User != nil {
+		return false
+	}
+	if baseURL != nil && sameOrigin(parsed, baseURL) {
+		return true
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+	if port := parsed.Port(); port != "" && port != "443" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	return host == "x.com" || host == "www.x.com" || host == "twitter.com" || host == "www.twitter.com" || strings.HasSuffix(host, ".twimg.com")
+}
+
 func fetchScript(ctx context.Context, client *http.Client, scriptURL string) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, scriptURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("User-Agent", xapi.UserAgent)
-	reply := doRequest(client, request)
+	reply := doRequestLimited(client, request, discoveryMaxBytes)
 	if reply.err != nil {
 		return nil, reply.err
 	}
 	if reply.status >= 400 {
 		return nil, fmt.Errorf("脚本返回 HTTP %d", reply.status)
 	}
-	if len(reply.payload) > discoveryMaxBytes {
-		return nil, fmt.Errorf("脚本超过 %d 字节上限", discoveryMaxBytes)
-	}
 	return reply.payload, nil
 }
 
 // scanQueryIDs 在同一段脚本里把 queryId 与最近的 operationName 配对。压缩包中
-// 两者相隔几个字段，取距离最近的已知 operation。
+// 两者相隔几个字段，取距离最近的已知 operation；operations 与 queries 均按偏移升序，
+// 用双指针在线性时间内找到每个 queryId 左右最近的候选。
 func scanQueryIDs(data []byte, ids map[string]string) {
 	operations := operationPattern.FindAllSubmatchIndex(data, -1)
 	if len(operations) == 0 {
 		return
 	}
+	opIdx := 0
 	for _, query := range queryIDPattern.FindAllSubmatchIndex(data, -1) {
 		queryID := string(data[query[2]:query[3]])
+		for opIdx < len(operations) && operations[opIdx][1] <= query[0] {
+			opIdx++
+		}
 		// 先找最近的 operationName（不论是否已知）：紧邻的未知 operation 说明这个
 		// queryId 属于它，不能拿来覆盖更远的已知 operation。
 		bestOperation := ""
 		bestDistance := -1
-		for _, operation := range operations {
+		consider := func(operation []int) {
 			distance := spanDistance(query[0], query[1], operation[0], operation[1])
 			if bestDistance < 0 || distance < bestDistance {
 				bestDistance = distance
 				bestOperation = string(data[operation[2]:operation[3]])
 			}
+		}
+		if opIdx > 0 {
+			consider(operations[opIdx-1])
+		}
+		if opIdx < len(operations) {
+			consider(operations[opIdx])
 		}
 		if _, known := builtinQueryIDs[bestOperation]; !known {
 			continue

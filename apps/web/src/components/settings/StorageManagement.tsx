@@ -51,6 +51,7 @@ export function StorageManagement() {
   const [dirty, setDirty] = useState(false);
   const [migrationId, setMigrationId] = useState<number | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState(false);
+  const pickingDirectoryRef = useRef(pickingDirectory); pickingDirectoryRef.current = pickingDirectory;
   const [defaultRulesCollapsed, setDefaultRulesCollapsed] = useState(true);
   const tweets = useQuery({ queryKey: ["storage-preview-tweets"], queryFn: ({ signal }) => getTweets(new URLSearchParams({ pageSize: "1" }), signal) });
   useEffect(() => { if (query.data && !dirty) setDraft(query.data); }, [query.data, dirty]);
@@ -73,7 +74,12 @@ export function StorageManagement() {
   if (!draft) return query.isError ? <Alert type="error" message={query.error.message} action={<Button type="tertiary" onClick={() => void query.refetch()}>{t("重试")}</Button>} /> : <ListSkeleton rows={3} />;
   const target = draft.targets.find(item => item.id === draft.default.targetId);
   function changeRoot(root: string) {
+    if (root === target?.root) return;
     update({ ...draft!, targets: draft!.targets.map(item => item.id === target?.id ? { ...item, root } : item) });
+  }
+  function openDirectoryPicker() {
+    void client.invalidateQueries({ queryKey: ["local-directories"] });
+    setPickingDirectory(true);
   }
   function ruleFields(kind: AssetKind | "default", rule: AssetRule, inherited = false) {
     const change = (patch: Partial<AssetRule>) => update(kind === "default" ? { ...draft!, default: { ...rule, ...patch } } : { ...draft!, rules: { ...draft!.rules, [kind]: { ...rule, ...patch } } });
@@ -81,16 +87,16 @@ export function StorageManagement() {
     if (!directories.some(item => item.value === rule.directoryTemplate)) directories.push({ value: rule.directoryTemplate, label: t("保留现有分类方式") });
     const ruleTarget = draft!.targets.find(item => item.id === rule.targetId);
     return <>
-      {kind !== "default" && <Field label={t("storage.target")} className="storage-media-field"><Select disabled={inherited} ariaLabel={`${t(`storage.kind.${kind}`)} ${t("storage.target")}`} value={rule.targetId} options={draft!.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => change({ targetId })} /><span className="storage-target-path">{ruleTarget?.type === "s3" ? `s3://${ruleTarget.bucket ?? ""}` : ruleTarget?.root}</span></Field>}
+      {kind !== "default" && <Field label={t("storage.target")} className="storage-media-field"><Select disabled={inherited} ariaLabel={`${t(`storage.kind.${kind}`)} ${t("storage.target")}`} value={rule.targetId} options={draft!.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => { if (targetId !== rule.targetId) change({ targetId }); }} /><span className="storage-target-path">{ruleTarget?.type === "s3" ? `s3://${ruleTarget.bucket ?? ""}` : ruleTarget?.root}</span></Field>}
       <Field label={t("分类存储策略")} className={kind !== "default" ? "storage-media-field" : undefined}>
-        <Select disabled={inherited} ariaLabel={kind === "default" ? t("分类存储策略") : `${t(`storage.kind.${kind}`)} ${t("分类存储策略")}`} value={rule.directoryTemplate} options={directories} onChange={directoryTemplate => change({ directoryTemplate, directoryTemplateSet: true })} />
+        <Select disabled={inherited} ariaLabel={kind === "default" ? t("分类存储策略") : `${t(`storage.kind.${kind}`)} ${t("分类存储策略")}`} value={rule.directoryTemplate} options={directories} onChange={directoryTemplate => { if (directoryTemplate !== rule.directoryTemplate) change({ directoryTemplate, directoryTemplateSet: true }); }} />
         {rule.prefix && <span className="storage-target-path">{t("storage.prefix")}: {rule.prefix}</span>}
         <div className="storage-folder-toggle"><Switch disabled={inherited} checked={Boolean(rule.separateFolder || rule.directoryTemplate.includes("{kind}"))} ariaLabel={`${kind === "default" ? "" : `${t(`storage.kind.${kind}`)} `}${t("按媒体类型分文件夹")}`} onChange={separateFolder => change({
           separateFolder,
           ...(!separateFolder && rule.directoryTemplate.includes("{kind}") ? { directoryTemplate: rule.directoryTemplate.replaceAll("{kind}", "").split("/").filter(Boolean).join("/"), directoryTemplateSet: true } : {}),
         })} /><span>{t("按媒体类型分文件夹")}</span></div>
       </Field>
-      <Field label={t("命名策略")} className={kind !== "default" ? "storage-media-field" : undefined}><FilenameStrategy disabled={inherited} labelPrefix={kind === "default" ? "" : t(`storage.kind.${kind}`)} value={rule.filenameTemplate} onChange={filenameTemplate => change({ filenameTemplate })} /></Field>
+      <Field label={t("命名策略")} className={kind !== "default" ? "storage-media-field" : undefined}><FilenameStrategy disabled={inherited} labelPrefix={kind === "default" ? "" : t(`storage.kind.${kind}`)} value={rule.filenameTemplate} onChange={filenameTemplate => { if (filenameTemplate !== rule.filenameTemplate) change({ filenameTemplate }); }} /></Field>
     </>;
   }
   return <section className="semi-settings-section storage-settings">
@@ -98,8 +104,8 @@ export function StorageManagement() {
     <div className="storage-location">
       <h3 className="settings-subsection-title">{t("storage.location")}</h3>
       <div className={`storage-directory-options ${draft.targets.length > 1 ? "storage-has-targets" : ""}`}>
-        {draft.targets.length > 1 && <Field label={t("storage.target")}><Select ariaLabel={t("storage.target")} value={draft.default.targetId} options={draft.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => update({ ...draft, default: { ...draft.default, targetId } })} /></Field>}
-        <Field label={t("保存目录")}><div className="flex min-w-0 gap-2"><Input aria-label={t("保存目录")} value={target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root ?? ""} disabled={target?.type === "s3"} onChange={event => changeRoot(event.target.value)} />{target?.type !== "s3" && <Tooltip content={t("选择目录")}><Button type="tertiary" icon={<FolderOpen size={16} />} aria-label={t("选择目录")} onClick={() => setPickingDirectory(true)} /></Tooltip>}</div></Field>
+        {draft.targets.length > 1 && <Field label={t("storage.target")}><Select ariaLabel={t("storage.target")} value={draft.default.targetId} options={draft.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => { if (targetId !== draft.default.targetId) update({ ...draft, default: { ...draft.default, targetId } }); }} /></Field>}
+        <Field label={t("保存目录")}><div className="flex min-w-0 gap-2"><Input aria-label={t("保存目录")} value={target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root ?? ""} disabled={target?.type === "s3"} onChange={event => changeRoot(event.target.value)} />{target?.type !== "s3" && <Tooltip content={t("选择目录")}><Button type="tertiary" icon={<FolderOpen size={16} />} aria-label={t("选择目录")} onClick={openDirectoryPicker} /></Tooltip>}</div></Field>
       </div>
     </div>
     <div className="storage-default-rules">
@@ -118,7 +124,7 @@ export function StorageManagement() {
         <StoragePathPreview document={draft} kind={kind} tweet={tweets.data?.items[0]} />
       </div>)}
     </div>
-    <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{dirty ? t("请先保存存储设置") : t("storage.sourceRetained")}</p>{migrationId && <a className="text-sm text-brand-600" href="/tasks">{t("查看整理任务")} #{migrationId}</a>}</div><Popconfirm title={t("storage.migrateConfirm")} onConfirm={() => migration.mutate()}><Button type="tertiary" disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
-    <Modal open={pickingDirectory} onClose={() => setPickingDirectory(false)} title={t("选择目录")} footer={null}><LocalDirectoryPicker path={target?.root ?? ""} onSelect={root => { changeRoot(root); setPickingDirectory(false); }} /></Modal>
+    <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{dirty ? t("请先保存存储设置") : t("storage.sourceRetained")}</p>{migrationId && <a className="text-sm text-brand-600" href="/tasks">{t("查看整理任务")} #{migrationId}</a>}</div><Popconfirm title={t("storage.migrateConfirm")} disabled={!draft.enabled || dirty || migration.isPending} onConfirm={() => { if (!draft.enabled || dirty || migration.isPending) return; migration.mutate(); }}><Button type="tertiary" disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
+    <Modal open={pickingDirectory} onClose={() => setPickingDirectory(false)} title={t("选择目录")} footer={null}><LocalDirectoryPicker path={target?.root ?? ""} onSelect={root => { if (!pickingDirectoryRef.current) return; changeRoot(root); setPickingDirectory(false); }} /></Modal>
   </section>;
 }

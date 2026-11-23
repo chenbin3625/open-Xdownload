@@ -247,3 +247,22 @@ func TestNewClientsShareProcessRequestPacing(t *testing.T) {
 		t.Fatalf("requests=%d, want process-wide pacing", requests.Load())
 	}
 }
+
+func TestBlockedResetChecksAllRequestedPaths(t *testing.T) {
+	rl := newRateLimiter()
+	rl.markRateLimitedFor("/b", 2*time.Minute)
+	reset, ok := rl.blockedReset("/a", "/b")
+	if !ok || time.Until(reset) < time.Minute {
+		t.Fatalf("blockedReset(/a, /b) = %v, %v; want /b cooldown", reset, ok)
+	}
+}
+
+func TestAfterRetryAfterPreservesFailuresAndLimit(t *testing.T) {
+	rl := newRateLimiter()
+	rl.limits["/p"] = rateLimitState{remaining: 5, limit: 50, reset: time.Now().Add(time.Minute), ready: true, failures: 3}
+	rl.after("/p", http.Header{"Retry-After": []string{"30"}})
+	state := rl.limits["/p"]
+	if state.failures != 3 || state.limit != 50 {
+		t.Fatalf("state = %+v, want failures=3 limit=50 preserved", state)
+	}
+}

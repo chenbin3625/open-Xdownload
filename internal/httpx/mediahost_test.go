@@ -21,6 +21,10 @@ func TestIsTwimgHost(t *testing.T) {
 		{"evil-twimg.com", false},
 		{"twimg.com.evil.example", false},
 		{"notwimg.com", false},
+		{".twimg.com", false},
+		{"foo..twimg.com", false},
+		{"..twimg.com", false},
+		{".", false},
 		{"", false},
 	}
 	for _, tc := range cases {

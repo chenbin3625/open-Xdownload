@@ -1,4 +1,10 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
+
+const configDir = path.dirname(fileURLToPath(import.meta.url));
+const storageStatePath = path.resolve(configDir, ".playwright-auth.json");
+const useNoSandbox = Boolean(process.env.CI) || process.getuid?.() === 0;
 
 export default defineConfig({
   testDir: "e2e",
@@ -9,12 +15,11 @@ export default defineConfig({
   globalSetup: "./e2e/global-setup.ts",
   reporter: [["list"], ["html", { outputFolder: "playwright-report", open: "never" }]],
   use: {
-    baseURL: process.env.OPEN_XDOWNLOAD_PREVIEW_URL ?? "http://10.10.11.3:8787",
+    baseURL: process.env.OPEN_XDOWNLOAD_PREVIEW_URL ?? "http://127.0.0.1:8787",
     trace: "retain-on-failure",
-    storageState: ".playwright-auth.json",
-    extraHTTPHeaders: { "X-XDownload-Request": "1" },
+    storageState: storageStatePath,
     screenshot: "only-on-failure",
-    launchOptions: { args: ["--no-sandbox"] },
+    ...(useNoSandbox ? { launchOptions: { args: ["--no-sandbox"] } } : {}),
   },
   projects: [
     { name: "desktop-zh", use: { viewport: { width: 1440, height: 1000 }, locale: "zh-CN" } },

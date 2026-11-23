@@ -2,8 +2,10 @@ package xscrape
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -18,6 +20,11 @@ import (
 const (
 	// requestMaxAttempts 是单个账号上一次"逻辑请求"的瞬时错误重试次数（与 legacy 一致）。
 	requestMaxAttempts = 3
+	// maxRateLimitedRetriesPerAccount 限制同一账号在单次逻辑请求里因限流等待后重试的次数，
+	// 避免解锁后持续 429 时无限循环。
+	maxRateLimitedRetriesPerAccount = 2
+	// maxTOCTOURetries 限制 PickXAccount 与 EarliestXAccountUnlock 之间锁刚好过期时的重试次数。
+	maxTOCTOURetries = 3
 	// forbiddenLock 是非 WAF 的 403 与无法确认的 401 的账号冷却。
 	forbiddenLock = 5 * time.Minute
 	// wafLock 是 WAF/挑战页的账号短退避。
@@ -39,33 +46,29 @@ func (s *source) GraphQL(ctx context.Context, path string, values url.Values) ([
 
 // graphQLWithAccount 执行一次逻辑 GraphQL 请求，返回实际服务该请求的账号。
 // excluded 是调用方已确认拿不到数据的账号（如目标账号受年龄限制）；失败换号时
-// 会在它之外再累积本次请求的失败账号。
+// 会在它之外再累积本次请求的非限流失败账号。限流账号通过持久化锁与独立计数跟踪，
+// 不塞进 failed，以免绕过非调度器上下文的解锁等待。
 func (s *source) graphQLWithAccount(ctx context.Context, path string, values url.Values, excluded map[int64]bool) ([]byte, storage.XAccount, error) {
 	queue := queueForPath(path)
 	failed := map[int64]bool{}
+	rateLimited := map[int64]int{}
 	var lastErr error
 	var lastAccount storage.XAccount
-	anyRateLimited := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, storage.XAccount{}, err
 		}
-		skip := mergeExclusions(excluded, failed)
+		skip := mergeExclusions(excluded, failed, rateLimited)
 		account, release, err := s.engine.nextAccount(ctx, queue, skip)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, storage.XAccount{}, ctxErr
+			}
 			if lastErr != nil {
-				// "全部限流"要保留为可分类错误，同时带上最后一次真实失败作为上下文。
-				if xapi.IsAllClientsRateLimited(err) {
-					return nil, lastAccount, fmt.Errorf("%w: %w", err, lastErr)
-				}
-				if anyRateLimited {
-					excludedIDs := make([]int64, 0, len(excluded))
-					for id := range excluded {
-						excludedIDs = append(excludedIDs, id)
-					}
-					if until, found, unlockErr := s.engine.store.EarliestXAccountUnlock(ctx, queue, excludedIDs, s.engine.now()); unlockErr == nil && found {
-						return nil, lastAccount, &xapi.RateLimitedError{Path: queue, RetryAt: until, Cause: lastErr, PoolExhausted: true}
-					}
+				// 仅当所有未被调用方排除的活跃账号确实都在限流中（不含 500/401 等非限流
+				// 失败但仍活跃的账号）时，才上报 PoolExhausted=true。
+				if until, ok := s.engine.allHealthyAccountsRateLimited(ctx, queue, excluded, failed); ok {
+					return nil, lastAccount, &xapi.RateLimitedError{Path: queue, RetryAt: until, Cause: lastErr, PoolExhausted: true}
 				}
 				return nil, lastAccount, lastErr
 			}
@@ -77,44 +80,115 @@ func (s *source) graphQLWithAccount(ctx context.Context, path string, values url
 			return payload, account, nil
 		}
 		lastErr = err
-		failed[account.ID] = true
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, account, ctxErr
+		}
 		if xapi.IsRateLimitError(err) || xapi.IsAllClientsRateLimited(err) {
-			anyRateLimited = true
+			rateLimited[account.ID]++
+			// 限流通常已写入账号锁；若写锁失败导致账号未锁定，退回本次请求级排除，避免死循环。
+			if locked, lockErr := s.engine.accountLocked(ctx, account.ID, queue); lockErr != nil || !locked {
+				failed[account.ID] = true
+			}
+		} else {
+			failed[account.ID] = true
 		}
-		if err := ctx.Err(); err != nil {
-			return nil, account, err
-		}
-		if !shouldSwitchAccount(err) {
+		if !shouldSwitchAccount(ctx, err) {
 			return nil, account, err
 		}
 	}
 }
 
-func shouldSwitchAccount(err error) bool {
-	if err == nil {
+func isDeactivatingAPICode(code int) bool {
+	return xapi.IsFatalAPIErrorCode(code) || code == 353
+}
+
+func shouldSwitchAccount(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		// 调用方 ctx 未超时但单次请求超时（例如坏代理挂起），允许切换其他账号。
+		return true
 	}
 	if errors.Is(err, httpx.ErrBodyTooLarge) {
 		return false
 	}
+	var apiErr *xapi.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == 353 {
+		return true
+	}
 	return xapi.IsPermanentClientError(err) || xapi.IsYieldableError(err) || xapi.IsTransientError(err)
 }
 
-func mergeExclusions(base, failed map[int64]bool) map[int64]bool {
-	if len(failed) == 0 {
+func mergeExclusions(base, failed map[int64]bool, rateLimited map[int64]int) map[int64]bool {
+	exhaustedRL := 0
+	for _, count := range rateLimited {
+		if count >= maxRateLimitedRetriesPerAccount {
+			exhaustedRL++
+		}
+	}
+	if len(failed) == 0 && exhaustedRL == 0 {
 		return base
 	}
-	merged := make(map[int64]bool, len(base)+len(failed))
+	merged := make(map[int64]bool, len(base)+len(failed)+exhaustedRL)
 	for id := range base {
 		merged[id] = true
 	}
 	for id := range failed {
 		merged[id] = true
 	}
+	for id, count := range rateLimited {
+		if count >= maxRateLimitedRetriesPerAccount {
+			merged[id] = true
+		}
+	}
 	return merged
+}
+
+// allHealthyAccountsRateLimited 仅在所有未被调用方排除的活跃账号都没有非限流失败
+// 且当前全部处于有效限流锁状态时，返回最早解锁时间和 true。
+func (e *Engine) allHealthyAccountsRateLimited(ctx context.Context, queue string, excluded, failed map[int64]bool) (time.Time, bool) {
+	accounts, err := e.store.ListXAccounts(ctx)
+	if err != nil {
+		return time.Time{}, false
+	}
+	locks, err := e.store.ListXAccountLocks(ctx, e.now())
+	if err != nil {
+		return time.Time{}, false
+	}
+	lockUntil := make(map[int64]time.Time, len(locks))
+	for _, lock := range locks {
+		if lock.Queue == queue || lock.Queue == "*" {
+			if lock.Until.After(lockUntil[lock.AccountID]) {
+				lockUntil[lock.AccountID] = lock.Until
+			}
+		}
+	}
+	var earliest time.Time
+	healthy := 0
+	for _, acc := range accounts {
+		if !acc.Active || excluded[acc.ID] {
+			continue
+		}
+		if failed[acc.ID] {
+			return time.Time{}, false
+		}
+		healthy++
+		until, locked := lockUntil[acc.ID]
+		if !locked {
+			return time.Time{}, false
+		}
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
+	}
+	if healthy == 0 {
+		return time.Time{}, false
+	}
+	return earliest, true
 }
 
 // nextAccount 选一个可执行请求的账号并占用它的内存执行槽。返回的 release 必须调用。
@@ -122,12 +196,15 @@ func mergeExclusions(base, failed map[int64]bool) map[int64]bool {
 func (e *Engine) nextAccount(ctx context.Context, queue string, excluded map[int64]bool) (storage.XAccount, func(), error) {
 	if excluded == nil {
 		excluded = map[int64]bool{}
+	} else {
+		excluded = maps.Clone(excluded)
 	}
 	excludeIDs := make([]int64, 0, len(excluded))
 	for id := range excluded {
 		excludeIDs = append(excludeIDs, id)
 	}
 	var waited time.Duration
+	toctouRetries := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return storage.XAccount{}, nil, err
@@ -142,13 +219,17 @@ func (e *Engine) nextAccount(ctx context.Context, queue string, excluded map[int
 				return storage.XAccount{}, nil, err
 			}
 			if slotWaited {
-				// 等待期间账号可能已被停用或加锁：重新读取后再决定是否使用。
+				// 等待期间账号可能已被停用、删除或加锁：重新读取后再决定是否使用。
+				// 仅在账号确实不存在（sql.ErrNoRows）时排除重试；瞬时 DB 错误直接上报。
 				current, err := e.store.GetXAccount(ctx, account.ID)
 				if err != nil {
 					release()
-					excluded[account.ID] = true
-					excludeIDs = appendUnique(excludeIDs, account.ID)
-					continue
+					if errors.Is(err, sql.ErrNoRows) {
+						excluded[account.ID] = true
+						excludeIDs = appendUnique(excludeIDs, account.ID)
+						continue
+					}
+					return storage.XAccount{}, nil, err
 				}
 				locked, err := e.accountLocked(ctx, account.ID, queue)
 				if err != nil {
@@ -194,20 +275,26 @@ func (e *Engine) nextAccount(ctx context.Context, queue string, excluded map[int
 			return storage.XAccount{}, nil, err
 		}
 		if !found {
+			// PickXAccount 与 EarliestXAccountUnlock 之间锁可能刚好过期，重选一次。
+			if toctouRetries < maxTOCTOURetries {
+				toctouRetries++
+				continue
+			}
 			return storage.XAccount{}, nil, errors.New("没有可用于本次请求的 X Cookie")
 		}
+		toctouRetries = 0
 		wait := until.Sub(e.now())
 		if wait <= 0 {
 			wait = 200 * time.Millisecond
 		}
 		if xapi.YieldsToScheduler(ctx) {
-			return storage.XAccount{}, nil, &xapi.RateLimitedError{Path: queue, RetryAt: until}
+			return storage.XAccount{}, nil, &xapi.RateLimitedError{Path: queue, RetryAt: until, PoolExhausted: true}
 		}
 		if wait > maxPoolSelectStep {
 			wait = maxPoolSelectStep
 		}
 		if waited+wait > maxPoolSelectWait {
-			return storage.XAccount{}, nil, &xapi.RateLimitedError{Path: queue, RetryAt: until}
+			return storage.XAccount{}, nil, &xapi.RateLimitedError{Path: queue, RetryAt: until, PoolExhausted: true}
 		}
 		waited += wait
 		if err := e.sleep(ctx, wait); err != nil {
@@ -268,6 +355,11 @@ func (s *source) executeAccountRequest(ctx context.Context, account storage.XAcc
 		defer release()
 	}
 	e := s.engine
+	if !e.opts.DisablePacing {
+		if _, _, ok := splitGraphQLPath(path); ok {
+			e.queryIDs.ensureFresh(ctx, e, e.proxyFor(""))
+		}
+	}
 	if pinned {
 		_ = e.store.MarkXAccountUsed(ctx, account.ID, e.now())
 	}
@@ -293,10 +385,15 @@ func (s *source) executeAccountRequest(ctx context.Context, account storage.XAcc
 		}
 		// xtid 生成器绑定全局代理（Engine 只保留一个）；账号级代理只影响请求本身，
 		// 否则多账号不同代理时每次请求都会重建生成器并重新抓取首页脚本。
-		e.applyTransactionID(ctx, request, e.generatorFor(s.proxy), method, rewritten)
+		e.applyTransactionID(ctx, request, e.generatorFor(e.proxyFor("")), method, rewritten)
 		reply := doRequest(client, request)
 
 		if reply.err != nil {
+			var dialTimeout *proxyDialTimeoutError
+			if !pinned && errors.As(reply.err, &dialTimeout) {
+				// 池化请求遇到死代理/建连超时直接交还池子换号，避免在同一坏代理上重复等待。
+				return nil, reply.err
+			}
 			if errors.Is(reply.err, httpx.ErrBodyTooLarge) || !xapi.IsTransientError(reply.err) {
 				return nil, reply.err
 			}
@@ -317,9 +414,9 @@ func (s *source) executeAccountRequest(ctx context.Context, account storage.XAcc
 		if reply.status != http.StatusOK && reply.status != http.StatusUnauthorized {
 			if code, _ := probeErrorCode(reply.payload); code != 0 {
 				if code == xapi.APIErrRateLimit {
-					return nil, e.rateLimited(ctx, account.ID, queue, reply)
+					return nil, e.rateLimited(ctx, account.ID, queue, reply, pinned)
 				}
-				if xapi.IsFatalAPIErrorCode(code) {
+				if isDeactivatingAPICode(code) {
 					e.deactivateAccount(ctx, account, code)
 					return nil, &xapi.APIError{Code: code, Raw: xapi.LimitedErrorPayload(reply.payload)}
 				}
@@ -331,11 +428,21 @@ func (s *source) executeAccountRequest(ctx context.Context, account storage.XAcc
 			if apiErr := xapi.ParseAPIError(reply.payload); apiErr != nil {
 				var parsed *xapi.APIError
 				if errors.As(apiErr, &parsed) && parsed.Code == xapi.APIErrRateLimit {
-					return nil, e.rateLimited(ctx, account.ID, queue, reply)
+					return nil, e.rateLimited(ctx, account.ID, queue, reply, pinned)
 				}
-				if errors.As(apiErr, &parsed) && xapi.IsFatalAPIErrorCode(parsed.Code) {
+				if errors.As(apiErr, &parsed) && isDeactivatingAPICode(parsed.Code) {
 					e.deactivateAccount(ctx, account, parsed.Code)
 					return nil, apiErr
+				}
+				if xapi.IsTransientError(apiErr) {
+					if attempt+1 >= requestMaxAttempts {
+						return nil, apiErr
+					}
+					if err := e.retrySleep(ctx, attempt); err != nil {
+						return nil, err
+					}
+					attempt++
+					continue
 				}
 				return nil, apiErr
 			}
@@ -343,7 +450,7 @@ func (s *source) executeAccountRequest(ctx context.Context, account storage.XAcc
 			return reply.payload, nil
 
 		case reply.status == http.StatusTooManyRequests:
-			return nil, e.rateLimited(ctx, account.ID, queue, reply)
+			return nil, e.rateLimited(ctx, account.ID, queue, reply, pinned)
 
 		case reply.status == http.StatusUnauthorized:
 			e.confirmUnauthorized(ctx, account, proxy, extra)
@@ -433,11 +540,16 @@ func newAccountRequest(ctx context.Context, baseURL, method, path string, query,
 }
 
 // rateLimited 记录按 queue 的限流锁并返回可分类的限流错误。
-func (e *Engine) rateLimited(ctx context.Context, accountID int64, queue string, reply *response) error {
+func (e *Engine) rateLimited(ctx context.Context, accountID int64, queue string, reply *response, poolExhausted bool) error {
 	reset := rateLimitReset(reply.header, e.now())
 	_ = e.store.LockXAccount(ctx, accountID, queue, reset, "rate limit")
 	e.slowXRequests()
-	return &xapi.RateLimitedError{Path: queue, RetryAt: reset, Cause: &xapi.HTTPError{StatusCode: reply.status, Payload: xapi.LimitedErrorPayload(reply.payload)}}
+	return &xapi.RateLimitedError{
+		Path:          queue,
+		RetryAt:       reset,
+		Cause:         &xapi.HTTPError{StatusCode: reply.status, Payload: xapi.LimitedErrorPayload(reply.payload)},
+		PoolExhausted: poolExhausted,
+	}
 }
 
 // confirmUnauthorized 在接口 401 后用登录校验区分"Cookie 失效"与"目标/接口级 401"。
@@ -471,6 +583,7 @@ func (e *Engine) confirmUnauthorized(ctx context.Context, account storage.XAccou
 			reason += ": " + message
 		}
 		_ = e.store.SetXAccountError(ctx, account.ID, reason)
+		_ = e.store.LockXAccount(ctx, account.ID, "*", e.now().Add(forbiddenLock), reason)
 	}
 }
 
@@ -490,6 +603,8 @@ func fatalAccountMessage(code int) string {
 		return "Cookie 已失效（code 89）"
 	case 215:
 		return "Cookie 无效（code 215）"
+	case 353:
+		return "ct0 与 auth_token 不匹配（code 353）"
 	case xapi.APIErrAccountLocked:
 		return "账号已锁定（code 326）"
 	default:

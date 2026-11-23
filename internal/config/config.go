@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -252,6 +253,7 @@ func Default() AppConfig {
 }
 
 func (cfg AppConfig) Normalized() AppConfig {
+	cfg.DownloadDir = strings.TrimSpace(cfg.DownloadDir)
 	if cfg.DownloadDir == "" {
 		cfg.DownloadDir = defaultDownloadDir()
 	}
@@ -417,14 +419,19 @@ func RestoreAdditionalCookies(submitted, stored string) string {
 //   - AuthToken/CSRFToken：ClearSentinel 表示清除，空值/占位符表示沿用 stored；
 //   - AdditionalCookies：见 RestoreAdditionalCookies（按 id 还原、半行允许、重复 id 取首条）；
 //   - ProxyURL：沿用 RestoreURLUserinfo 的同源还原规则；
-//   - DownloadDir：空提交沿用 stored（PATCH 语义），env 生效时同样保留 stored。
+//   - DownloadDir：空提交沿用 stored（PATCH 语义），env 生效时同样保留 stored（即使 stored 为空，
+//     也不把 OPEN_XDOWNLOAD_DOWNLOAD_DIR 环境变量值写入 SQLite）。
 //
 // 返回值恒为 nil error：保留 error 供将来真正不可恢复的错误使用，调用方的 400 映射可保留。
 func ResolveSubmission(submitted, stored AppConfig) (AppConfig, error) {
 	overrides := EnvOverrides()
 
-	if overrides["DownloadDir"] || strings.TrimSpace(submitted.DownloadDir) == "" {
-		submitted.DownloadDir = stored.DownloadDir
+	storedDownloadDir := strings.TrimSpace(stored.DownloadDir)
+	submitted.DownloadDir = strings.TrimSpace(submitted.DownloadDir)
+	preserveEmptyDownloadDir := false
+	if overrides["DownloadDir"] || submitted.DownloadDir == "" {
+		submitted.DownloadDir = storedDownloadDir
+		preserveEmptyDownloadDir = overrides["DownloadDir"] && storedDownloadDir == ""
 	}
 	if overrides["AuthToken"] {
 		submitted.AuthToken = stored.AuthToken
@@ -456,7 +463,11 @@ func ResolveSubmission(submitted, stored AppConfig) (AppConfig, error) {
 	} else {
 		submitted.AdditionalCookies = RestoreAdditionalCookies(submitted.AdditionalCookies, stored.AdditionalCookies)
 	}
-	return submitted.Normalized(), nil
+	resolved := submitted.Normalized()
+	if preserveEmptyDownloadDir {
+		resolved.DownloadDir = ""
+	}
+	return resolved, nil
 }
 
 // ParseCookiePairs parses cookie pairs from JSON or text representations.
@@ -476,16 +487,16 @@ func ParseCookiePairs(raw string) []AuthCookie {
 	if json.Unmarshal([]byte(raw), &decoded) == nil {
 		pairs := make([]AuthCookie, 0, len(decoded))
 		for _, item := range decoded {
-			auth := item.AuthToken
+			auth := strings.TrimSpace(item.AuthToken)
 			if auth == "" {
-				auth = item.AuthToken2
+				auth = strings.TrimSpace(item.AuthToken2)
 			}
-			csrf := item.CSRFToken
+			csrf := strings.TrimSpace(item.CSRFToken)
 			if csrf == "" {
-				csrf = item.CT0
+				csrf = strings.TrimSpace(item.CT0)
 			}
 			if auth != "" || csrf != "" {
-				pairs = append(pairs, AuthCookie{ID: strings.TrimSpace(item.ID), AuthToken: strings.TrimSpace(auth), CSRFToken: strings.TrimSpace(csrf)})
+				pairs = append(pairs, AuthCookie{ID: strings.TrimSpace(item.ID), AuthToken: auth, CSRFToken: csrf})
 			}
 		}
 		if len(pairs) > 0 {
@@ -493,16 +504,18 @@ func ParseCookiePairs(raw string) []AuthCookie {
 		}
 	}
 	var single cookieJSON
-	if json.Unmarshal([]byte(raw), &single) == nil && (single.AuthToken != "" || single.AuthToken2 != "" || single.CSRFToken != "" || single.CT0 != "") {
-		auth := single.AuthToken
+	if json.Unmarshal([]byte(raw), &single) == nil {
+		auth := strings.TrimSpace(single.AuthToken)
 		if auth == "" {
-			auth = single.AuthToken2
+			auth = strings.TrimSpace(single.AuthToken2)
 		}
-		csrf := single.CSRFToken
+		csrf := strings.TrimSpace(single.CSRFToken)
 		if csrf == "" {
-			csrf = single.CT0
+			csrf = strings.TrimSpace(single.CT0)
 		}
-		return []AuthCookie{{ID: strings.TrimSpace(single.ID), AuthToken: strings.TrimSpace(auth), CSRFToken: strings.TrimSpace(csrf)}}
+		if auth != "" || csrf != "" {
+			return []AuthCookie{{ID: strings.TrimSpace(single.ID), AuthToken: auth, CSRFToken: csrf}}
+		}
 	}
 	blocks := strings.Split(raw, "\n")
 	pairs := make([]AuthCookie, 0, len(blocks))
@@ -514,25 +527,33 @@ func ParseCookiePairs(raw string) []AuthCookie {
 		current = AuthCookie{}
 	}
 	for _, line := range blocks {
+		line = strings.TrimSpace(line)
 		line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
 		if line == "" {
 			flush()
 			continue
 		}
-		// 形如 "auth_token: xxx" 的 YAML/冒号行：整行按 key: value 解析；行内含 ;/, 时
-		// 落入下面的 token 分解，避免把 "auth_token=a; ct0=b" 里的 ":" 误当分隔符。
-		if strings.Contains(line, ":") && !strings.ContainsAny(line, ";,") {
-			if setAuthCookieValue(&current, line) {
-				if current.AuthToken != "" && current.CSRFToken != "" {
-					flush()
+		segments := strings.FieldsFunc(line, func(r rune) bool {
+			return r == ';' || r == ','
+		})
+		for _, seg := range segments {
+			seg = strings.TrimSpace(seg)
+			if seg == "" {
+				continue
+			}
+			if tabParts := splitTabsIfMultiPair(seg); len(tabParts) > 1 {
+				for _, part := range tabParts {
+					setAuthCookieValue(&current, part)
 				}
 				continue
 			}
-		}
-		for _, token := range strings.FieldsFunc(line, func(r rune) bool {
-			return r == ';' || r == ',' || r == ' '
-		}) {
-			setAuthCookieValue(&current, token)
+			if fields := strings.Fields(seg); countPairFields(fields) >= 2 {
+				for _, field := range fields {
+					setAuthCookieValue(&current, field)
+				}
+				continue
+			}
+			setAuthCookieValue(&current, seg)
 		}
 		if current.AuthToken != "" && current.CSRFToken != "" {
 			flush()
@@ -542,20 +563,87 @@ func ParseCookiePairs(raw string) []AuthCookie {
 	return pairs
 }
 
-func withCookieIDs(pairs []AuthCookie) []AuthCookie {
-	for index := range pairs {
-		if strings.TrimSpace(pairs[index].ID) == "" {
-			pairs[index].ID = fmt.Sprintf("cookie-%d", index)
+func splitTabsIfMultiPair(seg string) []string {
+	if !strings.Contains(seg, "\t") {
+		return nil
+	}
+	parts := strings.Split(seg, "\t")
+	pairCount := 0
+	for _, part := range parts {
+		if _, _, ok := cutEarliestCookieSep(strings.TrimSpace(part)); ok {
+			pairCount++
 		}
+	}
+	if pairCount >= 2 {
+		return parts
+	}
+	return nil
+}
+
+func countPairFields(fields []string) int {
+	count := 0
+	for _, field := range fields {
+		key, val, ok := cutEarliestCookieSep(field)
+		if ok && strings.TrimSpace(key) != "" && strings.TrimSpace(val) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func cutEarliestCookieSep(raw string) (string, string, bool) {
+	eqIdx := strings.IndexByte(raw, '=')
+	colonIdx := strings.IndexByte(raw, ':')
+	sepIdx := -1
+	switch {
+	case eqIdx >= 0 && colonIdx >= 0:
+		if eqIdx < colonIdx {
+			sepIdx = eqIdx
+		} else {
+			sepIdx = colonIdx
+		}
+	case eqIdx >= 0:
+		sepIdx = eqIdx
+	case colonIdx >= 0:
+		sepIdx = colonIdx
+	default:
+		return "", "", false
+	}
+	return raw[:sepIdx], raw[sepIdx+1:], true
+}
+
+func withCookieIDs(pairs []AuthCookie) []AuthCookie {
+	used := make(map[string]struct{}, len(pairs))
+	for index := range pairs {
+		id := strings.TrimSpace(pairs[index].ID)
+		pairs[index].ID = id
+		if id != "" {
+			used[id] = struct{}{}
+		}
+	}
+	next := 0
+	for index := range pairs {
+		if pairs[index].ID != "" {
+			continue
+		}
+		candidate := fmt.Sprintf("cookie-%d", index)
+		if _, exists := used[candidate]; exists {
+			for {
+				candidate = fmt.Sprintf("cookie-%d", next)
+				next++
+				if _, taken := used[candidate]; !taken {
+					break
+				}
+			}
+		}
+		pairs[index].ID = candidate
+		used[candidate] = struct{}{}
 	}
 	return pairs
 }
 
 func setAuthCookieValue(current *AuthCookie, raw string) bool {
-	key, value, ok := strings.Cut(raw, "=")
-	if !ok {
-		key, value, ok = strings.Cut(raw, ":")
-	}
+	key, value, ok := cutEarliestCookieSep(raw)
 	if !ok {
 		return false
 	}
@@ -586,12 +674,30 @@ func RedactURLUserinfo(rawURL string) string {
 		return ""
 	}
 	u, err := url.Parse(rawURL)
-	if err != nil || u.User == nil || u.Scheme == "" {
+	if err != nil {
+		if !strings.Contains(rawURL, "@") {
+			return rawURL
+		}
+		if redacted, ok := redactUnparseableCredentialedURL(rawURL); ok {
+			return redacted
+		}
+		return SecretPlaceholder
+	}
+	if u.User == nil {
+		if u.Opaque != "" && strings.Contains(u.Opaque, "@") {
+			return SecretPlaceholder
+		}
 		return rawURL
 	}
 	var b strings.Builder
-	b.WriteString(u.Scheme)
-	b.WriteString("://")
+	if u.Scheme != "" {
+		b.WriteString(u.Scheme)
+		b.WriteString("://")
+	} else if strings.HasPrefix(rawURL, "//") {
+		b.WriteString("//")
+	} else {
+		return SecretPlaceholder
+	}
 	b.WriteString(SecretPlaceholder)
 	b.WriteString("@")
 	b.WriteString(u.Host)
@@ -609,6 +715,34 @@ func RedactURLUserinfo(rawURL string) string {
 	return b.String()
 }
 
+func redactUnparseableCredentialedURL(rawURL string) (string, bool) {
+	prefix := ""
+	rest := ""
+	if idx := strings.Index(rawURL, "://"); idx > 0 && !strings.ContainsAny(rawURL[:idx], "/?#@ \t\r\n") {
+		prefix = rawURL[:idx+3]
+		rest = rawURL[idx+3:]
+	} else if strings.HasPrefix(rawURL, "//") {
+		prefix = "//"
+		rest = rawURL[2:]
+	} else {
+		return "", false
+	}
+	authEnd := strings.IndexAny(rest, "/?#")
+	if authEnd < 0 {
+		authEnd = len(rest)
+	}
+	auth := rest[:authEnd]
+	at := strings.LastIndex(auth, "@")
+	if at < 0 {
+		return "", false
+	}
+	candidate := prefix + SecretPlaceholder + "@" + rest[at+1:]
+	if parsed, err := url.Parse(candidate); err == nil && parsed.User != nil && parsed.User.Username() == SecretPlaceholder {
+		return candidate, true
+	}
+	return "", false
+}
+
 // SameURLAuthority reports whether two URLs point at the same scheme/host/port.
 // It intentionally ignores path/query so a user can edit the URL path on the
 // same server without losing saved credentials.
@@ -622,29 +756,31 @@ func SameURLAuthority(a, b string) bool {
 		return false
 	}
 	return au.Scheme != "" &&
+		au.Hostname() != "" &&
+		bu.Hostname() != "" &&
 		strings.EqualFold(au.Scheme, bu.Scheme) &&
 		strings.EqualFold(normalizeHost(au), normalizeHost(bu))
 }
 
 // normalizeHost 规范化 URL 的 Host：去掉与 scheme 对应的默认端口，
-// 使 "http://proxy:80" 和 "http://proxy" 被视为同一 authority。
+// 使 "http://proxy:80" 和 "http://proxy"、"[::1]:443" 和 "[::1]" 被视为同一 authority。
 func normalizeHost(u *url.URL) string {
-	host := u.Host
+	hostname := u.Hostname()
 	port := u.Port()
 	if port == "" {
-		return host
+		return hostname
 	}
 	switch {
 	case strings.EqualFold(u.Scheme, "http") && port == "80":
-		return u.Hostname()
+		return hostname
 	case strings.EqualFold(u.Scheme, "https") && port == "443":
-		return u.Hostname()
+		return hostname
 	case strings.EqualFold(u.Scheme, "socks5") && port == "1080":
-		return u.Hostname()
+		return hostname
 	case strings.EqualFold(u.Scheme, "socks5h") && port == "1080":
-		return u.Hostname()
+		return hostname
 	}
-	return host
+	return net.JoinHostPort(hostname, port)
 }
 
 // RestoreURLUserinfo reverses RedactURLUserinfo when a redacted config is
@@ -657,18 +793,52 @@ func RestoreURLUserinfo(redacted, stored string) string {
 	if redacted == "" {
 		return ""
 	}
+	if redacted == SecretPlaceholder {
+		if stored != "" && RedactURLUserinfo(stored) == SecretPlaceholder {
+			return stored
+		}
+		return ""
+	}
+	if stored != "" && redacted == RedactURLUserinfo(stored) {
+		return stored
+	}
 	ru, err := url.Parse(redacted)
 	if err != nil || ru.User == nil {
 		return redacted
 	}
-	if ru.User.Username() != SecretPlaceholder {
+	user := ru.User.Username()
+	pass, hasPass := ru.User.Password()
+	userMasked := user == SecretPlaceholder
+	passMasked := hasPass && pass == SecretPlaceholder
+	if !userMasked && !passMasked {
 		return redacted
 	}
+
 	su, err := url.Parse(stored)
-	if err != nil || su.User == nil || !SameURLAuthority(redacted, stored) {
-		ru.User = nil
+	sameStored := err == nil && su.User != nil && SameURLAuthority(redacted, stored)
+	if !sameStored {
+		if userMasked {
+			ru.User = nil
+		} else {
+			ru.User = url.User(user)
+		}
 		return ru.String()
 	}
-	ru.User = su.User
+
+	storedUser := su.User.Username()
+	storedPass, storedHasPass := su.User.Password()
+	if userMasked && (!hasPass || passMasked) {
+		ru.User = su.User
+		return ru.String()
+	}
+	if userMasked {
+		ru.User = url.UserPassword(storedUser, pass)
+		return ru.String()
+	}
+	if storedHasPass {
+		ru.User = url.UserPassword(user, storedPass)
+	} else {
+		ru.User = url.User(user)
+	}
 	return ru.String()
 }

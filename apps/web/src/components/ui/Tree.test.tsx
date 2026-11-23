@@ -95,7 +95,7 @@ describe("Tree", () => {
   });
 
   it("叶子节点不暴露 aria-expanded", () => {
-    render(<Harness initial={twoRoots} />);
+    render(<Harness initial={twoRoots} loadChildren={() => {}} />);
     const items = screen.getAllByRole("treeitem");
     expect(items[0].getAttribute("aria-expanded")).toBe("false");
     expect(items[1].hasAttribute("aria-expanded")).toBe(false);
@@ -154,5 +154,31 @@ describe("Tree", () => {
     screen.getAllByRole("treeitem")[0].focus();
     await user.keyboard("{Enter}");
     expect(screen.getAllByRole("treeitem")[0].getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("treats implicit leaves (children: []) as non-expandable leaves", async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={[{ key: "empty", title: "empty", children: [] }]} />);
+    const item = screen.getByRole("treeitem");
+    expect(item.hasAttribute("aria-expanded")).toBe(false);
+    item.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(item.hasAttribute("aria-expanded")).toBe(false);
+  });
+
+  it("deduplicates concurrent loadChildren calls and does not expand on rejection", async () => {
+    const user = userEvent.setup();
+    let rejectLoad!: (err: Error) => void;
+    const loadChildren = vi.fn(() => new Promise<void>((_, reject) => { rejectLoad = reject; }));
+    const onLoadError = vi.fn();
+    render(<Harness initial={[{ key: "a", title: "a" }]} loadChildren={loadChildren} onLoadError={onLoadError} />);
+    const item = screen.getByRole("treeitem");
+    item.focus();
+    await user.keyboard("{ArrowRight}");
+    await user.keyboard("{ArrowRight}");
+    expect(loadChildren).toHaveBeenCalledTimes(1);
+    await act(async () => rejectLoad(new Error("boom")));
+    await waitFor(() => expect(onLoadError).toHaveBeenCalledTimes(1));
+    expect(item.getAttribute("aria-expanded")).toBe("false");
   });
 });

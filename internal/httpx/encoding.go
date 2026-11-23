@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"math"
 	"strconv"
 	"strings"
 )
@@ -23,7 +24,11 @@ func NegotiateEncoding(acceptEncoding string, supported ...string) string {
 	accepted := parseAcceptEncoding(acceptEncoding)
 	star := accepted["*"]
 	for _, encoding := range supported {
-		if allowed, ok := accepted[encoding]; ok {
+		key := strings.ToLower(strings.TrimSpace(encoding))
+		if key == "" {
+			continue
+		}
+		if allowed, ok := accepted[key]; ok {
 			if allowed {
 				return encoding
 			}
@@ -66,7 +71,7 @@ func parseQuality(parameter string) float64 {
 			continue
 		}
 		value, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-		if err != nil || value < 0 || value > 1 {
+		if err != nil || math.IsNaN(value) || value < 0 || value > 1 {
 			return 1.0
 		}
 		return value

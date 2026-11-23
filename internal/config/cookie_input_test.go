@@ -162,3 +162,86 @@ func TestParseCookieInputEmpty(t *testing.T) {
 		t.Fatalf("blank input = %+v %+v", inputs, issues)
 	}
 }
+
+func TestParseCookieInputRejectsFallthroughAndControlChars(t *testing.T) {
+	// 2-cookie header missing auth_token/ct0 must not fall through to bare-pair parsing.
+	inputs, issues := ParseCookieInput("guest_id=123; lang=en")
+	if len(inputs) != 0 || len(issues) != 1 {
+		t.Fatalf("2-cookie non-auth header parsed as credentials: inputs=%+v issues=%+v", inputs, issues)
+	}
+
+	// Single YAML line must not fall through to bare-pair parsing.
+	for _, line := range []string{"auth_token: abc123", "foo: bar"} {
+		inputs, issues = ParseCookieInput(line)
+		if len(inputs) != 0 || len(issues) != 1 {
+			t.Fatalf("YAML line %q fell through: inputs=%+v issues=%+v", line, inputs, issues)
+		}
+	}
+
+	// Bare pair containing semicolon must be rejected, not truncated.
+	inputs, issues = ParseCookieInput("at;injected ct0val")
+	if len(inputs) != 0 || len(issues) != 1 {
+		t.Fatalf("bare pair with semicolon not rejected: inputs=%+v issues=%+v", inputs, issues)
+	}
+
+	// Comma-separated key=value pairs should parse cleanly.
+	inputs, issues = ParseCookieInput("auth_token=at-comma, ct0=ct-comma")
+	if len(issues) != 0 || len(inputs) != 1 || inputs[0].AuthToken != "at-comma" || inputs[0].CSRFToken != "ct-comma" {
+		t.Fatalf("comma-separated key=value failed: inputs=%+v issues=%+v", inputs, issues)
+	}
+
+	// Control chars rejected in auth_token/ct0 and dropped from Extra.
+	inputs, issues = ParseCookieInput(`{"auth_token":"at\u0007bad","ct0":"ct"}`)
+	if len(inputs) != 0 || len(issues) != 1 {
+		t.Fatalf("control char in auth_token not rejected: inputs=%+v issues=%+v", inputs, issues)
+	}
+	inputs, issues = ParseCookieInput(`{"auth_token":"at","ct0":"ct","good":"ok","ctrl":"a\u007fb","tab":"a\tb"}`)
+	if len(issues) != 0 || len(inputs) != 1 {
+		t.Fatalf("unexpected issues: %+v", issues)
+	}
+	if _, hasCtrl := inputs[0].Extra["ctrl"]; hasCtrl {
+		t.Fatalf("DEL char kept in Extra: %+v", inputs[0].Extra)
+	}
+	if _, hasTab := inputs[0].Extra["tab"]; hasTab {
+		t.Fatalf("TAB char kept in Extra: %+v", inputs[0].Extra)
+	}
+	if inputs[0].Extra["good"] != "ok" {
+		t.Fatalf("expected valid extra kept: %+v", inputs[0].Extra)
+	}
+}
+
+func TestParseCookieInputSkipsAccountMetadataAndFiltersExtensionDomain(t *testing.T) {
+	accountJSON := `{
+		"id":"acc-1","label":"main","name":"n","note":"memo","proxy":"http://p:1",
+		"userAgent":"UA","source":"ui","active":"true","isPrimary":"true",
+		"errorMsg":"","locks":"none","screenName":"alice",
+		"auth_token":"at-1","ct0":"ct-1","guest_id":"g1"
+	}`
+	inputs, issues := ParseCookieInput(accountJSON)
+	if len(issues) != 0 || len(inputs) != 1 {
+		t.Fatalf("inputs=%+v issues=%+v", inputs, issues)
+	}
+	wantExtra := map[string]string{"guest_id": "g1"}
+	if !reflect.DeepEqual(inputs[0].Extra, wantExtra) {
+		t.Fatalf("metadata leaked into Extra: %+v, want %+v", inputs[0].Extra, wantExtra)
+	}
+
+	extJSON := `[
+		{"name":"auth_token","value":"evil-at","domain":"evil.com"},
+		{"name":"ct0","value":"evil-ct","domain":"notx.com"},
+		{"name":"auth_token","value":"real-at","domain":".x.com"},
+		{"name":"ct0","value":"real-ct","domain":"api.twitter.com"},
+		{"name":"guest_id","value":"g2","domain":"twitter.com"},
+		{"name":"other","value":"drop","domain":"google.com"}
+	]`
+	inputs, issues = ParseCookieInput(extJSON)
+	if len(issues) != 0 || len(inputs) != 1 {
+		t.Fatalf("extension domain filter failed: inputs=%+v issues=%+v", inputs, issues)
+	}
+	if inputs[0].AuthToken != "real-at" || inputs[0].CSRFToken != "real-ct" {
+		t.Fatalf("wrong tokens selected: %+v", inputs[0])
+	}
+	if !reflect.DeepEqual(inputs[0].Extra, map[string]string{"guest_id": "g2"}) {
+		t.Fatalf("wrong Extra after domain filter: %+v", inputs[0].Extra)
+	}
+}

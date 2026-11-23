@@ -19,6 +19,11 @@ const requestTimeout = 90 * time.Second
 // maxResponseBytes 是响应体上限，与 legacy 一致。
 const maxResponseBytes = 32 << 20
 
+// tidGenerateWaitTimeout 限制单次请求等待可选 x-client-transaction-id 的上限，
+// 防止首次初始化抓取首页/脚本挂起时耗尽 GraphQL 或 CheckAll（20s）超时预算。
+// xtid 内部仍使用 context.WithoutCancel 在后台完成初始化并进入缓存或失败退避。
+var tidGenerateWaitTimeout = 10 * time.Second
+
 var errFetchGuestToken = errors.New("获取 X guest token 失败")
 
 func newHTTPClient(transport http.RoundTripper) *http.Client {
@@ -80,7 +85,13 @@ func (e *Engine) applyTransactionID(ctx context.Context, request *http.Request, 
 	if generator == nil {
 		return
 	}
-	transactionID, err := generator.Generate(ctx, method, path)
+	tidCtx := ctx
+	var cancel context.CancelFunc
+	if tidGenerateWaitTimeout > 0 {
+		tidCtx, cancel = context.WithTimeout(ctx, tidGenerateWaitTimeout)
+		defer cancel()
+	}
+	transactionID, err := generator.Generate(tidCtx, method, path)
 	if err != nil {
 		e.logs.printf("xtid", 5*time.Minute, "xscrape: 生成 x-client-transaction-id 失败，本次请求省略该头: %v", err)
 		return
@@ -112,16 +123,23 @@ func (e *Engine) invalidateTransactionIDs() {
 }
 
 func doRequest(client *http.Client, request *http.Request) *response {
+	return doRequestLimited(client, request, maxResponseBytes)
+}
+
+func doRequestLimited(client *http.Client, request *http.Request, maxBytes int64) *response {
 	reply, err := client.Do(request)
 	if err != nil {
 		return &response{err: err}
 	}
 	defer reply.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(reply.Body, maxResponseBytes+1))
+	if maxBytes <= 0 {
+		maxBytes = maxResponseBytes
+	}
+	payload, err := io.ReadAll(io.LimitReader(reply.Body, maxBytes+1))
 	if err != nil {
 		return &response{err: err}
 	}
-	if len(payload) > maxResponseBytes {
+	if int64(len(payload)) > maxBytes {
 		return &response{err: httpx.ErrBodyTooLarge}
 	}
 	return &response{status: reply.StatusCode, header: reply.Header, payload: payload}
