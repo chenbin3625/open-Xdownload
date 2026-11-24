@@ -38,14 +38,19 @@ const (
 // builtinQueryIDs 是内置表。环境变量覆盖优先于发现结果，发现结果优先于这里；
 // 环境变量只覆盖 TweetResultByRestId 和 UserTweets（由 xapi 的 Path 函数处理）。
 var builtinQueryIDs = map[string]string{
-	"UserMedia":           xapi.GraphQLQueryIDs.UserMedia,
-	"UserByRestId":        xapi.GraphQLQueryIDs.UserByRestId,
-	"UserByScreenName":    xapi.GraphQLQueryIDs.UserByScreenName,
-	"ListByRestId":        xapi.GraphQLQueryIDs.ListByRestId,
-	"ListMembers":         xapi.GraphQLQueryIDs.ListMembers,
-	"Following":           xapi.GraphQLQueryIDs.Following,
-	"UserTweets":          "jiF1DduqwzFSPmvRffg82g",
-	"TweetResultByRestId": "m6saLeawhcvnYmZi1Zzgmw",
+	"UserMedia":              xapi.GraphQLQueryIDs.UserMedia,
+	"UserByRestId":           xapi.GraphQLQueryIDs.UserByRestId,
+	"UserByScreenName":       xapi.GraphQLQueryIDs.UserByScreenName,
+	"ListByRestId":           xapi.GraphQLQueryIDs.ListByRestId,
+	"ListMembers":            xapi.GraphQLQueryIDs.ListMembers,
+	"Following":              xapi.GraphQLQueryIDs.Following,
+	"Bookmarks":              xapi.GraphQLQueryIDs.Bookmarks,
+	"BookmarkFolderTimeline": xapi.GraphQLQueryIDs.BookmarkFolderTimeline,
+	"Likes":                  xapi.GraphQLQueryIDs.Likes,
+	"TweetDetail":            xapi.GraphQLQueryIDs.TweetDetail,
+	"SearchTimeline":         xapi.GraphQLQueryIDs.SearchTimeline,
+	"UserTweets":             "jiF1DduqwzFSPmvRffg82g",
+	"TweetResultByRestId":    "m6saLeawhcvnYmZi1Zzgmw",
 }
 
 // queryIDTable 保存自动发现的 queryId。读路径只加锁查表；发现是后台/单飞任务。

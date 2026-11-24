@@ -88,11 +88,21 @@ describe("AppHeader", () => {
     expect(screen.queryByText(/运行中/)).toBeNull();
   });
 
-  it("不再提供主题或强调色切换入口", () => {
+  it("支持深浅色外观切换且不提供强调色选择器", async () => {
+    const user = userEvent.setup();
+    localStorage.removeItem("open-xdownload-theme");
+    document.body.removeAttribute("theme-mode");
     render(<AppHeader {...baseProps} />);
 
-    expect(screen.queryByRole("button", { name: "切换主题" })).toBeNull();
     expect(screen.queryByRole("button", { name: "选择主题强调色" })).toBeNull();
+    const toggle = screen.getByRole("button", { name: /切换外观/ });
+    await user.click(toggle); // system -> light
+    expect(document.body.getAttribute("theme-mode")).toBeNull();
+    await user.click(toggle); // light -> dark
+    expect(document.body.getAttribute("theme-mode")).toBe("dark");
+    await user.click(toggle); // dark -> system
+    localStorage.removeItem("open-xdownload-theme");
+    document.body.removeAttribute("theme-mode");
   });
 
   it("SSE 断开时显示提示且点击可重连", async () => {

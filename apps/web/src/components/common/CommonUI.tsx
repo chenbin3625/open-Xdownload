@@ -1,5 +1,5 @@
 import i18n, { t, useTranslation } from "../../lib/i18n";
-import { Check, Copy, FolderSync, HelpCircle, Image as ImageIcon, Link as LinkIcon, List as ListIcon, RotateCcw, User, UserPlus, type LucideIcon } from "lucide-react";
+import { Bookmark, Check, Copy, FolderSync, Heart, HelpCircle, Image as ImageIcon, Link as LinkIcon, List as ListIcon, MessageSquareText, RotateCcw, Search, User, UserPlus, type LucideIcon } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import type { JobKind } from "../../lib/api";
 import { cn } from "../../lib/cn";
@@ -305,6 +305,10 @@ const jobKindIcons: Record<string, LucideIcon> = {
   user: User,
   list: ListIcon,
   following: UserPlus,
+  bookmarks: Bookmark,
+  likes: Heart,
+  thread: MessageSquareText,
+  search: Search,
   failed_retry: RotateCcw,
   asset_migration: FolderSync,
 };
@@ -322,6 +326,10 @@ export function kindLabel(kind: JobKind) {
     user: t("用户归档"),
     list: t("列表归档"),
     following: t("关注归档"),
+    bookmarks: t("书签归档"),
+    likes: t("点赞归档"),
+    thread: t("长串归档"),
+    search: t("搜索归档"),
     failed_retry: t("失败重试"),
     asset_migration: t("storage.migrationJob"),
   };

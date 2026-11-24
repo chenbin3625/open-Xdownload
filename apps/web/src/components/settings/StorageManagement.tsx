@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Copy, Eye, FolderOpen, HardDrive, RefreshCw, Save } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Eye, FolderOpen, HardDrive, Pencil, Plus, RefreshCw, Save, Server, Trash2 } from "lucide-react";
 import { api, type AssetKind, type TweetData } from "../../lib/api";
-import { getStorage, getTweets, migrateStorage, saveStorage, storageQueryKey, type AssetRule, type StorageDocument } from "../../lib/archive";
+import { getStorage, getTweets, migrateStorage, saveStorage, storageQueryKey, type AssetRule, type StorageDocument, type StorageTarget } from "../../lib/archive";
 import { t, useTranslation } from "../../lib/i18n";
 import { Alert, ListSkeleton } from "../semi/feedback";
-import { Field, Input, Select, Switch } from "../semi/controls";
+import { Field, Input, PasswordInput, Select, Switch } from "../semi/controls";
 import { Modal, Popconfirm, Tooltip } from "../semi/overlays";
 import { Tag } from "../semi/data";
 import { toast } from "../semi/toast";
@@ -53,6 +53,9 @@ export function StorageManagement() {
   const [pickingDirectory, setPickingDirectory] = useState(false);
   const pickingDirectoryRef = useRef(pickingDirectory); pickingDirectoryRef.current = pickingDirectory;
   const [defaultRulesCollapsed, setDefaultRulesCollapsed] = useState(true);
+  const [targetsModalOpen, setTargetsModalOpen] = useState(false);
+  const [editingTarget, setEditingTarget] = useState<StorageTarget | null>(null);
+  const [isNewTarget, setIsNewTarget] = useState(false);
   const tweets = useQuery({ queryKey: ["storage-preview-tweets"], queryFn: ({ signal }) => getTweets(new URLSearchParams({ pageSize: "1" }), signal) });
   useEffect(() => { if (query.data && !dirty) setDraft(query.data); }, [query.data, dirty]);
   useEffect(() => {
@@ -102,7 +105,12 @@ export function StorageManagement() {
   return <section id="settings-storage" className="semi-settings-section storage-settings">
     <div className="settings-section-heading"><h2 className="settings-section-title"><HardDrive size={16} />{t("存储设置")}</h2><div className="flex flex-wrap items-center gap-2">{dirty && <Tag tone="warning">{t("storage.unsaved")}</Tag>}<Button theme="solid" icon={<Save size={16} />} disabled={!dirty || save.isPending} loading={save.isPending} onClick={() => save.mutate(draft)}>{t("保存存储设置")}</Button></div></div>
     <div className="storage-location">
-      <h3 className="settings-subsection-title">{t("storage.location")}</h3>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="settings-subsection-title">{t("storage.location")}</h3>
+        <Button type="tertiary" size="small" icon={<Server size={14} />} onClick={() => { setEditingTarget(null); setTargetsModalOpen(true); }}>
+          {t("管理存储目标")} ({draft.targets.length})
+        </Button>
+      </div>
       <div className={`storage-directory-options ${draft.targets.length > 1 ? "storage-has-targets" : ""}`}>
         {draft.targets.length > 1 && <Field label={t("storage.target")}><Select ariaLabel={t("storage.target")} value={draft.default.targetId} options={draft.targets.map(item => ({ value: item.id, label: item.name || item.id }))} onChange={targetId => { if (targetId !== draft.default.targetId) update({ ...draft, default: { ...draft.default, targetId } }); }} /></Field>}
         <Field label={t("保存目录")}><div className="flex min-w-0 gap-2"><Input aria-label={t("保存目录")} value={target?.type === "s3" ? `s3://${target.bucket ?? ""}` : target?.root ?? ""} disabled={target?.type === "s3"} onChange={event => changeRoot(event.target.value)} />{target?.type !== "s3" && <Tooltip content={t("选择目录")}><Button type="tertiary" icon={<FolderOpen size={16} />} aria-label={t("选择目录")} onClick={openDirectoryPicker} /></Tooltip>}</div></Field>
@@ -126,5 +134,202 @@ export function StorageManagement() {
     </div>
     <div className="storage-migration-row"><div><h3 className="settings-subsection-title">{t("历史文件整理")}</h3><p className="text-xs text-fg-muted">{dirty ? t("请先保存存储设置") : t("storage.sourceRetained")}</p>{migrationId && <a className="text-sm text-brand-600" href="/tasks">{t("查看整理任务")} #{migrationId}</a>}</div><Popconfirm title={t("storage.migrateConfirm")} disabled={!draft.enabled || dirty || migration.isPending} onConfirm={() => { if (!draft.enabled || dirty || migration.isPending) return; migration.mutate(); }}><Button type="tertiary" disabled={!draft.enabled || dirty || migration.isPending} loading={migration.isPending} icon={<RefreshCw size={16} />}>{t("storage.migrate")}</Button></Popconfirm></div>
     <Modal open={pickingDirectory} onClose={() => setPickingDirectory(false)} title={t("选择目录")} footer={null}><LocalDirectoryPicker path={target?.root ?? ""} onSelect={root => { if (!pickingDirectoryRef.current) return; changeRoot(root); setPickingDirectory(false); }} /></Modal>
+    <Modal
+      open={targetsModalOpen}
+      onClose={() => { setEditingTarget(null); setTargetsModalOpen(false); }}
+      title={t("多存储目标管理 (Local / NAS / S3)")}
+      width="min(92vw, 42rem)"
+    >
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-fg-muted">{t("可配置多个本地目录、NAS 挂载路径或 S3/R2/MinIO 对象存储，配置完成后请点击外层“保存存储设置”。")}</span>
+          <Button
+            size="small"
+            theme="solid"
+            icon={<Plus size={14} />}
+            onClick={() => {
+              setIsNewTarget(true);
+              setEditingTarget({
+                id: `target-${draft.targets.length + 1}`,
+                name: "",
+                type: "s3",
+                version: 1,
+                root: "",
+                endpoint: "",
+                region: "auto",
+                bucket: "",
+                accessKey: "",
+                secretKey: "",
+                accessKeyEnv: "",
+                secretKeyEnv: "",
+              });
+            }}
+          >
+            {t("新增存储目标")}
+          </Button>
+        </div>
+
+        <div className="divide-y divide-line rounded-card border border-line">
+          {draft.targets.map((item) => {
+            const inUse = draft.default.targetId === item.id || Object.values(draft.rules).some((r) => r?.targetId === item.id);
+            return (
+              <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-xs">
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-fg">{item.name || item.id}</span>
+                    <Tag size="sm">{item.type.toUpperCase()}</Tag>
+                    <code className="text-fg-subtle">{item.id}</code>
+                    {inUse && <Tag tone="brand" size="sm">{t("使用中")}</Tag>}
+                  </div>
+                  <div className="truncate font-mono text-fg-muted">
+                    {item.type === "s3" ? `s3://${item.bucket ?? ""} (${item.endpoint || item.region || "default"})` : item.root || "—"}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button
+                    size="small"
+                    theme="borderless"
+                    type="tertiary"
+                    icon={<Pencil size={14} />}
+                    aria-label={`${t("编辑存储目标")} ${item.name || item.id}`}
+                    onClick={() => { setIsNewTarget(false); setEditingTarget({ ...item }); }}
+                  />
+                  {!inUse && draft.targets.length > 1 && (
+                    <Button
+                      size="small"
+                      theme="borderless"
+                      type="danger"
+                      icon={<Trash2 size={14} />}
+                      aria-label={`${t("移除存储目标")} ${item.name || item.id}`}
+                      onClick={() => update({ ...draft, targets: draft.targets.filter((tItem) => tItem.id !== item.id) })}
+                    />
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {editingTarget && (
+          <div className="rounded-card border border-line bg-surface-muted/40 p-3.5 space-y-3">
+            <div className="text-sm font-semibold text-fg">{isNewTarget ? t("新增存储目标") : t("编辑存储目标")}</div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Field label={t("目标 ID")}>
+                <Input
+                  value={editingTarget.id}
+                  disabled={!isNewTarget}
+                  onChange={(e) => setEditingTarget({ ...editingTarget, id: e.target.value })}
+                  placeholder="s3-archive"
+                />
+              </Field>
+              <Field label={t("显示名称")}>
+                <Input
+                  value={editingTarget.name}
+                  onChange={(e) => setEditingTarget({ ...editingTarget, name: e.target.value })}
+                  placeholder={t("例如：Cloudflare R2")}
+                />
+              </Field>
+              <Field label={t("存储类型")}>
+                <Select
+                  ariaLabel={t("存储类型")}
+                  value={editingTarget.type}
+                  onChange={(type) => setEditingTarget({ ...editingTarget, type: type as StorageTarget["type"] })}
+                  options={[
+                    { value: "local", label: t("本地磁盘 (Local)") },
+                    { value: "nas", label: t("网络存储 (NAS)") },
+                    { value: "s3", label: t("对象存储 (S3 / R2 / MinIO)") },
+                  ]}
+                />
+              </Field>
+            </div>
+            {editingTarget.type === "s3" ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label={t("S3 Endpoint")}>
+                  <Input
+                    value={editingTarget.endpoint ?? ""}
+                    onChange={(e) => setEditingTarget({ ...editingTarget, endpoint: e.target.value })}
+                    placeholder="https://<account>.r2.cloudflarestorage.com"
+                  />
+                </Field>
+                <Field label={t("Bucket 名称")}>
+                  <Input
+                    value={editingTarget.bucket ?? ""}
+                    onChange={(e) => setEditingTarget({ ...editingTarget, bucket: e.target.value })}
+                    placeholder="x-archive"
+                  />
+                </Field>
+                <Field label={t("Region")}>
+                  <Input
+                    value={editingTarget.region ?? ""}
+                    onChange={(e) => setEditingTarget({ ...editingTarget, region: e.target.value })}
+                    placeholder="auto / us-east-1"
+                  />
+                </Field>
+                <Field label={t("Access Key")}>
+                  <Input
+                    value={editingTarget.accessKey ?? ""}
+                    onChange={(e) => setEditingTarget({ ...editingTarget, accessKey: e.target.value })}
+                    placeholder={t("或通过下方环境变量提供")}
+                  />
+                </Field>
+                <Field label={t("Secret Key")}>
+                  <PasswordInput
+                    value={editingTarget.secretKey ?? ""}
+                    onChange={(e) => setEditingTarget({ ...editingTarget, secretKey: e.target.value })}
+                    placeholder={t("或通过下方环境变量提供")}
+                  />
+                </Field>
+                <Field label={t("凭证环境变量名 (可选，Access / Secret)")}>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Input
+                      value={editingTarget.accessKeyEnv ?? ""}
+                      onChange={(e) => setEditingTarget({ ...editingTarget, accessKeyEnv: e.target.value })}
+                      placeholder="AWS_ACCESS_KEY_ID"
+                    />
+                    <Input
+                      value={editingTarget.secretKeyEnv ?? ""}
+                      onChange={(e) => setEditingTarget({ ...editingTarget, secretKeyEnv: e.target.value })}
+                      placeholder="AWS_SECRET_ACCESS_KEY"
+                    />
+                  </div>
+                </Field>
+              </div>
+            ) : (
+              <Field label={t("根目录路径")}>
+                <Input
+                  value={editingTarget.root ?? ""}
+                  onChange={(e) => setEditingTarget({ ...editingTarget, root: e.target.value })}
+                  placeholder="/mnt/nas/x-archive"
+                />
+              </Field>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button size="small" type="tertiary" onClick={() => setEditingTarget(null)}>{t("取消")}</Button>
+              <Button
+                size="small"
+                theme="solid"
+                disabled={!editingTarget.id.trim() || (editingTarget.type === "s3" ? !editingTarget.bucket?.trim() : !editingTarget.root?.trim())}
+                onClick={() => {
+                  const id = editingTarget.id.trim();
+                  const nextTarget: StorageTarget = { ...editingTarget, id, name: editingTarget.name.trim() || id };
+                  const exists = draft.targets.some((item) => item.id === id);
+                  if (isNewTarget && exists) {
+                    toast.error({ message: t("目标 ID 已存在") });
+                    return;
+                  }
+                  const nextTargets = exists
+                    ? draft.targets.map((item) => (item.id === id ? nextTarget : item))
+                    : [...draft.targets, nextTarget];
+                  update({ ...draft, targets: nextTargets });
+                  setEditingTarget(null);
+                }}
+              >
+                {t("应用目标变更")}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Modal>
   </section>;
 }

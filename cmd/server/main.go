@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/chenbin3625/open-Xdownload/internal/httpapi"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
+	"github.com/chenbin3625/open-Xdownload/internal/notify"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 )
@@ -125,11 +127,29 @@ func run() int {
 	}()
 
 	eventBus := jobs.NewEventBus()
+	notifier := notify.NewDispatcher(store)
+	defer notifier.Close()
 	resolver := parser.NewService()
 	manager := jobs.NewManager(store, resolver, eventBus)
+	manager.SetNotifier(notifier)
 	// 账号检测始终用 xscrape 引擎的探测（独立的账号接口，不碰生产池）；数据源工厂
 	// 默认就是 xscrape，只有显式 legacy 才保留 Manager 的 xclient 工厂。
 	engine := newXScrapeEngine(store)
+	engine.SetOnAccountDeactivated(func(accountID int64, screenName, reason string) {
+		label := screenName
+		if label == "" {
+			label = "#" + strconv.FormatInt(accountID, 10)
+		} else {
+			label = "@" + label
+		}
+		notifier.Emit(notify.Event{
+			Type:     "account.disabled",
+			Title:    "X 账号已自动停用：" + label,
+			Message:  reason,
+			Severity: "error",
+			Data:     map[string]any{"accountId": accountID, "screenName": screenName, "reason": reason},
+		})
+	})
 	if jobs.ScraperMode() == jobs.ScraperLegacy {
 		log.Printf("x: 数据源 legacy（xclient），已显式设置 %s=legacy", jobs.EnvScraper)
 	} else {
@@ -152,6 +172,7 @@ func run() int {
 	defer ln.Close()
 	boundAddr := ln.Addr().String()
 	api := httpapi.NewServer(store, resolver, manager, eventBus)
+	api.SetNotifier(notifier)
 	if prober := homeProber(engine); prober != nil {
 		api.SetHomeProber(prober)
 	}

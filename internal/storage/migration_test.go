@@ -816,6 +816,58 @@ func init() {
 	// 避免每完成一个用户就重写整张任务表。
 	schemaColumnsForVersion[14] = strings.Replace(schemaColumnsForVersion[13],
 		";job_checkpoints(", ";job_checkpoint_tasks(job_id,payload,updated_at);job_checkpoints(", 1)
+
+	// v15 新增 FTS5、互动指标与星标、过滤规则、Cron 定时、个人 API Token、Webhook、标签/合集与头像缓存。
+	schemaColumnsForVersion[15] = "api_tokens(created_at,expires_at,id,last_used_at,name,scopes,token_hash,token_prefix);" +
+		"app_account(id,password_hash,session_key,username);" +
+		"app_config(additional_cookies,archive_filter_json,auth_token,auto_follow_protected,auto_retry_failed,csrf_token,download_dir,file_naming_mode,id,include_nested_tweet_media,incremental_archive,max_concurrency,max_filename_length,offline_thumbnails,proxy_url,storage_type,updated_at,write_metadata_sidecar);" +
+		"app_sessions(created_at,expires_at,last_seen_at,token_hash);" +
+		"archive_media(id,media_type,payload,source_url);" +
+		"archive_schedules(claim_version,created_at,cron_expr,enabled,id,interval_minutes,items_json,last_job_ids,last_run_at,name,next_run_at,timezone,updated_at);" +
+		"asset_migration_progress(failed,job_id,last_id,max_id,processed,total);" +
+		"assets(content_hash,content_type,created_at,id,kind,object_key,policy_version,size,target_id,target_version);" +
+		"avatar_cache(content_type,file_path,screen_name,source_url,updated_at,user_id);" +
+		"collection_items(collection_id,created_at,item_id,item_type);" +
+		"collections(created_at,description,id,name,updated_at);" +
+		"dashboard_counters(active,completed,failed,failed_tweet_count,id,total);" +
+		"download_assets(asset_id,download_id,kind);" +
+		"download_roots(last_seen_at,path);" +
+		"download_tags(created_at,download_id,tag_id);" +
+		"downloads(bytes,content_hash,created_at,file_path,id,job_id,media_key,media_url,preview_url,starred,tweet_id);" +
+		"failed_media(created_at,error,id,job_id,media_url);" +
+		"failed_tweets(created_at,entity_id,error,id,job_id,next_retry_at,payload,retry_count,tweet_id,updated_at);" +
+		"job_checkpoint_tasks(job_id,payload,updated_at);" +
+		"job_checkpoints(job_id,payload,updated_at);" +
+		"job_storage(job_id,policy_version);" +
+		"jobs(archive_mode,available_at,available_ns,backfill,batch_size,created_at,deferred_seconds,enqueue_ns,enqueued_at,error,filter_json,id,input,kind,message,progress,source,status,title,updated_at);" +
+		"list_entities(id,list_id,name,parent_dir,updated_at);" +
+		"media_assets(asset_id,error,job_id,kind,media_key,status,updated_at);" +
+		"media_context(media_key,payload,position,tweet_id);" +
+		"media_sync(count,cursor,error,last_seen_tweet_id,status,stop_id,updated_at,user_id);" +
+		"schema_migrations(applied_at,name);" +
+		"storage_versions(created_at,document,version);" +
+		"tags(color,created_at,id,name);" +
+		"tweet_jobs(body_status,job_id,media_error,media_status,tweet_id);" +
+		"tweet_media(media_id,position,tweet_id);" +
+		"tweet_relations(related_id,relation,tweet_id);" +
+		"tweet_sync(count,cursor,error,head_id,last_id,status,updated_at,user_id);" +
+		"tweet_tags(created_at,tag_id,tweet_id);" +
+		"tweets(alt_texts,archived_at,author_id,author_name,body,bookmark_count,conversation_id,id,like_count,payload,published_at,reply_count,retweet_count,screen_name,starred,updated_at,view_count);" +
+		"tweets_fts(alt_texts,author_name,body,screen_name,tweet_id);" +
+		"tweets_fts_config(k,v);" +
+		"tweets_fts_content(c0,c1,c2,c3,c4,id);" +
+		"tweets_fts_data(block,id);" +
+		"tweets_fts_docsize(id,sz);" +
+		"tweets_fts_idx(pgno,segid,term);" +
+		"twitter_lists(id,name,owner_user_id,updated_at);" +
+		"unavailable_media(created_at,error,media_url,tweet_id,updated_at);" +
+		"user_entities(id,last_full_scan_at,last_seen_tweet_id,latest_release_time,media_count,name,parent_dir,updated_at,user_id);" +
+		"user_links(id,list_entity_id,name,updated_at,user_id);" +
+		"users(avatar_url,friends_count,id,media_count,name,protected,screen_name,updated_at);" +
+		"webhooks(created_at,enabled,events_json,id,kind,last_error,last_sent_at,last_status,name,secret,updated_at,url);" +
+		"x_account_locks(account_id,queue,reason,until);" +
+		"x_account_stats(account_id,day,queue,requests);" +
+		"x_accounts(active,auth_token,created_at,ct0,error_msg,extra_cookies,id,is_primary,last_used,proxy,screen_name,source,updated_at,user_agent,verified_at)"
 }
 
 func TestSchemaVersionMatchesTableColumns(t *testing.T) {

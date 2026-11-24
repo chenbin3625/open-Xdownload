@@ -16,6 +16,10 @@ export type JobKind =
   | "user"
   | "list"
   | "following"
+  | "bookmarks"
+  | "likes"
+  | "thread"
+  | "search"
   | "failed_retry"
   | "asset_migration";
 
@@ -24,6 +28,17 @@ export type AssetKind = "image" | "video" | "thumbnail" | "video_cover";
 
 export type FileNamingMode = "tweet_text" | "user_tweet";
 export type StorageType = "local";
+
+export interface ArchiveFilter {
+  mediaTypes?: string[];
+  excludeRetweets?: boolean;
+  excludeReplies?: boolean;
+  minBytes?: number;
+  minWidth?: number;
+  minHeight?: number;
+  sinceDate?: string;
+  untilDate?: string;
+}
 
 export interface AppConfig {
   downloadDir: string;
@@ -36,6 +51,9 @@ export interface AppConfig {
   fileNamingMode: FileNamingMode;
   maxFilenameLength: number;
   storageType: StorageType;
+  archiveFilter?: ArchiveFilter | null;
+  writeMetadataSidecar?: boolean;
+  offlineThumbnails?: boolean;
 }
 
 export interface Job {
@@ -52,6 +70,7 @@ export interface Job {
   archiveMode?: ArchiveMode;
   backfill?: boolean;
   batchSize?: number;
+  filter?: ArchiveFilter | null;
 }
 
 export interface JobRequest {
@@ -61,6 +80,7 @@ export interface JobRequest {
   archiveMode?: ArchiveMode;
   backfill?: boolean;
   batchSize?: number;
+  filter?: ArchiveFilter | null;
 }
 
 export interface BatchJobRequest {
@@ -74,6 +94,7 @@ export interface ArchiveScheduleItem {
   archiveMode?: ArchiveMode;
   backfill?: boolean;
   batchSize?: number;
+  filter?: ArchiveFilter | null;
 }
 
 export interface ArchiveSchedule {
@@ -81,6 +102,8 @@ export interface ArchiveSchedule {
   name: string;
   enabled: boolean;
   intervalMinutes: number;
+  cronExpr?: string;
+  timezone?: string;
   items: ArchiveScheduleItem[];
   lastRunAt?: string;
   lastRunStatus?: "running" | "success" | "failed" | "canceled" | string;
@@ -95,6 +118,8 @@ export interface ArchiveScheduleRequest {
   name: string;
   enabled: boolean;
   intervalMinutes: number;
+  cronExpr?: string;
+  timezone?: string;
   items: ArchiveScheduleItem[];
 }
 
@@ -112,6 +137,39 @@ export interface Media {
   previewUrl: string;
   bestUrl: string;
   variants: MediaVariant[];
+  altText?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface TweetArticle {
+  id?: string;
+  title?: string;
+  previewText?: string;
+  plainText?: string;
+  coverImageUrl?: string;
+  media?: Media[];
+}
+
+export interface PollChoice {
+  label: string;
+  votes: number;
+}
+
+export interface TweetPoll {
+  id?: string;
+  endDatetime?: string;
+  votingStatus?: string;
+  totalVotes?: number;
+  choices: PollChoice[];
+}
+
+export interface TweetMetrics {
+  likes?: number;
+  retweets?: number;
+  replies?: number;
+  bookmarks?: number;
+  views?: number;
 }
 
 export interface TweetData {
@@ -123,6 +181,7 @@ export interface TweetData {
     id: string;
     name: string;
     screenName: string;
+    avatarUrl?: string;
   };
   media: Media[];
   conversationId?: string;
@@ -130,6 +189,137 @@ export interface TweetData {
   quotedTweetId?: string;
   retweetedTweetId?: string;
   related?: TweetData[];
+  article?: TweetArticle;
+  poll?: TweetPoll;
+  metrics?: TweetMetrics;
+}
+
+export interface TagRecord {
+  id: number;
+  name: string;
+  color: string;
+  createdAt: string;
+}
+
+export interface CollectionRecord {
+  id: number;
+  name: string;
+  description: string;
+  tweetCount: number;
+  downloadCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DeleteResult {
+  deletedRecords: number;
+  deletedFiles: number;
+  skippedFiles: number;
+}
+
+export interface APIToken {
+  id: number;
+  name: string;
+  tokenPrefix: string;
+  scopes: string;
+  lastUsedAt?: string;
+  expiresAt?: string;
+  createdAt: string;
+}
+
+export interface APITokenCreateResponse {
+  token: APIToken;
+  plaintext: string;
+}
+
+export type WebhookKind = "generic" | "telegram" | "discord" | "bark" | "feishu" | "wecom" | "dingtalk";
+
+export interface Webhook {
+  id: number;
+  name: string;
+  kind: WebhookKind | string;
+  url: string;
+  secret?: string;
+  events: string[];
+  enabled: boolean;
+  lastStatus?: string;
+  lastError?: string;
+  lastSentAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookPayload {
+  name: string;
+  kind: string;
+  url: string;
+  secret?: string;
+  events: string[];
+  enabled: boolean;
+}
+
+export interface KindStat {
+  count: number;
+  bytes: number;
+}
+
+export interface StorageStats {
+  downloadDir: string;
+  diskTotalBytes: number;
+  diskFreeBytes: number;
+  diskAvailable: boolean;
+  totalTweets: number;
+  totalDownloads: number;
+  totalBytes: number;
+  byKind: Record<string, KindStat>;
+  topUsers: LibraryUserSummary[];
+  duplicateGroups: number;
+  duplicateBytes: number;
+  databaseBytes: number;
+}
+
+export interface BrokenDownloadItem {
+  id: number;
+  tweetId: string;
+  filePath: string;
+  bytes: number;
+}
+
+export interface OrphanFileItem {
+  filePath: string;
+  bytes: number;
+  modTime: string;
+}
+
+export interface DuplicateHashGroup {
+  contentHash: string;
+  filePaths: string[];
+  bytes: number;
+}
+
+export interface MaintenanceScanResult {
+  brokenRecords: BrokenDownloadItem[];
+  orphanFiles: OrphanFileItem[];
+  duplicateGroups: DuplicateHashGroup[];
+  brokenCount: number;
+  orphanCount: number;
+  duplicateCount: number;
+  reclaimableBytes: number;
+}
+
+export interface MaintenanceCleanupResult {
+  action: string;
+  affected: number;
+  reclaimedBytes: number;
+  skipped: number;
+  createdJobId?: number;
+}
+
+export interface ConfigImportResult {
+  ok: boolean;
+  createdSchedules: number;
+  createdTags: number;
+  createdCollections: number;
 }
 
 export interface DownloadRecord {
@@ -145,6 +335,8 @@ export interface DownloadRecord {
   userName?: string;
   fileUrl?: string;
   assetUrls?: Partial<Record<AssetKind, string>>;
+  starred?: boolean;
+  tags?: TagRecord[];
 }
 
 export interface FailedMedia {
@@ -367,6 +559,11 @@ export const archiveScheduleQueryRoot = ["archive-schedules"] as const;
 export const failedTweetQueryRoot = ["failed-tweets"] as const;
 export const libraryDownloadsQueryRoot = ["library-downloads"] as const;
 export const xAccountsQueryRoot = ["x-accounts"] as const;
+export const tagsQueryRoot = ["tags"] as const;
+export const collectionsQueryRoot = ["collections"] as const;
+export const webhooksQueryRoot = ["webhooks"] as const;
+export const apiTokensQueryRoot = ["api-tokens"] as const;
+export const maintenanceStatsQueryRoot = ["maintenance-stats"] as const;
 
 /** 归档库按账号聚合的统计（用户卡片视图）。 */
 export interface LibraryUserSummary {
@@ -561,7 +758,21 @@ export const getConfig = (signal?: AbortSignal) => api<AppConfig>("/api/config",
 export const getJobFiles = (id: number, signal?: AbortSignal) =>
   api<JobFiles>(`/api/jobs/${id}/files`, { signal, timeoutMs: LONG_TIMEOUT_MS });
 export const getLibraryDownloadsPage = (
-  options: { page: number; pageSize: number; kind: string; user: string; search: string; sort?: string; from?: string; to?: string; minBytes?: string; maxBytes?: string },
+  options: {
+    page: number;
+    pageSize: number;
+    kind: string;
+    user: string;
+    search: string;
+    sort?: string;
+    from?: string;
+    to?: string;
+    minBytes?: string;
+    maxBytes?: string;
+    starred?: string;
+    tagId?: string;
+    collectionId?: string;
+  },
   signal?: AbortSignal,
 ) => {
   const params = new URLSearchParams({
@@ -571,7 +782,7 @@ export const getLibraryDownloadsPage = (
     user: options.user,
     search: options.search,
   });
-  for (const key of ["sort", "from", "to", "minBytes", "maxBytes"] as const) {
+  for (const key of ["sort", "from", "to", "minBytes", "maxBytes", "starred", "tagId", "collectionId"] as const) {
     if (options[key] !== undefined && options[key] !== "") params.set(key, options[key]);
   }
   return api<LibraryDownloadsPage>(`/api/library/downloads?${params}`, {
@@ -591,7 +802,12 @@ export const parseTweetLink = (url: string) =>
     body: JSON.stringify({ url }),
   });
 
-export const createJob = (kind: JobKind, input: string, title = "", options?: { archiveMode: ArchiveMode; backfill: boolean }) =>
+export const createJob = (
+  kind: JobKind,
+  input: string,
+  title = "",
+  options?: { archiveMode: ArchiveMode; backfill: boolean; filter?: ArchiveFilter | null },
+) =>
   api<Job>("/api/jobs", {
     method: "POST",
     body: JSON.stringify({ kind, input, title, ...options }),
@@ -715,6 +931,94 @@ export const unlockXAccount = (id: number) =>
 export const checkAllXAccounts = () =>
   api<XAccountCheckAllResult>("/api/x-accounts/check-all", {
     method: "POST",
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+
+// Personal API Tokens
+export const getApiTokens = (signal?: AbortSignal) => api<APIToken[]>("/api/tokens", { signal });
+export const createApiToken = (req: { name: string; scopes?: string; expiresInDays?: number }) =>
+  api<APITokenCreateResponse>("/api/tokens", { method: "POST", body: JSON.stringify(req) });
+export const deleteApiToken = (id: number) => api<void>(`/api/tokens/${id}`, { method: "DELETE" });
+
+// Webhooks & push notifications
+export const getWebhooks = (signal?: AbortSignal) => api<Webhook[]>("/api/webhooks", { signal });
+export const createWebhook = (payload: WebhookPayload) =>
+  api<Webhook>("/api/webhooks", { method: "POST", body: JSON.stringify(payload) });
+export const updateWebhook = (id: number, payload: WebhookPayload) =>
+  api<Webhook>(`/api/webhooks/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+export const deleteWebhook = (id: number) => api<void>(`/api/webhooks/${id}`, { method: "DELETE" });
+export const testWebhook = (id: number) =>
+  api<{ ok: boolean; webhook: Webhook }>(`/api/webhooks/${id}/test`, { method: "POST", timeoutMs: LONG_TIMEOUT_MS });
+
+// Tags, Collections & Download management
+export const getTags = (signal?: AbortSignal) => api<TagRecord[]>("/api/tags", { signal });
+export const createTag = (name: string, color = "blue") =>
+  api<TagRecord>("/api/tags", { method: "POST", body: JSON.stringify({ name, color }) });
+export const updateTag = (id: number, name: string, color: string) =>
+  api<TagRecord>(`/api/tags/${id}`, { method: "PUT", body: JSON.stringify({ name, color }) });
+export const deleteTag = (id: number) => api<void>(`/api/tags/${id}`, { method: "DELETE" });
+
+export const getCollections = (signal?: AbortSignal) => api<CollectionRecord[]>("/api/collections", { signal });
+export const createCollection = (name: string, description = "") =>
+  api<CollectionRecord>("/api/collections", { method: "POST", body: JSON.stringify({ name, description }) });
+export const updateCollection = (id: number, name: string, description = "") =>
+  api<CollectionRecord>(`/api/collections/${id}`, { method: "PUT", body: JSON.stringify({ name, description }) });
+export const deleteCollection = (id: number) => api<void>(`/api/collections/${id}`, { method: "DELETE" });
+export const addCollectionItems = (id: number, itemType: "tweet" | "download", itemIds: string[]) =>
+  api<{ ok: boolean }>(`/api/collections/${id}/items`, { method: "POST", body: JSON.stringify({ itemType, itemIds }) });
+export const removeCollectionItems = (id: number, itemType: "tweet" | "download", itemIds: string[]) =>
+  api<{ ok: boolean }>(`/api/collections/${id}/items`, { method: "DELETE", body: JSON.stringify({ itemType, itemIds }) });
+
+export const setDownloadStar = (id: number, starred: boolean) =>
+  api<{ starred: boolean }>(`/api/library/downloads/${id}/star`, { method: "POST", body: JSON.stringify({ starred }) });
+export const setDownloadTags = (id: number, tagIds: number[]) =>
+  api<{ tags: TagRecord[] }>(`/api/library/downloads/${id}/tags`, { method: "PUT", body: JSON.stringify({ tagIds }) });
+export const deleteDownload = (id: number, deleteFiles = false) =>
+  api<DeleteResult>(`/api/library/downloads/${id}${deleteFiles ? "?deleteFiles=1" : ""}`, { method: "DELETE" });
+export const batchDeleteDownloads = (ids: number[], deleteFiles = false) =>
+  api<DeleteResult>("/api/library/downloads/batch-delete", { method: "POST", body: JSON.stringify({ ids, deleteFiles }) });
+
+export async function exportMediaZip(payload: {
+  ids?: number[];
+  user?: string;
+  kind?: string;
+  search?: string;
+  starred?: boolean;
+  tagId?: number;
+  collectionId?: number;
+}): Promise<Blob> {
+  const response = await fetch("/api/export/media-zip", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      "X-XDownload-Request": "1",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const msg = (typeof body?.error === "string" && body.error) || response.statusText || t("导出失败");
+    throw new ApiError(msg, response.status);
+  }
+  return response.blob();
+}
+
+// Maintenance & Storage analytics
+export const getMaintenanceStats = (signal?: AbortSignal) =>
+  api<StorageStats>("/api/maintenance/stats", { signal, timeoutMs: LONG_TIMEOUT_MS });
+export const scanMaintenance = () =>
+  api<MaintenanceScanResult>("/api/maintenance/scan", { method: "POST", timeoutMs: LONG_TIMEOUT_MS });
+export const cleanupMaintenance = (action: "prune_broken" | "delete_orphans" | "import_orphans" | "dedup_hardlink") =>
+  api<MaintenanceCleanupResult>("/api/maintenance/cleanup", {
+    method: "POST",
+    body: JSON.stringify({ action }),
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+export const importConfigBundle = (bundle: unknown) =>
+  api<ConfigImportResult>("/api/maintenance/import-config", {
+    method: "POST",
+    body: JSON.stringify(bundle),
     timeoutMs: LONG_TIMEOUT_MS,
   });
 

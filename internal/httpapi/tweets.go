@@ -12,29 +12,39 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-func (s *Server) listTweets(w http.ResponseWriter, r *http.Request) {
+func parseTweetFilterFromRequest(r *http.Request) (storage.TweetFilter, error) {
 	q := r.URL.Query()
-	filter := storage.TweetFilter{Search: q.Get("search"), Author: q.Get("author"), MediaType: q.Get("mediaType"), ID: q.Get("id"), Page: parsePositiveInt(r, "page", 1, 1, 1000000), PageSize: parsePositiveInt(r, "pageSize", 20, 1, 100)}
+	filter := storage.TweetFilter{
+		Search:         q.Get("search"),
+		Author:         q.Get("author"),
+		MediaType:      q.Get("mediaType"),
+		ID:             q.Get("id"),
+		ConversationID: q.Get("conversationId"),
+		Page:           parsePositiveInt(r, "page", 1, 1, 1000000),
+		PageSize:       parsePositiveInt(r, "pageSize", 20, 1, 100),
+	}
 	filter.Sort = q.Get("sort")
+	switch filter.Sort {
+	case "", "desc", "asc", "likes_desc", "retweets_desc", "views_desc":
+	default:
+		return filter, storage.ErrValidation("无效的排序方式")
+	}
 	filter.Retweets = q.Get("retweets")
 	if filter.Retweets != "" && filter.Retweets != "exclude" && filter.Retweets != "only" {
-		writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的转推筛选"))
-		return
+		return filter, storage.ErrValidation("无效的转推筛选")
 	}
 	var fromDate, toDate time.Time
 	for key, target := range map[string]*time.Time{"from": &fromDate, "to": &toDate} {
 		if value := q.Get(key); value != "" {
 			date, err := time.Parse("2006-01-02", value)
 			if err != nil {
-				writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的日期"))
-				return
+				return filter, storage.ErrValidation("无效的日期")
 			}
 			*target = date
 		}
 	}
 	if !fromDate.IsZero() && !toDate.IsZero() && fromDate.After(toDate) {
-		writeError(w, http.StatusBadRequest, storage.ErrValidation("开始日期不能晚于结束日期"))
-		return
+		return filter, storage.ErrValidation("开始日期不能晚于结束日期")
 	}
 	if !fromDate.IsZero() {
 		filter.From = fromDate.Format(time.RFC3339)
@@ -45,10 +55,32 @@ func (s *Server) listTweets(w http.ResponseWriter, r *http.Request) {
 	if rawJobID := q.Get("jobId"); rawJobID != "" {
 		jobID, err := strconv.ParseInt(rawJobID, 10, 64)
 		if err != nil || jobID <= 0 {
-			writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的任务 ID"))
-			return
+			return filter, storage.ErrValidation("无效的任务 ID")
 		}
 		filter.JobID = jobID
+	}
+	if rawStarred := q.Get("starred"); rawStarred != "" {
+		v := rawStarred == "1" || rawStarred == "true"
+		filter.Starred = &v
+	}
+	if rawTag := q.Get("tagId"); rawTag != "" {
+		if tagID, err := strconv.ParseInt(rawTag, 10, 64); err == nil && tagID > 0 {
+			filter.TagID = tagID
+		}
+	}
+	if rawCol := q.Get("collectionId"); rawCol != "" {
+		if colID, err := strconv.ParseInt(rawCol, 10, 64); err == nil && colID > 0 {
+			filter.CollectionID = colID
+		}
+	}
+	return filter, nil
+}
+
+func (s *Server) listTweets(w http.ResponseWriter, r *http.Request) {
+	filter, err := parseTweetFilterFromRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
 	}
 	page, err := s.store.ListTweets(r.Context(), filter)
 	if err != nil {

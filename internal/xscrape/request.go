@@ -681,6 +681,7 @@ func (e *Engine) confirmUnauthorized(ctx context.Context, account storage.XAccou
 		}
 		_ = e.store.DeactivateXAccount(ctx, account.ID, message)
 		e.probes.forget(account.ID)
+		e.notifyAccountDeactivated(account, message)
 	case result.Err == nil:
 		e.probes.mark(account.ID, e.now())
 	default:
@@ -695,8 +696,26 @@ func (e *Engine) confirmUnauthorized(ctx context.Context, account storage.XAccou
 
 // deactivateAccount 处理非 401 响应里的致命 API 错误码。
 func (e *Engine) deactivateAccount(ctx context.Context, account storage.XAccount, code int) {
-	_ = e.store.DeactivateXAccount(ctx, account.ID, fatalAccountMessage(code))
+	msg := fatalAccountMessage(code)
+	_ = e.store.DeactivateXAccount(ctx, account.ID, msg)
 	e.probes.forget(account.ID)
+	e.notifyAccountDeactivated(account, msg)
+}
+
+// SetOnAccountDeactivated 注册账号被自动停用时的回调（供外部 Webhook 推送告警）。
+func (e *Engine) SetOnAccountDeactivated(fn func(accountID int64, screenName, reason string)) {
+	e.onDeactivatedMu.Lock()
+	e.onDeactivated = fn
+	e.onDeactivatedMu.Unlock()
+}
+
+func (e *Engine) notifyAccountDeactivated(account storage.XAccount, reason string) {
+	e.onDeactivatedMu.RLock()
+	fn := e.onDeactivated
+	e.onDeactivatedMu.RUnlock()
+	if fn != nil {
+		fn(account.ID, account.ScreenName, reason)
+	}
 }
 
 func fatalAccountMessage(code int) string {

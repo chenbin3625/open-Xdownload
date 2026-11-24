@@ -226,6 +226,16 @@ func tweetFromResultDepth(rawURL string, fallbackUsername string, fallbackID str
 		ReplyToID:        legacy.Get("in_reply_to_status_id_str").String(),
 		QuotedTweetID:    legacy.Get("quoted_status_id_str").String(),
 		RetweetedTweetID: legacy.Get("retweeted_status_id_str").String(),
+		Article:          parseTweetArticle(result),
+		Poll:             parseTweetPoll(result.Get("card")),
+		Metrics:          parseTweetMetrics(result, legacy),
+	}
+	if tweet.Article != nil && strings.TrimSpace(tweet.Text) == "" {
+		if tweet.Article.Title != "" {
+			tweet.Text = tweet.Article.Title
+		} else if tweet.Article.PreviewText != "" {
+			tweet.Text = tweet.Article.PreviewText
+		}
 	}
 	if tweet.ReplyToID == "" {
 		tweet.ReplyToID = result.Get("reply_to_results.rest_id").String()
@@ -268,10 +278,15 @@ func tweetFromResultDepth(rawURL string, fallbackUsername string, fallbackID str
 func parseAuthor(result gjson.Result, fallbackUsername string) Author {
 	// X 已把 screen_name / name 从 legacy 迁到 core；新字段优先，旧结构兜底。
 	legacy := result.Get("legacy")
+	avatarURL := firstString(result.Get("avatar.image_url"), legacy.Get("profile_image_url_https"))
+	if !isTwimgMediaURL(avatarURL) {
+		avatarURL = ""
+	}
 	author := Author{
 		ID:         result.Get("rest_id").String(),
 		Name:       firstString(result.Get("core.name"), legacy.Get("name")),
 		ScreenName: firstString(result.Get("core.screen_name"), legacy.Get("screen_name")),
+		AvatarURL:  avatarURL,
 	}
 	if author.ScreenName == "" {
 		author.ScreenName = validScreenNameFallback(fallbackUsername)
@@ -310,6 +325,9 @@ func collectTweetResultMedia(result gjson.Result, items *[]Media, seen map[strin
 		appendUniqueMedia(items, seen, parseMedia(legacy.Get("entities.media")))
 	}
 	appendUniqueMedia(items, seen, parseCardMedia(result.Get("card")))
+	if article := parseTweetArticle(result); article != nil {
+		appendUniqueMedia(items, seen, article.Media)
+	}
 
 	if !options.IncludeNestedTweets {
 		return
@@ -441,10 +459,15 @@ func tweetFromSyndicationDepth(rawURL string, fallbackUsername string, fallbackI
 	if id == "" {
 		id = fallbackID
 	}
+	authorAvatar := result.Get("user.profile_image_url_https").String()
+	if !isTwimgMediaURL(authorAvatar) {
+		authorAvatar = ""
+	}
 	author := Author{
 		ID:         result.Get("user.id_str").String(),
 		Name:       result.Get("user.name").String(),
 		ScreenName: result.Get("user.screen_name").String(),
+		AvatarURL:  authorAvatar,
 	}
 	if author.ScreenName == "" {
 		author.ScreenName = validScreenNameFallback(fallbackUsername)
@@ -464,6 +487,9 @@ func tweetFromSyndicationDepth(rawURL string, fallbackUsername string, fallbackI
 		ReplyToID:        firstString(result.Get("in_reply_to_status_id_str"), result.Get("in_reply_to_status_id"), result.Get("reply_to_id")),
 		QuotedTweetID:    firstString(result.Get("quoted_status_id_str"), result.Get("quoted_status_id"), result.Get("quoted_tweet_id")),
 		RetweetedTweetID: firstString(result.Get("retweeted_status_id_str"), result.Get("retweeted_status_id"), result.Get("retweeted_tweet_id")),
+		Article:          parseTweetArticle(result),
+		Poll:             parseTweetPoll(result.Get("card")),
+		Metrics:          parseSyndicationMetrics(result),
 	}
 	if depth < 2 {
 		for _, relation := range []struct {
@@ -544,6 +570,9 @@ func collectSyndicationMedia(result gjson.Result, items *[]Media, seen map[strin
 		appendUniqueMedia(items, seen, []Media{media})
 	}
 	appendUniqueMedia(items, seen, parseCardMedia(result.Get("card")))
+	if article := parseTweetArticle(result); article != nil {
+		appendUniqueMedia(items, seen, article.Media)
+	}
 	for _, item := range result.Get("photos").Array() {
 		rawURL := item.Get("url").String()
 		if rawURL == "" {
@@ -592,6 +621,15 @@ func mediaFromDetail(item gjson.Result) Media {
 	if !isTwimgMediaURL(mediaURL) {
 		mediaURL = ""
 	}
+	width := int(item.Get("original_info.width").Int())
+	height := int(item.Get("original_info.height").Int())
+	if width <= 0 {
+		width = int(item.Get("sizes.large.w").Int())
+	}
+	if height <= 0 {
+		height = int(item.Get("sizes.large.h").Int())
+	}
+	altText := html.UnescapeString(strings.TrimSpace(firstString(item.Get("ext_alt_text"), item.Get("alt_text"))))
 	media := Media{
 		// Media.ID 语义：优先 Snowflake ID（id_str/id）；缺失时由 stableMediaID 从
 		// 归一化 URL 生成稳定 hash，下游可安全当去重/展示键使用。
@@ -599,6 +637,9 @@ func mediaFromDetail(item gjson.Result) Media {
 		Type:       kind,
 		URL:        mediaURL,
 		PreviewURL: mediaURL,
+		AltText:    altText,
+		Width:      width,
+		Height:     height,
 	}
 	if kind == MediaVideo || kind == MediaGIF {
 		media.Variants = parseVariantList(firstResult(item.Get("video_info.variants"), item.Get("videoInfo.variants")))

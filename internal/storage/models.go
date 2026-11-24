@@ -27,6 +27,10 @@ const (
 	JobKindUser           JobKind = "user"
 	JobKindList           JobKind = "list"
 	JobKindFollowing      JobKind = "following"
+	JobKindBookmarks      JobKind = "bookmarks"
+	JobKindLikes          JobKind = "likes"
+	JobKindThread         JobKind = "thread"
+	JobKindSearch         JobKind = "search"
 	JobKindFailedRetry    JobKind = "failed_retry"
 	JobKindAssetMigration JobKind = "asset_migration"
 )
@@ -82,7 +86,9 @@ type Job struct {
 	ArchiveMode     ArchiveMode `json:"archiveMode" db:"archive_mode"`
 	Backfill        bool        `json:"backfill" db:"backfill"`
 	// BatchSize 是全文归档每轮最多处理的用户数；0 表示不限制。
-	BatchSize int `json:"batchSize,omitempty" db:"batch_size"`
+	BatchSize  int                   `json:"batchSize,omitempty" db:"batch_size"`
+	FilterJSON string                `json:"-" db:"filter_json"`
+	Filter     *config.ArchiveFilter `json:"filter,omitempty" db:"-"`
 }
 
 type JobDraft struct {
@@ -93,17 +99,19 @@ type JobDraft struct {
 	Backfill    bool
 	// BatchSize 是全文归档每轮最多处理的用户数；0 表示不限制。
 	BatchSize int
+	Filter    *config.ArchiveFilter
 	// Source 为空时按 manual 处理；定时计划由调度器显式设为 schedule。
 	Source JobSource
 }
 
 type ArchiveScheduleItem struct {
-	Kind        JobKind     `json:"kind"`
-	Input       string      `json:"input"`
-	Title       string      `json:"title"`
-	ArchiveMode ArchiveMode `json:"archiveMode,omitempty"`
-	Backfill    bool        `json:"backfill,omitempty"`
-	BatchSize   int         `json:"batchSize,omitempty"`
+	Kind        JobKind               `json:"kind"`
+	Input       string                `json:"input"`
+	Title       string                `json:"title"`
+	ArchiveMode ArchiveMode           `json:"archiveMode,omitempty"`
+	Backfill    bool                  `json:"backfill,omitempty"`
+	BatchSize   int                   `json:"batchSize,omitempty"`
+	Filter      *config.ArchiveFilter `json:"filter,omitempty"`
 }
 
 type ArchiveSchedule struct {
@@ -111,6 +119,8 @@ type ArchiveSchedule struct {
 	Name            string                `json:"name" db:"name"`
 	Enabled         bool                  `json:"enabled" db:"enabled"`
 	IntervalMinutes int                   `json:"intervalMinutes" db:"interval_minutes"`
+	CronExpr        string                `json:"cronExpr,omitempty" db:"cron_expr"`
+	Timezone        string                `json:"timezone,omitempty" db:"timezone"`
 	Items           []ArchiveScheduleItem `json:"items" db:"-"`
 	ItemsJSON       string                `json:"-" db:"items_json"`
 	LastRunAt       *time.Time            `json:"lastRunAt,omitempty" db:"last_run_at"`
@@ -141,6 +151,8 @@ type DownloadRecord struct {
 	UserName       string                      `json:"userName,omitempty" db:"user_name"`
 	FileURL        string                      `json:"fileUrl,omitempty" db:"-"`
 	AssetURLs      map[config.AssetKind]string `json:"assetUrls,omitempty" db:"-"`
+	Starred        bool                        `json:"starred" db:"starred"`
+	Tags           []Tag                       `json:"tags,omitempty" db:"-"`
 	// MediaKey 是 media_url 的媒体身份键（downloader.MediaIdentity），同一份媒体内容的
 	// 不同 URL 写法共用同一个键，用于跨推文判断"已有可用文件"并跳过；不对外暴露。
 	MediaKey    string `json:"-" db:"media_key"`

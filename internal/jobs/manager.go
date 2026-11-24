@@ -28,6 +28,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/filestore"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
+	"github.com/chenbin3625/open-Xdownload/internal/notify"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xapi"
@@ -71,6 +72,7 @@ type Manager struct {
 	// 缓存命中时每次进度写入不必重新序列化整张表。
 	checkpointTasksMu    sync.Mutex
 	checkpointTasksCache checkpointTasksSnapshot
+	notifier             *notify.Dispatcher
 }
 
 // checkpointTasksSnapshot 记录已写入检查点的任务快照身份（切片首元素指针 + 长度）。
@@ -494,6 +496,13 @@ func (m *Manager) enqueueDueArchiveSchedules(ctx context.Context) {
 		createdAny = true
 		m.publishJobsCreated(ctx, jobs)
 		m.publish(Event{Type: "archive_schedule.ran", Payload: map[string]any{"id": schedule.ID, "jobCount": len(jobs)}})
+		m.emitNotification(notify.Event{
+			Type:     "schedule.ran",
+			Title:    fmt.Sprintf("定时计划已触发：%s", schedule.Name),
+			Message:  fmt.Sprintf("已入队 %d 个归档任务", len(jobs)),
+			Severity: "info",
+			Data:     map[string]any{"scheduleId": schedule.ID, "jobCount": len(jobs)},
+		})
 	}
 	if createdAny {
 		m.Notify()
@@ -642,6 +651,14 @@ func (m *Manager) process(ctx context.Context, saveCtx context.Context, job stor
 		m.processList(ctx, saveCtx, job)
 	case storage.JobKindFollowing:
 		m.processFollowing(ctx, saveCtx, job)
+	case storage.JobKindBookmarks:
+		m.processBookmarks(ctx, saveCtx, job)
+	case storage.JobKindLikes:
+		m.processLikes(ctx, saveCtx, job)
+	case storage.JobKindThread:
+		m.processThread(ctx, saveCtx, job)
+	case storage.JobKindSearch:
+		m.processSearch(ctx, saveCtx, job)
 	case storage.JobKindFailedRetry:
 		m.processFailedRetry(ctx, saveCtx, job)
 	case storage.JobKindAssetMigration:
@@ -2551,6 +2568,28 @@ func (m *Manager) archiveTweetsBatch(ctx context.Context, saveCtx context.Contex
 		err    error
 	}
 
+	filter := effectiveFilter(cfg, job)
+	if filter != nil && !filter.IsEmpty() {
+		filtered := make([]parser.TweetData, 0, len(tweets))
+		for _, tweet := range tweets {
+			if kept, ok := filterTweetByRules(tweet, filter); ok {
+				filtered = append(filtered, kept)
+			}
+		}
+		tweets = filtered
+		stats.Tweets = len(tweets)
+		if len(tweets) == 0 {
+			return stats, nil
+		}
+	}
+	cachedAvatars := map[string]bool{}
+	for _, tweet := range tweets {
+		if tweet.Author.AvatarURL != "" && tweet.Author.ScreenName != "" && !cachedAvatars[strings.ToLower(tweet.Author.ScreenName)] {
+			cachedAvatars[strings.ToLower(tweet.Author.ScreenName)] = true
+			m.cacheAuthorAvatar(saveCtx, cfg, tweet.Author.ID, tweet.Author.ScreenName, tweet.Author.AvatarURL)
+		}
+	}
+
 	var works []mediaDownloadWork
 	workIndexByPos := make([][]int, len(tweets))
 	for tweetIdx, tweet := range tweets {
@@ -3421,6 +3460,23 @@ func (m *Manager) completeArchive(ctx context.Context, job storage.Job, stats ar
 	job.Message = completionMessage(stats, retried)
 	job.Error = archiveIssueSummary(stats.Issues)
 	m.save(ctx, job)
+	if job.Status == storage.JobCompletedWithErrors {
+		m.emitNotification(notify.Event{
+			Type:     "job.completed_with_errors",
+			Title:    fmt.Sprintf("任务部分失败 #%d · %s", job.ID, job.Title),
+			Message:  job.Message,
+			Severity: "warning",
+			Data:     map[string]any{"jobId": job.ID, "kind": job.Kind, "status": job.Status, "error": job.Error},
+		})
+	} else {
+		m.emitNotification(notify.Event{
+			Type:     "job.completed",
+			Title:    fmt.Sprintf("任务完成 #%d · %s", job.ID, job.Title),
+			Message:  job.Message,
+			Severity: "success",
+			Data:     map[string]any{"jobId": job.ID, "kind": job.Kind, "status": job.Status},
+		})
+	}
 }
 
 func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, err error) {
@@ -3430,6 +3486,15 @@ func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, er
 		pacing := xapi.IsPacingRateLimit(err)
 		if pacing || !m.rateLimitDeferExceeded(job, retryAt) {
 			if m.requeueForRateLimit(ctx, job, retryAt, pacing) {
+				if !pacing {
+					m.emitNotification(notify.Event{
+						Type:     "account.rate_limited",
+						Title:    fmt.Sprintf("账号池限流冷却 #%d", job.ID),
+						Message:  fmt.Sprintf("任务「%s」已延后至 %s 重试", job.Title, retryAt.UTC().Format(time.RFC3339)),
+						Severity: "warning",
+						Data:     map[string]any{"jobId": job.ID, "retryAt": retryAt.UTC().Format(time.RFC3339)},
+					})
+				}
 				return
 			}
 		} else {
@@ -3447,6 +3512,13 @@ func (m *Manager) fail(ctx context.Context, job storage.Job, mediaURL string, er
 	job.Message = failureMessage(job, err)
 	job.Error = enhanceErrorContext(job, mediaURL, err)
 	m.save(ctx, job)
+	m.emitNotification(notify.Event{
+		Type:     "job.failed",
+		Title:    fmt.Sprintf("任务失败 #%d · %s", job.ID, job.Title),
+		Message:  job.Error,
+		Severity: "error",
+		Data:     map[string]any{"jobId": job.ID, "kind": job.Kind, "error": job.Error},
+	})
 }
 
 // failureMessage 根据任务类型和错误类型生成用户友好的失败消息
@@ -3468,6 +3540,14 @@ func failureMessage(job storage.Job, err error) string {
 		return "用户归档失败"
 	case storage.JobKindList:
 		return "列表归档失败"
+	case storage.JobKindBookmarks:
+		return "书签归档失败"
+	case storage.JobKindLikes:
+		return "点赞归档失败"
+	case storage.JobKindThread:
+		return "长串归档失败"
+	case storage.JobKindSearch:
+		return "搜索归档失败"
 	case storage.JobKindFollowing:
 		return "关注归档失败"
 	case storage.JobKindFailedRetry:

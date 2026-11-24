@@ -20,6 +20,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/downloader"
 	"github.com/chenbin3625/open-Xdownload/internal/filestore"
+	"github.com/chenbin3625/open-Xdownload/internal/metadata"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/minio/minio-go/v7"
@@ -385,6 +386,10 @@ func (m *Manager) downloadAssetMediaWithTweet(ctx, saveCtx context.Context, job 
 			}
 			// 下载器写盘时已经流过 sha256 并统计了字节数，直接复用，避免再整文件读一遍。
 			source = assetInput{path: result.Path, hash: result.ContentHash, size: result.Bytes, tempOwned: true}
+			if filter := effectiveFilter(cfg, job); filter != nil && filter.MinBytes > 0 && source.size > 0 && source.size < filter.MinBytes {
+				_ = os.Remove(result.Path)
+				return mediaDownloadResult{skipped: true}, nil
+			}
 		}
 		created, err := m.saveAsset(ctx, saveCtx, document, kind, tweet, media, index, source)
 		if err != nil {
@@ -415,6 +420,11 @@ func (m *Manager) downloadAssetMediaWithTweet(ctx, saveCtx context.Context, job 
 	}
 	if isLocalTarget && !published.IsZero() && !skipped {
 		_ = os.Chtimes(filePath, published, published)
+	}
+	if isLocalTarget && cfg.WriteMetadataSidecar && !skipped {
+		if metaErr := metadata.WriteSidecarAndEmbed(filePath, tweet, media); metaErr != nil {
+			log.Printf("write metadata sidecar for %s: %v", filePath, metaErr)
+		}
 	}
 	var record storage.DownloadRecord
 	if skipped && existing != nil {

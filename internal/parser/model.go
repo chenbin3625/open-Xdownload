@@ -27,26 +27,67 @@ type Media struct {
 	PreviewURL string         `json:"previewUrl"`
 	BestURL    string         `json:"bestUrl"`
 	Variants   []MediaVariant `json:"variants"`
+	AltText    string         `json:"altText,omitempty"`
+	Width      int            `json:"width,omitempty"`
+	Height     int            `json:"height,omitempty"`
 }
 
 type Author struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	ScreenName string `json:"screenName"`
+	AvatarURL  string `json:"avatarUrl,omitempty"`
+}
+
+// TweetArticle 保存 X Articles（长文章）的标题、纯文本、封面和插图。
+type TweetArticle struct {
+	ID            string  `json:"id,omitempty"`
+	Title         string  `json:"title,omitempty"`
+	PreviewText   string  `json:"previewText,omitempty"`
+	PlainText     string  `json:"plainText,omitempty"`
+	CoverImageURL string  `json:"coverImageUrl,omitempty"`
+	Media         []Media `json:"media,omitempty"`
+}
+
+// PollChoice 表示推文投票中的单个选项及票数快照。
+type PollChoice struct {
+	Label string `json:"label"`
+	Votes int64  `json:"votes"`
+}
+
+// TweetPoll 保存推文投票选项、截止时间与状态快照。
+type TweetPoll struct {
+	ID           string       `json:"id,omitempty"`
+	EndDatetime  string       `json:"endDatetime,omitempty"`
+	VotingStatus string       `json:"votingStatus,omitempty"`
+	TotalVotes   int64        `json:"totalVotes,omitempty"`
+	Choices      []PollChoice `json:"choices"`
+}
+
+// TweetMetrics 保存归档时采集到的推文互动指标快照。
+type TweetMetrics struct {
+	Likes     int64 `json:"likes,omitempty"`
+	Retweets  int64 `json:"retweets,omitempty"`
+	Replies   int64 `json:"replies,omitempty"`
+	Bookmarks int64 `json:"bookmarks,omitempty"`
+	Views     int64 `json:"views,omitempty"`
 }
 
 type TweetData struct {
-	ID               string      `json:"id"`
-	URL              string      `json:"url"`
-	Text             string      `json:"text"`
-	CreatedAt        time.Time   `json:"createdAt"`
-	Author           Author      `json:"author"`
-	Media            []Media     `json:"media"`
-	ConversationID   string      `json:"conversationId,omitempty"`
-	ReplyToID        string      `json:"replyToId,omitempty"`
-	QuotedTweetID    string      `json:"quotedTweetId,omitempty"`
-	RetweetedTweetID string      `json:"retweetedTweetId,omitempty"`
-	Related          []TweetData `json:"related,omitempty"`
+	ID               string        `json:"id"`
+	URL              string        `json:"url"`
+	Text             string        `json:"text"`
+	CreatedAt        time.Time     `json:"createdAt"`
+	Author           Author        `json:"author"`
+	Media            []Media       `json:"media"`
+	ConversationID   string        `json:"conversationId,omitempty"`
+	ReplyToID        string        `json:"replyToId,omitempty"`
+	QuotedTweetID    string        `json:"quotedTweetId,omitempty"`
+	RetweetedTweetID string        `json:"retweetedTweetId,omitempty"`
+	Related          []TweetData   `json:"related,omitempty"`
+	Article          *TweetArticle `json:"article,omitempty"`
+	Poll             *TweetPoll    `json:"poll,omitempty"`
+	Metrics          *TweetMetrics `json:"metrics,omitempty"`
 }
 
 func (tweet TweetData) BestMediaURLs() []string {

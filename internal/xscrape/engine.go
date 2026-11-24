@@ -98,7 +98,10 @@ type Engine struct {
 	probes     probeRecords
 	assets     assetCache
 	rateLimits rateLimitTracker
-	logs       rateLimitedLog
+
+	onDeactivatedMu sync.RWMutex
+	onDeactivated   func(accountID int64, screenName, reason string)
+	logs            rateLimitedLog
 }
 
 // NewEngine 创建 Engine。构造时不发起任何网络请求，也不访问数据库。

@@ -230,6 +230,11 @@ type AppConfig struct {
 	FileNamingMode     FileNamingMode `json:"fileNamingMode" db:"file_naming_mode"`
 	MaxFilenameLength  int            `json:"maxFilenameLength" db:"max_filename_length"`
 	StorageType        StorageType    `json:"storageType" db:"storage_type"`
+	// ArchiveFilterJSON / ArchiveFilter 保存全局默认归档过滤规则（媒体类型、排除转推/回复等）。
+	ArchiveFilterJSON    string         `json:"-" db:"archive_filter_json"`
+	ArchiveFilter        *ArchiveFilter `json:"archiveFilter,omitempty" db:"-"`
+	WriteMetadataSidecar bool           `json:"writeMetadataSidecar" db:"write_metadata_sidecar"`
+	OfflineThumbnails    bool           `json:"offlineThumbnails" db:"offline_thumbnails"`
 	// EnvOverridden 只用于 API 展示：列出被环境变量接管、保存时会被忽略的字段
 	// （JSON 字段名，camelCase）。由 Redacted() 填充，不落库。
 	EnvOverridden []string `json:"envOverridden,omitempty" db:"-"`
@@ -279,6 +284,18 @@ func (cfg AppConfig) Normalized() AppConfig {
 	default:
 		// SMB/WebDAV 存储已移除：历史库里遗留的值一律回落到本地存储。
 		cfg.StorageType = StorageLocal
+	}
+	if cfg.ArchiveFilter != nil {
+		if normalized, err := cfg.ArchiveFilter.NormalizeAndValidate(); err == nil {
+			cfg.ArchiveFilter = normalized
+			if raw, err := MarshalArchiveFilter(normalized); err == nil {
+				cfg.ArchiveFilterJSON = raw
+			}
+		}
+	} else if strings.TrimSpace(cfg.ArchiveFilterJSON) != "" {
+		if parsed, err := ParseArchiveFilterJSON(cfg.ArchiveFilterJSON); err == nil {
+			cfg.ArchiveFilter = parsed
+		}
 	}
 	return cfg
 }
@@ -462,6 +479,18 @@ func ResolveSubmission(submitted, stored AppConfig) (AppConfig, error) {
 		submitted.AdditionalCookies = stored.AdditionalCookies
 	} else {
 		submitted.AdditionalCookies = RestoreAdditionalCookies(submitted.AdditionalCookies, stored.AdditionalCookies)
+	}
+	if submitted.ArchiveFilter != nil {
+		normalized, err := submitted.ArchiveFilter.NormalizeAndValidate()
+		if err != nil {
+			return AppConfig{}, err
+		}
+		submitted.ArchiveFilter = normalized
+		raw, err := MarshalArchiveFilter(normalized)
+		if err != nil {
+			return AppConfig{}, err
+		}
+		submitted.ArchiveFilterJSON = raw
 	}
 	resolved := submitted.Normalized()
 	if preserveEmptyDownloadDir {

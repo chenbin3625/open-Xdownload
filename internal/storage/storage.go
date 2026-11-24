@@ -139,7 +139,10 @@ const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout
 // v11: jobs.batch_size（定时全文归档每轮最多用户数）。
 // v12: users.avatar_url（归档库按用户浏览时显示头像）。
 // v13: app_sessions adds absolute expiry, idle expiry and per-session logout.
-const schemaVersion = 14
+// v14: job_checkpoint_tasks separates per-job task snapshot from per-user progress.
+// v15: FTS5 tweets_fts, tweet metrics/star/conversation/alt_texts, downloads.starred,
+// archive filter rules, cron schedules, personal API tokens, webhooks, tags/collections, avatar cache.
+const schemaVersion = 15
 
 // ErrSchemaTooNew 表示库由更新版本写入，当前二进制不认识。
 var ErrSchemaTooNew = errors.New("数据库结构版本高于当前程序")
@@ -580,6 +583,21 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	if err := s.runMigrationOnce("migrate_cookies_to_x_accounts", s.migrateCookiesToXAccounts); err != nil {
 		return err
 	}
+	if err := s.migrateAPITokens(); err != nil {
+		return err
+	}
+	if err := s.migrateWebhooks(); err != nil {
+		return err
+	}
+	if err := s.migrateOrganize(); err != nil {
+		return err
+	}
+	if err := s.migrateAvatarCache(); err != nil {
+		return err
+	}
+	if err := s.runMigrationOnce("backfill_tweets_fts", s.backfillTweetsFTS); err != nil {
+		return err
+	}
 	return s.setSchemaVersion()
 }
 
@@ -677,6 +695,13 @@ func (s *Store) addMissingColumns() error {
 		{"app_config", "file_naming_mode", `ALTER TABLE app_config ADD COLUMN file_naming_mode TEXT NOT NULL DEFAULT 'tweet_text'`},
 		{"app_config", "max_filename_length", `ALTER TABLE app_config ADD COLUMN max_filename_length INTEGER NOT NULL DEFAULT 120`},
 		{"app_config", "storage_type", `ALTER TABLE app_config ADD COLUMN storage_type TEXT NOT NULL DEFAULT 'local'`},
+		{"app_config", "archive_filter_json", `ALTER TABLE app_config ADD COLUMN archive_filter_json TEXT NOT NULL DEFAULT ''`},
+		{"app_config", "write_metadata_sidecar", `ALTER TABLE app_config ADD COLUMN write_metadata_sidecar BOOLEAN NOT NULL DEFAULT 0`},
+		{"app_config", "offline_thumbnails", `ALTER TABLE app_config ADD COLUMN offline_thumbnails BOOLEAN NOT NULL DEFAULT 0`},
+		{"jobs", "filter_json", `ALTER TABLE jobs ADD COLUMN filter_json TEXT NOT NULL DEFAULT ''`},
+		{"archive_schedules", "cron_expr", `ALTER TABLE archive_schedules ADD COLUMN cron_expr TEXT NOT NULL DEFAULT ''`},
+		{"archive_schedules", "timezone", `ALTER TABLE archive_schedules ADD COLUMN timezone TEXT NOT NULL DEFAULT ''`},
+		{"downloads", "starred", `ALTER TABLE downloads ADD COLUMN starred BOOLEAN NOT NULL DEFAULT 0`},
 		// 归档库按用户分组展示时用来显示头像；旧库的历史用户为空，由前端回退成首字母。
 		{"users", "avatar_url", `ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''`},
 	}
@@ -1406,7 +1431,8 @@ const storedConfigQuery = `
 SELECT download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 	additional_cookies, auto_retry_failed, auto_follow_protected,
 	include_nested_tweet_media, incremental_archive,
-	file_naming_mode, max_filename_length, storage_type
+	file_naming_mode, max_filename_length, storage_type,
+	archive_filter_json, write_metadata_sidecar, offline_thumbnails
 FROM app_config WHERE id = 1`
 
 // GetStoredConfig 返回数据库中的配置，不套用环境变量。供占位符合并与 UpdateConfig 写库使用。
@@ -1518,6 +1544,11 @@ func (s *Store) updateConfig(ctx context.Context, cfg config.AppConfig, fields m
 		if err := json.Unmarshal(payload, &cfg); err != nil {
 			return config.AppConfig{}, ErrValidation("配置字段类型无效")
 		}
+		for key := range fields {
+			if strings.EqualFold(key, "archiveFilter") && cfg.ArchiveFilter == nil {
+				cfg.ArchiveFilterJSON = ""
+			}
+		}
 	}
 
 	cfg, err = config.ResolveSubmission(cfg, current)
@@ -1558,12 +1589,14 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 		id, download_dir, max_concurrency, proxy_url, auth_token, csrf_token,
 		additional_cookies, auto_retry_failed, auto_follow_protected,
 		include_nested_tweet_media, incremental_archive,
-		file_naming_mode, max_filename_length, storage_type, updated_at
+		file_naming_mode, max_filename_length, storage_type,
+		archive_filter_json, write_metadata_sidecar, offline_thumbnails, updated_at
 	) VALUES (
 		1, :download_dir, :max_concurrency, :proxy_url, :auth_token, :csrf_token,
 		:additional_cookies, :auto_retry_failed, :auto_follow_protected,
 		:include_nested_tweet_media, :incremental_archive,
-		:file_naming_mode, :max_filename_length, :storage_type, :updated_at
+		:file_naming_mode, :max_filename_length, :storage_type,
+		:archive_filter_json, :write_metadata_sidecar, :offline_thumbnails, :updated_at
 	) ON CONFLICT(id) DO UPDATE SET
 		download_dir = excluded.download_dir,
 		max_concurrency = excluded.max_concurrency,
@@ -1578,6 +1611,9 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 		file_naming_mode = excluded.file_naming_mode,
 		max_filename_length = excluded.max_filename_length,
 		storage_type = excluded.storage_type,
+		archive_filter_json = excluded.archive_filter_json,
+		write_metadata_sidecar = excluded.write_metadata_sidecar,
+		offline_thumbnails = excluded.offline_thumbnails,
 		updated_at = excluded.updated_at`, map[string]any{
 		"download_dir":               cfg.DownloadDir,
 		"max_concurrency":            cfg.MaxConcurrency,
@@ -1592,6 +1628,9 @@ ON CONFLICT(path) DO UPDATE SET last_seen_at = excluded.last_seen_at`, clean, ti
 		"file_naming_mode":           cfg.FileNamingMode,
 		"max_filename_length":        cfg.MaxFilenameLength,
 		"storage_type":               cfg.StorageType,
+		"archive_filter_json":        cfg.ArchiveFilterJSON,
+		"write_metadata_sidecar":     cfg.WriteMetadataSidecar,
+		"offline_thumbnails":         cfg.OfflineThumbnails,
 		"updated_at":                 time.Now().UTC(),
 	})
 	if err != nil {
@@ -1938,10 +1977,26 @@ func (s *Store) CreateJobFromSource(ctx context.Context, kind JobKind, input str
 	return jobs[0], nil
 }
 
+func hydrateJob(job Job) Job {
+	if job.Filter == nil && strings.TrimSpace(job.FilterJSON) != "" {
+		if parsed, err := config.ParseArchiveFilterJSON(job.FilterJSON); err == nil {
+			job.Filter = parsed
+		}
+	}
+	return job
+}
+
+func hydrateJobs(jobs []Job) []Job {
+	for i := range jobs {
+		jobs[i] = hydrateJob(jobs[i])
+	}
+	return jobs
+}
+
 func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
 	job := Job{}
 	err := s.db.GetContext(ctx, &job, `SELECT * FROM jobs WHERE id = ?`, id)
-	return job, err
+	return hydrateJob(job), err
 }
 
 func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
@@ -1950,7 +2005,7 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
 	}
 	jobs := []Job{}
 	err := s.db.SelectContext(ctx, &jobs, `SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
-	return jobs, err
+	return hydrateJobs(jobs), err
 }
 
 func (s *Store) ListJobsPage(ctx context.Context, limit int, offset int) ([]Job, error) {
@@ -1965,7 +2020,7 @@ func (s *Store) ListJobsPage(ctx context.Context, limit int, offset int) ([]Job,
 SELECT * FROM jobs
 ORDER BY created_at DESC, id DESC
 LIMIT ? OFFSET ?`, limit, offset)
-	return jobs, err
+	return hydrateJobs(jobs), err
 }
 
 // ListJobsPageFiltered 返回服务端筛选后的任务页，以及同一类型/关键词条件下的全量状态计数。
@@ -2014,6 +2069,7 @@ ORDER BY created_at DESC, id DESC
 LIMIT ? OFFSET ?`, append(baseArgs, limit, offset)...); err != nil {
 		return JobListPage{}, err
 	}
+	result.Items = hydrateJobs(result.Items)
 	return result, nil
 }
 
@@ -2116,7 +2172,7 @@ func (s *Store) ClaimPendingJobs(ctx context.Context, limit int) ([]Job, error) 
 			return jobs[i].ID < jobs[j].ID
 		})
 	}
-	return jobs, nil
+	return hydrateJobs(jobs), nil
 }
 
 func jobSourcePriorityOffsetNS(source JobSource) int64 {
@@ -2488,9 +2544,9 @@ SELECT kind, input FROM jobs WHERE status IN (`+activeJobStatusesSQL+`)`); err !
 
 	var query strings.Builder
 	query.WriteString(`
-INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source, archive_mode, backfill, batch_size)
+INSERT INTO jobs (kind, status, input, title, progress, message, created_at, updated_at, enqueued_at, enqueue_ns, source, archive_mode, backfill, batch_size, filter_json)
 VALUES `)
-	args := make([]any, 0, len(drafts)*11)
+	args := make([]any, 0, len(drafts)*12)
 	for index, draft := range drafts {
 		if index > 0 {
 			query.WriteString(",")
@@ -2501,8 +2557,12 @@ VALUES `)
 		if draft.BatchSize < 0 || draft.BatchSize > MaxArchiveBatchSize {
 			return nil, ErrValidation(fmt.Sprintf("每轮用户数必须在 0 到 %d 之间", MaxArchiveBatchSize))
 		}
-		query.WriteString("(?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		args = append(args, draft.Kind, JobPending, draft.Input, draft.Title, message, now, now, now, now.UnixNano(), draft.Source.Normalized(), draft.ArchiveMode.Normalized(), draft.Backfill, draft.BatchSize)
+		filterJSON, err := config.MarshalArchiveFilter(draft.Filter)
+		if err != nil {
+			return nil, ErrValidation(err.Error())
+		}
+		query.WriteString("(?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, draft.Kind, JobPending, draft.Input, draft.Title, message, now, now, now, now.UnixNano(), draft.Source.Normalized(), draft.ArchiveMode.Normalized(), draft.Backfill, draft.BatchSize, filterJSON)
 	}
 	query.WriteString(" RETURNING *")
 
@@ -2511,7 +2571,7 @@ VALUES `)
 		return nil, err
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID })
-	return jobs, nil
+	return hydrateJobs(jobs), nil
 }
 
 func (s *Store) CreateArchiveSchedule(ctx context.Context, schedule ArchiveSchedule) (ArchiveSchedule, error) {
@@ -2520,13 +2580,16 @@ func (s *Store) CreateArchiveSchedule(ctx context.Context, schedule ArchiveSched
 	if err != nil {
 		return ArchiveSchedule{}, err
 	}
-	schedule.NextRunAt = nextArchiveScheduleRun(now, schedule.IntervalMinutes)
+	schedule.NextRunAt, err = nextArchiveScheduleRunFor(now, schedule)
+	if err != nil {
+		return ArchiveSchedule{}, ErrValidation(err.Error())
+	}
 	err = s.db.GetContext(ctx, &schedule, `
 INSERT INTO archive_schedules (
-	name, enabled, interval_minutes, items_json, next_run_at, last_job_ids, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	name, enabled, interval_minutes, cron_expr, timezone, items_json, next_run_at, last_job_ids, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *`,
-		schedule.Name, schedule.Enabled, schedule.IntervalMinutes, schedule.ItemsJSON,
+		schedule.Name, schedule.Enabled, schedule.IntervalMinutes, schedule.CronExpr, schedule.Timezone, schedule.ItemsJSON,
 		schedule.NextRunAt, "[]", now, now)
 	if err != nil {
 		return ArchiveSchedule{}, err
@@ -2539,7 +2602,7 @@ func (s *Store) UpdateArchiveSchedule(ctx context.Context, schedule ArchiveSched
 	if err != nil {
 		return ArchiveSchedule{}, err
 	}
-	// 与 UpdateConfig 同理：next_run_at 是从当前的 enabled / interval_minutes 推算出来的，
+	// 与 UpdateConfig 同理：next_run_at 是从当前的 enabled / interval_minutes / cron_expr 推算出来的，
 	// "读当前值 → 推算 → 写回"必须在一个事务里，否则两个并发编辑会各自读到旧值，
 	// 后写入的一方按过期的开关/间隔重算 next_run_at。
 	tx, err := s.db.BeginTxx(ctx, nil)
@@ -2554,11 +2617,20 @@ func (s *Store) UpdateArchiveSchedule(ctx context.Context, schedule ArchiveSched
 	}
 	now := time.Now().UTC()
 	nextRunAt := current.NextRunAt
-	if schedule.Enabled && (!current.Enabled || current.IntervalMinutes != schedule.IntervalMinutes) {
-		nextRunAt = nextArchiveScheduleRun(now, schedule.IntervalMinutes)
+	scheduleTimingChanged := current.IntervalMinutes != schedule.IntervalMinutes ||
+		current.CronExpr != schedule.CronExpr ||
+		current.Timezone != schedule.Timezone
+	if schedule.Enabled && (!current.Enabled || scheduleTimingChanged) {
+		nextRunAt, err = nextArchiveScheduleRunFor(now, schedule)
+		if err != nil {
+			return ArchiveSchedule{}, ErrValidation(err.Error())
+		}
 	}
 	if nextRunAt.IsZero() {
-		nextRunAt = nextArchiveScheduleRun(now, schedule.IntervalMinutes)
+		nextRunAt, err = nextArchiveScheduleRunFor(now, schedule)
+		if err != nil {
+			return ArchiveSchedule{}, ErrValidation(err.Error())
+		}
 	}
 	// claim_version 只在 next_run_at 真的变化时递增：编辑目标清单（间隔不变）应让调度器
 	// 手里的快照继续有效，并按库里最新的清单执行（见 TestScheduleClaimUsesItemsFromClaimTransaction）；
@@ -2572,13 +2644,15 @@ UPDATE archive_schedules SET
 	name = ?,
 	enabled = ?,
 	interval_minutes = ?,
+	cron_expr = ?,
+	timezone = ?,
 	items_json = ?,
 	next_run_at = ?,
 	claim_version = ?,
 	updated_at = ?
 WHERE id = ?
 RETURNING *`,
-		schedule.Name, schedule.Enabled, schedule.IntervalMinutes, schedule.ItemsJSON,
+		schedule.Name, schedule.Enabled, schedule.IntervalMinutes, schedule.CronExpr, schedule.Timezone, schedule.ItemsJSON,
 		nextRunAt, claimVersion, now, schedule.ID); err != nil {
 		return ArchiveSchedule{}, err
 	}
@@ -2787,7 +2861,10 @@ func (s *Store) claimArchiveScheduleJobs(ctx context.Context, snapshot ArchiveSc
 	if err != nil {
 		return nil, err
 	}
-	nextRunAt := nextArchiveScheduleRun(runAt, schedule.IntervalMinutes)
+	nextRunAt, err := nextArchiveScheduleRunFor(runAt, schedule)
+	if err != nil {
+		return nil, err
+	}
 	// 事务开头已取写锁（_txlock=immediate），SELECT 与 UPDATE 之间不会有并发写入。
 	if _, err := tx.ExecContext(ctx, `
 UPDATE archive_schedules SET
@@ -2808,7 +2885,7 @@ WHERE id = ?`,
 	}
 	drafts := make([]JobDraft, 0, len(schedule.Items))
 	for _, item := range schedule.Items {
-		drafts = append(drafts, JobDraft{Kind: item.Kind, Input: item.Input, Title: item.Title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, BatchSize: item.BatchSize, Source: source})
+		drafts = append(drafts, JobDraft{Kind: item.Kind, Input: item.Input, Title: item.Title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, BatchSize: item.BatchSize, Filter: item.Filter, Source: source})
 	}
 	jobs, err := s.insertJobs(ctx, tx, drafts, "定时归档排队中", runAt, true)
 	if err != nil {
@@ -4396,11 +4473,22 @@ func prepareArchiveScheduleForSave(schedule ArchiveSchedule) (ArchiveSchedule, e
 	if schedule.Name == "" {
 		schedule.Name = "批量归档计划"
 	}
-	if schedule.IntervalMinutes < MinArchiveScheduleIntervalMinutes {
-		return ArchiveSchedule{}, ErrValidation(fmt.Sprintf("定时任务间隔不能小于 %d 分钟", MinArchiveScheduleIntervalMinutes))
-	}
-	if schedule.IntervalMinutes > MaxArchiveScheduleIntervalMinutes {
-		return ArchiveSchedule{}, ErrValidation(fmt.Sprintf("定时任务间隔不能超过 %d 分钟", MaxArchiveScheduleIntervalMinutes))
+	schedule.CronExpr = strings.TrimSpace(schedule.CronExpr)
+	schedule.Timezone = strings.TrimSpace(schedule.Timezone)
+	if schedule.CronExpr != "" {
+		if err := config.ValidateCron(schedule.CronExpr, schedule.Timezone); err != nil {
+			return ArchiveSchedule{}, ErrValidation(err.Error())
+		}
+		if schedule.IntervalMinutes <= 0 {
+			schedule.IntervalMinutes = 60
+		}
+	} else {
+		if schedule.IntervalMinutes < MinArchiveScheduleIntervalMinutes {
+			return ArchiveSchedule{}, ErrValidation(fmt.Sprintf("定时任务间隔不能小于 %d 分钟", MinArchiveScheduleIntervalMinutes))
+		}
+		if schedule.IntervalMinutes > MaxArchiveScheduleIntervalMinutes {
+			return ArchiveSchedule{}, ErrValidation(fmt.Sprintf("定时任务间隔不能超过 %d 分钟", MaxArchiveScheduleIntervalMinutes))
+		}
 	}
 	if len(schedule.Items) == 0 {
 		return ArchiveSchedule{}, ErrValidation("定时任务目标不能为空")
@@ -4418,13 +4506,28 @@ func prepareArchiveScheduleForSave(schedule ArchiveSchedule) (ArchiveSchedule, e
 		if item.BatchSize < 0 || item.BatchSize > MaxArchiveBatchSize {
 			return ArchiveSchedule{}, ErrValidation(fmt.Sprintf("每轮用户数必须在 0 到 %d 之间", MaxArchiveBatchSize))
 		}
+		if item.Filter != nil {
+			norm, err := item.Filter.NormalizeAndValidate()
+			if err != nil {
+				return ArchiveSchedule{}, ErrValidation(err.Error())
+			}
+			item.Filter = norm
+		}
 		item.Input = strings.TrimSpace(item.Input)
 		item.Title = strings.TrimSpace(item.Title)
-		if item.Input == "" {
-			return ArchiveSchedule{}, ErrValidation("定时任务目标不能为空")
-		}
 		switch item.Kind {
-		case JobKindUser, JobKindList, JobKindFollowing:
+		case JobKindUser, JobKindList, JobKindFollowing, JobKindSearch:
+			if item.Input == "" {
+				return ArchiveSchedule{}, ErrValidation("定时任务目标不能为空")
+			}
+		case JobKindBookmarks:
+			if item.Input == "" {
+				item.Input = "all"
+			}
+		case JobKindLikes:
+			if item.Input == "" {
+				item.Input = "self"
+			}
 		default:
 			return ArchiveSchedule{}, ErrValidation(fmt.Sprintf("定时任务不支持的目标类型: %s", item.Kind))
 		}
@@ -4491,6 +4594,18 @@ func defaultArchiveScheduleItemTitle(item ArchiveScheduleItem) string {
 		return fmt.Sprintf("列表 %s", item.Input)
 	case JobKindFollowing:
 		return fmt.Sprintf("关注 %s", displayArchiveScheduleUserInput(item.Input))
+	case JobKindBookmarks:
+		if item.Input == "" || item.Input == "all" {
+			return "书签归档"
+		}
+		return fmt.Sprintf("书签文件夹 %s", item.Input)
+	case JobKindLikes:
+		if item.Input == "" || item.Input == "self" {
+			return "点赞归档"
+		}
+		return fmt.Sprintf("点赞 %s", displayArchiveScheduleUserInput(item.Input))
+	case JobKindSearch:
+		return fmt.Sprintf("搜索 %s", item.Input)
 	default:
 		return item.Input
 	}
@@ -4509,6 +4624,13 @@ func displayArchiveScheduleUserInput(input string) string {
 
 func nextArchiveScheduleRun(now time.Time, intervalMinutes int) time.Time {
 	return now.UTC().Add(time.Duration(intervalMinutes) * time.Minute)
+}
+
+func nextArchiveScheduleRunFor(now time.Time, schedule ArchiveSchedule) (time.Time, error) {
+	if strings.TrimSpace(schedule.CronExpr) != "" {
+		return config.NextCronRun(schedule.CronExpr, schedule.Timezone, now)
+	}
+	return nextArchiveScheduleRun(now, schedule.IntervalMinutes), nil
 }
 
 func normalizeParentDir(parentDir string) (string, error) {

@@ -50,6 +50,9 @@ type LibraryFilter struct {
 	Search             string
 	From, To           time.Time // UTC; To is exclusive.
 	MinBytes, MaxBytes *int64
+	Starred            *bool
+	TagID              int64
+	CollectionID       int64
 }
 
 // LibraryPageOptions 是分页请求参数。
@@ -145,13 +148,37 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 		return LibraryPage{}, err
 	}
 	if snap.entriesTruncated {
-		return s.listLibraryDownloadsPageSQL(ctx, snap, page, pageSize, filter, opts.Sort)
+		pageRes, err := s.listLibraryDownloadsPageSQL(ctx, snap, page, pageSize, filter, opts.Sort)
+		if err == nil {
+			s.attachDownloadTags(ctx, pageRes.Items)
+		}
+		return pageRes, err
+	}
+	allowedIDs, useAllowed, err := s.resolveLibraryAllowedDownloadIDs(ctx, filter)
+	if err != nil {
+		return LibraryPage{}, err
 	}
 	// 快照包含全量条目时直接在内存切片上过滤、排序、分页，避免每次翻页重跑全表 SQL。
 	entries := filterLibraryEntries(snap.entries, filter, snap)
+	if useAllowed || filter.Starred != nil {
+		filtered := entries[:0]
+		for _, item := range entries {
+			if filter.Starred != nil && item.Starred != *filter.Starred {
+				continue
+			}
+			if useAllowed && !allowedIDs[item.ID] {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		entries = filtered
+	}
 	sort.SliceStable(entries, func(i, j int) bool { return libraryEntryLess(entries[i], entries[j], opts.Sort) })
-	orphans := filterLibraryOrphans(snap.orphans, filter)
-	sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], opts.Sort) })
+	var orphans []DownloadRecord
+	if !useAllowed && (filter.Starred == nil || !*filter.Starred) {
+		orphans = filterLibraryOrphans(snap.orphans, filter)
+		sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], opts.Sort) })
+	}
 	dbItems, dbTotal := entries, len(entries)
 
 	total := dbTotal + len(orphans)
@@ -171,7 +198,72 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	if len(merged) > pageSize {
 		merged = merged[:pageSize]
 	}
-	return buildLibraryPageResponse(snap, merged, page, pageSize, total, totalPages, false), nil
+	pageRes := buildLibraryPageResponse(snap, merged, page, pageSize, total, totalPages, false)
+	s.attachDownloadTags(ctx, pageRes.Items)
+	return pageRes, nil
+}
+
+func (s *Store) attachDownloadTags(ctx context.Context, items []DownloadRecord) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		if item.ID > 0 {
+			ids = append(ids, item.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	tagsByID, err := s.ListTagsForDownloads(ctx, ids)
+	if err != nil {
+		return
+	}
+	for i := range items {
+		if tags := tagsByID[items[i].ID]; len(tags) > 0 {
+			items[i].Tags = tags
+		}
+	}
+}
+
+func (s *Store) resolveLibraryAllowedDownloadIDs(ctx context.Context, filter LibraryFilter) (map[int64]bool, bool, error) {
+	if filter.TagID <= 0 && filter.CollectionID <= 0 {
+		return nil, false, nil
+	}
+	var allowed map[int64]bool
+	if filter.TagID > 0 {
+		var ids []int64
+		if err := s.db.SelectContext(ctx, &ids, `SELECT download_id FROM download_tags WHERE tag_id = ?`, filter.TagID); err != nil {
+			return nil, false, err
+		}
+		allowed = make(map[int64]bool, len(ids))
+		for _, id := range ids {
+			allowed[id] = true
+		}
+	}
+	if filter.CollectionID > 0 {
+		var rawIDs []string
+		if err := s.db.SelectContext(ctx, &rawIDs, `SELECT item_id FROM collection_items WHERE collection_id = ? AND item_type = 'download'`, filter.CollectionID); err != nil {
+			return nil, false, err
+		}
+		colSet := make(map[int64]bool, len(rawIDs))
+		for _, raw := range rawIDs {
+			if id, err := strconv.ParseInt(raw, 10, 64); err == nil && id > 0 {
+				colSet[id] = true
+			}
+		}
+		if allowed == nil {
+			allowed = colSet
+		} else {
+			for id := range allowed {
+				if !colSet[id] {
+					delete(allowed, id)
+				}
+			}
+		}
+	}
+	return allowed, true, nil
 }
 
 func buildLibraryPageResponse(snap *librarySnapshot, items []DownloadRecord, page, pageSize, total, totalPages int, truncated bool) LibraryPage {
@@ -216,8 +308,11 @@ func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySn
 	if _, ok := libraryKindExts(filter.Kind); !ok {
 		return buildLibraryPageResponse(snap, nil, 1, pageSize, 0, 1, false), nil
 	}
-	orphans := filterLibraryOrphans(snap.orphans, filter)
-	sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], order) })
+	var orphans []DownloadRecord
+	if filter.TagID <= 0 && filter.CollectionID <= 0 && (filter.Starred == nil || !*filter.Starred) {
+		orphans = filterLibraryOrphans(snap.orphans, filter)
+		sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], order) })
+	}
 
 	whereClause, args := buildLibraryEntriesWhereSQL(filter)
 	orderBy := libraryEntriesOrderBySQL(order)
@@ -418,6 +513,21 @@ func buildLibraryEntriesWhereSQL(filter LibraryFilter) (string, []any) {
 		conds = append(conds, `(instr(lower(file_path), ?) > 0 OR instr(lower(media_url), ?) > 0 OR instr(lower(tweet_id), ?) > 0)`)
 		args = append(args, filter.Search, filter.Search, filter.Search)
 	}
+	if filter.Starred != nil {
+		if *filter.Starred {
+			conds = append(conds, `starred = 1`)
+		} else {
+			conds = append(conds, `starred = 0`)
+		}
+	}
+	if filter.TagID > 0 {
+		conds = append(conds, `EXISTS(SELECT 1 FROM download_tags dt WHERE dt.download_id = ranked.id AND dt.tag_id = ?)`)
+		args = append(args, filter.TagID)
+	}
+	if filter.CollectionID > 0 {
+		conds = append(conds, `EXISTS(SELECT 1 FROM collection_items ci WHERE ci.collection_id = ? AND ci.item_type = 'download' AND ci.item_id = CAST(ranked.id AS TEXT))`)
+		args = append(args, filter.CollectionID)
+	}
 	switch filter.User {
 	case libraryKindAll:
 	case libraryUserUnknown:
@@ -549,7 +659,7 @@ func containsString(items []string, want string) bool {
 }
 
 const libraryEntriesSelectColsSQL = `
-SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash,
+SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_at, media_key, content_hash, starred,
 	user_screen_name, user_name
 FROM ranked
 WHERE rn = 1`
@@ -558,7 +668,7 @@ func libraryEntriesCTESQL() string {
 	return `
 WITH filtered AS (
 	SELECT d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes,
-		d.created_at, d.media_key, d.content_hash,
+		d.created_at, d.media_key, d.content_hash, d.starred,
 		COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name,
 		CASE WHEN d.file_path = '' THEN 'record:' || d.id ELSE d.file_path END AS entry_key
 	FROM downloads d

@@ -197,12 +197,12 @@ function Workbench() {
     enabled: isWorkbenchActive,
   });
 
-  // 系统配置 Query
+  // 系统配置 Query（媒体库和推文页也会读取 offlineThumbnails 等展示偏好）
   const config = useQuery({
     queryKey: configQueryRoot,
     queryFn: ({ signal }) => getConfig(signal),
-    staleTime: 15_000,
-    enabled: activeSection === "settings",
+    staleTime: 60_000,
+    enabled: activeSection === "settings" || activeSection === "gallery" || activeSection === "tweets",
   });
 
   // 分页边界校验：若当前页响应未携带 total，必须等 meta 成功加载后再裁剪，

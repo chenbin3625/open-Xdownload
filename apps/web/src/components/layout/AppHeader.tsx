@@ -1,5 +1,5 @@
 import { t, useTranslation } from "../../lib/i18n";
-import { ArrowRight, Bell, Menu, RefreshCw, Search, TriangleAlert, WifiOff } from "lucide-react";
+import { ArrowRight, Bell, Menu, Monitor, Moon, RefreshCw, Search, Sun, TriangleAlert, WifiOff } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Badge from "@douyinfe/semi-ui/lib/es/badge";
 import Button from "@douyinfe/semi-ui/lib/es/button";
@@ -8,6 +8,7 @@ import Popover from "@douyinfe/semi-ui/lib/es/popover";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import { detectQuickInputTab } from "../../lib/quickInput";
+import { readThemePreference, setThemePreference, subscribeTheme, type ThemePreference } from "../../lib/theme";
 
 export interface AppHeaderProps {
   refreshPending: boolean;
@@ -43,7 +44,18 @@ export const AppHeader = React.memo(function AppHeader({
   useTranslation();
   const [quickInput, setQuickInput] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [themePref, setThemePref] = useState<ThemePreference>(() => readThemePreference());
   const quickInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => subscribeTheme(setThemePref), []);
+
+  const cycleTheme = () => {
+    const order: ThemePreference[] = ["system", "light", "dark"];
+    const next = order[(order.indexOf(themePref) + 1) % order.length];
+    setThemePreference(next);
+  };
+  const themeLabel = themePref === "dark" ? t("深色模式") : themePref === "light" ? t("浅色模式") : t("跟随系统");
+  const themeIcon = themePref === "dark" ? <Moon className="size-4" /> : themePref === "light" ? <Sun className="size-4" /> : <Monitor className="size-4" />;
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -165,6 +177,16 @@ export const AppHeader = React.memo(function AppHeader({
             <Tag color="blue" className="hidden font-mono sm:inline-flex">
               v{__APP_VERSION__}
             </Tag>
+
+            <Tooltip content={`${t("切换外观")}: ${themeLabel}`}>
+              <Button
+                theme="borderless"
+                type="tertiary"
+                icon={themeIcon}
+                onClick={cycleTheme}
+                aria-label={`${t("切换外观")}: ${themeLabel}`}
+              />
+            </Tooltip>
 
             <Tooltip content={t("刷新数据")}>
               <Button

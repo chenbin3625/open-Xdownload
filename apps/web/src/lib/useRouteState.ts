@@ -27,6 +27,9 @@ export interface GalleryRouteState {
   to: string;
   minBytes: string;
   maxBytes: string;
+  starred?: string;
+  tagId?: string;
+  collectionId?: string;
 }
 
 export const gallerySortValues = ["date_desc", "date_asc", "size_desc", "size_asc"] as const;
@@ -62,7 +65,7 @@ export const defaultJobPageSize = 10;
 export const defaultJobStatus: StatusFilterType = "all";
 export const defaultJobKind = "all";
 export const defaultJobSearch = "";
-const jobKindValues = ["all", "tweet_link", "media_url", "user", "list", "following", "failed_retry", "asset_migration"];
+const jobKindValues = ["all", "tweet_link", "media_url", "user", "list", "following", "bookmarks", "likes", "thread", "search", "failed_retry", "asset_migration"];
 
 export const sectionRoutes: Record<SectionKey, string> = {
   overview: "/overview",
@@ -168,8 +171,8 @@ export function buildRoutePath(state: RouteQueryState) {
     if (gallery.user && gallery.user !== "all") params.set("user", gallery.user);
     if (gallery.search) params.set("q", gallery.search);
     if (gallery.sort !== defaultGalleryFilter.sort) params.set("sort", gallery.sort);
-    for (const key of ["from", "to", "minBytes", "maxBytes"] as const) {
-      if (gallery[key] !== "") params.set(key, gallery[key]);
+    for (const key of ["from", "to", "minBytes", "maxBytes", "starred", "tagId", "collectionId"] as const) {
+      if (gallery[key]) params.set(key, gallery[key]!);
     }
   } else if (section === "tweets" && typeof window !== "undefined" && normalizePathname(window.location.pathname) === "/tweets") {
     new URLSearchParams(window.location.search).forEach((value, key) => params.set(key, value));
@@ -219,6 +222,9 @@ export function readRouteState(): RouteState {
           to: parseGalleryDate(params.get("to")),
           minBytes: parseGalleryBytes(params.get("minBytes")),
           maxBytes: parseGalleryBytes(params.get("maxBytes")),
+          ...(params.get("starred") === "1" ? { starred: "1" } : {}),
+          ...(parseGalleryBytes(params.get("tagId")) ? { tagId: parseGalleryBytes(params.get("tagId")) } : {}),
+          ...(parseGalleryBytes(params.get("collectionId")) ? { collectionId: parseGalleryBytes(params.get("collectionId")) } : {}),
         }
       : { ...defaultGalleryFilter };
 

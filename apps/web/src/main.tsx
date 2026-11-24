@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "./index.css";
 import "@douyinfe/semi-ui/lib/es/_base/base.css";
 import "./lib/i18n";
+import { initTheme } from "./lib/theme";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
@@ -27,6 +28,8 @@ const queryClient = new QueryClient({
     },
   },
 });
+initTheme();
+
 const bootstrap = takeAppBootstrap();
 if (bootstrap) {
   const route = readRouteState();

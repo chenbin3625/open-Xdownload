@@ -1,8 +1,10 @@
-import { api, type AssetKind, type DownloadRecord, type Job, type TweetData } from "./api";
+import { api, type AssetKind, type DeleteResult, type DownloadRecord, type Job, type TagRecord, type TweetData } from "./api";
 
 export interface ArchivedTweet extends TweetData {
   jobIds: number[]; bodyStatus: string; mediaStatus: string; mediaError?: string;
   downloads: DownloadRecord[]; archivedAt: string;
+  starred?: boolean;
+  tags?: TagRecord[];
 }
 export interface TweetAuthor { value: string; label: string }
 export interface TweetPage { items: ArchivedTweet[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }
@@ -24,3 +26,13 @@ export const getTweetAuthors = (signal?: AbortSignal) => api<TweetAuthor[]>("/ap
 export const getTweetProgress = (signal?: AbortSignal) => api<{ items: TweetSync[] }>("/api/archive/progress", { signal });
 export const retryTweetMedia = (id: string) => api<Job>(`/api/archive/tweets/${encodeURIComponent(id)}/retry-media`, { method: "POST" });
 export const migrateStorage = () => api<Job>("/api/storage/migrate", { method: "POST" });
+export const getTweetThread = (tweetId: string, signal?: AbortSignal) =>
+  api<{ items: ArchivedTweet[] }>(`/api/archive/tweets/${encodeURIComponent(tweetId)}/thread`, { signal });
+export const setTweetStar = (tweetId: string, starred: boolean) =>
+  api<{ starred: boolean }>(`/api/archive/tweets/${encodeURIComponent(tweetId)}/star`, { method: "POST", body: JSON.stringify({ starred }) });
+export const setTweetTags = (tweetId: string, tagIds: number[]) =>
+  api<{ tags: TagRecord[] }>(`/api/archive/tweets/${encodeURIComponent(tweetId)}/tags`, { method: "PUT", body: JSON.stringify({ tagIds }) });
+export const deleteTweet = (tweetId: string, deleteFiles = false) =>
+  api<DeleteResult>(`/api/archive/tweets/${encodeURIComponent(tweetId)}${deleteFiles ? "?deleteFiles=1" : ""}`, { method: "DELETE" });
+export const batchDeleteTweets = (ids: string[], deleteFiles = false) =>
+  api<DeleteResult>("/api/archive/tweets/batch-delete", { method: "POST", body: JSON.stringify({ ids, deleteFiles }) });

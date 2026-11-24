@@ -20,19 +20,29 @@ const TimelineFeatures = `{"rweb_tipjar_consumption_enabled":true,"responsive_we
 // GraphQLQueryIDs 集中管理 X GraphQL 的 queryId。X 轮换 queryId 时只需改这一处；
 // 请求如果因 queryId 失效返回 404，会得到 ErrQueryIDStale（不自动猜测新 id）。
 var GraphQLQueryIDs = struct {
-	UserMedia        string
-	UserByRestId     string
-	UserByScreenName string
-	ListByRestId     string
-	ListMembers      string
-	Following        string
+	UserMedia              string
+	UserByRestId           string
+	UserByScreenName       string
+	ListByRestId           string
+	ListMembers            string
+	Following              string
+	Bookmarks              string
+	BookmarkFolderTimeline string
+	Likes                  string
+	TweetDetail            string
+	SearchTimeline         string
 }{
-	UserMedia:        "MOLbHrtk8Ovu7DUNOLcXiA",
-	UserByRestId:     "CO4_gU4G_MRREoqfiTh6Hg",
-	UserByScreenName: "xmU6X_CKVnQ5lSrCbAmJsg",
-	ListByRestId:     "ZMQOSpxDo0cP5Cdt8MgEVA",
-	ListMembers:      "3dQPyRyAj6Lslp4e0ClXzg",
-	Following:        "7FEKOPNAvxWASt6v9gfCXw",
+	UserMedia:              "MOLbHrtk8Ovu7DUNOLcXiA",
+	UserByRestId:           "CO4_gU4G_MRREoqfiTh6Hg",
+	UserByScreenName:       "xmU6X_CKVnQ5lSrCbAmJsg",
+	ListByRestId:           "ZMQOSpxDo0cP5Cdt8MgEVA",
+	ListMembers:            "3dQPyRyAj6Lslp4e0ClXzg",
+	Following:              "7FEKOPNAvxWASt6v9gfCXw",
+	Bookmarks:              "qMDtp_J522083286420123",
+	BookmarkFolderTimeline: "h5r2qG9uP3z6X8vN2mK1wQ",
+	Likes:                  "kgZtsNyE46T3s9DFvpdklg",
+	TweetDetail:            "nBS-WpgA6ZG0CyNHD517JQ",
+	SearchTimeline:         "nK1dw4oV3k4w5TdtcAdSww",
 }
 
 // GraphQLPath 由 queryId + operation 构造 GraphQL 端点路径。
@@ -47,6 +57,11 @@ var (
 	ListByRestIDPath     = GraphQLPath(GraphQLQueryIDs.ListByRestId, "ListByRestId")
 	ListMembersPath      = GraphQLPath(GraphQLQueryIDs.ListMembers, "ListMembers")
 	FollowingPath        = GraphQLPath(GraphQLQueryIDs.Following, "Following")
+	BookmarksPath        = GraphQLPath(GraphQLQueryIDs.Bookmarks, "Bookmarks")
+	BookmarkFolderPath   = GraphQLPath(GraphQLQueryIDs.BookmarkFolderTimeline, "BookmarkFolderTimeline")
+	LikesPath            = GraphQLPath(GraphQLQueryIDs.Likes, "Likes")
+	TweetDetailPath      = GraphQLPath(GraphQLQueryIDs.TweetDetail, "TweetDetail")
+	SearchTimelinePath   = GraphQLPath(GraphQLQueryIDs.SearchTimeline, "SearchTimeline")
 )
 
 // EncodeVariables 用 encoding/json 构造 GraphQL variables：%q 是 Go 字面量转义，
@@ -156,4 +171,97 @@ func UserTweetsPath() string {
 	}
 	// X 已不再接受裸 /graphql/ 前缀（一律 401），必须与其他接口一样走 /i/api/graphql/。
 	return GraphQLPath(queryID, "UserTweets")
+}
+
+// BookmarksValues 构造书签时间线分页的查询参数。
+func BookmarksValues(cursor string) url.Values {
+	vars := map[string]any{
+		"count":                  100,
+		"includePromotedContent": false,
+	}
+	if cursor != "" {
+		vars["cursor"] = cursor
+	}
+	return url.Values{
+		"variables": {EncodeVariables(vars)},
+		"features":  {TimelineFeatures},
+	}
+}
+
+// BookmarkFolderValues 构造指定书签文件夹分页的查询参数。
+func BookmarkFolderValues(folderID, cursor string) url.Values {
+	vars := map[string]any{
+		"bookmark_collection_id": folderID,
+		"count":                  100,
+		"includePromotedContent": false,
+	}
+	if cursor != "" {
+		vars["cursor"] = cursor
+	}
+	return url.Values{
+		"variables": {EncodeVariables(vars)},
+		"features":  {TimelineFeatures},
+	}
+}
+
+// LikesValues 构造点赞时间线分页的查询参数。
+func LikesValues(userID, cursor string) url.Values {
+	vars := map[string]any{
+		"userId":                 userID,
+		"count":                  100,
+		"includePromotedContent": false,
+		"withClientEventToken":   false,
+		"withBirdwatchNotes":     false,
+		"withVoice":              true,
+		"withV2Timeline":         true,
+	}
+	if cursor != "" {
+		vars["cursor"] = cursor
+	}
+	return url.Values{
+		"variables": {EncodeVariables(vars)},
+		"features":  {TimelineFeatures},
+	}
+}
+
+// TweetDetailValues 构造推文对话长串（TweetDetail）的查询参数。
+func TweetDetailValues(tweetID, cursor string) url.Values {
+	vars := map[string]any{
+		"focalTweetId":                           tweetID,
+		"with_rux_injections":                    false,
+		"rankingMode":                            "Relevance",
+		"includePromotedContent":                 false,
+		"withCommunity":                          true,
+		"withQuickPromoteEligibilityTweetFields": true,
+		"withBirdwatchNotes":                     true,
+		"withVoice":                              true,
+	}
+	if cursor != "" {
+		vars["cursor"] = cursor
+	}
+	return url.Values{
+		"variables":    {EncodeVariables(vars)},
+		"features":     {TimelineFeatures},
+		"fieldToggles": {`{"withArticleRichContentState":true,"withArticlePlainText":true,"withGrokAnalyze":false,"withDisallowedReplyControls":false}`},
+	}
+}
+
+// SearchTimelineValues 构造关键词 / 高级搜索时间线的查询参数。
+func SearchTimelineValues(rawQuery, product, cursor string) url.Values {
+	if product == "" {
+		product = "Latest"
+	}
+	vars := map[string]any{
+		"rawQuery":    rawQuery,
+		"count":       40,
+		"querySource": "typed_query",
+		"product":     product,
+	}
+	if cursor != "" {
+		vars["cursor"] = cursor
+	}
+	return url.Values{
+		"variables": {EncodeVariables(vars)},
+		"features":  {TimelineFeatures},
+	}
 }

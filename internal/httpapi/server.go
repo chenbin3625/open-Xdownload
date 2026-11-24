@@ -24,6 +24,7 @@ import (
 	"github.com/chenbin3625/open-Xdownload/internal/config"
 	"github.com/chenbin3625/open-Xdownload/internal/httpx"
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
+	"github.com/chenbin3625/open-Xdownload/internal/notify"
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xapi"
@@ -46,6 +47,7 @@ type Server struct {
 	homeProber xapi.HomeProber
 	// xAccountMu 串行化账号代理还原更新与探测结果写回，避免并发 TOCTOU 覆写。
 	xAccountMu sync.Mutex
+	notifier   *notify.Dispatcher
 }
 
 const maxLoginAttempts = 10             // 窗口内最大尝试次数
@@ -164,6 +166,58 @@ func (s *Server) Routes() http.Handler {
 	r.Delete("/api/failed-tweets", s.clearFailedTweets)
 	read("/api/dashboard", s.dashboard)
 	read("/api/dashboard/meta", s.dashboardMeta)
+
+	// Personal API Tokens & Browser Userscript
+	read("/api/tokens", s.listAPITokens)
+	r.Post("/api/tokens", s.createAPIToken)
+	r.Delete("/api/tokens/{id}", s.deleteAPIToken)
+	read("/api/extensions/userscript.user.js", s.serveUserscript)
+
+	// Webhooks & Notifications
+	read("/api/webhooks", s.listWebhooks)
+	r.Post("/api/webhooks", s.createWebhook)
+	r.Put("/api/webhooks/{id}", s.updateWebhook)
+	r.Delete("/api/webhooks/{id}", s.deleteWebhook)
+	r.Post("/api/webhooks/{id}/test", s.testWebhook)
+
+	// Archive Organization: Thread, Star, Delete, Tags, Collections
+	read("/api/archive/tweets/{tweetID}/thread", s.getTweetThread)
+	r.Delete("/api/archive/tweets/{tweetID}", s.deleteTweet)
+	r.Post("/api/archive/tweets/batch-delete", s.batchDeleteTweets)
+	r.Post("/api/archive/tweets/{tweetID}/star", s.setTweetStar)
+	r.Put("/api/archive/tweets/{tweetID}/tags", s.setTweetTags)
+
+	r.Delete("/api/library/downloads/{id}", s.deleteDownload)
+	r.Post("/api/library/downloads/batch-delete", s.batchDeleteDownloads)
+	r.Post("/api/library/downloads/{id}/star", s.setDownloadStar)
+	r.Put("/api/library/downloads/{id}/tags", s.setDownloadTags)
+	read("/api/library/downloads/{id}/thumbnail", s.serveDownloadThumbnail)
+
+	read("/api/tags", s.listTags)
+	r.Post("/api/tags", s.createTag)
+	r.Put("/api/tags/{id}", s.updateTag)
+	r.Delete("/api/tags/{id}", s.deleteTag)
+
+	read("/api/collections", s.listCollections)
+	r.Post("/api/collections", s.createCollection)
+	r.Put("/api/collections/{id}", s.updateCollection)
+	r.Delete("/api/collections/{id}", s.deleteCollection)
+	r.Post("/api/collections/{id}/items", s.addCollectionItems)
+	r.Delete("/api/collections/{id}/items", s.removeCollectionItems)
+
+	// Export, RSS, Avatars & Maintenance
+	r.Post("/api/export/media-zip", s.exportMediaZIP)
+	read("/api/export/tweets", s.exportTweets)
+	read("/api/rss/tweets", s.serveTweetRSS)
+	read("/api/avatars/{screenName}", s.serveAvatar)
+
+	read("/api/maintenance/stats", s.getMaintenanceStats)
+	r.Post("/api/maintenance/scan", s.scanMaintenance)
+	r.Post("/api/maintenance/cleanup", s.cleanupMaintenance)
+	read("/api/maintenance/backup", s.downloadBackup)
+	read("/api/maintenance/export-config", s.exportConfigBundle)
+	r.Post("/api/maintenance/import-config", s.importConfigBundle)
+
 	// JSON 按 Accept-Encoding 协商 br/gzip；SSE 与过小 payload 保持 identity。
 	return compressJSON(r)
 }
@@ -617,7 +671,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	job, err := s.store.CreateArchiveJob(r.Context(), storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: req.ArchiveMode, Backfill: req.Backfill, BatchSize: req.BatchSize})
+	job, err := s.store.CreateArchiveJob(r.Context(), storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: req.ArchiveMode, Backfill: req.Backfill, BatchSize: req.BatchSize, Filter: req.Filter})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -655,7 +709,7 @@ func (s *Server) createJobsBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[key] = struct{}{}
-		prepared = append(prepared, storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, BatchSize: item.BatchSize})
+		prepared = append(prepared, storage.JobDraft{Kind: kind, Input: input, Title: title, ArchiveMode: item.ArchiveMode, Backfill: item.Backfill, BatchSize: item.BatchSize, Filter: item.Filter})
 	}
 	if len(prepared) == 0 {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("没有可创建的任务"))
@@ -771,12 +825,13 @@ func (s *Server) runArchiveSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 type jobRequest struct {
-	Kind        storage.JobKind     `json:"kind"`
-	Input       string              `json:"input"`
-	Title       string              `json:"title"`
-	ArchiveMode storage.ArchiveMode `json:"archiveMode"`
-	Backfill    bool                `json:"backfill"`
-	BatchSize   int                 `json:"batchSize"`
+	Kind        storage.JobKind       `json:"kind"`
+	Input       string                `json:"input"`
+	Title       string                `json:"title"`
+	ArchiveMode storage.ArchiveMode   `json:"archiveMode"`
+	Backfill    bool                  `json:"backfill"`
+	BatchSize   int                   `json:"batchSize"`
+	Filter      *config.ArchiveFilter `json:"filter,omitempty"`
 }
 
 type batchJobRequest struct {
@@ -787,6 +842,8 @@ type archiveScheduleRequest struct {
 	Name            string                        `json:"name"`
 	Enabled         bool                          `json:"enabled"`
 	IntervalMinutes int                           `json:"intervalMinutes"`
+	CronExpr        string                        `json:"cronExpr,omitempty"`
+	Timezone        string                        `json:"timezone,omitempty"`
 	Items           []storage.ArchiveScheduleItem `json:"items"`
 }
 
@@ -811,6 +868,8 @@ func archiveScheduleFromRequest(req archiveScheduleRequest) storage.ArchiveSched
 		Name:            strings.TrimSpace(req.Name),
 		Enabled:         req.Enabled,
 		IntervalMinutes: req.IntervalMinutes,
+		CronExpr:        strings.TrimSpace(req.CronExpr),
+		Timezone:        strings.TrimSpace(req.Timezone),
 		Items:           req.Items,
 	}
 }
@@ -846,10 +905,58 @@ func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKin
 	if req.Kind == "" {
 		req.Kind = storage.JobKindTweetLink
 	}
-	if strings.TrimSpace(req.Input) == "" {
-		return "", "", "", fmt.Errorf("任务输入不能为空")
-	}
 	req.Input = strings.TrimSpace(req.Input)
+	switch req.Kind {
+	case storage.JobKindBookmarks:
+		if req.Input == "" {
+			req.Input = "all"
+		}
+		if strings.TrimSpace(req.Title) == "" {
+			if req.Input == "all" {
+				req.Title = "书签归档"
+			} else {
+				req.Title = fmt.Sprintf("书签文件夹 %s", req.Input)
+			}
+		}
+	case storage.JobKindLikes:
+		if req.Input == "" {
+			req.Input = "self"
+		}
+		if strings.TrimSpace(req.Title) == "" {
+			if req.Input == "self" {
+				req.Title = "点赞归档"
+			} else {
+				req.Title = fmt.Sprintf("点赞 %s", displayUserInput(req.Input))
+			}
+		}
+	case storage.JobKindThread:
+		if req.Input == "" {
+			return "", "", "", fmt.Errorf("任务输入不能为空")
+		}
+		rawTarget := strings.TrimSpace(strings.TrimPrefix(req.Input, "replies:"))
+		_, tweetID, err := parser.ExtractTweetURL(rawTarget)
+		if err != nil {
+			if _, numErr := strconv.ParseUint(rawTarget, 10, 64); numErr == nil && rawTarget != "" {
+				tweetID = rawTarget
+			} else {
+				return "", "", "", err
+			}
+		}
+		if strings.TrimSpace(req.Title) == "" {
+			req.Title = fmt.Sprintf("长串 %s", tweetID)
+		}
+	case storage.JobKindSearch:
+		if req.Input == "" {
+			return "", "", "", fmt.Errorf("搜索关键词不能为空")
+		}
+		if strings.TrimSpace(req.Title) == "" {
+			req.Title = fmt.Sprintf("搜索 %s", req.Input)
+		}
+	default:
+		if req.Input == "" {
+			return "", "", "", fmt.Errorf("任务输入不能为空")
+		}
+	}
 	if req.Kind == storage.JobKindTweetLink {
 		_, tweetID, err := parser.ExtractTweetURL(req.Input)
 		if err != nil {
@@ -880,8 +987,14 @@ func (s *Server) prepareJob(ctx context.Context, req jobRequest) (storage.JobKin
 			req.Title = "媒体 URL"
 		}
 	}
+	if req.Filter != nil {
+		if _, err := req.Filter.NormalizeAndValidate(); err != nil {
+			return "", "", "", storage.ErrValidation(err.Error())
+		}
+	}
 	switch req.Kind {
-	case storage.JobKindTweetLink, storage.JobKindMediaURL, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing:
+	case storage.JobKindTweetLink, storage.JobKindMediaURL, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing,
+		storage.JobKindBookmarks, storage.JobKindLikes, storage.JobKindThread, storage.JobKindSearch:
 	default:
 		return "", "", "", fmt.Errorf("不支持的任务类型: %s", req.Kind)
 	}
@@ -914,7 +1027,9 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	if kindValue != "" {
 		switch storage.JobKind(kindValue) {
-		case storage.JobKindTweetLink, storage.JobKindMediaURL, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing, storage.JobKindFailedRetry, storage.JobKindAssetMigration:
+		case storage.JobKindTweetLink, storage.JobKindMediaURL, storage.JobKindUser, storage.JobKindList, storage.JobKindFollowing,
+			storage.JobKindBookmarks, storage.JobKindLikes, storage.JobKindThread, storage.JobKindSearch,
+			storage.JobKindFailedRetry, storage.JobKindAssetMigration:
 		default:
 			writeError(w, http.StatusBadRequest, storage.ErrValidation("无效的任务类型筛选"))
 			return
@@ -1183,6 +1298,20 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filter := storage.LibraryFilter{Kind: strings.TrimSpace(q.Get("kind")), User: strings.TrimSpace(q.Get("user")), Search: strings.TrimSpace(q.Get("search"))}
+	if rawStarred := q.Get("starred"); rawStarred != "" {
+		v := rawStarred == "1" || rawStarred == "true"
+		filter.Starred = &v
+	}
+	if rawTag := q.Get("tagId"); rawTag != "" {
+		if tagID, err := strconv.ParseInt(rawTag, 10, 64); err == nil && tagID > 0 {
+			filter.TagID = tagID
+		}
+	}
+	if rawCol := q.Get("collectionId"); rawCol != "" {
+		if colID, err := strconv.ParseInt(rawCol, 10, 64); err == nil && colID > 0 {
+			filter.CollectionID = colID
+		}
+	}
 	for key, target := range map[string]*time.Time{"from": &filter.From, "to": &filter.To} {
 		if value := q.Get(key); value != "" {
 			date, err := time.Parse("2006-01-02", value)

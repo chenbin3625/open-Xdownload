@@ -1,7 +1,10 @@
 import { t, useTranslation } from "../../lib/i18n";
 import {
+  BellRing,
+  Database,
   Download,
   HardDrive,
+  KeyRound,
   RefreshCw,
   Save,
   Users,
@@ -24,6 +27,9 @@ import { DownloadSettingsFields } from "./DownloadSettings";
 import { StorageManagement } from "./StorageManagement";
 import { LanguageSettings } from "./LanguageSettings";
 import { AccountSecurity } from "./AccountSecurity";
+import { WebhookSettings } from "./WebhookSettings";
+import { ApiTokensSettings } from "./ApiTokensSettings";
+import { MaintenanceSettings } from "./MaintenanceSettings";
 
 export function ConfigForm({
   config,
@@ -188,6 +194,9 @@ export function ConfigForm({
         <a href="#settings-download" className="settings-jump-link"><Download size={14} />{t("下载与归档")}</a>
         <a href="#settings-storage" className="settings-jump-link"><HardDrive size={14} />{t("存储设置")}</a>
         <a href="#settings-x-accounts" className="settings-jump-link"><Users size={14} />{t("X 账号池")}</a>
+        <a href="#settings-webhooks" className="settings-jump-link"><BellRing size={14} />{t("通知推送")}</a>
+        <a href="#settings-integrations" className="settings-jump-link"><KeyRound size={14} />{t("API 与扩展")}</a>
+        <a href="#settings-maintenance" className="settings-jump-link"><Database size={14} />{t("统计与维护")}</a>
       </nav>
 
       <div className="settings-general-bar">
@@ -203,6 +212,12 @@ export function ConfigForm({
       <StorageManagement />
 
       <XAccountsSettings />
+
+      <WebhookSettings />
+
+      <ApiTokensSettings />
+
+      <MaintenanceSettings />
     </div>
   );
 }
@@ -218,6 +233,9 @@ export function normalizeConfig(config: AppConfig): AppConfig {
     maxConcurrency: rest.maxConcurrency || 1,
     includeNestedTweetMedia: rest.includeNestedTweetMedia ?? false,
     incrementalArchive: rest.incrementalArchive ?? false,
+    writeMetadataSidecar: rest.writeMetadataSidecar ?? false,
+    offlineThumbnails: rest.offlineThumbnails ?? false,
+    archiveFilter: rest.archiveFilter ?? null,
     storageType: rest.storageType ?? "local",
   };
 }

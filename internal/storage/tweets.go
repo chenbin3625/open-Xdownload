@@ -42,13 +42,18 @@ type ArchivedTweet struct {
 	MediaError  string           `json:"mediaError,omitempty"`
 	Downloads   []DownloadRecord `json:"downloads"`
 	ArchivedAt  time.Time        `json:"archivedAt"`
+	Starred     bool             `json:"starred"`
+	Tags        []Tag            `json:"tags,omitempty"`
 }
 
 type TweetFilter struct {
-	Sort, Retweets                          string
-	Search, Author, From, To, MediaType, ID string
-	JobID                                   int64
-	Page, PageSize                          int
+	Sort, Retweets                                          string
+	Search, Author, From, To, MediaType, ID, ConversationID string
+	JobID                                                   int64
+	Starred                                                 *bool
+	TagID                                                   int64
+	CollectionID                                            int64
+	Page, PageSize                                          int
 }
 type TweetPage struct {
 	Items      []ArchivedTweet `json:"items"`
@@ -147,7 +152,63 @@ CREATE TABLE IF NOT EXISTS tweet_sync (
 	if err != nil {
 		return err
 	}
+	for _, col := range []struct{ name, definition string }{
+		{"like_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"retweet_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"reply_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"bookmark_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"view_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"starred", "BOOLEAN NOT NULL DEFAULT 0"},
+		{"conversation_id", "TEXT NOT NULL DEFAULT ''"},
+		{"alt_texts", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		var count int
+		if err := tx.Get(&count, `SELECT COUNT(*) FROM pragma_table_info('tweets') WHERE name=?`, col.name); err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := tx.Exec(`ALTER TABLE tweets ADD COLUMN ` + col.name + ` ` + col.definition); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.Exec(`
+CREATE INDEX IF NOT EXISTS idx_tweets_conversation ON tweets(conversation_id, published_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_tweets_starred ON tweets(starred, published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tweets_likes ON tweets(like_count DESC, id DESC);
+CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts USING fts5(tweet_id UNINDEXED, screen_name, author_name, body, alt_texts, tokenize='unicode61');
+`); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func (s *Store) backfillTweetsFTS(exec migrationExecutor) error {
+	if _, err := exec.Exec(`DELETE FROM tweets_fts`); err != nil {
+		return err
+	}
+	_, err := exec.Exec(`
+INSERT INTO tweets_fts(tweet_id, screen_name, author_name, body, alt_texts)
+SELECT id, screen_name, author_name, body, alt_texts FROM tweets`)
+	return err
+}
+
+func collectTweetAltTexts(tweet parser.TweetData) string {
+	parts := make([]string, 0, len(tweet.Media))
+	for _, m := range tweet.Media {
+		if alt := strings.TrimSpace(m.AltText); alt != "" {
+			parts = append(parts, alt)
+		}
+	}
+	if tweet.Article != nil {
+		if t := strings.TrimSpace(tweet.Article.Title); t != "" {
+			parts = append(parts, t)
+		}
+		if p := strings.TrimSpace(tweet.Article.PlainText); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // Each body commits before any media I/O. A later media failure cannot roll it back.
@@ -228,11 +289,36 @@ func archiveTweetTx(ctx context.Context, tx *sqlx.Tx, jobID int64, tweet parser.
 	}
 
 	if !preserveExisting {
-		_, err = tx.ExecContext(ctx, `INSERT INTO tweets(id,author_id,screen_name,author_name,body,published_at,payload,archived_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET author_id=excluded.author_id,screen_name=excluded.screen_name,
-author_name=excluded.author_name,body=excluded.body,published_at=excluded.published_at,payload=excluded.payload,updated_at=excluded.updated_at`,
-			tweet.ID, tweet.Author.ID, tweet.Author.ScreenName, tweet.Author.Name, tweet.Text, publishedAt, string(payload), now, now)
+		var likeCount, retweetCount, replyCount, bookmarkCount, viewCount int64
+		if tweet.Metrics != nil {
+			likeCount = tweet.Metrics.Likes
+			retweetCount = tweet.Metrics.Retweets
+			replyCount = tweet.Metrics.Replies
+			bookmarkCount = tweet.Metrics.Bookmarks
+			viewCount = tweet.Metrics.Views
+		}
+		altTexts := collectTweetAltTexts(tweet)
+		convID := strings.TrimSpace(tweet.ConversationID)
+		_, err = tx.ExecContext(ctx, `INSERT INTO tweets(id,author_id,screen_name,author_name,body,published_at,payload,archived_at,updated_at,like_count,retweet_count,reply_count,bookmark_count,view_count,conversation_id,alt_texts)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET author_id=excluded.author_id,screen_name=excluded.screen_name,
+author_name=excluded.author_name,body=excluded.body,published_at=excluded.published_at,payload=excluded.payload,updated_at=excluded.updated_at,
+like_count=CASE WHEN excluded.like_count>0 THEN excluded.like_count ELSE tweets.like_count END,
+retweet_count=CASE WHEN excluded.retweet_count>0 THEN excluded.retweet_count ELSE tweets.retweet_count END,
+reply_count=CASE WHEN excluded.reply_count>0 THEN excluded.reply_count ELSE tweets.reply_count END,
+bookmark_count=CASE WHEN excluded.bookmark_count>0 THEN excluded.bookmark_count ELSE tweets.bookmark_count END,
+view_count=CASE WHEN excluded.view_count>0 THEN excluded.view_count ELSE tweets.view_count END,
+conversation_id=CASE WHEN excluded.conversation_id<>'' THEN excluded.conversation_id ELSE tweets.conversation_id END,
+alt_texts=CASE WHEN excluded.alt_texts<>'' THEN excluded.alt_texts ELSE tweets.alt_texts END`,
+			tweet.ID, tweet.Author.ID, tweet.Author.ScreenName, tweet.Author.Name, tweet.Text, publishedAt, string(payload), now, now,
+			likeCount, retweetCount, replyCount, bookmarkCount, viewCount, convID, altTexts)
 		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM tweets_fts WHERE tweet_id=?`, tweet.ID); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO tweets_fts(tweet_id,screen_name,author_name,body,alt_texts) VALUES(?,?,?,?,?)`,
+			tweet.ID, tweet.Author.ScreenName, tweet.Author.Name, tweet.Text, altTexts); err != nil {
 			return err
 		}
 	}
@@ -531,9 +617,10 @@ type tweetRow struct {
 	PublishedAt time.Time `db:"published_at"`
 	Payload     string    `db:"payload"`
 	ArchivedAt  time.Time `db:"archived_at"`
+	Starred     bool      `db:"starred"`
 }
 
-func hydrateArchivedTweetRow(row tweetRow, jobIDs []int64, bodyStatus, mediaStatus, mediaError string, downloads []DownloadRecord) (ArchivedTweet, error) {
+func hydrateArchivedTweetRow(row tweetRow, jobIDs []int64, bodyStatus, mediaStatus, mediaError string, downloads []DownloadRecord, tags []Tag) (ArchivedTweet, error) {
 	if jobIDs == nil {
 		jobIDs = []int64{}
 	}
@@ -553,6 +640,8 @@ func hydrateArchivedTweetRow(row tweetRow, jobIDs []int64, bodyStatus, mediaStat
 		MediaStatus: mediaStatus,
 		MediaError:  mediaError,
 		Downloads:   downloads,
+		Starred:     row.Starred,
+		Tags:        tags,
 	}
 	if err := json.Unmarshal([]byte(row.Payload), &result.TweetData); err != nil {
 		return result, err
@@ -586,7 +675,7 @@ func hydrateArchivedTweetRow(row tweetRow, jobIDs []int64, bodyStatus, mediaStat
 
 func (s *Store) getTweet(ctx context.Context, id string, jobID int64) (ArchivedTweet, error) {
 	var row tweetRow
-	if err := s.db.GetContext(ctx, &row, `SELECT id,author_id,screen_name,author_name,body,published_at,payload,archived_at FROM tweets WHERE id=?`, id); err != nil {
+	if err := s.db.GetContext(ctx, &row, `SELECT id,author_id,screen_name,author_name,body,published_at,payload,archived_at,starred FROM tweets WHERE id=?`, id); err != nil {
 		return ArchivedTweet{}, err
 	}
 	var jobIDs []int64
@@ -608,7 +697,62 @@ SELECT
 	if err := s.db.SelectContext(ctx, &downloads, `SELECT d.*, '' AS user_screen_name, '' AS user_name FROM downloads d WHERE tweet_id=? AND tweet_id<>'' ORDER BY id`, id); err != nil {
 		return ArchivedTweet{}, err
 	}
-	return hydrateArchivedTweetRow(row, jobIDs, bodyStatus, mediaStatus, mediaError, downloads)
+	tagsByTweet, _ := s.ListTagsForTweets(ctx, []string{id})
+	return hydrateArchivedTweetRow(row, jobIDs, bodyStatus, mediaStatus, mediaError, downloads, tagsByTweet[id])
+}
+
+// buildFTS5Query 将用户输入转为安全的 FTS5 MATCH 表达式：每词用双引号包裹并启用前缀匹配，
+// 避免 FTS5 特殊操作符（如 OR/NOT/:/-/"）造成语法错误。
+func buildFTS5Query(search string) string {
+	fields := strings.Fields(strings.TrimSpace(search))
+	if len(fields) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		clean := strings.ReplaceAll(field, `"`, `""`)
+		if clean == "" {
+			continue
+		}
+		parts = append(parts, `"`+clean+`"*`)
+	}
+	return strings.Join(parts, " AND ")
+}
+
+// ListConversationTweets 返回与指定 tweetID 属于同一对话串（conversation_id）的所有已归档推文，
+// 按发布时间升序排列，供前端 Thread 串联视图使用。
+func (s *Store) ListConversationTweets(ctx context.Context, tweetID string) ([]ArchivedTweet, error) {
+	anchor, err := s.GetTweet(ctx, tweetID)
+	if err != nil {
+		return nil, err
+	}
+	convID := strings.TrimSpace(anchor.ConversationID)
+	if convID == "" {
+		convID = anchor.ID
+	}
+	page, err := s.ListTweets(ctx, TweetFilter{
+		ConversationID: convID,
+		Sort:           "asc",
+		Page:           1,
+		PageSize:       100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(page.Items) == 0 {
+		return []ArchivedTweet{anchor}, nil
+	}
+	found := false
+	for _, item := range page.Items {
+		if item.ID == anchor.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		page.Items = append([]ArchivedTweet{anchor}, page.Items...)
+	}
+	return page.Items, nil
 }
 
 func normalizeTweetFilterTime(raw string) (string, bool) {
@@ -630,9 +774,20 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	}
 	where := []string{"1=1"}
 	args := []any{}
+	if search := strings.TrimSpace(f.Search); search != "" {
+		ftsQuery := buildFTS5Query(search)
+		if ftsQuery != "" {
+			where = append(where, `(t.id IN (SELECT tweet_id FROM tweets_fts WHERE tweets_fts MATCH ?) OR instr(lower(t.body),lower(?))>0 OR instr(lower(t.alt_texts),lower(?))>0)`)
+			args = append(args, ftsQuery, search, search)
+		} else {
+			where = append(where, `(instr(lower(t.body),lower(?))>0 OR instr(lower(t.alt_texts),lower(?))>0)`)
+			args = append(args, search, search)
+		}
+	}
 	for _, condition := range []struct{ value, sql string }{
-		{f.Search, `instr(lower(t.body),lower(?))>0`}, {strings.TrimPrefix(f.Author, "@"), `(t.author_id=? OR lower(t.screen_name)=lower(?))`},
+		{strings.TrimPrefix(f.Author, "@"), `(t.author_id=? OR lower(t.screen_name)=lower(?))`},
 		{f.ID, `t.id=?`},
+		{f.ConversationID, `(t.conversation_id=? OR t.id=?)`},
 	} {
 		if condition.value != "" {
 			where = append(where, condition.sql)
@@ -641,6 +796,21 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 				args = append(args, condition.value)
 			}
 		}
+	}
+	if f.Starred != nil {
+		if *f.Starred {
+			where = append(where, `t.starred=1`)
+		} else {
+			where = append(where, `t.starred=0`)
+		}
+	}
+	if f.TagID > 0 {
+		where = append(where, `EXISTS(SELECT 1 FROM tweet_tags tt WHERE tt.tweet_id=t.id AND tt.tag_id=?)`)
+		args = append(args, f.TagID)
+	}
+	if f.CollectionID > 0 {
+		where = append(where, `EXISTS(SELECT 1 FROM collection_items ci WHERE ci.collection_id=? AND ci.item_type='tweet' AND ci.item_id=t.id)`)
+		args = append(args, f.CollectionID)
 	}
 	if f.From != "" {
 		if norm, ok := normalizeTweetFilterTime(f.From); ok {
@@ -686,13 +856,20 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	result.Pagination.TotalPages = max(1, (result.Pagination.Total+f.PageSize-1)/f.PageSize)
 	result.Pagination.Page = min(f.Page, result.Pagination.TotalPages)
 	args = append(args, f.PageSize, (result.Pagination.Page-1)*f.PageSize)
-	order := "DESC"
-	if f.Sort == "asc" {
-		order = "ASC"
+	orderClause := `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.published_at DESC, t.id DESC`
+	switch f.Sort {
+	case "asc":
+		orderClause = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) ASC, t.published_at ASC, t.id ASC`
+	case "likes_desc":
+		orderClause = `t.like_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
+	case "retweets_desc":
+		orderClause = `t.retweet_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
+	case "views_desc":
+		orderClause = `t.view_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
 	}
 	var rows []tweetRow
-	if err := s.db.SelectContext(ctx, &rows, `SELECT t.id,t.author_id,t.screen_name,t.author_name,t.body,t.published_at,t.payload,t.archived_at FROM tweets t WHERE `+clause+
-		` ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) `+order+`, t.published_at `+order+`, t.id `+order+` LIMIT ? OFFSET ?`, args...); err != nil {
+	if err := s.db.SelectContext(ctx, &rows, `SELECT t.id,t.author_id,t.screen_name,t.author_name,t.body,t.published_at,t.payload,t.archived_at,t.starred FROM tweets t WHERE `+clause+
+		` ORDER BY `+orderClause+` LIMIT ? OFFSET ?`, args...); err != nil {
 		return result, err
 	}
 	if len(rows) == 0 {
@@ -751,6 +928,12 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 		downloadsByTweet[d.TweetID] = append(downloadsByTweet[d.TweetID], d)
 	}
 
+	tweetIDs := make([]string, len(rows))
+	for i, row := range rows {
+		tweetIDs[i] = row.ID
+	}
+	tagsByTweet, _ := s.ListTagsForTweets(ctx, tweetIDs)
+
 	result.Items = make([]ArchivedTweet, 0, len(rows))
 	for _, row := range rows {
 		var jobIDs []int64
@@ -761,7 +944,7 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 			mediaStatus = agg.mediaStatus
 			mediaError = agg.mediaError
 		}
-		tweet, err := hydrateArchivedTweetRow(row, jobIDs, bodyStatus, mediaStatus, mediaError, downloadsByTweet[row.ID])
+		tweet, err := hydrateArchivedTweetRow(row, jobIDs, bodyStatus, mediaStatus, mediaError, downloadsByTweet[row.ID], tagsByTweet[row.ID])
 		if err != nil {
 			return result, err
 		}

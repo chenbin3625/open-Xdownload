@@ -1,5 +1,6 @@
 import { t, useTranslation } from "../lib/i18n";
 import {
+  Archive,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
@@ -7,6 +8,7 @@ import {
   Download,
   ExternalLink,
   Film,
+  FolderPlus,
   HardDrive,
   LayoutGrid,
   Link,
@@ -14,11 +16,14 @@ import {
   Image as ImageIcon,
   PictureInPicture,
   Search,
+  Star,
+  Tag as TagIcon,
+  Trash2,
   Users,
   Video,
   X,
 } from "lucide-react";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Card from "@douyinfe/semi-ui/lib/es/card";
@@ -28,15 +33,27 @@ import InputNumber from "@douyinfe/semi-ui/lib/es/inputNumber";
 import RadioGroup from "@douyinfe/semi-ui/lib/es/radio/radioGroup";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import {
+  addCollectionItems,
+  batchDeleteDownloads,
+  collectionsQueryRoot,
+  configQueryRoot,
+  deleteDownload,
+  exportMediaZip,
   formatBytes,
+  getCollections,
   getLibraryDownloadsPage,
   getLibraryUsers,
+  getTags,
   libraryDownloadsQueryRoot,
   libraryUsersQueryRoot,
+  setDownloadStar,
+  setDownloadTags,
+  tagsQueryRoot,
+  type AppConfig,
   type DownloadRecord,
   type LibraryUserSummary,
 } from "../lib/api";
-import { copyToClipboard, formatDateTime, getErrorMessage } from "../components/common/CommonUI";
+import { copyToClipboard, formatDateTime, getErrorMessage, notifyError } from "../components/common/CommonUI";
 import { smallTwimgUrl } from "../lib/tweetDisplay";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import {
@@ -46,9 +63,11 @@ import {
   type GallerySort,
 } from "../lib/useRouteState";
 import { Alert, Empty, Skeleton } from "../components/semi/feedback";
-import { MediaModal, SimplePopover, Tooltip } from "../components/semi/overlays";
-import { Pagination } from "../components/semi/data";
-import { SearchSelect } from "../components/semi/controls";
+import { MediaModal, Modal, SimplePopover, Tooltip } from "../components/semi/overlays";
+import { Pagination, Tag } from "../components/semi/data";
+import { Checkbox as ControlCheckbox, Field, SearchSelect, Select as ControlSelect } from "../components/semi/controls";
+import { toast } from "../components/semi/toast";
+import { OrganizeManagerModal, safeCollectionList, safeTagList } from "../components/organize/OrganizeManagerModal";
 
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm", ".ogv"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".avif"];
@@ -161,27 +180,35 @@ const GalleryCard = React.memo(function GalleryCard({
   isVideo,
   isPreviewableImage,
   thumbnailFit,
+  offlineThumbnails = false,
   onOpen,
+  onToggleStar,
+  onRequestDelete,
 }: {
   item: DownloadRecord;
   isVideo: boolean;
   isPreviewableImage: boolean;
   thumbnailFit: "contain" | "cover";
+  offlineThumbnails?: boolean;
   onOpen: (previewId: string) => void;
+  onToggleStar?: (item: DownloadRecord) => void;
+  onRequestDelete?: (item: DownloadRecord) => void;
 }) {
   useTranslation();
   const fileName = displayFileName(item);
   const ext = fileName.split(".").pop()?.toUpperCase() || "FILE";
   const previewURL = fileURL(item);
-  // 缩略图优先走图床小图，失败再回退未登记文件或本地接口；下载链接仍指向原文件。
-  const remoteThumbnail = useMemo(() => smallTwimgUrl(item.previewUrl), [item.previewUrl]);
+  // 缩略图默认优先图床小图，开启离线缩略图时优先走本地缩略图缓存；下载链接仍指向原文件。
+  const remoteThumbnail = useMemo(() => (offlineThumbnails ? undefined : smallTwimgUrl(item.previewUrl)), [offlineThumbnails, item.previewUrl]);
+  const offlineThumbUrl = offlineThumbnails && item.id > 0 ? `/api/library/downloads/${item.id}/thumbnail` : undefined;
   const localThumbnail = item.id > 0 ? `/api/library/downloads/${item.id}/file` : previewURL;
-  const [imageSource, setImageSource] = useState(remoteThumbnail ?? localThumbnail);
+  const preferredSource = offlineThumbUrl ?? remoteThumbnail ?? localThumbnail;
+  const [imageSource, setImageSource] = useState(preferredSource);
   const [imageFailed, setImageFailed] = useState(false);
   useEffect(() => {
     setImageFailed(false);
-    setImageSource(remoteThumbnail ?? localThumbnail);
-  }, [remoteThumbnail, localThumbnail]);
+    setImageSource(preferredSource);
+  }, [preferredSource]);
 
   return (
     <Card
@@ -252,10 +279,30 @@ const GalleryCard = React.memo(function GalleryCard({
           )}
         </div>
 
+        {item.tags && item.tags.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {item.tags.map((tg) => (
+              <Tag key={tg.id} size="sm">{tg.name}</Tag>
+            ))}
+          </div>
+        )}
+
         <div className="gallery-card-meta">
           {item.tweetId && <a className="text-brand-600" href={`/tweets?id=${encodeURIComponent(item.tweetId)}`}>{t("archive.title")}</a>}
           <time dateTime={item.createdAt} title={formatDateTime(item.createdAt)}>{formatDateTime(item.createdAt)}</time>
           <div className="gallery-card-actions">
+            {item.id > 0 && onToggleStar && (
+              <Tooltip title={item.starred ? t("取消收藏") : t("收藏媒体")}>
+                <Button
+                  theme="borderless"
+                  type={item.starred ? "warning" : "tertiary"}
+                  icon={<Star size={16} fill={item.starred ? "currentColor" : "none"} />}
+                  onClick={() => onToggleStar(item)}
+                  aria-label={item.starred ? t("取消收藏") : t("收藏媒体")}
+                  aria-pressed={Boolean(item.starred)}
+                />
+              </Tooltip>
+            )}
             <Tooltip title={t("下载原文件")}>
               <a
                 className="gallery-download semi-button semi-button-borderless semi-button-tertiary semi-button-size-default semi-button-with-icon-only"
@@ -297,6 +344,17 @@ const GalleryCard = React.memo(function GalleryCard({
                 </a>
               </Tooltip>
             )}
+            {item.id > 0 && onRequestDelete && (
+              <Tooltip title={t("删除媒体")}>
+                <Button
+                  theme="borderless"
+                  type="danger"
+                  icon={<Trash2 size={16} />}
+                  onClick={() => onRequestDelete(item)}
+                  aria-label={t("删除媒体")}
+                />
+              </Tooltip>
+            )}
           </div>
         </div>
       </div>
@@ -314,6 +372,18 @@ const UserCard = React.memo(function UserCard({
 }) {
   useTranslation();
   const initial = (summary.displayName || summary.screenName).trim().charAt(0).toUpperCase();
+  const avatarCandidates = useMemo(() => {
+    const list: { url: string; remote: boolean }[] = [];
+    if (summary.screenName && summary.avatarUrl) {
+      list.push({ url: `/api/avatars/${encodeURIComponent(summary.screenName)}`, remote: false });
+    }
+    if (summary.avatarUrl) {
+      list.push({ url: summary.avatarUrl, remote: true });
+    }
+    return list;
+  }, [summary.screenName, summary.avatarUrl]);
+  const [avatarIdx, setAvatarIdx] = useState(0);
+  useEffect(() => { setAvatarIdx(0); }, [summary.screenName, summary.avatarUrl]);
   return (
     <Card shadows="hover" className="gallery-card min-w-0" bodyStyle={{ padding: 12 }}>
       <button
@@ -322,13 +392,14 @@ const UserCard = React.memo(function UserCard({
         className="flex w-full cursor-pointer items-center gap-3 border-0 bg-transparent p-0 text-left"
         aria-label={t("查看 @{{value0}} 的媒体", { value0: summary.screenName })}
       >
-        {summary.avatarUrl ? (
+        {avatarIdx < avatarCandidates.length ? (
           <img
-            src={summary.avatarUrl}
+            src={avatarCandidates[avatarIdx].url}
             alt=""
             loading="lazy"
             decoding="async"
-            referrerPolicy="no-referrer"
+            referrerPolicy={avatarCandidates[avatarIdx].remote ? "no-referrer" : undefined}
+            onError={() => setAvatarIdx((i) => i + 1)}
             className="size-12 shrink-0 rounded-full border border-line object-cover"
           />
         ) : (
@@ -351,10 +422,20 @@ const UserCard = React.memo(function UserCard({
 
 export function GalleryPage({ filter: controlledFilter, onFilterChange }: GalleryPageProps) {
   useTranslation();
+  const queryClient = useQueryClient();
   const [localFilter, setLocalFilter] = useState<GalleryRouteState>(defaultGalleryFilter);
   // 归档库的两种浏览方式：媒体网格 / 按账号卡片。
   const [viewMode, setViewMode] = useState<"media" | "users">("media");
   const filter = controlledFilter ?? localFilter;
+  const offlineThumbnails = Boolean(queryClient.getQueryData<AppConfig>(configQueryRoot)?.offlineThumbnails);
+  const [organizeOpen, setOrganizeOpen] = useState(false);
+  const [organizeLoaded, setOrganizeLoaded] = useState(false);
+  const [deletingIds, setDeletingIds] = useState<number[] | null>(null);
+  const [deleteLocalFiles, setDeleteLocalFiles] = useState(false);
+  const [organizingDownload, setOrganizingDownload] = useState<DownloadRecord | null>(null);
+  const [batchCollectionOpen, setBatchCollectionOpen] = useState(false);
+  const [selectedTagIds, setSelectedTagIds] = useState<number[]>([]);
+  const [selectedCollectionId, setSelectedCollectionId] = useState("");
   const updateFilter = useCallback(
     (patch: Partial<GalleryRouteState>, options?: { replace?: boolean }) => {
       if (controlledFilter !== undefined) {
@@ -376,7 +457,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   const shiftSelectRef = useRef(false);
   useEffect(() => { setPreviewZoomed(false); }, [previewId]);
   useEffect(() => { try { localStorage.setItem("gallery-view", view); localStorage.setItem("gallery-density", density); localStorage.setItem("gallery-thumbnail-fit", thumbnailFit); } catch { /* Storage may be unavailable in private browsing. */ } }, [view, density, thumbnailFit]);
-  useEffect(() => { setSelected(new Set()); lastSelectedKeyRef.current = null; }, [filter.page, filter.kind, filter.user, filter.search, filter.sort, filter.from, filter.to, filter.minBytes, filter.maxBytes]);
+  useEffect(() => { setSelected(new Set()); lastSelectedKeyRef.current = null; }, [filter.page, filter.kind, filter.user, filter.search, filter.sort, filter.from, filter.to, filter.minBytes, filter.maxBytes, filter.starred, filter.tagId, filter.collectionId]);
   const pageSize = galleryPageSize;
   // 输入框即时响应，查询键用 300ms 防抖后的值。
   const debouncedSearch = useDebouncedValue(filter.search, GALLERY_SEARCH_DEBOUNCE_MS);
@@ -390,6 +471,22 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
     ? t("开始日期不能晚于结束日期")
     : filter.minBytes !== "" && filter.maxBytes !== "" && Number(filter.minBytes) > Number(filter.maxBytes)
       ? t("最小体积不能大于最大体积") : "";
+
+  const shouldLoadOrganize = organizeLoaded || organizeOpen || Boolean(organizingDownload) || batchCollectionOpen || Boolean(filter.tagId) || Boolean(filter.collectionId);
+  const tagsQuery = useQuery({
+    queryKey: tagsQueryRoot,
+    queryFn: ({ signal }) => getTags(signal),
+    enabled: shouldLoadOrganize,
+    staleTime: 60_000,
+  });
+  const collectionsQuery = useQuery({
+    queryKey: collectionsQueryRoot,
+    queryFn: ({ signal }) => getCollections(signal),
+    enabled: shouldLoadOrganize,
+    staleTime: 60_000,
+  });
+  const tagsList = safeTagList(tagsQuery.data);
+  const collectionsList = safeCollectionList(collectionsQuery.data);
 
   // 只有切到「按账号」时才拉聚合数据，避免每次进归档库都多一次全量扫描。
   const usersQuery = useQuery({
@@ -412,6 +509,9 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
         to: filter.to,
         minBytes: debouncedMinBytes,
         maxBytes: debouncedMaxBytes,
+        starred: filter.starred ?? "",
+        tagId: filter.tagId ?? "",
+        collectionId: filter.collectionId ?? "",
       },
     ],
     queryFn: ({ signal }) =>
@@ -427,6 +527,9 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           to: filter.to,
           minBytes: debouncedMinBytes,
           maxBytes: debouncedMaxBytes,
+          starred: filter.starred || undefined,
+          tagId: filter.tagId || undefined,
+          collectionId: filter.collectionId || undefined,
         },
         signal,
       ),
@@ -485,7 +588,94 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   const selectionDisabled = libraryQuery.isPlaceholderData || Boolean(rangeError) || filtersPendingDebounce;
   const hasActiveFilter =
     filter.kind !== "all" || filter.user !== "all" || filter.search.trim() !== "" ||
-    filter.from !== "" || filter.to !== "" || filter.minBytes !== "" || filter.maxBytes !== "";
+    filter.from !== "" || filter.to !== "" || filter.minBytes !== "" || filter.maxBytes !== "" ||
+    Boolean(filter.starred) || Boolean(filter.tagId) || Boolean(filter.collectionId);
+
+  const starMutation = useMutation({
+    mutationFn: ({ id, starred }: { id: number; starred: boolean }) => setDownloadStar(id, starred),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot }); },
+    onError: notifyError(t("操作失败")),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async ({ ids, removeFiles }: { ids: number[]; removeFiles: boolean }) =>
+      ids.length === 1 ? deleteDownload(ids[0], removeFiles) : batchDeleteDownloads(ids, removeFiles),
+    onSuccess: (res) => {
+      setDeletingIds(null);
+      setDeleteLocalFiles(false);
+      setSelected(new Set());
+      setPreviewId(null);
+      void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+      toast.success({
+        message: t("已删除 {{value0}} 条媒体记录", { value0: res.deletedRecords }),
+        description: res.deletedFiles > 0 ? t("同时移除了 {{value0}} 个本地文件", { value0: res.deletedFiles }) : undefined,
+      });
+    },
+    onError: notifyError(t("删除失败")),
+  });
+
+  const saveOrganizeDownload = useMutation({
+    mutationFn: async () => {
+      if (!organizingDownload) return;
+      await setDownloadTags(organizingDownload.id, selectedTagIds);
+      if (selectedCollectionId) {
+        await addCollectionItems(Number(selectedCollectionId), "download", [String(organizingDownload.id)]);
+      }
+    },
+    onSuccess: () => {
+      setOrganizingDownload(null);
+      setSelectedCollectionId("");
+      void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+      void queryClient.invalidateQueries({ queryKey: collectionsQueryRoot });
+      toast.success({ message: t("已更新标签与合集") });
+    },
+    onError: notifyError(t("保存失败")),
+  });
+
+  const batchAddCollection = useMutation({
+    mutationFn: async () => {
+      const ids = selectedEntries.map(({ item }) => item.id).filter((id) => id > 0).map(String);
+      if (!selectedCollectionId || ids.length === 0) return;
+      await addCollectionItems(Number(selectedCollectionId), "download", ids);
+    },
+    onSuccess: () => {
+      setBatchCollectionOpen(false);
+      setSelectedCollectionId("");
+      void queryClient.invalidateQueries({ queryKey: collectionsQueryRoot });
+      toast.success({ message: t("已加入合集") });
+    },
+    onError: notifyError(t("操作失败")),
+  });
+
+  const zipExportMutation = useMutation({
+    mutationFn: async () => {
+      const ids = selectedEntries.map(({ item }) => item.id).filter((id) => id > 0);
+      if (ids.length === 0) throw new Error(t("所选文件尚未登记，无法打包"));
+      return exportMediaZip({ ids });
+    },
+    onSuccess: (blob) => {
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `open-xdownload-media-${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), OBJECT_URL_REVOKE_DELAY_MS);
+    },
+    onError: notifyError(t("打包下载失败")),
+  });
+
+  const handleToggleDownloadStar = useCallback((item: DownloadRecord) => {
+    if (item.id <= 0) return;
+    starMutation.mutate({ id: item.id, starred: !item.starred });
+  }, [starMutation.mutate]);
+
+  const handleRequestDeleteDownload = useCallback((item: DownloadRecord) => {
+    if (item.id <= 0) return;
+    setDeleteLocalFiles(false);
+    setDeletingIds([item.id]);
+  }, []);
 
   const downloadTimersRef = useRef<number[]>([]);
   useEffect(() => () => {
@@ -657,6 +847,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             ]}
           />
           {viewMode === "media" && <>
+            <Button type="tertiary" icon={<FolderPlus size={16} />} onClick={() => { setOrganizeLoaded(true); setOrganizeOpen(true); }}>{t("标签与合集")}</Button>
             <RadioGroup type="button" buttonSize="middle" aria-label={t("媒体视图")} value={view} onChange={event => setView(event.target.value)} options={[{ value: "grid", label: <span title={t("网格视图")} aria-label={t("网格视图")}><LayoutGrid size={16} /></span> }, { value: "list", label: <span title={t("列表视图")} aria-label={t("列表视图")}><List size={16} /></span> }]} />
             {view === "grid" && <><label id="gallery-density-label" className="sr-only">{t("缩略图大小")}</label><Select value={density} aria-labelledby="gallery-density-label" onChange={value => setDensity(String(value))} optionList={[{ value: "standard", label: t("标准缩略图") }, { value: "compact", label: t("紧凑缩略图") }]} /><label id="gallery-fit-label" className="sr-only">{t("缩略图显示方式")}</label><Select value={thumbnailFit} aria-labelledby="gallery-fit-label" onChange={value => setThumbnailFit(value as "contain" | "cover")} optionList={[{ value: "contain", label: t("完整显示") }, { value: "cover", label: t("填充裁剪") }]} /></>}
           </>}
@@ -712,6 +903,43 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
             ]}
           />
         <div className="toolbar-options">
+        <Tooltip title={t("仅显示已收藏")}>
+          <Button
+            icon={<Star size={16} fill={filter.starred === "1" ? "currentColor" : "none"} />}
+            theme="light"
+            type={filter.starred === "1" ? "warning" : "tertiary"}
+            aria-label={t("仅显示已收藏")}
+            aria-pressed={filter.starred === "1"}
+            onClick={() => updateFilter({ starred: filter.starred === "1" ? "" : "1", page: 1 })}
+          />
+        </Tooltip>
+        <SimplePopover trigger={<Button
+          icon={<TagIcon size={16} />}
+          theme="light"
+          type={filter.tagId || filter.collectionId ? "primary" : "tertiary"}
+          aria-label={t("标签与合集筛选")}
+          aria-pressed={Boolean(filter.tagId || filter.collectionId)}
+          onClick={() => setOrganizeLoaded(true)}
+        />}>
+          <div className="space-y-3 min-w-56">
+            <Field label={t("按标签筛选")}>
+              <ControlSelect
+                ariaLabel={t("按标签筛选")}
+                value={filter.tagId ?? ""}
+                onChange={(val) => updateFilter({ tagId: val, page: 1 })}
+                options={[{ value: "", label: t("全部标签") }, ...tagsList.map((tg) => ({ value: String(tg.id), label: tg.name }))]}
+              />
+            </Field>
+            <Field label={t("按合集筛选")}>
+              <ControlSelect
+                ariaLabel={t("按合集筛选")}
+                value={filter.collectionId ?? ""}
+                onChange={(val) => updateFilter({ collectionId: val, page: 1 })}
+                options={[{ value: "", label: t("全部合集") }, ...collectionsList.map((col) => ({ value: String(col.id), label: col.name }))]}
+              />
+            </Field>
+          </div>
+        </SimplePopover>
         <SimplePopover trigger={<Button
           icon={<CalendarDays size={16} />}
           theme="light"
@@ -756,7 +984,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           </div>
         </div>
         </SimplePopover>
-        {hasActiveFilter && <Tooltip title={t("清除筛选")}><Button theme="borderless" type="tertiary" icon={<X size={16} />} aria-label={t("清除筛选")} onClick={() => updateFilter({ kind: "all", user: "all", search: "", from: "", to: "", minBytes: "", maxBytes: "", page: 1 })} /></Tooltip>}
+        {hasActiveFilter && <Tooltip title={t("清除筛选")}><Button theme="borderless" type="tertiary" icon={<X size={16} />} aria-label={t("清除筛选")} onClick={() => updateFilter({ kind: "all", user: "all", search: "", from: "", to: "", minBytes: "", maxBytes: "", ...(filter.starred ? { starred: "" } : {}), ...(filter.tagId ? { tagId: "" } : {}), ...(filter.collectionId ? { collectionId: "" } : {}), page: 1 })} /></Tooltip>}
         </div>
         </div>
       </div>
@@ -767,12 +995,15 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           { key: "user", label: filter.user !== "all" ? filter.user : "", patch: { user: "all" } },
           { key: "dates", label: filter.from || filter.to ? `${filter.from || t("不限")} ~ ${filter.to || t("不限")}` : "", patch: { from: "", to: "" } },
           { key: "bytes", label: filter.minBytes || filter.maxBytes ? `${filter.minBytes ? formatBytes(Number(filter.minBytes)) : t("不限")} ~ ${filter.maxBytes ? formatBytes(Number(filter.maxBytes)) : t("不限")}` : "", patch: { minBytes: "", maxBytes: "" } },
+          { key: "starred", label: filter.starred === "1" ? t("已收藏") : "", patch: { starred: "" } },
+          { key: "tagId", label: filter.tagId ? `${t("标签")}: ${tagsList.find((tg) => String(tg.id) === filter.tagId)?.name ?? filter.tagId}` : "", patch: { tagId: "" } },
+          { key: "collectionId", label: filter.collectionId ? `${t("合集")}: ${collectionsList.find((col) => String(col.id) === filter.collectionId)?.name ?? filter.collectionId}` : "", patch: { collectionId: "" } },
         ].filter(item => item.label).map(item => <Button className="filter-chip" size="small" type="tertiary" icon={<X size={12} />} iconPosition="right" key={item.key} onClick={() => updateFilter({ ...item.patch, page: 1 })} aria-label={`${t("移除筛选")} ${item.label}`}>{item.label}</Button>)}
       </div>}
       <div className={`gallery-result-bar${selectedEntries.length > 0 ? " gallery-result-bar-active" : ""}`}>
         <Checkbox checked={Boolean(visibleEntries.length) && selectedEntries.length === visibleEntries.length} indeterminate={selectedEntries.length > 0 && selectedEntries.length < visibleEntries.length} disabled={selectionDisabled || !visibleEntries.length} onChange={event => setSelected(event.target.checked ? new Set(visibleEntries.map(({ item }) => entryKey(item))) : new Set())}>{t("选择本页")}</Checkbox>
         <span className="text-xs text-fg-muted" aria-live="polite">{rangeError ? `${t("筛选结果")} —` : libraryQuery.isPlaceholderData && libraryQuery.isFetching ? t("正在应用筛选...") : `${t("筛选结果")} ${totalEntries} ${t("项")}`}</span>
-        {selectedEntries.length > 0 && <div className="gallery-batch-actions"><span className="text-xs">{t("已选")} {selectedEntries.length}</span><Button size="small" type="tertiary" icon={<Copy size={14} />} disabled={selectionDisabled} onClick={() => void copyToClipboard(selectedEntries.map(({ item }) => item.filePath).join("\n"), t("所选文件路径"))}>{t("复制路径")}</Button><Button size="small" type="tertiary" icon={<Download size={14} />} disabled={selectionDisabled} onClick={downloadSelected}>{t("批量下载")}</Button><Button size="small" type="tertiary" icon={<ExternalLink size={14} />} disabled={selectionDisabled} onClick={exportSelected}>{t("导出清单")}</Button><Button size="small" theme="borderless" type="tertiary" icon={<X size={14} />} aria-label={t("取消选择")} onClick={() => setSelected(new Set())} /></div>}
+        {selectedEntries.length > 0 && <div className="gallery-batch-actions"><span className="text-xs">{t("已选")} {selectedEntries.length}</span><Button size="small" type="tertiary" icon={<Copy size={14} />} disabled={selectionDisabled} onClick={() => void copyToClipboard(selectedEntries.map(({ item }) => item.filePath).join("\n"), t("所选文件路径"))}>{t("复制路径")}</Button><Button size="small" type="tertiary" icon={<Download size={14} />} disabled={selectionDisabled} onClick={downloadSelected}>{t("批量下载")}</Button><Button size="small" type="tertiary" icon={<Archive size={14} />} disabled={selectionDisabled || zipExportMutation.isPending} loading={zipExportMutation.isPending} onClick={() => zipExportMutation.mutate()}>{t("打包 ZIP")}</Button><Button size="small" type="tertiary" icon={<FolderPlus size={14} />} disabled={selectionDisabled} onClick={() => { setOrganizeLoaded(true); setSelectedCollectionId(""); setBatchCollectionOpen(true); }}>{t("加入合集")}</Button><Button size="small" type="tertiary" icon={<ExternalLink size={14} />} disabled={selectionDisabled} onClick={exportSelected}>{t("导出清单")}</Button><Button size="small" type="danger" icon={<Trash2 size={14} />} disabled={selectionDisabled} onClick={() => { const ids = selectedEntries.map(({ item }) => item.id).filter((id) => id > 0); if (ids.length > 0) { setDeleteLocalFiles(false); setDeletingIds(ids); } }}>{t("批量删除")}</Button><Button size="small" theme="borderless" type="tertiary" icon={<X size={14} />} aria-label={t("取消选择")} onClick={() => setSelected(new Set())} /></div>}
       </div>
       {rangeError && <Alert type="warning" message={rangeError} />}
       {libraryQuery.isError && libraryQuery.data && <Alert type="error" message={getErrorMessage(libraryQuery.error)} />}
@@ -920,7 +1151,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
               isVideo={isVideo}
               isPreviewableImage={isImage || isGif}
               thumbnailFit={thumbnailFit}
+              offlineThumbnails={offlineThumbnails}
               onOpen={openPreview}
+              onToggleStar={handleToggleDownloadStar}
+              onRequestDelete={handleRequestDeleteDownload}
             />
             </div>
             );
@@ -1018,6 +1252,33 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                 </div>
 
                 <div className="flex items-center gap-2">
+                  {item.id > 0 && (
+                    <>
+                      <Tooltip title={item.starred ? t("取消收藏") : t("收藏媒体")}>
+                        <Button
+                          theme="borderless"
+                          type={item.starred ? "warning" : "tertiary"}
+                          icon={<Star size={16} fill={item.starred ? "currentColor" : "none"} />}
+                          aria-label={item.starred ? t("取消收藏") : t("收藏媒体")}
+                          onClick={() => handleToggleDownloadStar(item)}
+                        />
+                      </Tooltip>
+                      <Tooltip title={t("设置标签与合集")}>
+                        <Button
+                          theme="borderless"
+                          type="tertiary"
+                          icon={<TagIcon size={16} />}
+                          aria-label={t("设置标签与合集")}
+                          onClick={() => {
+                            setOrganizeLoaded(true);
+                            setOrganizingDownload(item);
+                            setSelectedTagIds((item.tags ?? []).map((tg) => tg.id));
+                            setSelectedCollectionId("");
+                          }}
+                        />
+                      </Tooltip>
+                    </>
+                  )}
                   <Tooltip title={t("下载原文件")}>
                     <a
                       className="gallery-download semi-button semi-button-borderless semi-button-tertiary semi-button-size-default semi-button-with-icon-only"
@@ -1059,12 +1320,121 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
                       </a>
                     </Tooltip>
                   )}
+                  {item.id > 0 && (
+                    <Tooltip title={t("删除媒体")}>
+                      <Button
+                        theme="borderless"
+                        type="danger"
+                        icon={<Trash2 size={16} />}
+                        aria-label={t("删除媒体")}
+                        onClick={() => handleRequestDeleteDownload(item)}
+                      />
+                    </Tooltip>
+                  )}
                 </div>
               </div>
             </div>
           );
         })()}
       </MediaModal>
+
+      {/* 删除媒体确认弹窗 */}
+      <Modal
+        open={Boolean(deletingIds && deletingIds.length > 0)}
+        onClose={() => setDeletingIds(null)}
+        title={t("删除媒体")}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button type="tertiary" onClick={() => setDeletingIds(null)}>{t("取消")}</Button>
+            <Button
+              theme="solid"
+              type="danger"
+              loading={deleteMutation.isPending}
+              onClick={() => deletingIds && deleteMutation.mutate({ ids: deletingIds, removeFiles: deleteLocalFiles })}
+            >
+              {t("确认删除")}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <p>{t("确定删除选中的 {{value0}} 条媒体记录？", { value0: deletingIds?.length ?? 0 })}</p>
+          <ControlCheckbox
+            checked={deleteLocalFiles}
+            onChange={setDeleteLocalFiles}
+            label={t("同时删除本地磁盘上的对应文件（仅当无其他记录引用时）")}
+          />
+        </div>
+      </Modal>
+
+      {/* 单个媒体打标签与加入合集 */}
+      <Modal
+        open={Boolean(organizingDownload)}
+        onClose={() => setOrganizingDownload(null)}
+        title={t("设置标签与合集")}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button type="tertiary" onClick={() => setOrganizingDownload(null)}>{t("取消")}</Button>
+            <Button theme="solid" loading={saveOrganizeDownload.isPending} onClick={() => saveOrganizeDownload.mutate()}>{t("保存设置")}</Button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <div className="mb-2 text-xs font-semibold text-fg-muted">{t("选择标签")}</div>
+            {tagsList.length === 0 ? (
+              <p className="text-xs text-fg-subtle">{t("暂无自定义标签，请先点击“标签与合集”创建。")}</p>
+            ) : (
+              <div className="flex flex-wrap gap-3">
+                {tagsList.map((tg) => (
+                  <ControlCheckbox
+                    key={tg.id}
+                    checked={selectedTagIds.includes(tg.id)}
+                    onChange={(checked) =>
+                      setSelectedTagIds((current) =>
+                        checked ? Array.from(new Set([...current, tg.id])) : current.filter((id) => id !== tg.id),
+                      )
+                    }
+                    label={tg.name}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          <Field label={t("加入合集 (可选)")}>
+            <ControlSelect
+              ariaLabel={t("加入合集")}
+              value={selectedCollectionId}
+              onChange={setSelectedCollectionId}
+              options={[{ value: "", label: t("不加入合集") }, ...collectionsList.map((col) => ({ value: String(col.id), label: col.name }))]}
+            />
+          </Field>
+        </div>
+      </Modal>
+
+      {/* 批量加入合集 */}
+      <Modal
+        open={batchCollectionOpen}
+        onClose={() => setBatchCollectionOpen(false)}
+        title={t("批量加入合集")}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button type="tertiary" onClick={() => setBatchCollectionOpen(false)}>{t("取消")}</Button>
+            <Button theme="solid" disabled={!selectedCollectionId} loading={batchAddCollection.isPending} onClick={() => batchAddCollection.mutate()}>{t("确认加入")}</Button>
+          </div>
+        }
+      >
+        <Field label={t("选择目标合集")}>
+          <ControlSelect
+            ariaLabel={t("选择目标合集")}
+            value={selectedCollectionId}
+            onChange={setSelectedCollectionId}
+            options={[{ value: "", label: t("请选择合集") }, ...collectionsList.map((col) => ({ value: String(col.id), label: col.name }))]}
+          />
+        </Field>
+      </Modal>
+
+      <OrganizeManagerModal open={organizeOpen} onClose={() => setOrganizeOpen(false)} />
     </div>
   );
 }

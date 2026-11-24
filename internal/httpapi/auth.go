@@ -37,6 +37,11 @@ func requestToken(r *http.Request) (string, bool) {
 		}
 		return "", true
 	}
+	if r.Method == http.MethodGet && (r.URL.Path == "/api/rss/tweets" || r.URL.Path == "/api/extensions/userscript.user.js") {
+		if qToken := strings.TrimSpace(r.URL.Query().Get("token")); strings.HasPrefix(qToken, storage.APITokenPrefix) {
+			return qToken, true
+		}
+	}
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		return cookie.Value, false
 	}
@@ -84,8 +89,18 @@ func (s *Server) requestAccountMode(r *http.Request, touch bool) (*storage.Accou
 	if err != nil {
 		return nil, err
 	}
-	token, _ := requestToken(r)
-	if account == nil || !validSession(token, account.SessionKey) {
+	token, isBearer := requestToken(r)
+	if account == nil || token == "" {
+		return nil, nil
+	}
+	if isBearer && strings.HasPrefix(token, storage.APITokenPrefix) {
+		ok, err := s.store.ValidateAPIToken(r.Context(), token, time.Now(), touch)
+		if err != nil || !ok {
+			return nil, nil
+		}
+		return account, nil
+	}
+	if !validSession(token, account.SessionKey) {
 		return nil, nil
 	}
 	var active bool

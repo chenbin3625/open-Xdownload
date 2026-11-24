@@ -28,7 +28,15 @@ import { toast } from "../components/semi/toast";
 
 type EditingSchedule = Omit<ArchiveSchedule, "intervalMinutes"> & {
   intervalMinutes: number | string;
+  hadCron?: boolean;
 };
+
+function formatScheduleFrequency(schedule: Pick<ArchiveSchedule, "intervalMinutes" | "cronExpr" | "timezone">) {
+  if (schedule.cronExpr?.trim()) {
+    return schedule.timezone ? `${schedule.cronExpr} (${schedule.timezone})` : schedule.cronExpr;
+  }
+  return formatIntervalMinutes(schedule.intervalMinutes);
+}
 
 function parseIntervalMinutes(value: number | string): number {
   if (typeof value === "string") {
@@ -78,7 +86,8 @@ export function SchedulesPage({
   const detail = schedules.find((schedule) => schedule.id === detailId);
   const detailRunStatus = runStatusLabel(detail?.lastRunStatus);
   const editingInterval = editing ? parseIntervalMinutes(editing.intervalMinutes) : Number.NaN;
-  const editingIntervalValid = isValidIntervalMinutes(editingInterval);
+  const editingHasCron = Boolean(editing?.cronExpr?.trim());
+  const editingIntervalValid = editingHasCron || isValidIntervalMinutes(editingInterval);
   const enabledCount = schedules.filter((schedule) => schedule.enabled).length;
   const pausedCount = schedules.length - enabledCount;
   const filtered = schedules.filter(
@@ -94,6 +103,7 @@ export function SchedulesPage({
       updateArchiveSchedule(schedule.id, {
         name: schedule.name,
         intervalMinutes: schedule.intervalMinutes,
+        ...(schedule.cronExpr ? { cronExpr: schedule.cronExpr, timezone: schedule.timezone } : {}),
         items: schedule.items,
         enabled: !schedule.enabled,
       }),
@@ -104,8 +114,10 @@ export function SchedulesPage({
   });
   const save = useMutation({
     mutationFn: (schedule: EditingSchedule) => {
+      const cronExpr = schedule.cronExpr?.trim() ?? "";
+      const timezone = schedule.timezone?.trim() ?? "";
       const intervalMinutes = parseIntervalMinutes(schedule.intervalMinutes);
-      if (!isValidIntervalMinutes(intervalMinutes)) {
+      if (!cronExpr && !isValidIntervalMinutes(intervalMinutes)) {
         throw new Error(t("调度频率需在 5 至 43200 分钟之间"));
       }
       const trimmedName = schedule.name.trim();
@@ -116,9 +128,11 @@ export function SchedulesPage({
       if (!trimmedName || trimmedItems.length === 0 || trimmedItems.some((item) => !item.input)) {
         throw new Error(t("请填写完整的计划名称和目标"));
       }
+      const effectiveInterval = isValidIntervalMinutes(intervalMinutes) ? intervalMinutes : 360;
       return updateArchiveSchedule(schedule.id, {
         name: trimmedName,
-        intervalMinutes,
+        intervalMinutes: effectiveInterval,
+        ...(cronExpr || schedule.hadCron ? { cronExpr, ...(timezone ? { timezone } : {}) } : {}),
         enabled: schedule.enabled,
         items: trimmedItems,
       });
@@ -293,7 +307,7 @@ export function SchedulesPage({
                 {schedule.lastRunStatus === "failed" && schedule.lastRunMessage && <span className="text-xs text-danger break-words">{schedule.lastRunMessage}</span>}
               </div>
               <span className="text-sm tabular-nums">
-                {formatIntervalMinutes(schedule.intervalMinutes)}
+                {formatScheduleFrequency(schedule)}
               </span>
               <time
                 className="text-sm text-fg-muted tabular-nums"
@@ -333,6 +347,7 @@ export function SchedulesPage({
                     onClick={() =>
                       setEditing({
                         ...schedule,
+                        hadCron: Boolean(schedule.cronExpr),
                         items: schedule.items.map((item) => ({ ...item })),
                       })
                     }
@@ -385,7 +400,7 @@ export function SchedulesPage({
               <Tag tone={detail.enabled ? "success" : "default"}>
                 {detail.enabled ? t("已启用") : t("已暂停")}
               </Tag>
-              <Tag>{formatIntervalMinutes(detail.intervalMinutes)}</Tag>
+              <Tag>{formatScheduleFrequency(detail)}</Tag>
               {detailRunStatus && <Tag tone={detailRunStatus.tone}>{detailRunStatus.label}</Tag>}
             </div>
             <dl className="schedule-detail-meta">
@@ -398,7 +413,7 @@ export function SchedulesPage({
                   : t("从未")}
               </dd>
               <dt>{t("时区")}</dt>
-              <dd>{timeZone}</dd>
+              <dd>{detail.timezone || timeZone}</dd>
               {detail.lastRunMessage && <><dt>{t("执行摘要")}</dt><dd className={detail.lastRunStatus === "failed" ? "text-danger" : undefined}>{detail.lastRunMessage}</dd></>}
             </dl>
             <h2 className="text-sm font-semibold text-fg">
@@ -448,6 +463,7 @@ export function SchedulesPage({
                 onClick={() => {
                   setEditing({
                     ...detail,
+                    hadCron: Boolean(detail.cronExpr),
                     items: detail.items.map((item) => ({ ...item })),
                   });
                   setDetailId(null);
@@ -513,13 +529,53 @@ export function SchedulesPage({
                 }}
               />
               <span className="text-xs text-fg-muted">
-                {editingIntervalValid ? formatIntervalMinutes(editingInterval) : "—"}
+                {isValidIntervalMinutes(editingInterval) ? formatIntervalMinutes(editingInterval) : "—"}
               </span>
             </Field>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label={t("Cron 表达式 (可选)")}>
+                <Input
+                  aria-label={t("Cron 表达式 (可选)")}
+                  value={editing.cronExpr ?? ""}
+                  disabled={save.isPending}
+                  placeholder="0 3 * * * / @daily"
+                  onChange={(cronExpr) => setEditing({ ...editing, cronExpr })}
+                />
+              </Field>
+              <Field label={t("时区 (IANA)")}>
+                <Input
+                  aria-label={t("时区 (IANA)")}
+                  value={editing.timezone ?? ""}
+                  disabled={save.isPending}
+                  placeholder={timeZone}
+                  onChange={(timezone) => setEditing({ ...editing, timezone })}
+                />
+              </Field>
+            </div>
             <h3 className="text-sm font-semibold text-fg">{t("目标清单")}</h3>
             {editing.items.map((item, index) => (
               <div className="schedule-edit-target" key={index}>
-                <Tag>{kindLabel(item.kind)}</Tag>
+                <Select
+                  aria-label={`${t("目标类型")} ${index + 1}`}
+                  value={item.kind}
+                  disabled={save.isPending}
+                  onChange={(kind) =>
+                    setEditing({
+                      ...editing,
+                      items: editing.items.map((current, position) =>
+                        position === index ? { ...current, kind: String(kind) as ArchiveSchedule["items"][number]["kind"] } : current,
+                      ),
+                    })
+                  }
+                  optionList={[
+                    { value: "user", label: kindLabel("user") },
+                    { value: "list", label: kindLabel("list") },
+                    { value: "following", label: kindLabel("following") },
+                    { value: "bookmarks", label: kindLabel("bookmarks") },
+                    { value: "likes", label: kindLabel("likes") },
+                    { value: "search", label: kindLabel("search") },
+                  ]}
+                />
                 <Input
                   aria-label={`${t("目标")} ${index + 1}`}
                   value={item.input}
