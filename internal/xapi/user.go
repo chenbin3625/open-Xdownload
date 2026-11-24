@@ -97,6 +97,10 @@ func GetListByID(ctx context.Context, requester Requester, id string, fetch List
 		return List{}, errors.New("列表不存在")
 	}
 	creator, _ := ParseUser(raw.Get("user_results"))
+	name := strings.TrimSpace(raw.Get("name").String())
+	if name == "" && creator.ID == "" {
+		return List{}, errors.New("列表不存在或当前账号无权访问")
+	}
 	return List{
 		ID:          FirstString(raw.Get("id_str"), raw.Get("id")),
 		Name:        raw.Get("name").String(),

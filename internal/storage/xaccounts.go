@@ -256,8 +256,9 @@ func (s *Store) CreateXAccount(ctx context.Context, account XAccount) (XAccount,
 			return XAccount{}, err
 		}
 	}
+	var lastUsedArg any
 	if account.LastUsed.Valid {
-		account.LastUsed.Time = account.LastUsed.Time.UTC()
+		lastUsedArg = formatSortableTime(account.LastUsed.Time)
 	}
 	if account.VerifiedAt.Valid {
 		account.VerifiedAt.Time = account.VerifiedAt.Time.UTC()
@@ -271,7 +272,7 @@ INSERT INTO x_accounts (
 RETURNING *`,
 		account.ScreenName, account.AuthToken, account.CSRFToken, account.ExtraCookies,
 		account.UserAgent, account.Proxy, makePrimary, account.Source, account.ErrorMsg,
-		account.LastUsed, account.VerifiedAt, now, now)
+		lastUsedArg, account.VerifiedAt, now, now)
 	if err != nil {
 		if isSQLiteUniqueViolation(err) {
 			return XAccount{}, ErrValidation("auth_token 已存在")
@@ -620,14 +621,14 @@ func sqlPlaceholders(n int) string {
 // active、不在 exclude、且 queue 与 '*' 都没有仍未过期的锁；排序让从未使用过的账号
 // 优先，其后按 last_used 最早、id 最小轮换。
 func (s *Store) PickXAccount(ctx context.Context, queue string, exclude []int64, now time.Time) (XAccount, bool, error) {
-	now = now.UTC()
+	nowText := formatSortableTime(now)
 	query := `
 UPDATE x_accounts SET last_used = ?
 WHERE id = (
 	SELECT a.id FROM x_accounts a
 	WHERE a.active = 1`
 	args := make([]any, 0, len(exclude)+4)
-	args = append(args, now)
+	args = append(args, nowText)
 	if len(exclude) > 0 {
 		placeholders := make([]string, len(exclude))
 		for index, id := range exclude {
@@ -647,7 +648,7 @@ WHERE id = (
 	LIMIT 1
 )
 RETURNING *`
-	args = append(args, queue, "*", now)
+	args = append(args, queue, "*", nowText)
 
 	account := XAccount{}
 	err := s.db.GetContext(ctx, &account, query, args...)
@@ -663,7 +664,7 @@ RETURNING *`
 // EarliestXAccountUnlock 返回 active、未排除账号中 queue 或 '*' 锁最早的未来解锁时间。
 // 没有任何未过期锁时 ok=false。
 func (s *Store) EarliestXAccountUnlock(ctx context.Context, queue string, exclude []int64, now time.Time) (time.Time, bool, error) {
-	now = now.UTC()
+	nowText := formatSortableTime(now)
 	query := `
 SELECT MAX(l.until) AS unlock_at FROM x_account_locks l
 JOIN x_accounts a ON a.id = l.account_id
@@ -671,7 +672,7 @@ WHERE a.active = 1
   AND l.queue IN (?, ?)
   AND l.until > ?`
 	args := make([]any, 0, len(exclude)+3)
-	args = append(args, queue, "*", now)
+	args = append(args, queue, "*", nowText)
 	if len(exclude) > 0 {
 		placeholders := make([]string, len(exclude))
 		for index, id := range exclude {
@@ -705,7 +706,7 @@ ON CONFLICT(account_id, queue) DO UPDATE SET
 	until = excluded.until,
 	reason = excluded.reason
 WHERE excluded.until > x_account_locks.until`,
-		id, queue, until.UTC(), reason)
+		id, queue, formatSortableTime(until), reason)
 	return err
 }
 
@@ -924,7 +925,7 @@ func (s *Store) MarkXAccountUsed(ctx context.Context, id int64, at time.Time) er
 	if at.IsZero() {
 		at = time.Now()
 	}
-	return s.updateXAccountState(ctx, `UPDATE x_accounts SET last_used = ? WHERE id = ?`, at.UTC(), id)
+	return s.updateXAccountState(ctx, `UPDATE x_accounts SET last_used = ? WHERE id = ?`, formatSortableTime(at), id)
 }
 
 // IncrementXAccountStat 累加账号在 UTC 当天、指定 queue 上的请求次数。
@@ -947,7 +948,7 @@ func (s *Store) ListXAccountLocks(ctx context.Context, now time.Time) ([]XAccoun
 	err := s.db.SelectContext(ctx, &locks, `
 SELECT account_id, queue, reason, until FROM x_account_locks
 WHERE until > ?
-ORDER BY until ASC, account_id ASC, queue ASC`, now.UTC())
+ORDER BY until ASC, account_id ASC, queue ASC`, formatSortableTime(now))
 	return locks, err
 }
 
@@ -963,8 +964,17 @@ ORDER BY account_id ASC, queue ASC`, day)
 
 // PurgeExpiredXAccountLocks 删除 until 已到的锁。
 func (s *Store) PurgeExpiredXAccountLocks(ctx context.Context, now time.Time) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM x_account_locks WHERE until <= ?`, now.UTC())
+	_, err := s.db.ExecContext(ctx, `DELETE FROM x_account_locks WHERE until <= ?`, formatSortableTime(now))
 	return err
+}
+
+// PruneXAccountStats 删除早于 olderThanDay（UTC YYYY-MM-DD）的账号日统计行，防止表长期无界增长。
+func (s *Store) PruneXAccountStats(ctx context.Context, olderThanDay string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM x_account_stats WHERE day < ?`, olderThanDay)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func isSQLiteUniqueViolation(err error) bool {

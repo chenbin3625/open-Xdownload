@@ -106,7 +106,8 @@ func (e *Engine) applyTransactionID(ctx context.Context, request *http.Request, 
 const tidInvalidateInterval = time.Minute
 
 // invalidateTransactionIDs 让下次请求重新抓取 xtid 脚本（GraphQL 404 时）。
-func (e *Engine) invalidateTransactionIDs() {
+// 返回 true 表示本次确实使生成器失效，false 表示处于节流窗口内或无生成器。
+func (e *Engine) invalidateTransactionIDs() bool {
 	e.tidMu.Lock()
 	generator := e.tid
 	if e.opts.TransactionIDs != nil {
@@ -115,11 +116,13 @@ func (e *Engine) invalidateTransactionIDs() {
 	now := e.now()
 	if generator == nil || (!e.tidInvalidatedAt.IsZero() && now.Sub(e.tidInvalidatedAt) < tidInvalidateInterval) {
 		e.tidMu.Unlock()
-		return
+		return false
 	}
 	e.tidInvalidatedAt = now
 	e.tidMu.Unlock()
+	e.assets.clear()
 	generator.Invalidate()
+	return true
 }
 
 func doRequest(client *http.Client, request *http.Request) *response {

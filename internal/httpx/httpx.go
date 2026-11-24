@@ -304,7 +304,7 @@ func guardDialContext(ctx context.Context, network, address string) (net.Conn, e
 }
 
 // maxProxyTransports 限制缓存中的代理 Transport 数量，防止反复切换代理配置时连接无界累积。
-const maxProxyTransports = 8
+const maxProxyTransports = 64
 
 type transportEntry struct {
 	transport *http.Transport

@@ -791,6 +791,38 @@ func (s *Store) ListTweetReplay(ctx context.Context, authorID, afterID string, a
 	return items, nil
 }
 
+// ListTweetReplayPending 仅返回有媒体且尚未有任一任务将媒体标记为 completed 的历史推文，
+// 避免非回溯的 ArchiveBoth 每次都全量重扫/重写已完成的历史推文。
+func (s *Store) ListTweetReplayPending(ctx context.Context, authorID, afterID string, archivedBefore time.Time, limit int) ([]parser.TweetData, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	var payloads []string
+	if err := s.db.SelectContext(ctx, &payloads, `
+SELECT t.payload FROM tweets t
+WHERE t.author_id = ?
+  AND t.archived_at <= ?
+  AND t.id > ?
+  AND EXISTS (SELECT 1 FROM tweet_media tm WHERE tm.tweet_id = t.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM tweet_jobs tj
+    WHERE tj.tweet_id = t.id AND tj.media_status = 'completed'
+  )
+ORDER BY t.id
+LIMIT ?`, authorID, archivedBefore.UTC(), afterID, limit); err != nil {
+		return nil, err
+	}
+	items := make([]parser.TweetData, 0, len(payloads))
+	for _, payload := range payloads {
+		var tweet parser.TweetData
+		if err := json.Unmarshal([]byte(payload), &tweet); err != nil {
+			return nil, err
+		}
+		items = append(items, tweet)
+	}
+	return items, nil
+}
+
 func (s *Store) GetTweetSync(ctx context.Context, userID string) (TweetSync, error) {
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO tweet_sync(user_id,updated_at) VALUES(?,?) ON CONFLICT(user_id) DO NOTHING`, userID, time.Now().UTC()); err != nil {
 		return TweetSync{}, err

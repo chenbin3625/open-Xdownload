@@ -173,7 +173,13 @@ func (m *Manager) replayArchivedTweetMedia(ctx, saveCtx context.Context, job sto
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		local, err := m.store.ListTweetReplay(saveCtx, user.ID, state.AfterID, state.ArchivedBefore, 100)
+		var local []parser.TweetData
+		var err error
+		if job.Backfill {
+			local, err = m.store.ListTweetReplay(saveCtx, user.ID, state.AfterID, state.ArchivedBefore, 100)
+		} else {
+			local, err = m.store.ListTweetReplayPending(saveCtx, user.ID, state.AfterID, state.ArchivedBefore, 100)
+		}
 		if err != nil {
 			return stats, err
 		}

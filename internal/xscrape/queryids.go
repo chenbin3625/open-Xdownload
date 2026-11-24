@@ -18,6 +18,11 @@ import (
 const (
 	// queryIDTTL 是内置/发现 queryId 的刷新周期。
 	queryIDTTL = time.Hour
+	// queryIDEmptyTTL 是首页/脚本未发现任何 queryId（例如 X 切换纯客户端分包）后的退避周期，
+	// 避免每小时空抓 24 个前端脚本。
+	queryIDEmptyTTL = 6 * time.Hour
+	// queryIDErrorTTL 是发现失败或超时后的退避周期，避免每个请求重复触发发现。
+	queryIDErrorTTL = 30 * time.Minute
 	// queryID404RefreshInterval 限制 404 触发的同步重新发现频率，避免故障时每个
 	// 请求都抓一遍首页。
 	queryID404RefreshInterval = 10 * time.Minute
@@ -48,10 +53,21 @@ type queryIDTable struct {
 	mu            sync.Mutex
 	ids           map[string]string
 	fetchedAt     time.Time
+	nextRefreshAt time.Time
 	last404At     time.Time
 	discovering   bool
 	lastSucceeded bool
 	done          chan struct{}
+}
+
+func queryIDRefreshCooldown(ids map[string]string, err error) time.Duration {
+	if err != nil {
+		return queryIDErrorTTL
+	}
+	if len(ids) == 0 {
+		return queryIDEmptyTTL
+	}
+	return queryIDTTL
 }
 
 // rewrite 把 xapi 构造的 GraphQL 路径中的 queryId 换成当前值。环境变量覆盖过的
@@ -77,14 +93,23 @@ func (t *queryIDTable) operationID(operation string) string {
 	return builtinQueryIDs[operation]
 }
 
-// ensureFresh 在首次使用和每小时到期时后台发现一次 queryId。发现失败不会影响
+// ensureFresh 在首次使用和冷却到期时后台发现一次 queryId。发现失败不会影响
 // 请求：始终回退到内置表。
 func (t *queryIDTable) ensureFresh(ctx context.Context, e *Engine, proxy string) {
 	if ctx.Err() != nil {
 		return
 	}
 	t.mu.Lock()
-	if t.discovering || (!t.fetchedAt.IsZero() && e.now().Sub(t.fetchedAt) < queryIDTTL) {
+	now := e.now()
+	if t.discovering {
+		t.mu.Unlock()
+		return
+	}
+	if !t.nextRefreshAt.IsZero() && now.Before(t.nextRefreshAt) {
+		t.mu.Unlock()
+		return
+	}
+	if t.nextRefreshAt.IsZero() && !t.fetchedAt.IsZero() && now.Sub(t.fetchedAt) < queryIDTTL {
 		t.mu.Unlock()
 		return
 	}
@@ -95,7 +120,7 @@ func (t *queryIDTable) ensureFresh(ctx context.Context, e *Engine, proxy string)
 	t.mu.Unlock()
 
 	// 后台发现由多个并发请求及 refreshFor404 等待者共享：与发起方取消解耦，
-	// 避免单个调用取消中断共享发现或阻止 fetchedAt 更新。
+	// 避免单个调用取消中断共享发现或阻止冷却时间戳更新。
 	discoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryDiscoveryTimeout)
 	go func() {
 		defer cancel()
@@ -103,12 +128,17 @@ func (t *queryIDTable) ensureFresh(ctx context.Context, e *Engine, proxy string)
 		var err error
 		defer func() {
 			t.merge(ids)
+			finishedAt := e.now()
+			effectiveErr := err
+			if effectiveErr == nil && discoveryCtx.Err() != nil {
+				effectiveErr = discoveryCtx.Err()
+			}
+			cooldown := queryIDRefreshCooldown(ids, effectiveErr)
 			t.mu.Lock()
 			t.discovering = false
-			if discoveryCtx.Err() == nil {
-				t.fetchedAt = e.now()
-			}
-			t.lastSucceeded = err == nil && len(ids) > 0
+			t.fetchedAt = finishedAt
+			t.nextRefreshAt = finishedAt.Add(cooldown)
+			t.lastSucceeded = effectiveErr == nil && len(ids) > 0
 			t.done = nil
 			close(done)
 			t.mu.Unlock()
@@ -125,7 +155,7 @@ func (t *queryIDTable) ensureFresh(ctx context.Context, e *Engine, proxy string)
 }
 
 // refreshFor404 在 GraphQL 返回 404 后同步重新发现（单飞、最多每 10 分钟一次）。
-// 返回是否真的拿到了新结果；无论返回值如何，调用方都会用现有表重试一次。
+// 返回是否真的拿到了新结果。
 func (t *queryIDTable) refreshFor404(ctx context.Context, e *Engine, proxy string) bool {
 	if ctx.Err() != nil {
 		return false
@@ -155,6 +185,8 @@ func (t *queryIDTable) refreshFor404(ctx context.Context, e *Engine, proxy strin
 	t.done = done
 	t.mu.Unlock()
 
+	e.assets.clear()
+
 	// 发现过程会抓首页和最多 24 个脚本；使用与 leader 取消解耦的超时上下文，
 	// 避免 leader 取消中断等待者或污染冷却时间戳。
 	discoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryDiscoveryTimeout)
@@ -164,12 +196,17 @@ func (t *queryIDTable) refreshFor404(ctx context.Context, e *Engine, proxy strin
 		var err error
 		defer func() {
 			t.merge(ids)
+			finishedAt := e.now()
+			effectiveErr := err
+			if effectiveErr == nil && discoveryCtx.Err() != nil {
+				effectiveErr = discoveryCtx.Err()
+			}
+			cooldown := queryIDRefreshCooldown(ids, effectiveErr)
 			t.mu.Lock()
 			t.discovering = false
-			if discoveryCtx.Err() == nil {
-				t.fetchedAt = e.now()
-			}
-			t.lastSucceeded = err == nil && len(ids) > 0
+			t.fetchedAt = finishedAt
+			t.nextRefreshAt = finishedAt.Add(cooldown)
+			t.lastSucceeded = effectiveErr == nil && len(ids) > 0
 			t.done = nil
 			close(done)
 			t.mu.Unlock()
@@ -241,7 +278,7 @@ func discoverQueryIDs(ctx context.Context, e *Engine, proxy string) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	client := newHTTPClient(transport)
+	client := newHTTPClient(e.assetRoundTripper(proxy, transport))
 	homeURL := e.baseURL + "/"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, homeURL, nil)
 	if err != nil {
@@ -294,7 +331,8 @@ func allQueryIDsFound(ids map[string]string) bool {
 	return true
 }
 
-// scriptURLs 提取首页引用的脚本，只保留 X/Twitter 静态资源主机上的 .js。
+// scriptURLs 提取首页引用的脚本，只保留 X/Twitter 静态资源主机上的 .js，
+// 并跳过明显的语言包/polyfill/vendor 块以减少无效下载。
 func scriptURLs(payload []byte, base string) []string {
 	baseURL, _ := url.Parse(base)
 	seen := map[string]bool{}
@@ -317,6 +355,9 @@ func scriptURLs(payload []byte, base string) []string {
 		if !strings.HasSuffix(strings.ToLower(parsed.Path), ".js") {
 			continue
 		}
+		if isNonGraphQLScriptPath(parsed.Path) {
+			continue
+		}
 		value := parsed.String()
 		if seen[value] {
 			continue
@@ -325,6 +366,15 @@ func scriptURLs(payload []byte, base string) []string {
 		scripts = append(scripts, value)
 	}
 	return scripts
+}
+
+func isNonGraphQLScriptPath(scriptPath string) bool {
+	lower := strings.ToLower(scriptPath)
+	return strings.Contains(lower, "/i18n/") ||
+		strings.Contains(lower, "polyfill") ||
+		strings.Contains(lower, "emoji") ||
+		strings.Contains(lower, "/vendor.") ||
+		strings.Contains(lower, "/vendor-")
 }
 
 func allowedScriptURL(parsed, baseURL *url.URL) bool {

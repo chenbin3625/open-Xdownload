@@ -40,7 +40,7 @@ type cachedAccountTransport struct {
 	lastUsed  time.Time
 }
 
-const maxAccountTransports = 8
+const maxAccountTransports = 64
 
 var accountTransports = struct {
 	sync.Mutex

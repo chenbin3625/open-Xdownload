@@ -118,7 +118,7 @@ func (e *Engine) fetchGuestToken(ctx context.Context, proxy string) (string, tim
 	request.Header.Set("Authorization", "Bearer "+xapi.GuestBearer())
 	request.Header.Set("User-Agent", xapi.UserAgent)
 	request.Header.Set("Accept", "application/json")
-	if err := e.paceProcess(ctx); err != nil {
+	if err := e.paceProcess(ctx, proxy); err != nil {
 		return "", 0, err
 	}
 	reply := doRequest(newHTTPClient(transport), request)
@@ -186,11 +186,14 @@ func (s *source) guestGraphQL(ctx context.Context, path string, values url.Value
 				return nil, fmt.Errorf("%w: %w", xapi.ErrQueryIDStale, guestHTTPError(reply))
 			}
 			retried404 = true
-			s.engine.invalidateTransactionIDs()
-			s.engine.queryIDs.refreshFor404(ctx, s.engine, s.proxy)
-			continue
+			tidInvalidated := s.engine.invalidateTransactionIDs()
+			refreshed := s.engine.queryIDs.refreshFor404(ctx, s.engine, s.proxy)
+			if tidInvalidated || refreshed {
+				continue
+			}
+			return nil, fmt.Errorf("%w: %w", xapi.ErrQueryIDStale, guestHTTPError(reply))
 		case reply.status == http.StatusTooManyRequests:
-			s.engine.slowXRequests()
+			s.engine.slowXRequestsForProxy(s.proxy)
 			return nil, &xapi.RateLimitedError{Path: queueForPath(path), RetryAt: rateLimitReset(reply.header, s.engine.now()), Cause: guestHTTPError(reply)}
 		case reply.status >= 500 || reply.status == http.StatusRequestTimeout || reply.status == 425:
 			if transient < 2 {
@@ -207,7 +210,7 @@ func (s *source) guestGraphQL(ctx context.Context, path string, values url.Value
 		if apiErr := xapi.ParseAPIError(reply.payload); apiErr != nil {
 			var parsed *xapi.APIError
 			if errors.As(apiErr, &parsed) && parsed.Code == xapi.APIErrRateLimit {
-				s.engine.slowXRequests()
+				s.engine.slowXRequestsForProxy(s.proxy)
 				return nil, &xapi.RateLimitedError{Path: queueForPath(path), RetryAt: rateLimitReset(reply.header, s.engine.now()), Cause: apiErr}
 			}
 			if transient < 2 && xapi.IsTransientError(apiErr) {
@@ -251,9 +254,10 @@ func (s *source) doGuestRequest(ctx context.Context, path string, values url.Val
 	request.Header.Set("User-Agent", xapi.UserAgent)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Referer", "https://x.com/")
 	s.engine.applyTransactionID(ctx, request, s.engine.generatorFor(s.proxy), http.MethodGet, rewritten)
 
-	if err := s.engine.paceProcess(ctx); err != nil {
+	if err := s.engine.paceProcess(ctx, s.proxy); err != nil {
 		return nil, err
 	}
 	reply := doRequest(newHTTPClient(transport), request)

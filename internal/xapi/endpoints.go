@@ -11,7 +11,7 @@ const (
 	// Host 是 X 的站点根地址。GraphQL 路径都相对于它构造。
 	Host = "https://x.com"
 	// UserAgent 是请求 X 时使用的浏览器 UA。
-	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 )
 
 // TimelineFeatures 是时间线类接口共用的 features 参数。

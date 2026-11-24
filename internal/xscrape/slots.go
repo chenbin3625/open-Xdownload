@@ -3,6 +3,7 @@ package xscrape
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,9 +61,9 @@ func (s *accountSlots) acquire(ctx context.Context, id int64) (slot *accountSlot
 	return slot, release, waited, nil
 }
 
-// pace 在持有执行槽时调用：保证同一账号两次请求间隔至少 3 秒，再经过进程级节流。
+// pace 在持有执行槽时调用：保证同一账号两次请求间隔至少 3 秒，再经过按代理隔离的节流器。
 // DisablePacing 时直接返回。
-func (e *Engine) pace(ctx context.Context, slot *accountSlot) error {
+func (e *Engine) pace(ctx context.Context, slot *accountSlot, proxy string) error {
 	if e.opts.DisablePacing {
 		return ctx.Err()
 	}
@@ -73,7 +74,7 @@ func (e *Engine) pace(ctx context.Context, slot *accountSlot) error {
 			}
 		}
 	}
-	if err := httpx.WaitXRequest(ctx); err != nil {
+	if err := httpx.WaitXRequestForScope(ctx, xRequestScope(proxy)); err != nil {
 		return err
 	}
 	if slot != nil {
@@ -82,12 +83,20 @@ func (e *Engine) pace(ctx context.Context, slot *accountSlot) error {
 	return nil
 }
 
-// paceProcess 只做进程级节流，用于不绑定执行槽的请求（guest、账号探测）。
-func (e *Engine) paceProcess(ctx context.Context) error {
+// paceProcess 只做按代理隔离的进程级节流，用于不绑定执行槽的请求（guest、账号探测）。
+func (e *Engine) paceProcess(ctx context.Context, proxy string) error {
 	if e.opts.DisablePacing {
 		return ctx.Err()
 	}
-	return httpx.WaitXRequest(ctx)
+	return httpx.WaitXRequestForScope(ctx, xRequestScope(proxy))
+}
+
+func xRequestScope(proxy string) string {
+	trimmed := strings.TrimSpace(proxy)
+	if trimmed == "" {
+		return ""
+	}
+	return "proxy:" + trimmed
 }
 
 // rateLimitedLog 让同一类日志在一段时间内只打印一次，避免 xtid 失败等问题刷屏。

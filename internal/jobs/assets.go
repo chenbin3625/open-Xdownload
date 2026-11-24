@@ -35,10 +35,19 @@ func newAssetID() (string, error) {
 
 // assetInput 是待写入资产的源文件。Hash/Size 已知时（下载器在写盘时已经算过、
 // 或复制源文件时边拷边算）跳过 filestore.AssetHash 的整文件重读。
+// tempOwned 为 true 表示该文件是本次刚写入临时目录的新文件，可零拷贝硬链接/重命名发布。
 type assetInput struct {
-	path string
-	hash string
-	size int64
+	path      string
+	hash      string
+	size      int64
+	tempOwned bool
+}
+
+func putAssetForInput(ctx context.Context, target config.StorageTarget, key string, source assetInput, contentType, assetID string) (string, error) {
+	if source.tempOwned {
+		return filestore.PutAssetFromTemp(ctx, target, key, source.path, contentType, assetID)
+	}
+	return filestore.PutAsset(ctx, target, key, source.path, contentType, assetID)
 }
 
 // removeWrittenAsset 在 CreateAsset 入库失败时尽力回滚刚刚新写入且尚未被数据库追踪的
@@ -112,7 +121,7 @@ func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.Storag
 		if ct == "" {
 			ct = contentType
 		}
-		restoredKey, err := filestore.PutAsset(ctx, target, existing.Key, source.path, ct, id)
+		restoredKey, err := putAssetForInput(ctx, target, existing.Key, source, ct, id)
 		if err != nil {
 			return storage.Asset{}, err
 		}
@@ -157,7 +166,7 @@ func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.Storag
 		if err != nil {
 			return storage.Asset{}, err
 		}
-		restoredKey, err := filestore.PutAsset(ctx, target, existing.Key, source.path, ct, id)
+		restoredKey, err := putAssetForInput(ctx, target, existing.Key, source, ct, id)
 		if err != nil {
 			return storage.Asset{}, err
 		}
@@ -181,7 +190,7 @@ func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.Storag
 	if err != nil {
 		return storage.Asset{}, err
 	}
-	writtenKey, err := filestore.PutAsset(ctx, target, desiredKey, source.path, contentType, id)
+	writtenKey, err := putAssetForInput(ctx, target, desiredKey, source, contentType, id)
 	if err != nil {
 		return storage.Asset{}, err
 	}
@@ -204,6 +213,10 @@ func (m *Manager) saveAsset(ctx, saveCtx context.Context, document config.Storag
 }
 
 func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, document config.StorageDocument, mediaURL, tweetID string, photo bool, published time.Time, previewURLs ...string) (mediaDownloadResult, error) {
+	return m.downloadAssetMediaWithTweet(ctx, saveCtx, job, cfg, document, nil, mediaURL, tweetID, photo, published, previewURLs...)
+}
+
+func (m *Manager) downloadAssetMediaWithTweet(ctx, saveCtx context.Context, job storage.Job, cfg config.AppConfig, document config.StorageDocument, tweetHint *parser.TweetData, mediaURL, tweetID string, photo bool, published time.Time, previewURLs ...string) (mediaDownloadResult, error) {
 	key := downloader.MediaIdentity(mediaURL)
 	release, err := m.lockMedia(ctx, key)
 	if err != nil {
@@ -226,13 +239,17 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 		mediaType = parser.MediaPhoto
 	}
 	tweet := parser.TweetData{ID: tweetID, CreatedAt: published}
-	if contextTweet, _, _, contextErr := m.store.AssetContext(saveCtx, key); contextErr != nil {
-		return mediaDownloadResult{}, contextErr
-	} else if contextTweet.ID != "" {
-		tweet = contextTweet
-	}
-	if archived, err := m.store.GetTweet(saveCtx, tweetID); err == nil {
-		tweet = archived.TweetData
+	if tweetHint != nil && (tweetHint.ID == tweetID || tweetID == "") {
+		tweet = *tweetHint
+	} else {
+		if contextTweet, _, _, contextErr := m.store.AssetContext(saveCtx, key); contextErr != nil {
+			return mediaDownloadResult{}, contextErr
+		} else if contextTweet.ID != "" {
+			tweet = contextTweet
+		}
+		if archived, err := m.store.GetTweet(saveCtx, tweetID); err == nil {
+			tweet = archived.TweetData
+		}
 	}
 	media := parser.Media{ID: key, Type: mediaType, BestURL: mediaURL}
 	index := 0
@@ -251,15 +268,51 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	if err != nil {
 		return mediaDownloadResult{}, err
 	}
-	tempDir, err := os.MkdirTemp("", "open-xdownload-asset-")
-	if err != nil {
-		return mediaDownloadResult{}, err
+
+	var tempDir string
+	defer func() {
+		if tempDir != "" {
+			_ = os.RemoveAll(tempDir)
+		}
+	}()
+	ensureTempDir := func() (string, error) {
+		if tempDir != "" {
+			return tempDir, nil
+		}
+		// 本地/NAS 目标优先在 target.Root/.xdl-tmp 下创建临时目录，下载后可直接零拷贝硬链接/重命名，
+		// 避免先写 /tmp 再跨卷复制并二次 fsync。
+		if _, destTarget, ruleErr := document.Rule(kind); ruleErr == nil && destTarget.Type != "s3" && filepath.IsAbs(destTarget.Root) {
+			if config.ValidateDownloadRoot(destTarget.Root) == nil {
+				tmpBase := filepath.Join(destTarget.Root, ".xdl-tmp")
+				if mkErr := os.MkdirAll(tmpBase, 0o700); mkErr == nil {
+					if dir, dirErr := os.MkdirTemp(tmpBase, "asset-"); dirErr == nil {
+						tempDir = dir
+						return tempDir, nil
+					}
+				}
+			}
+		}
+		dir, dirErr := os.MkdirTemp("", "open-xdownload-asset-")
+		if dirErr != nil {
+			return "", dirErr
+		}
+		tempDir = dir
+		return tempDir, nil
 	}
-	defer os.RemoveAll(tempDir)
+
+	storageDocForVersion := func(version int64) (config.StorageDocument, error) {
+		if version == document.Version {
+			return document, nil
+		}
+		return m.store.GetStorageVersion(saveCtx, version)
+	}
+
 	source := assetInput{}
 	skipped := asset != nil
+	var resolvedDoc config.StorageDocument
+	hasResolvedDoc := false
 	if asset != nil {
-		prior, err := m.store.GetStorageVersion(saveCtx, asset.PolicyVersion)
+		prior, err := storageDocForVersion(asset.PolicyVersion)
 		if err != nil {
 			return mediaDownloadResult{}, err
 		}
@@ -272,7 +325,11 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 			// the source, but create a policy-versioned asset at the new
 			// target/key instead of linking the historical asset directly.
 			skipped = false
-			source, err = m.copyAssetToTemp(ctx, *asset, tempDir)
+			dir, dirErr := ensureTempDir()
+			if dirErr != nil {
+				return mediaDownloadResult{}, dirErr
+			}
+			source, err = m.copyAssetToTemp(ctx, *asset, dir)
 			if err != nil {
 				if ctx.Err() != nil {
 					return mediaDownloadResult{}, ctx.Err()
@@ -281,6 +338,8 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 					return mediaDownloadResult{}, err
 				}
 				source = assetInput{}
+			} else {
+				source.tempOwned = true
 			}
 			asset = nil
 		} else {
@@ -293,12 +352,18 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 				skipped = false
 			} else {
 				file.Close()
+				resolvedDoc = prior
+				hasResolvedDoc = true
 			}
 		}
 	}
 	if asset == nil {
 		if source.path == "" {
-			result, downloadErr := m.downloader.DownloadWithOptions(ctx, mediaURL, tempDir, "source", downloader.Options{ModTime: published, LargePhoto: photo, ProxyURL: cfg.ProxyURL, MaxFilenameLength: 120})
+			dir, dirErr := ensureTempDir()
+			if dirErr != nil {
+				return mediaDownloadResult{}, dirErr
+			}
+			result, downloadErr := m.downloader.DownloadWithOptions(ctx, mediaURL, dir, "source", downloader.Options{ModTime: published, LargePhoto: photo, ProxyURL: cfg.ProxyURL, MaxFilenameLength: 120})
 			if downloadErr != nil {
 				if isPermanentlyUnavailableMediaError(downloadErr) {
 					previouslyFailed, checkErr := m.store.HasPermanentFailedMediaForURL(saveCtx, mediaURL)
@@ -319,7 +384,7 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 				return mediaDownloadResult{}, downloadErr
 			}
 			// 下载器写盘时已经流过 sha256 并统计了字节数，直接复用，避免再整文件读一遍。
-			source = assetInput{path: result.Path, hash: result.ContentHash, size: result.Bytes}
+			source = assetInput{path: result.Path, hash: result.ContentHash, size: result.Bytes, tempOwned: true}
 		}
 		created, err := m.saveAsset(ctx, saveCtx, document, kind, tweet, media, index, source)
 		if err != nil {
@@ -336,9 +401,13 @@ func (m *Manager) downloadAssetMedia(ctx, saveCtx context.Context, job storage.J
 	}
 	filePath := "asset:" + asset.ID + "/" + path.Base(asset.Key)
 	isLocalTarget := false
-	prior, err := m.store.GetStorageVersion(saveCtx, asset.PolicyVersion)
-	if err != nil {
-		return mediaDownloadResult{}, err
+	prior := resolvedDoc
+	if !hasResolvedDoc || asset.PolicyVersion != prior.Version {
+		var verErr error
+		prior, verErr = storageDocForVersion(asset.PolicyVersion)
+		if verErr != nil {
+			return mediaDownloadResult{}, verErr
+		}
 	}
 	if target, found := findStorageTarget(prior, asset.TargetID, asset.TargetVersion); found && target.Type != "s3" {
 		filePath = filepath.Join(target.Root, filepath.FromSlash(asset.Key))

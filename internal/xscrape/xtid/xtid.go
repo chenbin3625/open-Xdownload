@@ -19,7 +19,7 @@ import (
 const (
 	defaultBaseURL   = "https://x.com"
 	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 
 	// 与参考实现保持一致。
 	keyword                = "obfiowerehiring"
@@ -27,6 +27,7 @@ const (
 	timestampEpoch         = int64(1682924400) // x-client-transaction-id 的时钟起点
 
 	cacheTTL       = time.Hour
+	staleGraceTTL  = 6 * time.Hour
 	failureBackoff = 30 * time.Second
 	fetchTimeout   = 45 * time.Second
 
@@ -176,8 +177,16 @@ func (g *Generator) keys(ctx context.Context) (*keys, error) {
 		g.mu.Unlock()
 		return k, nil
 	}
+	var stale *keys
+	if g.cached != nil && now.Sub(g.fetchedAt) < staleGraceTTL {
+		stale = g.cached
+	}
 	if g.lastErr != nil && !g.failedAt.IsZero() {
 		if elapsed := now.Sub(g.failedAt); elapsed >= 0 && elapsed < failureBackoff {
+			if stale != nil {
+				g.mu.Unlock()
+				return stale, nil
+			}
 			err := g.lastErr
 			g.mu.Unlock()
 			return nil, err
@@ -187,8 +196,14 @@ func (g *Generator) keys(ctx context.Context) (*keys, error) {
 		g.mu.Unlock()
 		select {
 		case <-c.done:
+			if c.err != nil && stale != nil {
+				return stale, nil
+			}
 			return c.keys, c.err
 		case <-ctx.Done():
+			if stale != nil && ctx.Err() == context.DeadlineExceeded {
+				return stale, nil
+			}
 			return nil, ctx.Err()
 		}
 	}
@@ -230,8 +245,14 @@ func (g *Generator) keys(ctx context.Context) (*keys, error) {
 
 	select {
 	case <-call.done:
+		if call.err != nil && stale != nil {
+			return stale, nil
+		}
 		return call.keys, call.err
 	case <-ctx.Done():
+		if stale != nil && ctx.Err() == context.DeadlineExceeded {
+			return stale, nil
+		}
 		return nil, ctx.Err()
 	}
 }

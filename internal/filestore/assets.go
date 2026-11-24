@@ -310,6 +310,17 @@ func assetCollisionCandidate(key, safeID string, attempt int) string {
 }
 
 func PutAsset(ctx context.Context, target config.StorageTarget, key, source, contentType, assetID string) (string, error) {
+	return putAsset(ctx, target, key, source, contentType, assetID, false)
+}
+
+// PutAssetFromTemp 把调用方刚下载到临时目录的新文件发布为资产。当 source 位于本地/NAS
+// 的同一个 target.Root 内时，直接通过 os.Root 原子硬链接/重命名零拷贝发布，避免重复复制
+// 和二次 fsync；若处于不同目录或文件系统（EXDEV）则自动回退到标准复制路径。
+func PutAssetFromTemp(ctx context.Context, target config.StorageTarget, key, source, contentType, assetID string) (string, error) {
+	return putAsset(ctx, target, key, source, contentType, assetID, true)
+}
+
+func putAsset(ctx context.Context, target config.StorageTarget, key, source, contentType, assetID string, fromTemp bool) (string, error) {
 	if !validAssetKey(key) {
 		return "", fmt.Errorf("无效的资产 key")
 	}
@@ -373,14 +384,25 @@ func PutAsset(ctx context.Context, target config.StorageTarget, key, source, con
 	}
 	defer root.Close()
 
-	// 同一资产的所有冲突候选名位于相同父目录：先一次性写入并 fsync 临时文件，
-	// 随后循环以不覆盖方式发布到唯一目标名，避免每次命名冲突都重复复制与 fsync 大文件。
 	parentDir := path.Dir(key)
 	if parentDir != "." && parentDir != "" {
 		if err = root.MkdirAll(filepath.FromSlash(parentDir), 0o700); err != nil {
 			return "", err
 		}
 	}
+
+	// 若调用方把新下载的临时文件放在同一 target.Root 下（例如 .xdl-tmp），先尝试在 os.Root
+	// 边界内直接 Link/Rename 零拷贝发布；跨盘或不可链接时再退回复制 + fsync。
+	if fromTemp {
+		if relSource, ok := relPathWithinRoot(target.Root, source); ok {
+			if candidate, published, pubErr := publishRootFile(root, relSource, key, safeID); published || pubErr != nil {
+				return candidate, pubErr
+			}
+		}
+	}
+
+	// 同一资产的所有冲突候选名位于相同父目录：先一次性写入并 fsync 临时文件，
+	// 随后循环以不覆盖方式发布到唯一目标名，避免每次命名冲突都重复复制与 fsync 大文件。
 	var nonceBytes [8]byte
 	if _, randErr := rand.Read(nonceBytes[:]); randErr != nil {
 		return "", randErr
@@ -434,6 +456,57 @@ func PutAsset(ctx context.Context, target config.StorageTarget, key, source, con
 		return candidate, nil
 	}
 	return "", fmt.Errorf("资源命名冲突过多")
+}
+
+func relPathWithinRoot(rootDir, source string) (string, bool) {
+	cleanRoot := filepath.Clean(rootDir)
+	cleanSource := filepath.Clean(source)
+	rel, err := filepath.Rel(cleanRoot, cleanSource)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return rel, true
+}
+
+// publishRootFile 尝试将 root 内部的临时文件零拷贝发布为不覆盖的候选资产 key。
+// 遇到 EXDEV 时返回 ( "", false, nil ) 交由调用方退回跨卷复制。
+func publishRootFile(root *os.Root, relSource, key, safeID string) (string, bool, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		candidate := assetCollisionCandidate(key, safeID, attempt)
+		if !validAssetKey(candidate) {
+			return "", true, fmt.Errorf("无效的资产 key")
+		}
+		targetRel := filepath.FromSlash(candidate)
+		err := root.Link(relSource, targetRel)
+		if errors.Is(err, syscall.EXDEV) {
+			return "", false, nil
+		}
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.ENOTSUP) {
+			reservation, reserveErr := root.OpenFile(targetRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if reserveErr != nil {
+				err = reserveErr
+			} else if closeErr := reservation.Close(); closeErr != nil {
+				_ = root.Remove(targetRel)
+				err = closeErr
+			} else {
+				err = root.Rename(relSource, targetRel)
+				if err != nil {
+					_ = root.Remove(targetRel)
+					if errors.Is(err, syscall.EXDEV) {
+						return "", false, nil
+					}
+				}
+			}
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", true, err
+		}
+		return candidate, true, nil
+	}
+	return "", true, fmt.Errorf("资源命名冲突过多")
 }
 
 type contextAssetReader struct {

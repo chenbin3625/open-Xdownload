@@ -394,7 +394,7 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 			return origCheckRedirect(req, via)
 		}
 	}
-	if err := httpx.WaitXRequest(ctx); err != nil {
+	if err := httpx.WaitXRequestForScope(ctx, "syndication"); err != nil {
 		return TweetData{}, err
 	}
 	response, err := effectiveClient.Do(request)
@@ -404,7 +404,7 @@ func (s *Service) parseSyndicationTweetWithClient(ctx context.Context, rawURL st
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
 		if response.StatusCode == http.StatusTooManyRequests {
-			httpx.SlowXRequests()
+			httpx.SlowXRequestsForScope("syndication")
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 		return TweetData{}, fmt.Errorf("X 推文详情请求失败: HTTP %d", response.StatusCode)

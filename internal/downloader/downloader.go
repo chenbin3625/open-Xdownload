@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,7 +31,19 @@ const (
 	defaultDownloadTimeout = 10 * time.Minute
 	// minStaleTempAge 是 RemoveStaleTempFiles 允许的最小清理阈值（2 倍下载超时）。
 	minStaleTempAge = 2 * defaultDownloadTimeout
+	// openMaxAttempts 是媒体 CDN 瞬时失败（5xx/408/425/429/网络抖动）时的总尝试次数。
+	openMaxAttempts = 3
+	// defaultUserAgent 是请求 twimg CDN 时的标准浏览器 UA。
+	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 )
+
+// openRetryBackoff 控制媒体 CDN 瞬时错误重试前的退避时长，测试可替换以加速。
+var openRetryBackoff = func(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	return time.Duration(500*(1<<min(attempt, 3))) * time.Millisecond
+}
 
 // ErrUnknownMediaType 表示响应既没有可识别的 Content-Type，URL 与文件名提示里也没有
 // 允许的媒体扩展名。历史上这种情况会退化成 `.bin` 落盘，但 `.bin` 既不在媒体库扩展名
@@ -433,10 +446,6 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 	if !d.hostAllowed(parsedURL.Hostname()) {
 		return nil, fmt.Errorf("拒绝非 twimg.com 媒体 URL: %s", parsedURL.Hostname())
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		return nil, err
-	}
 	transport, err := transportForProxy(options.ProxyURL)
 	if err != nil {
 		return nil, err
@@ -472,19 +481,83 @@ func (d *Downloader) Open(ctx context.Context, rawURL string, options Options) (
 			return nil
 		},
 	}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode != http.StatusOK {
-		defer response.Body.Close()
+
+	var lastErr error
+	for attempt := 0; attempt < openMaxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := openRetryBackoff(attempt - 1)
+			if delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, ctx.Err()
+				case <-timer.C:
+				}
+			}
+		}
+		request, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		request.Header.Set("User-Agent", defaultUserAgent)
+
+		response, doErr := client.Do(request)
+		if doErr != nil {
+			lastErr = doErr
+			if !shouldRetryOpenError(ctx, doErr) || attempt+1 >= openMaxAttempts {
+				return nil, doErr
+			}
+			continue
+		}
+		if response.StatusCode == http.StatusOK {
+			return response, nil
+		}
 		payload, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		return nil, &HTTPStatusError{
+		_ = response.Body.Close()
+		statusErr := &HTTPStatusError{
 			StatusCode: response.StatusCode,
 			Payload:    strings.Join(strings.Fields(string(payload)), " "),
 		}
+		lastErr = statusErr
+		if !isRetryableCDNStatus(response.StatusCode) || attempt+1 >= openMaxAttempts {
+			return nil, statusErr
+		}
 	}
-	return response, nil
+	return nil, lastErr
+}
+
+func isRetryableCDNStatus(code int) bool {
+	return code == http.StatusRequestTimeout ||
+		code == http.StatusTooEarly ||
+		code == http.StatusTooManyRequests ||
+		(code >= 500 && code <= 599)
+}
+
+func shouldRetryOpenError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || httpx.IsBlockedTargetError(err) {
+		return false
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		msg := urlErr.Err.Error()
+		if strings.Contains(msg, "拒绝") || strings.Contains(msg, "重定向超过") || strings.Contains(msg, "proxyconnect") {
+			return false
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
 }
 
 // transportForProxy 返回按代理地址复用的 Transport（底层拨号带链路本地防护）。
@@ -901,6 +974,7 @@ func RemoveStaleTempFiles(ctx context.Context, root string, olderThan time.Durat
 	}
 	cutoff := time.Now().Add(-olderThan)
 	removed := 0
+	var staleTmpDirs []string
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -912,7 +986,16 @@ func RemoveStaleTempFiles(ctx context.Context, root string, olderThan time.Durat
 			}
 			return nil
 		}
-		if entry.IsDir() || !entry.Type().IsRegular() || !isStaleTempFileName(entry.Name()) {
+		inXdlTmp := isInsideXdlTmp(root, path)
+		if entry.IsDir() {
+			if inXdlTmp && entry.Name() != ".xdl-tmp" {
+				if info, infoErr := entry.Info(); infoErr == nil && info.ModTime().Before(cutoff) {
+					staleTmpDirs = append(staleTmpDirs, path)
+				}
+			}
+			return nil
+		}
+		if !entry.Type().IsRegular() || (!isStaleTempFileName(entry.Name()) && !inXdlTmp) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -927,10 +1010,21 @@ func RemoveStaleTempFiles(ctx context.Context, root string, olderThan time.Durat
 		}
 		return nil
 	})
+	for i := len(staleTmpDirs) - 1; i >= 0; i-- {
+		_ = os.Remove(staleTmpDirs[i])
+	}
 	if os.IsNotExist(err) {
 		return removed, nil
 	}
 	return removed, err
+}
+
+func isInsideXdlTmp(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return false
+	}
+	return rel == ".xdl-tmp" || strings.HasPrefix(rel, ".xdl-tmp"+string(filepath.Separator))
 }
 
 // staleTempFileReady 判断快照 info 对应的临时文件此刻是否仍可安全删除。

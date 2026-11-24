@@ -46,7 +46,7 @@ type Options struct {
 const (
 	defaultBaseURL      = "https://x.com"
 	defaultAPIBaseURL   = "https://api.x.com"
-	maxCachedTransports = 8
+	maxCachedTransports = 64
 )
 
 // proxyDialTimeout 限制单次代理/TCP 建连耗时，避免死代理在 30s×3 次重试里卡住多账号故障转移。
@@ -92,11 +92,13 @@ type Engine struct {
 	transports     map[string]*http.Transport
 	transportOrder []string
 
-	queryIDs queryIDTable
-	slots    accountSlots
-	guest    guestTokens
-	probes   probeRecords
-	logs     rateLimitedLog
+	queryIDs   queryIDTable
+	slots      accountSlots
+	guest      guestTokens
+	probes     probeRecords
+	assets     assetCache
+	rateLimits rateLimitTracker
+	logs       rateLimitedLog
 }
 
 // NewEngine 创建 Engine。构造时不发起任何网络请求，也不访问数据库。
@@ -147,7 +149,7 @@ func (e *Engine) HomeProber() xapi.HomeProber {
 }
 
 // transport 返回请求使用的 RoundTripper：测试注入的 Transport 优先，否则基于
-// httpx 共享 Transport 克隆一份带短建连超时的 Transport（按代理缓存以复用连接池）。
+// httpx 共享 Transport 克隆一份带短建连超时的 Transport（按代理 LRU 缓存以复用连接池）。
 func (e *Engine) transport(proxy string) (http.RoundTripper, error) {
 	if e.opts.Transport != nil {
 		return e.opts.Transport, nil
@@ -155,6 +157,7 @@ func (e *Engine) transport(proxy string) (http.RoundTripper, error) {
 	key := strings.TrimSpace(proxy)
 	e.transportMu.Lock()
 	if cached, ok := e.transports[key]; ok {
+		e.touchTransportOrderLocked(key)
 		e.transportMu.Unlock()
 		return cached, nil
 	}
@@ -170,6 +173,7 @@ func (e *Engine) transport(proxy string) (http.RoundTripper, error) {
 	defer e.transportMu.Unlock()
 	if cached, ok := e.transports[key]; ok {
 		cloned.CloseIdleConnections()
+		e.touchTransportOrderLocked(key)
 		return cached, nil
 	}
 	if e.transports == nil {
@@ -186,6 +190,20 @@ func (e *Engine) transport(proxy string) (http.RoundTripper, error) {
 	e.transports[key] = cloned
 	e.transportOrder = append(e.transportOrder, key)
 	return cloned, nil
+}
+
+func (e *Engine) touchTransportOrderLocked(key string) {
+	n := len(e.transportOrder)
+	if n <= 1 || e.transportOrder[n-1] == key {
+		return
+	}
+	for i, existing := range e.transportOrder {
+		if existing == key {
+			copy(e.transportOrder[i:], e.transportOrder[i+1:])
+			e.transportOrder[n-1] = key
+			return
+		}
+	}
 }
 
 func wrapDialTimeout(tr *http.Transport) *http.Transport {
@@ -209,11 +227,28 @@ func wrapDialTimeout(tr *http.Transport) *http.Transport {
 	return tr
 }
 
-// generatorFor 返回绑定到全局代理的 xtid 生成器；代理变化时重建。
+// metaProxyFor 返回 xtid / queryId 元数据抓取应使用的代理：优先全局代理，
+// 未配置全局代理时复用已绑定的 tidProxy 或回退到当前账号的代理，避免无全局代理时
+// 元数据请求直连 x.com 失败。
+func (e *Engine) metaProxyFor(accountProxy string) string {
+	if global := e.proxyFor(""); global != "" {
+		return global
+	}
+	e.tidMu.Lock()
+	sticky := e.tidProxy
+	e.tidMu.Unlock()
+	if sticky != "" {
+		return sticky
+	}
+	return strings.TrimSpace(accountProxy)
+}
+
+// generatorFor 返回绑定到指定代理的 xtid 生成器；代理变化时重建。
 func (e *Engine) generatorFor(proxy string) TransactionIDGenerator {
 	if e.opts.TransactionIDs != nil {
 		return e.opts.TransactionIDs
 	}
+	proxy = strings.TrimSpace(proxy)
 	e.tidMu.Lock()
 	defer e.tidMu.Unlock()
 	if e.tid != nil && e.tidProxy == proxy {
@@ -223,7 +258,7 @@ func (e *Engine) generatorFor(proxy string) TransactionIDGenerator {
 	if err != nil {
 		return e.tid
 	}
-	e.tid = xtid.New(newHTTPClient(transport), e.baseURL, xapi.UserAgent)
+	e.tid = xtid.New(newHTTPClient(e.assetRoundTripper(proxy, transport)), e.baseURL, xapi.UserAgent)
 	e.tidProxy = proxy
 	return e.tid
 }

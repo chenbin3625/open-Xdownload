@@ -590,7 +590,15 @@ func (s *Server) parseTweetLink(w http.ResponseWriter, r *http.Request) {
 	}
 	// 单推解析请求把配置的代理注入本次请求用客户端（M1），使解析链路与 timeline/下载
 	// 一致地走代理（httpx.Client 空代理时尊重环境变量）。
-	tweet, err := s.parser.ParseTweetLinkWithClient(r.Context(), req.URL, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
+	parseOpts := parserOptionsFromConfig(cfg)
+	tweet, err := s.parser.ParseTweetLinkWithClient(r.Context(), req.URL, httpx.Client(cfg.ProxyURL, 20*time.Second), parseOpts)
+	if err != nil && r.Context().Err() == nil && s.manager != nil {
+		if _, tweetID, idErr := parser.ExtractTweetURL(req.URL); idErr == nil && tweetID != "" {
+			if fallback, fbErr := s.manager.FetchTweetWithAuth(r.Context(), cfg, tweetID, parseOpts); fbErr == nil {
+				tweet, err = fallback, nil
+			}
+		}
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

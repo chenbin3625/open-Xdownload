@@ -548,6 +548,12 @@ func (m *Manager) maybeMaintain(ctx context.Context) {
 	} else if pruned > 0 {
 		log.Printf("pruned %d stale automatic retry job rows", pruned)
 	}
+	// 定期清理超过 180 天的账号每日统计记录，防止 x_account_stats 表无限累积。
+	if pruned, err := m.store.PruneXAccountStats(ctx, now.UTC().AddDate(0, 0, -180).Format("2006-01-02")); err != nil {
+		log.Printf("prune x account stats: %v", err)
+	} else if pruned > 0 {
+		log.Printf("pruned %d stale x account stat rows", pruned)
+	}
 	// 进程在下载/海报写入中途被杀时 .part 临时文件会永久残留（大视频可达数百 MB）。
 	roots := make(map[string]struct{})
 	if cfg, err := m.store.GetConfig(ctx); err == nil && strings.TrimSpace(cfg.DownloadDir) != "" {
@@ -655,16 +661,30 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		m.fail(saveCtx, job, "", err)
 		return
 	}
+	job.ArchiveMode = job.ArchiveMode.Normalized()
+	parseOpts := parserOptionsFromConfig(cfg)
 	var tweet parser.TweetData
 	_, tweetID, _ := parser.ExtractTweetURL(job.Input)
 	archived, archiveErr := m.store.GetTweet(saveCtx, tweetID)
 	if job.ArchiveMode == storage.ArchiveMedia {
 		// Signed video URLs expire. Refresh the payload for every media retry;
-		// retain the archived copy only when the refresh endpoint is unavailable.
-		tweet, err = m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
+		// fall back to authenticated GraphQL when public syndication fails or returns
+		// no downloadable media (e.g. protected/NSFW tweets), and retain the archived
+		// copy only when both refresh paths are unavailable.
+		tweet, err = m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parseOpts)
 		if isCancellation(ctx, err) {
 			m.handleInterrupt(ctx, saveCtx, job)
 			return
+		}
+		if (err != nil || downloadableMediaCount(tweet) == 0) && tweetID != "" {
+			if fallback, fbErr := m.FetchTweetWithAuth(ctx, cfg, tweetID, parseOpts); fbErr == nil {
+				if err != nil || downloadableMediaCount(fallback) > downloadableMediaCount(tweet) {
+					tweet, err = fallback, nil
+				}
+			} else if isCancellation(ctx, fbErr) {
+				m.handleInterrupt(ctx, saveCtx, job)
+				return
+			}
 		}
 		if archiveErr == nil {
 			if err == nil && downloadableMediaCount(tweet) > 0 {
@@ -674,7 +694,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 		}
 	} else {
 		if job.ArchiveMode.IncludesTweets() {
-			options := parserOptionsFromConfig(cfg)
+			options := parseOpts
 			options.RequireRelated = true
 			if source, sourceErr := m.XSource(ctx, cfg); sourceErr != nil {
 				err = sourceErr
@@ -682,7 +702,7 @@ func (m *Manager) processTweetLink(ctx context.Context, saveCtx context.Context,
 				tweet, err = source.FetchTweet(ctx, tweetID, options)
 			}
 		} else {
-			tweet, err = m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg))
+			tweet, err = m.parser.ParseTweetLinkWithClient(ctx, job.Input, httpx.Client(cfg.ProxyURL, 20*time.Second), parseOpts)
 		}
 	}
 	if err != nil {
@@ -1113,13 +1133,39 @@ type mediaDownloadResult struct {
 	unavailable bool
 }
 
-func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time, previewURLs ...string) (mediaDownloadResult, error) {
-	document, err := m.store.FreezeJobStorage(saveCtx, job.ID)
+// FetchTweetWithAuth 在账号池存在可用 X 账号时通过已认证 GraphQL 拉取单条推文，
+// 用作公开 syndication 接口失败（私密推文/年龄限制/视频签名过期）时的回退路径。
+func (m *Manager) FetchTweetWithAuth(ctx context.Context, cfg config.AppConfig, tweetID string, options parser.ParseOptions) (parser.TweetData, error) {
+	if strings.TrimSpace(tweetID) == "" {
+		return parser.TweetData{}, errors.New("推文 ID 不能为空")
+	}
+	source, err := m.XSource(ctx, cfg)
 	if err != nil {
-		return mediaDownloadResult{}, err
+		return parser.TweetData{}, err
+	}
+	if source == nil || source.Diagnostics().Available <= 0 {
+		return parser.TweetData{}, errors.New("没有可用 X Cookie")
+	}
+	return source.FetchTweet(ctx, tweetID, options)
+}
+
+func (m *Manager) downloadMedia(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time, previewURLs ...string) (mediaDownloadResult, error) {
+	return m.downloadMediaWithContext(ctx, saveCtx, job, cfg, nil, nil, mediaURL, tweetID, dir, filenameHint, largePhoto, modTime, previewURLs...)
+}
+
+func (m *Manager) downloadMediaWithContext(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, frozenDoc *config.StorageDocument, tweetHint *parser.TweetData, mediaURL string, tweetID string, dir string, filenameHint string, largePhoto bool, modTime time.Time, previewURLs ...string) (mediaDownloadResult, error) {
+	var document config.StorageDocument
+	if frozenDoc != nil {
+		document = *frozenDoc
+	} else {
+		var err error
+		document, err = m.store.FreezeJobStorage(saveCtx, job.ID)
+		if err != nil {
+			return mediaDownloadResult{}, err
+		}
 	}
 	if document.Enabled {
-		return m.downloadAssetMedia(ctx, saveCtx, job, cfg, document, mediaURL, tweetID, largePhoto, modTime, previewURLs...)
+		return m.downloadAssetMediaWithTweet(ctx, saveCtx, job, cfg, document, tweetHint, mediaURL, tweetID, largePhoto, modTime, previewURLs...)
 	}
 	previewURL := ""
 	if len(previewURLs) > 0 {
@@ -1928,6 +1974,35 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		return m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, done, stats)
 	}
 
+	deferredPrimary := map[string]bool{}
+	canDeferPrimaryRateLimit := func(idx int, task archiveUserTask) bool {
+		if (!task.primaryOnly && !task.user.Protected) || deferredPrimary[task.user.ID] || pool == nil {
+			return false
+		}
+		hasPublicRemaining := false
+		for j := idx + 1; j < len(tasks); j++ {
+			if !tasks[j].primaryOnly && !tasks[j].user.Protected {
+				hasPublicRemaining = true
+				break
+			}
+		}
+		if !hasPublicRemaining {
+			return false
+		}
+		return pool.Diagnostics().Available > 1
+	}
+	deferPrimaryTask := func(idx int) error {
+		moved := tasks[idx]
+		deferredPrimary[moved.user.ID] = true
+		copy(tasks[idx:], tasks[idx+1:])
+		tasks[len(tasks)-1] = moved
+		for i := idx; i < len(tasks); i++ {
+			tasks[i].order = i
+		}
+		m.clearCheckpointTasksCache(job.ID)
+		return m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, idx, stats)
+	}
+
 	sliceStart := time.Now()
 	sliceStartIndex := completed
 	for index := completed; index < len(tasks); index++ {
@@ -1954,6 +2029,13 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 			refreshed, err := pool.GetUserByIDAsPrimary(ctx, task.user.ID)
 			if err != nil {
 				_, limited := xapi.RateLimitRetryAt(err)
+				if limited && canDeferPrimaryRateLimit(index, task) {
+					if cpErr := deferPrimaryTask(index); cpErr != nil {
+						return stats, cpErr
+					}
+					index--
+					continue
+				}
 				if limited || isCancellation(ctx, err) || shouldAbortArchiveUsers(err) {
 					_ = m.saveArchiveCheckpoint(saveCtx, job.ID, tasks, index, stats)
 					return stats, err
@@ -1991,6 +2073,13 @@ func (m *Manager) archiveUsers(ctx context.Context, saveCtx context.Context, job
 		}, func() bool { return time.Since(sliceStart) >= archiveSliceBudget })
 		addStats(delta)
 		if err != nil {
+			if _, limited := xapi.RateLimitRetryAt(err); limited && canDeferPrimaryRateLimit(index, task) {
+				if cpErr := deferPrimaryTask(index); cpErr != nil {
+					return stats, cpErr
+				}
+				index--
+				continue
+			}
 			var pathError *os.PathError
 			var linkError *os.LinkError
 			// 单个用户的时间线 401（私密/深翻页）而 Cookie 仍通过 /home 校验：只算该用户失败。
@@ -2190,8 +2279,11 @@ func (m *Manager) archiveUserWithBudget(ctx context.Context, saveCtx context.Con
 			}
 			opts.StopAtTweetID = entity.LastSeenTweetID
 		}
+	} else if cfg.IncrementalArchive && !job.Backfill && entity.LastSeenTweetID != "" {
+		// 手动运行开启增量归档（且非回溯任务）时使用上次成功水位线早停。
+		fullScan = false
+		opts.StopAtTweetID = entity.LastSeenTweetID
 	}
-	// 手动运行始终全量（opts.StopAtTweetID 保持为空）。
 
 	downloaded, err := m.archiveMediaTimeline(ctx, saveCtx, job, cfg, pool, user, entity, dir, opts, updateDownloading, shouldYield)
 	stats.merge(downloaded)
@@ -2369,21 +2461,23 @@ func (m *Manager) archiveMediaTimeline(ctx context.Context, saveCtx context.Cont
 			_ = m.store.SaveMediaSync(saveCtx, state)
 			return stats, walkErr
 		}
-		staleCursor := xapi.IsInvalidTimelineCursor(walkErr) ||
-			(xapi.IsUnauthorized(walkErr) && pool.RecheckDisabledClients(ctx))
-		if attempt == 0 && startCursor != "" && pagesSaved == 0 && staleCursor {
-			// 保存的游标在首页即失效：清空后从第 0 页重翻。已下载的媒体会被去重跳过。
-			state.Cursor = ""
-			state.StopID = stopID
-			state.LastSeenTweetID = ""
-			state.Count = 0
-			state.Status = "running"
-			state.Error = ""
-			if saveErr := m.store.SaveMediaSync(saveCtx, state); saveErr != nil {
-				return stats, saveErr
+		if attempt == 0 && startCursor != "" && pagesSaved == 0 {
+			staleCursor := xapi.IsInvalidTimelineCursor(walkErr) ||
+				(xapi.IsUnauthorized(walkErr) && pool.RecheckDisabledClients(ctx))
+			if staleCursor {
+				// 保存的游标在首页即失效：清空后从第 0 页重翻。已下载的媒体会被去重跳过。
+				state.Cursor = ""
+				state.StopID = stopID
+				state.LastSeenTweetID = ""
+				state.Count = 0
+				state.Status = "running"
+				state.Error = ""
+				if saveErr := m.store.SaveMediaSync(saveCtx, state); saveErr != nil {
+					return stats, saveErr
+				}
+				startCursor = ""
+				continue
 			}
-			startCursor = ""
-			continue
 		}
 		state.Status = "interrupted"
 		state.Error = walkErr.Error()
@@ -2429,11 +2523,37 @@ func (m *Manager) archiveTweetsWithSeen(ctx context.Context, saveCtx context.Con
 	return stats, m.advanceUserCursor(saveCtx, entity.ID, cursor)
 }
 
+// pageMediaDownloadConcurrency 限制单页时间线内媒体 CDN 并发下载数。
+// 仅并发 twimg CDN 文件拉取，不改变单任务串行调度与结果按原顺序提交语义。
+var pageMediaDownloadConcurrency = 4
+
 // archiveTweetsBatch 处理一批时间线推文的正文/媒体，但不推进增量游标。媒体时间线
 // 按页调用它：每页的失败已写入失败队列后再保存分页游标，整轮结束后才统一前移游标。
 func (m *Manager) archiveTweetsBatch(ctx context.Context, saveCtx context.Context, job storage.Job, cfg config.AppConfig, user xapi.User, entity storage.UserEntity, dir string, tweets []parser.TweetData, updateDownloading func(message string)) (archiveStats, error) {
 	stats := archiveStats{Tweets: len(tweets)}
-	for _, tweet := range tweets {
+	if len(tweets) == 0 {
+		return stats, nil
+	}
+	frozenDoc, err := m.store.FreezeJobStorage(saveCtx, job.ID)
+	if err != nil {
+		return stats, err
+	}
+
+	type mediaDownloadWork struct {
+		tweetIdx     int
+		mediaIdx     int
+		media        parser.Media
+		mediaURL     string
+		filenameHint string
+	}
+	type mediaDownloadOutcome struct {
+		result mediaDownloadResult
+		err    error
+	}
+
+	var works []mediaDownloadWork
+	workIndexByPos := make([][]int, len(tweets))
+	for tweetIdx, tweet := range tweets {
 		if ctx.Err() != nil {
 			return stats, context.Canceled
 		}
@@ -2460,14 +2580,110 @@ func (m *Manager) archiveTweetsBatch(ctx context.Context, saveCtx context.Contex
 				return stats, err
 			}
 		}
+		if len(tweet.Media) == 0 {
+			continue
+		}
+		workIndexByPos[tweetIdx] = make([]int, len(tweet.Media))
+		for mediaIndex, media := range tweet.Media {
+			mediaURL := bestMediaURL(media)
+			if mediaURL == "" {
+				workIndexByPos[tweetIdx][mediaIndex] = -1
+				continue
+			}
+			workIndexByPos[tweetIdx][mediaIndex] = len(works)
+			works = append(works, mediaDownloadWork{
+				tweetIdx:     tweetIdx,
+				mediaIdx:     mediaIndex,
+				media:        media,
+				mediaURL:     mediaURL,
+				filenameHint: tweetFilename(cfg, tweet, mediaIndex),
+			})
+		}
+	}
+
+	outcomes := make([]mediaDownloadOutcome, len(works))
+	var batchFatalErr error
+	if len(works) > 0 {
+		if updateDownloading != nil {
+			updateDownloading(fmt.Sprintf("下载 @%s 的媒体", fallbackUserName(user)))
+		}
+		workers := pageMediaDownloadConcurrency
+		if workers < 1 {
+			workers = 1
+		}
+		if len(works) == 1 || workers == 1 {
+			for i, work := range works {
+				if ctx.Err() != nil {
+					outcomes[i].err = context.Canceled
+					break
+				}
+				tweet := tweets[work.tweetIdx]
+				res, dlErr := m.downloadMediaWithContext(ctx, saveCtx, job, cfg, &frozenDoc, &tweet, work.mediaURL, tweet.ID, dir, work.filenameHint, work.media.Type == parser.MediaPhoto, tweet.CreatedAt, work.media.PreviewURL)
+				outcomes[i] = mediaDownloadOutcome{result: res, err: dlErr}
+				if dlErr != nil {
+					var databaseError interface{ Code() int }
+					if isCancellation(ctx, dlErr) || errors.As(dlErr, &databaseError) || isDiskFatalError(dlErr) {
+						batchFatalErr = dlErr
+						break
+					}
+				}
+			}
+		} else {
+			batchCtx, cancelBatch := context.WithCancel(ctx)
+			defer cancelBatch()
+			var fatalMu sync.Mutex
+			setFatal := func(err error) {
+				fatalMu.Lock()
+				if batchFatalErr == nil {
+					batchFatalErr = err
+				}
+				fatalMu.Unlock()
+				cancelBatch()
+			}
+			workCh := make(chan int, len(works))
+			for i := range works {
+				workCh <- i
+			}
+			close(workCh)
+			var wg sync.WaitGroup
+			for w := 0; w < min(workers, len(works)); w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range workCh {
+						if batchCtx.Err() != nil {
+							outcomes[i].err = batchCtx.Err()
+							continue
+						}
+						work := works[i]
+						tweet := tweets[work.tweetIdx]
+						res, dlErr := m.downloadMediaWithContext(batchCtx, saveCtx, job, cfg, &frozenDoc, &tweet, work.mediaURL, tweet.ID, dir, work.filenameHint, work.media.Type == parser.MediaPhoto, tweet.CreatedAt, work.media.PreviewURL)
+						outcomes[i] = mediaDownloadOutcome{result: res, err: dlErr}
+						if dlErr != nil {
+							var databaseError interface{ Code() int }
+							if isCancellation(ctx, dlErr) || errors.As(dlErr, &databaseError) || isDiskFatalError(dlErr) {
+								setFatal(dlErr)
+							}
+						}
+					}
+				}()
+			}
+			wg.Wait()
+		}
+	}
+
+	for tweetIdx, tweet := range tweets {
+		if job.ArchiveMode == storage.ArchiveTweets {
+			continue
+		}
+		if ctx.Err() != nil {
+			return stats, context.Canceled
+		}
 		succeeded := 0
 		tweetErrors := []string{}
 		for mediaIndex, media := range tweet.Media {
-			if ctx.Err() != nil {
-				return stats, context.Canceled
-			}
-			mediaURL := bestMediaURL(media)
-			if mediaURL == "" {
+			workIdx := workIndexByPos[tweetIdx][mediaIndex]
+			if workIdx < 0 {
 				// 结构上不可解析（例如只有缩略图、没有 mp4 变体的视频）：重试同一 payload
 				// 永远不会成功，因此只记失败与 Issue，不写失败队列（否则条目会按 24h
 				// 退避被反复重试而永不清理），也不阻塞增量游标（否则该用户会永久全量
@@ -2477,39 +2693,44 @@ func (m *Manager) archiveTweetsBatch(ctx context.Context, saveCtx context.Contex
 				stats.Issues = append(stats.Issues, fmt.Sprintf("推文 %s 的媒体 %d 未解析到下载地址", tweet.ID, mediaIndex+1))
 				continue
 			}
-			if updateDownloading != nil {
-				updateDownloading(fmt.Sprintf("下载 @%s 的媒体", fallbackUserName(user)))
-			}
-			result, err := m.downloadMedia(ctx, saveCtx, job, cfg, mediaURL, tweet.ID, dir, tweetFilename(cfg, tweet, mediaIndex), media.Type == parser.MediaPhoto, tweet.CreatedAt, media.PreviewURL)
-			if err != nil {
+			out := outcomes[workIdx]
+			if out.err != nil {
 				var databaseError interface{ Code() int }
-				if isCancellation(ctx, err) || errors.As(err, &databaseError) {
-					return stats, err
+				if isCancellation(ctx, out.err) || errors.As(out.err, &databaseError) {
+					return stats, out.err
 				}
 				// 磁盘/文件系统致命错误：继续下载只会持续失败并刷满失败记录。
-				if isDiskFatalError(err) {
-					return stats, fmt.Errorf("磁盘写入失败，中止归档: %w", err)
+				if isDiskFatalError(out.err) {
+					return stats, fmt.Errorf("磁盘写入失败，中止归档: %w", out.err)
+				}
+				// 同页其他并发下载触发了致命错误并取消了本页子上下文：立即返回该致命错误，
+				// 不把被连带取消的正常媒体记入失败队列。
+				if errors.Is(out.err, context.Canceled) && batchFatalErr != nil {
+					if isDiskFatalError(batchFatalErr) {
+						return stats, fmt.Errorf("磁盘写入失败，中止归档: %w", batchFatalErr)
+					}
+					return stats, batchFatalErr
 				}
 				stats.Failed++
-				tweetErrors = append(tweetErrors, err.Error())
-				stats.Issues = append(stats.Issues, fmt.Sprintf("推文 %s 下载媒体 %d 失败: %v", tweet.ID, mediaIndex+1, err))
-				if _, recordErr := m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: mediaURL, Error: err.Error()}); recordErr != nil {
+				tweetErrors = append(tweetErrors, out.err.Error())
+				stats.Issues = append(stats.Issues, fmt.Sprintf("推文 %s 下载媒体 %d 失败: %v", tweet.ID, mediaIndex+1, out.err))
+				if _, recordErr := m.store.CreateFailedMedia(saveCtx, storage.FailedMedia{JobID: job.ID, MediaURL: works[workIdx].mediaURL, Error: out.err.Error()}); recordErr != nil {
 					return stats, recordErr
 				}
-				if shouldRetryMediaError(err) || isPermanentlyUnavailableMediaError(err) {
-					if rememberErr := m.rememberFailedTweet(saveCtx, job, entity, tweet, err); rememberErr != nil {
+				if shouldRetryMediaError(out.err) || isPermanentlyUnavailableMediaError(out.err) {
+					if rememberErr := m.rememberFailedTweet(saveCtx, job, entity, tweet, out.err); rememberErr != nil {
 						return stats, rememberErr
 					}
 				}
 				continue
 			}
-			if result.unavailable {
+			if out.result.unavailable {
 				tweetErrors = append(tweetErrors, "媒体永久不可用")
 				stats.Failed++
 				stats.Issues = append(stats.Issues, fmt.Sprintf("推文 %s 的媒体 %d 永久不可用", tweet.ID, mediaIndex+1))
 			} else {
 				succeeded++
-				if result.skipped {
+				if out.result.skipped {
 					stats.SkippedMedia++
 				} else {
 					stats.Downloaded++
@@ -2705,8 +2926,16 @@ func (m *Manager) retryFailedTweets(ctx context.Context, saveCtx context.Context
 			}
 			continue
 		}
+		refreshedMedia := false
+		parseOpts := parserOptionsFromConfig(cfg)
 		if m.parser != nil && strings.TrimSpace(tweet.URL) != "" {
-			if fresh, refreshErr := m.parser.ParseTweetLinkWithClient(ctx, tweet.URL, httpx.Client(cfg.ProxyURL, 20*time.Second), parserOptionsFromConfig(cfg)); refreshErr == nil && downloadableMediaCount(fresh) > 0 {
+			if fresh, refreshErr := m.parser.ParseTweetLinkWithClient(ctx, tweet.URL, httpx.Client(cfg.ProxyURL, 20*time.Second), parseOpts); refreshErr == nil && downloadableMediaCount(fresh) > 0 {
+				tweet.Media = mergeRefreshedMedia(tweet.Media, fresh.Media)
+				refreshedMedia = true
+			}
+		}
+		if !refreshedMedia && ctx.Err() == nil && strings.TrimSpace(tweet.ID) != "" {
+			if fresh, refreshErr := m.FetchTweetWithAuth(ctx, cfg, tweet.ID, parseOpts); refreshErr == nil && downloadableMediaCount(fresh) > 0 {
 				tweet.Media = mergeRefreshedMedia(tweet.Media, fresh.Media)
 			}
 		}

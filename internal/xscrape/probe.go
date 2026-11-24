@@ -24,10 +24,11 @@ const probeVerifiedTTL = 2 * time.Minute
 // Cookie 也返回 404，不能再作为探测入口。
 const probePath = "/i/api/1.1/account/multi/list.json"
 
-// probeRecords 记录内存中的"最近一次探测成功"时间；不落库、不保存 Cookie。
+// probeRecords 记录内存中的"最近一次探测成功"与"最近一次停用复检"时间；不落库、不保存 Cookie。
 type probeRecords struct {
-	mu       sync.Mutex
-	verified map[int64]time.Time
+	mu          sync.Mutex
+	verified    map[int64]time.Time
+	recheckedAt map[int64]time.Time
 }
 
 func (p *probeRecords) mark(id int64, at time.Time) {
@@ -50,6 +51,22 @@ func (p *probeRecords) forget(id int64) {
 	p.mu.Lock()
 	delete(p.verified, id)
 	p.mu.Unlock()
+}
+
+func (p *probeRecords) markRechecked(id int64, at time.Time) {
+	p.mu.Lock()
+	if p.recheckedAt == nil {
+		p.recheckedAt = map[int64]time.Time{}
+	}
+	p.recheckedAt[id] = at
+	p.mu.Unlock()
+}
+
+func (p *probeRecords) recentRecheck(id int64, now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	at, ok := p.recheckedAt[id]
+	return ok && now.Sub(at) < probeVerifiedTTL
 }
 
 // proxyFor 返回账号请求使用的代理：账号级代理优先，否则用最近一次 Source 的全局代理。
@@ -90,10 +107,11 @@ func (e *Engine) probe(ctx context.Context, creds xapi.AccountCredentials) xapi.
 	request.Header.Set("X-Twitter-Auth-Type", "OAuth2Session")
 	request.Header.Set("X-Twitter-Active-User", "yes")
 	request.Header.Set("X-Twitter-Client-Language", "en")
+	request.Header.Set("Referer", "https://x.com/")
 	addAccountCookies(request, authToken, csrfToken, creds.ExtraCookies)
 	e.applyTransactionID(ctx, request, e.currentGenerator(), http.MethodGet, probePath)
 
-	if err := e.paceProcess(ctx); err != nil {
+	if err := e.paceProcess(ctx, proxy); err != nil {
 		return xapi.HomeProbeResult{Err: err}
 	}
 	reply := doRequest(newHTTPClient(transport), request)

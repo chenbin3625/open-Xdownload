@@ -6,12 +6,15 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/parser"
 	"github.com/chenbin3625/open-Xdownload/internal/storage"
 	"github.com/chenbin3625/open-Xdownload/internal/xapi"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -291,14 +294,55 @@ func (s *source) lookupFetcher() xapi.LookupFetcher {
 }
 
 // listFetcher 返回读取列表元信息的账号的 viewerKey，供成员分页固定视角。
+// 私有列表对无权限账号可能返回空 data.list（HTTP 200）；此时自动排除该账号并换号尝试。
 func (s *source) listFetcher() xapi.ListFetcher {
 	return func(ctx context.Context, path string, values url.Values) ([]byte, string, error) {
-		payload, account, err := s.graphQLWithAccount(ctx, path, values, nil)
-		if err != nil {
-			return nil, "", err
+		excluded := map[int64]bool{}
+		var lastPayload []byte
+		var lastViewer string
+		for {
+			payload, account, err := s.graphQLWithAccount(ctx, path, values, maps.Clone(excluded))
+			if err != nil {
+				if len(lastPayload) > 0 && ctx.Err() == nil && !xapi.IsRateLimitError(err) && !xapi.IsAllClientsRateLimited(err) {
+					return lastPayload, lastViewer, nil
+				}
+				return nil, "", err
+			}
+			viewer := xapi.ViewerKey(account.AuthToken)
+			if listPayloadAccessible(payload) {
+				return payload, viewer, nil
+			}
+			lastPayload = payload
+			lastViewer = viewer
+			excluded[account.ID] = true
+			accounts, listErr := s.engine.store.ListXAccounts(ctx)
+			if listErr != nil {
+				return payload, viewer, nil
+			}
+			hasCandidate := false
+			for _, candidate := range accounts {
+				if candidate.Active && !excluded[candidate.ID] {
+					hasCandidate = true
+					break
+				}
+			}
+			if !hasCandidate {
+				return payload, viewer, nil
+			}
 		}
-		return payload, xapi.ViewerKey(account.AuthToken), nil
 	}
+}
+
+func listPayloadAccessible(payload []byte) bool {
+	raw := gjson.GetBytes(payload, "data.list")
+	if !raw.Exists() {
+		return false
+	}
+	if strings.TrimSpace(raw.Get("name").String()) != "" {
+		return true
+	}
+	creator, _ := xapi.ParseUser(raw.Get("user_results"))
+	return creator.ID != ""
 }
 
 func (s *source) RecheckDisabledClients(ctx context.Context) bool {
@@ -306,16 +350,34 @@ func (s *source) RecheckDisabledClients(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	now := s.engine.now()
+	active := 0
 	candidates := make([]storage.XAccount, 0, len(accounts))
 	for _, account := range accounts {
-		if !account.Active {
-			candidates = append(candidates, account)
+		if account.Active {
+			active++
+			continue
 		}
+		// 跳过用户手动停用的账号（active=0 且 error_msg 为空），不为其发探测请求。
+		if strings.TrimSpace(account.ErrorMsg) == "" {
+			continue
+		}
+		if s.engine.probes.recentRecheck(account.ID, now) {
+			continue
+		}
+		candidates = append(candidates, account)
+	}
+	// 池中已有活跃账号（401 路径已由 confirmUnauthorized 校验过）时无需再去重复探测老的失效账号。
+	if active > 0 {
+		return true
 	}
 	if len(candidates) > 0 {
+		for _, candidate := range candidates {
+			s.engine.probes.markRechecked(candidate.ID, now)
+		}
 		s.checkAccounts(ctx, candidates)
 	}
-	active, err := s.engine.activeAccountCount(ctx)
+	active, err = s.engine.activeAccountCount(ctx)
 	return err == nil && active > 0
 }
 
@@ -393,11 +455,12 @@ func (s *source) Diagnostics() xapi.PoolDiagnostics {
 		e.logs.printf("diagnostics", time.Minute, "xscrape: 读取账号诊断失败: %v", err)
 		return xapi.PoolDiagnostics{}
 	}
-	locks, lockErr := e.store.ListXAccountLocks(ctx, e.now())
+	now := e.now()
+	locks, lockErr := e.store.ListXAccountLocks(ctx, now)
 	if lockErr != nil {
 		e.logs.printf("diagnostics", time.Minute, "xscrape: 读取账号限流锁失败: %v", lockErr)
 	}
-	stats, statsErr := e.store.ListXAccountStats(ctx, e.now().UTC().Format("2006-01-02"))
+	stats, statsErr := e.store.ListXAccountStats(ctx, now.UTC().Format("2006-01-02"))
 	if statsErr != nil {
 		e.logs.printf("diagnostics", time.Minute, "xscrape: 读取账号统计失败: %v", statsErr)
 	}
@@ -417,6 +480,7 @@ func (s *source) Diagnostics() xapi.PoolDiagnostics {
 
 	diagnostics := xapi.PoolDiagnostics{Total: len(accounts), Clients: make([]xapi.ClientStatus, 0, len(accounts))}
 	for index, account := range accounts {
+		rateLimits := mergeAccountRateLimits(locksByAccount[account.ID], e.rateLimits.snapshot(account.ID, now))
 		status := xapi.ClientStatus{
 			Index:        index,
 			Primary:      account.IsPrimary,
@@ -425,7 +489,7 @@ func (s *source) Diagnostics() xapi.PoolDiagnostics {
 			Disabled:     !account.Active,
 			Error:        account.ErrorMsg,
 			RequestCount: statsByAccount[account.ID],
-			RateLimits:   locksByAccount[account.ID],
+			RateLimits:   rateLimits,
 		}
 		if status.OK {
 			diagnostics.Available++
@@ -433,6 +497,33 @@ func (s *source) Diagnostics() xapi.PoolDiagnostics {
 		diagnostics.Clients = append(diagnostics.Clients, status)
 	}
 	return diagnostics
+}
+
+func mergeAccountRateLimits(locked []xapi.RateLimitSnapshot, observed map[string]xapi.RateLimitSnapshot) []xapi.RateLimitSnapshot {
+	if len(observed) == 0 {
+		return locked
+	}
+	merged := make([]xapi.RateLimitSnapshot, 0, len(locked)+len(observed))
+	seen := make(map[string]bool, len(locked))
+	for _, item := range locked {
+		if obs, ok := observed[item.Path]; ok {
+			item.Limit = obs.Limit
+			item.Remaining = obs.Remaining
+		}
+		seen[item.Path] = true
+		merged = append(merged, item)
+	}
+	extraQueues := make([]string, 0, len(observed))
+	for queue := range observed {
+		if !seen[queue] {
+			extraQueues = append(extraQueues, queue)
+		}
+	}
+	sort.Strings(extraQueues)
+	for _, queue := range extraQueues {
+		merged = append(merged, observed[queue])
+	}
+	return merged
 }
 
 func (s *source) HasPrimary() bool {

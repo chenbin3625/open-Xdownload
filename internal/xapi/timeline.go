@@ -168,8 +168,21 @@ func WalkUserMediaPages(ctx context.Context, requester Requester, user User, opt
 			}
 			pageTweets = append(pageTweets, tweet)
 		}
-		if page == 0 && reachedStop && TweetIDNewerThan(lastTweetID, options.StopID) {
-			reachedStop = false
+		if page == 0 && options.StopID != "" {
+			if reachedStop && TweetIDNewerThan(lastTweetID, options.StopID) {
+				reachedStop = false
+			} else if !reachedStop && lastTweetID != "" && !TweetIDNewerThan(lastTweetID, options.StopID) {
+				// StopID 推文已被删除导致首页未精确命中，但页尾非置顶推文已不新于 StopID：
+				// 直接在首页早停并滤掉不新于 StopID 的已归档推文，避免多余翻页。
+				reachedStop = true
+				filtered := pageTweets[:0]
+				for _, tw := range pageTweets {
+					if TweetIDNewerThan(tw.ID, options.StopID) {
+						filtered = append(filtered, tw)
+					}
+				}
+				pageTweets = filtered
+			}
 		}
 		complete := reachedStop || next == ""
 		if !complete {
@@ -213,6 +226,10 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 	seen := map[string]bool{}
 	seenCursors := map[string]bool{}
 	consecutiveEmpty := 0
+	parseCandidates := 0
+	failedParseCount := 0
+	parsedValid := 0
+	skippedIDs := []string{}
 	for page := 0; page < 1000; page++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -250,16 +267,25 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 		reached := false
 		lastOwnerID := ""
 		for _, result := range items {
+			rawID := TweetResultID(result.Result)
 			tweet, err := parser.TweetFromGraphQLResultWithOptions("", user.ScreenName, "", result.Result, options.Parse)
 			if errors.Is(err, parser.ErrTweetUnavailable) {
 				continue
 			}
+			parseCandidates++
 			if err != nil {
-				return fmt.Errorf("全文解析失败，保留上页进度: %w", err)
+				failedParseCount++
+				skippedIDs = append(skippedIDs, rawID)
+				log.Printf("xapi: 全文时间线跳过无法解析的推文 %s (user=%s): %v", rawID, user.ID, err)
+				continue
 			}
 			if tweet.Author.ID == "" {
-				return fmt.Errorf("推文 %s 缺少作者 ID，未推进全文进度", tweet.ID)
+				failedParseCount++
+				skippedIDs = append(skippedIDs, tweet.ID)
+				log.Printf("xapi: 全文时间线跳过缺少作者 ID 的推文 %s (user=%s)", tweet.ID, user.ID)
+				continue
 			}
+			parsedValid++
 			if tweet.Author.ID != user.ID {
 				continue
 			}
@@ -298,6 +324,10 @@ func WalkUserTweets(ctx context.Context, requester Requester, user User, options
 			// 最后一个用户上，游标永远无法推进。与媒体时间线、成员列表一致：游标不再
 			// 前进即视为已到末尾，本页作为最后一页正常提交。
 			batch.Complete = true
+		}
+		if batch.Complete && parsedValid == 0 && failedParseCount > 0 && failedParseCount == parseCandidates {
+			return fmt.Errorf("全文时间线返回了 %d 条推文但全部解析失败，保留上页进度（user=%s，跳过的推文: %s）",
+				failedParseCount, user.ID, strings.Join(skippedIDs, ", "))
 		}
 		if err := save(batch); err != nil {
 			return err
@@ -375,15 +405,18 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 						if isUnavailableTweetResult(item, "item.content.tweet_results", "item.itemContent.tweet_results", "content.tweet_results") {
 							continue
 						}
-						return nil, "", errors.New("全文模块缺少推文内容")
+						log.Printf("xapi: 跳过缺少推文内容的全文模块项")
 					}
 				}
 				continue
-			case "TimelineTerminateTimeline", "TimelineClearCache":
+			case "TimelineTerminateTimeline", "TimelineClearCache",
+				"TimelineShowAlert", "TimelineClearEntriesUnreadState",
+				"TimelineMarkEntriesUnreadGreaterThanSortIndex", "TimelineRemoveEntries", "TimelineShowCover":
 				recognized = true
 				continue
 			default:
-				return nil, "", fmt.Errorf("无法识别全文 instruction: %s", kind)
+				log.Printf("xapi: 忽略未知全文 instruction 类型: %s", kind)
+				continue
 			}
 			entries := instruction.Get("entries").Array()
 			if entry := instruction.Get("entry"); entry.Exists() {
@@ -391,7 +424,8 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 			}
 			for _, entry := range entries {
 				content := entry.Get("content")
-				switch content.Get("__typename").String() {
+				entryKind := content.Get("__typename").String()
+				switch entryKind {
 				case "TimelineTimelineCursor":
 					if strings.EqualFold(content.Get("cursor_type").String(), "bottom") {
 						next = content.Get("value").String()
@@ -404,7 +438,7 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 						if isUnavailableTweetResult(tweetContent, "tweet_results") {
 							continue
 						}
-						return nil, "", errors.New("全文条目缺少推文内容")
+						log.Printf("xapi: 跳过缺少推文内容的全文条目")
 					}
 				case "TimelineTimelineModule":
 					for _, item := range content.Get("items").Array() {
@@ -420,11 +454,11 @@ func FullTimelineItems(payload []byte) ([]FullTimelineTweet, string, error) {
 							if isUnavailableTweetResult(item, "item.content.tweet_results", "item.itemContent.tweet_results") {
 								continue
 							}
-							return nil, "", errors.New("全文模块缺少推文内容")
+							log.Printf("xapi: 跳过缺少推文内容的全文模块项")
 						}
 					}
 				default:
-					return nil, "", fmt.Errorf("无法识别全文 entry: %s", content.Get("__typename").String())
+					log.Printf("xapi: 忽略未知全文 entry 类型: %s", entryKind)
 				}
 			}
 		}
