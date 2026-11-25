@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/config"
@@ -57,10 +58,17 @@ type LibraryFilter struct {
 
 // LibraryPageOptions 是分页请求参数。
 type LibraryPageOptions struct {
-	Page     int
-	PageSize int
-	Filter   LibraryFilter
-	Sort     string
+	Page      int
+	PageSize  int
+	Filter    LibraryFilter
+	Sort      string
+	OmitUsers bool
+}
+
+type orphanDiskFile struct {
+	filePath string
+	bytes    int64
+	modTime  time.Time
 }
 
 // LibraryUserOption 是媒体库用户筛选下拉项，与前端 {value,label} 契约一致。
@@ -112,8 +120,10 @@ type libraryUserAggregate struct {
 type librarySnapshot struct {
 	gen              uint64
 	at               time.Time
-	entries          []DownloadRecord // 去重后的下载记录（已按目录前缀补全归属），最多 librarySnapshotMaxEntries 条
+	entries          []DownloadRecord // 去重并按 date_desc 排序后的下载记录（已按目录前缀补全归属），最多 librarySnapshotMaxEntries 条
 	entriesTruncated bool
+	sortMu           sync.Mutex
+	sortedIdx        map[string][]int // 按非默认排序（date_asc/size_desc/size_asc）延迟缓存的下标序列
 	orphans          []DownloadRecord // 无下载记录的磁盘媒体文件，按 CreatedAt 降序
 	prefixes         []libraryEntityPrefix
 	prefixIndex      map[string]int // 实体前缀 -> prefixes 下标（取 id 最小者）
@@ -121,6 +131,39 @@ type librarySnapshot struct {
 	userAggregates   map[string]*libraryUserAggregate // 全量（含超过阈值与孤儿）按小写 screen_name 聚合
 	unknownEntries   int                              // 无归属的 entries（含 file_path 为空的记录）
 	counts           libraryCounts
+}
+
+func (snap *librarySnapshot) sortedIndices(order string) []int {
+	snap.sortMu.Lock()
+	defer snap.sortMu.Unlock()
+	if idx, ok := snap.sortedIdx[order]; ok {
+		return idx
+	}
+	idx := make([]int, len(snap.entries))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(i, j int) bool {
+		return libraryEntryLess(snap.entries[idx[i]], snap.entries[idx[j]], order)
+	})
+	if snap.sortedIdx == nil {
+		snap.sortedIdx = make(map[string][]int, 3)
+	}
+	snap.sortedIdx[order] = idx
+	return idx
+}
+
+func isLibraryFilterEmpty(filter LibraryFilter) bool {
+	return filter.Kind == libraryKindAll &&
+		filter.User == libraryKindAll &&
+		filter.Search == "" &&
+		filter.From.IsZero() &&
+		filter.To.IsZero() &&
+		filter.MinBytes == nil &&
+		filter.MaxBytes == nil &&
+		filter.Starred == nil &&
+		filter.TagID <= 0 &&
+		filter.CollectionID <= 0
 }
 
 // ListLibraryDownloadsPage 返回媒体库按 page/pageSize 分页、并已按 Kind/User/Search 过滤的
@@ -142,23 +185,88 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	if page < 1 {
 		page = 1
 	}
+	order := opts.Sort
+	if order == "" {
+		order = "date_desc"
+	}
 	filter := normalizeLibraryFilter(opts.Filter)
 	snap, err := s.librarySnapshot(ctx)
 	if err != nil {
 		return LibraryPage{}, err
 	}
 	if snap.entriesTruncated {
-		pageRes, err := s.listLibraryDownloadsPageSQL(ctx, snap, page, pageSize, filter, opts.Sort)
+		pageRes, err := s.listLibraryDownloadsPageSQL(ctx, snap, page, pageSize, filter, order, opts.OmitUsers)
 		if err == nil {
 			s.attachDownloadTags(ctx, pageRes.Items)
 		}
 		return pageRes, err
 	}
+
+	// 无筛选快路径：避免每次翻页拷贝并重排数万条结构体；date_desc 直接切片，
+	// 其余排序通过快照级 sortedIdx 延迟索引实现 O(pageSize) 翻页。
+	if isLibraryFilterEmpty(filter) {
+		total := len(snap.entries) + len(snap.orphans)
+		totalPages := max(1, (total+pageSize-1)/pageSize)
+		if page > totalPages {
+			page = totalPages
+		}
+		offset := (page - 1) * pageSize
+		need := min(offset+pageSize, total)
+		var merged []DownloadRecord
+		if len(snap.orphans) == 0 {
+			if order == "date_desc" {
+				if offset < len(snap.entries) {
+					end := min(offset+pageSize, len(snap.entries))
+					merged = append([]DownloadRecord(nil), snap.entries[offset:end]...)
+				}
+			} else {
+				idx := snap.sortedIndices(order)
+				if offset < len(idx) {
+					end := min(offset+pageSize, len(idx))
+					merged = make([]DownloadRecord, end-offset)
+					for k := offset; k < end; k++ {
+						merged[k-offset] = snap.entries[idx[k]]
+					}
+				}
+			}
+		} else {
+			orphans := snap.orphans
+			if order != "date_desc" {
+				orphans = append([]DownloadRecord(nil), snap.orphans...)
+				sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], order) })
+			}
+			var dbSource []DownloadRecord
+			if order == "date_desc" {
+				dbSource = snap.entries
+			} else {
+				idx := snap.sortedIndices(order)
+				limit := min(need, len(idx))
+				dbSource = make([]DownloadRecord, limit)
+				for k := 0; k < limit; k++ {
+					dbSource[k] = snap.entries[idx[k]]
+				}
+			}
+			merged = mergeLibraryEntries(dbSource, orphans, need, order)
+			if offset < len(merged) {
+				merged = merged[offset:]
+			} else {
+				merged = nil
+			}
+			if len(merged) > pageSize {
+				merged = merged[:pageSize]
+			}
+		}
+		pageRes := buildLibraryPageResponse(snap, merged, page, pageSize, total, totalPages, false, opts.OmitUsers)
+		s.attachDownloadTags(ctx, pageRes.Items)
+		return pageRes, nil
+	}
+
 	allowedIDs, useAllowed, err := s.resolveLibraryAllowedDownloadIDs(ctx, filter)
 	if err != nil {
 		return LibraryPage{}, err
 	}
 	// 快照包含全量条目时直接在内存切片上过滤、排序、分页，避免每次翻页重跑全表 SQL。
+	// snap.entries 与 snap.orphans 已按 date_desc 有序，date_desc 筛选后保持有序，无需再次排序。
 	entries := filterLibraryEntries(snap.entries, filter, snap)
 	if useAllowed || filter.Starred != nil {
 		filtered := entries[:0]
@@ -173,11 +281,15 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 		}
 		entries = filtered
 	}
-	sort.SliceStable(entries, func(i, j int) bool { return libraryEntryLess(entries[i], entries[j], opts.Sort) })
+	if order != "date_desc" {
+		sort.SliceStable(entries, func(i, j int) bool { return libraryEntryLess(entries[i], entries[j], order) })
+	}
 	var orphans []DownloadRecord
 	if !useAllowed && (filter.Starred == nil || !*filter.Starred) {
 		orphans = filterLibraryOrphans(snap.orphans, filter)
-		sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], opts.Sort) })
+		if order != "date_desc" {
+			sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], order) })
+		}
 	}
 	dbItems, dbTotal := entries, len(entries)
 
@@ -189,7 +301,7 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	offset := (page - 1) * pageSize
 	need := min(offset+pageSize, total)
 
-	merged := mergeLibraryEntries(dbItems, orphans, need, opts.Sort)
+	merged := mergeLibraryEntries(dbItems, orphans, need, order)
 	if offset < len(merged) {
 		merged = merged[offset:]
 	} else {
@@ -198,7 +310,7 @@ func (s *Store) ListLibraryDownloadsPage(ctx context.Context, opts LibraryPageOp
 	if len(merged) > pageSize {
 		merged = merged[:pageSize]
 	}
-	pageRes := buildLibraryPageResponse(snap, merged, page, pageSize, total, totalPages, false)
+	pageRes := buildLibraryPageResponse(snap, merged, page, pageSize, total, totalPages, false, opts.OmitUsers)
 	s.attachDownloadTags(ctx, pageRes.Items)
 	return pageRes, nil
 }
@@ -266,7 +378,7 @@ func (s *Store) resolveLibraryAllowedDownloadIDs(ctx context.Context, filter Lib
 	return allowed, true, nil
 }
 
-func buildLibraryPageResponse(snap *librarySnapshot, items []DownloadRecord, page, pageSize, total, totalPages int, truncated bool) LibraryPage {
+func buildLibraryPageResponse(snap *librarySnapshot, items []DownloadRecord, page, pageSize, total, totalPages int, truncated bool, omitUsers bool) LibraryPage {
 	if items == nil {
 		items = []DownloadRecord{}
 	}
@@ -281,9 +393,9 @@ func buildLibraryPageResponse(snap *librarySnapshot, items []DownloadRecord, pag
 			}
 		}
 	}
-	users := append([]LibraryUserOption(nil), snap.users...)
-	if users == nil {
-		users = []LibraryUserOption{}
+	users := []LibraryUserOption{}
+	if !omitUsers && len(snap.users) > 0 {
+		users = append([]LibraryUserOption(nil), snap.users...)
 	}
 	return LibraryPage{
 		Items: items,
@@ -304,22 +416,25 @@ func buildLibraryPageResponse(snap *librarySnapshot, items []DownloadRecord, pag
 	}
 }
 
-func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySnapshot, page, pageSize int, filter LibraryFilter, order string) (LibraryPage, error) {
+func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySnapshot, page, pageSize int, filter LibraryFilter, order string, omitUsers bool) (LibraryPage, error) {
 	if _, ok := libraryKindExts(filter.Kind); !ok {
-		return buildLibraryPageResponse(snap, nil, 1, pageSize, 0, 1, false), nil
+		return buildLibraryPageResponse(snap, nil, 1, pageSize, 0, 1, false, omitUsers), nil
 	}
 	var orphans []DownloadRecord
 	if filter.TagID <= 0 && filter.CollectionID <= 0 && (filter.Starred == nil || !*filter.Starred) {
 		orphans = filterLibraryOrphans(snap.orphans, filter)
-		sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], order) })
+		if order != "date_desc" {
+			sort.SliceStable(orphans, func(i, j int) bool { return libraryEntryLess(orphans[i], orphans[j], order) })
+		}
 	}
 
-	whereClause, args := buildLibraryEntriesWhereSQL(filter)
-	orderBy := libraryEntriesOrderBySQL(order)
-	baseCTE := libraryEntriesCTESQL()
+	legacyTS := s.hasLegacyDownloadCreatedAt(ctx)
+	whereClause, args := buildLibraryEntriesWhereSQL(filter, legacyTS)
+	orderBy := libraryEntriesOrderBySQL(order, legacyTS)
+	baseCTE := libraryEntriesCTESQL(legacyTS)
 
-	hasSubMillisBounds := (!filter.From.IsZero() && filter.From.Nanosecond()%1_000_000 != 0) ||
-		(!filter.To.IsZero() && filter.To.Nanosecond()%1_000_000 != 0)
+	hasSubMillisBounds := legacyTS && ((!filter.From.IsZero() && filter.From.Nanosecond()%1_000_000 != 0) ||
+		(!filter.To.IsZero() && filter.To.Nanosecond()%1_000_000 != 0))
 	needsGoFilter := filter.User != libraryKindAll || (filter.Search != "" && !isASCIIString(filter.Search)) || hasSubMillisBounds
 	if !needsGoFilter {
 		var dbTotal int
@@ -339,7 +454,7 @@ func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySn
 				end := min(offset+pageSize, len(orphans))
 				pageItems = append([]DownloadRecord(nil), orphans[offset:end]...)
 			}
-			return buildLibraryPageResponse(snap, pageItems, page, pageSize, total, totalPages, false), nil
+			return buildLibraryPageResponse(snap, pageItems, page, pageSize, total, totalPages, false, omitUsers), nil
 		}
 		if len(orphans) == 0 {
 			dbItems := []DownloadRecord{}
@@ -348,7 +463,7 @@ func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySn
 			if err := s.db.SelectContext(ctx, &dbItems, selectQuery, selectArgs...); err != nil {
 				return LibraryPage{}, err
 			}
-			return buildLibraryPageResponse(snap, dbItems, page, pageSize, total, totalPages, false), nil
+			return buildLibraryPageResponse(snap, dbItems, page, pageSize, total, totalPages, false, omitUsers), nil
 		}
 		dbStart, dbLimit := librarySQLMergeWindow(offset, pageSize, dbTotal, len(orphans))
 		dbItems := []DownloadRecord{}
@@ -358,7 +473,7 @@ func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySn
 			return LibraryPage{}, err
 		}
 		pageItems := mergeLibraryWindowPage(dbItems, dbStart, orphans, offset, pageSize, order)
-		return buildLibraryPageResponse(snap, pageItems, page, pageSize, total, totalPages, false), nil
+		return buildLibraryPageResponse(snap, pageItems, page, pageSize, total, totalPages, false, omitUsers), nil
 	}
 
 	// 需要按 user_entities 前缀归属或非 ASCII 关键词过滤时，按目标 SQL 排序流式扫描，
@@ -426,7 +541,7 @@ func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySn
 			end := min(actualOffset+pageSize, len(orphans))
 			pageItems = append([]DownloadRecord(nil), orphans[actualOffset:end]...)
 		}
-		return buildLibraryPageResponse(snap, pageItems, actualPage, pageSize, total, totalPages, false), nil
+		return buildLibraryPageResponse(snap, pageItems, actualPage, pageSize, total, totalPages, false, omitUsers), nil
 	}
 	wantStart, _ := librarySQLMergeWindow(actualOffset, pageSize, dbTotal, len(orphans))
 	if actualPage != page || wantStart != dbStart {
@@ -436,7 +551,7 @@ func (s *Store) listLibraryDownloadsPageSQL(ctx context.Context, snap *librarySn
 		}
 	}
 	pageItems := mergeLibraryWindowPage(dbWindow, dbStart, orphans, actualOffset, pageSize, order)
-	return buildLibraryPageResponse(snap, pageItems, actualPage, pageSize, total, totalPages, false), nil
+	return buildLibraryPageResponse(snap, pageItems, actualPage, pageSize, total, totalPages, false, omitUsers), nil
 }
 
 func librarySQLMergeWindow(offset, pageSize, dbTotal, orphanCount int) (dbStart, dbLimit int) {
@@ -498,7 +613,7 @@ func matchesLibraryUserAndSearch(item DownloadRecord, filter LibraryFilter, lowe
 	}
 }
 
-func buildLibraryEntriesWhereSQL(filter LibraryFilter) (string, []any) {
+func buildLibraryEntriesWhereSQL(filter LibraryFilter, legacyTS bool) (string, []any) {
 	conds := []string{}
 	args := []any{}
 	if exts, ok := libraryKindExts(filter.Kind); ok && len(exts) > 0 {
@@ -537,19 +652,30 @@ func buildLibraryEntriesWhereSQL(filter LibraryFilter) (string, []any) {
 		conds = append(conds, `(lower(user_screen_name) = ? OR user_screen_name = '')`)
 		args = append(args, lowerUser)
 	}
-	normCreated := `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at)`
-	if !filter.From.IsZero() {
-		conds = append(conds, normCreated+` >= ?`)
-		args = append(args, filter.From.UTC().Format("2006-01-02T15:04:05.000Z"))
-	}
-	if !filter.To.IsZero() {
-		toBound := filter.To.UTC()
-		if toBound.Nanosecond()%1_000_000 != 0 {
-			// Round up by 1ms for the SQL pre-filter; streamPage applies exact Go comparison.
-			toBound = toBound.Truncate(time.Millisecond).Add(time.Millisecond)
+	if legacyTS {
+		normCreated := `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at)`
+		if !filter.From.IsZero() {
+			conds = append(conds, normCreated+` >= ?`)
+			args = append(args, filter.From.UTC().Format("2006-01-02T15:04:05.000Z"))
 		}
-		conds = append(conds, normCreated+` < ?`)
-		args = append(args, toBound.Format("2006-01-02T15:04:05.000Z"))
+		if !filter.To.IsZero() {
+			toBound := filter.To.UTC()
+			if toBound.Nanosecond()%1_000_000 != 0 {
+				// Round up by 1ms for the SQL pre-filter; streamPage applies exact Go comparison.
+				toBound = toBound.Truncate(time.Millisecond).Add(time.Millisecond)
+			}
+			conds = append(conds, normCreated+` < ?`)
+			args = append(args, toBound.Format("2006-01-02T15:04:05.000Z"))
+		}
+	} else {
+		if !filter.From.IsZero() {
+			conds = append(conds, `created_at >= ?`)
+			args = append(args, formatSortableTime(filter.From))
+		}
+		if !filter.To.IsZero() {
+			conds = append(conds, `created_at < ?`)
+			args = append(args, formatSortableTime(filter.To))
+		}
 	}
 	if filter.MinBytes != nil {
 		conds = append(conds, `bytes >= ?`)
@@ -565,7 +691,19 @@ func buildLibraryEntriesWhereSQL(filter LibraryFilter) (string, []any) {
 	return " AND " + strings.Join(conds, " AND "), args
 }
 
-func libraryEntriesOrderBySQL(order string) string {
+func libraryEntriesOrderBySQL(order string, legacyTS bool) string {
+	if !legacyTS {
+		switch order {
+		case "date_asc":
+			return `created_at ASC, id DESC, file_path ASC`
+		case "size_asc":
+			return `bytes ASC, created_at DESC, id DESC, file_path ASC`
+		case "size_desc":
+			return `bytes DESC, created_at DESC, id DESC, file_path ASC`
+		default:
+			return `created_at DESC, id DESC, file_path ASC`
+		}
+	}
 	const normCreated = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at)`
 	switch order {
 	case "date_asc":
@@ -664,7 +802,11 @@ SELECT id, job_id, tweet_id, media_url, preview_url, file_path, bytes, created_a
 FROM ranked
 WHERE rn = 1`
 
-func libraryEntriesCTESQL() string {
+func libraryEntriesCTESQL(legacyTS bool) string {
+	rowOrder := `created_at DESC, id DESC`
+	if legacyTS {
+		rowOrder = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC`
+	}
 	return `
 WITH filtered AS (
 	SELECT d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes,
@@ -676,15 +818,10 @@ WITH filtered AS (
 ), ranked AS (
 	SELECT filtered.*, ROW_NUMBER() OVER (
 		PARTITION BY entry_key
-		ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC
+		ORDER BY ` + rowOrder + `
 	) AS rn
 	FROM filtered
 )`
-}
-
-// libraryEntriesSQL 返回"每个 file_path 只保留最新一条下载记录"的去重查询。
-func libraryEntriesSQL() string {
-	return libraryEntriesCTESQL() + libraryEntriesSelectColsSQL
 }
 
 // matchUser 按"目录前缀逐级上溯、取 id 最小的实体"判定路径归属（与
@@ -986,19 +1123,48 @@ ORDER BY ue.id`); err != nil {
 		addUser(entity.ScreenName, entity.UserName)
 	}
 
-	// 流式扫描每个文件的最新下载记录，作者和去重规则与分页结果保持一致。
-	known := make(map[string]struct{})
-	pathVariants := make(map[string][]string)
-	rows, err := s.db.QueryxContext(ctx, libraryEntriesSQL()+" ORDER BY "+libraryEntriesOrderBySQL("date_desc"))
+	// 单次顺序扫描 downloads LEFT JOIN tweets（命中 idx_tweets_id_author 覆盖索引），
+	// 在 Go 侧完成按 file_path 去重与排序，免去 SQLite 两次 TEMP B-TREE 与逐行 strftime。
+	rows, err := s.db.QueryxContext(ctx, `
+SELECT d.id, d.job_id, d.tweet_id, d.media_url, d.preview_url, d.file_path, d.bytes,
+	d.created_at, d.media_key, d.content_hash, d.starred,
+	COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
+FROM downloads d
+LEFT JOIN tweets t ON t.id = d.tweet_id`)
 	if err != nil {
 		return nil, err
 	}
+	byKey := make(map[string]int, 1024)
+	deduped := make([]DownloadRecord, 0, 1024)
 	for rows.Next() {
 		var item DownloadRecord
 		if err := rows.StructScan(&item); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		key := item.FilePath
+		if key == "" {
+			key = "record:" + strconv.FormatInt(item.ID, 10)
+		}
+		if idx, exists := byKey[key]; exists {
+			if libraryEntryLess(item, deduped[idx], "date_desc") {
+				deduped[idx] = item
+			}
+		} else {
+			byKey[key] = len(deduped)
+			deduped = append(deduped, item)
+		}
+	}
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		return nil, rowsErr
+	}
+
+	known := make(map[string]struct{}, len(deduped))
+	pathVariants := make(map[string][]string, len(deduped))
+	for i := range deduped {
+		item := &deduped[i]
 		filePath := item.FilePath
 		if filePath != "" {
 			if abs, absErr := filepath.Abs(filePath); absErr == nil {
@@ -1028,19 +1194,15 @@ ORDER BY ue.id`); err != nil {
 		} else {
 			snap.unknownEntries++
 		}
-		addUserAggregate(item)
-		// 仅在总数不超过阈值时缓存全部条目；超过阈值后分页查询自动回退 SQL，
-		// 避免把超大媒体库的全部记录常驻内存，同时保证筛选/排序/统计 100% 一致。
-		if len(snap.entries) < librarySnapshotMaxEntries {
-			snap.entries = append(snap.entries, item)
-		} else {
-			snap.entriesTruncated = true
-		}
+		addUserAggregate(*item)
 	}
-	rowsErr := rows.Err()
-	rows.Close()
-	if rowsErr != nil {
-		return nil, rowsErr
+	// 仅在总数不超过阈值时排序并常驻快照；超过阈值后分页查询自动回退 SQL，
+	// 避免把超大媒体库的全部记录常驻内存，同时保证筛选/排序/统计 100% 一致。
+	if len(deduped) > librarySnapshotMaxEntries {
+		snap.entriesTruncated = true
+	} else {
+		sort.Slice(deduped, func(i, j int) bool { return libraryEntryLess(deduped[i], deduped[j], "date_desc") })
+		snap.entries = deduped
 	}
 
 	cfg, err := s.GetConfig(ctx)
@@ -1052,35 +1214,34 @@ ORDER BY ue.id`); err != nil {
 		if absErr != nil {
 			return nil, absErr
 		}
-		walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
+		orphanFiles, err := s.cachedOrphanDiskFiles(ctx, root, known, pathVariants)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range orphanFiles {
+			if _, recorded := known[f.filePath]; recorded {
+				continue
 			}
-			if walkErr != nil || entry.IsDir() {
-				return nil
-			}
-			if !IsLibraryMediaPath(path) {
-				return nil
-			}
-			cleaned := filepath.Clean(path)
-			if _, recorded := known[cleaned]; recorded {
-				return nil
-			}
-			info, infoErr := entry.Info()
-			if infoErr != nil {
-				return nil
-			}
-			for _, recorded := range pathVariants[libraryMatchPath(cleaned)] {
-				if recordedInfo, err := os.Stat(recorded); err == nil && os.SameFile(info, recordedInfo) {
-					return nil
+			if variants := pathVariants[libraryMatchPath(f.filePath)]; len(variants) > 0 {
+				if info, statErr := os.Stat(f.filePath); statErr == nil {
+					same := false
+					for _, recorded := range variants {
+						if recordedInfo, err := os.Stat(recorded); err == nil && os.SameFile(info, recordedInfo) {
+							same = true
+							break
+						}
+					}
+					if same {
+						continue
+					}
 				}
 			}
 			item := DownloadRecord{
-				FilePath:  cleaned,
-				Bytes:     info.Size(),
-				CreatedAt: info.ModTime().UTC(),
+				FilePath:  f.filePath,
+				Bytes:     f.bytes,
+				CreatedAt: f.modTime,
 			}
-			if prefix, ok := snap.matchUser(cleaned); ok {
+			if prefix, ok := snap.matchUser(f.filePath); ok {
 				item.UserScreenName = prefix.screen
 				item.UserName = prefix.name
 			} else {
@@ -1089,7 +1250,7 @@ ORDER BY ue.id`); err != nil {
 			addUserAggregate(item)
 			snap.orphans = append(snap.orphans, item)
 			snap.counts.all++
-			switch libraryCategory(cleaned) {
+			switch libraryCategory(f.filePath) {
 			case libraryKindImages:
 				snap.counts.images++
 			case libraryKindVideos:
@@ -1097,12 +1258,7 @@ ORDER BY ue.id`); err != nil {
 			case libraryKindGifs:
 				snap.counts.gifs++
 			}
-			return nil
-		})
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
 		}
-		_ = walkErr // 根目录不存在/不可读沿用旧行为：忽略，返回已收集结果。
 	}
 	sort.SliceStable(snap.orphans, func(i, j int) bool {
 		return snap.orphans[i].CreatedAt.After(snap.orphans[j].CreatedAt)
@@ -1116,4 +1272,60 @@ ORDER BY ue.id`); err != nil {
 	}
 	sort.Slice(snap.users, func(i, j int) bool { return snap.users[i].Label < snap.users[j].Label })
 	return snap, nil
+}
+
+// cachedOrphanDiskFiles 缓存下载根目录的孤儿媒体文件列表（默认 5 分钟 TTL，仅在删除、
+// 改目录等全量失效时清空），使后台持续下载触发的快照重建免于每次重走机械硬盘 WalkDir。
+func (s *Store) cachedOrphanDiskFiles(ctx context.Context, root string, known map[string]struct{}, pathVariants map[string][]string) ([]orphanDiskFile, error) {
+	s.orphanCacheMu.RLock()
+	if s.orphanCacheOK && s.orphanCacheRoot == root && time.Since(s.orphanCacheAt) < libraryDownloadsCacheTTL {
+		cached := s.orphanCacheFiles
+		s.orphanCacheMu.RUnlock()
+		return cached, nil
+	}
+	s.orphanCacheMu.RUnlock()
+
+	files := []orphanDiskFile{}
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		if !IsLibraryMediaPath(path) {
+			return nil
+		}
+		cleaned := filepath.Clean(path)
+		if _, recorded := known[cleaned]; recorded {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return nil
+		}
+		for _, recorded := range pathVariants[libraryMatchPath(cleaned)] {
+			if recordedInfo, err := os.Stat(recorded); err == nil && os.SameFile(info, recordedInfo) {
+				return nil
+			}
+		}
+		files = append(files, orphanDiskFile{
+			filePath: cleaned,
+			bytes:    info.Size(),
+			modTime:  info.ModTime().UTC(),
+		})
+		return nil
+	})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	_ = walkErr // 根目录不存在/不可读沿用旧行为：忽略，返回已收集结果。
+
+	s.orphanCacheMu.Lock()
+	s.orphanCacheRoot = root
+	s.orphanCacheFiles = files
+	s.orphanCacheAt = time.Now()
+	s.orphanCacheOK = true
+	s.orphanCacheMu.Unlock()
+	return files, nil
 }

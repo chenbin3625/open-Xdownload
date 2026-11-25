@@ -89,6 +89,29 @@ type Store struct {
 	// 归档期间每条下载记录都落一次，若在写路径上直接清缓存（持锁 + 丢大切片引用），
 	// 会在没有读者的情况下产生大量无意义的 GC 压力。
 	libraryStale atomic.Bool
+
+	// storageVerCache 缓存按版本号只追加不变的 storage_versions 文档，避免每张媒体/
+	// 预览请求重复查库和 JSON 反序列化。
+	storageVerMu    sync.RWMutex
+	storageVerCache map[int64]config.StorageDocument
+
+	// tweetAuthorsCache 缓存 /api/archive/authors 的归档作者列表，避免每次进入推文页
+	// 都对大表做全表窗口排序。
+	tweetAuthorsMu       sync.RWMutex
+	tweetAuthorsCache    []TweetAuthor
+	tweetAuthorsIndex    map[string]TweetAuthor
+	tweetAuthorsOK       bool
+	tweetAuthorsGen      atomic.Uint64
+	tweetAuthorsGenBuilt uint64
+	tweetAuthorsMaxRowID int64
+
+	// orphanCache 把下载目录的孤儿磁盘扫描与数据库写入解耦：仅在全量失效（删除、
+	// 配置变更、维护清理）或超过 TTL 时重扫磁盘，避免后台持续下载时每次翻页重走 HDD WalkDir。
+	orphanCacheMu    sync.RWMutex
+	orphanCacheRoot  string
+	orphanCacheFiles []orphanDiskFile
+	orphanCacheAt    time.Time
+	orphanCacheOK    bool
 }
 
 const libraryDownloadsCacheTTL = 5 * time.Minute
@@ -108,13 +131,140 @@ func formatSortableTime(t time.Time) string {
 	return t.UTC().Format(sortableTimestampLayout)
 }
 
+const legacyDownloadCreatedAtPredicate = `created_at <> '' AND (length(created_at) <> 30 OR substr(created_at, 11, 1) <> 'T' OR substr(created_at, 30, 1) <> 'Z')`
+
+func isSortableTimestamp(raw string) bool {
+	return len(raw) == len(sortableTimestampLayout) && raw[10] == 'T' && raw[len(raw)-1] == 'Z'
+}
+
+func parseStoredTimestamp(raw string) (time.Time, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if idx := strings.Index(s, " m="); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	} {
+		if parsed, err := time.Parse(layout, s); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// normalizeSortableTimestamps 把历史库中混杂的时间戳格式（RFC3339、Go time.Time.String()
+// 等）统一改写为定宽 UTC sortableTimestampLayout，使列表排序、日期范围筛选与作者去重
+// 可以直接命中 B-tree 索引，无需再对每行调用 strftime() 导致全表扫描。
+func (s *Store) normalizeSortableTimestamps(exec migrationExecutor) error {
+	type downloadTSRow struct {
+		ID        int64  `db:"id"`
+		CreatedAt string `db:"created_at"`
+	}
+	var lastDownloadID int64
+	for {
+		var rows []downloadTSRow
+		if err := exec.Select(&rows, `
+SELECT id, '' || created_at AS created_at
+FROM downloads
+WHERE id > ? AND `+legacyDownloadCreatedAtPredicate+`
+ORDER BY id LIMIT 500`, lastDownloadID); err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			if parsed, ok := parseStoredTimestamp(row.CreatedAt); ok {
+				norm := formatSortableTime(parsed)
+				if norm != row.CreatedAt {
+					if _, err := exec.Exec(`UPDATE downloads SET created_at = ? WHERE id = ?`, norm, row.ID); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		lastDownloadID = rows[len(rows)-1].ID
+	}
+
+	type tweetTSRow struct {
+		RowID       int64  `db:"rowid"`
+		PublishedAt string `db:"published_at"`
+		UpdatedAt   string `db:"updated_at"`
+	}
+	var lastTweetRowID int64
+	for {
+		var rows []tweetTSRow
+		if err := exec.Select(&rows, `
+SELECT rowid, '' || published_at AS published_at, '' || updated_at AS updated_at
+FROM tweets
+WHERE rowid > ?
+  AND (
+    (published_at <> '' AND (length(published_at) <> 30 OR substr(published_at, 11, 1) <> 'T' OR substr(published_at, 30, 1) <> 'Z'))
+    OR (updated_at <> '' AND (length(updated_at) <> 30 OR substr(updated_at, 11, 1) <> 'T' OR substr(updated_at, 30, 1) <> 'Z'))
+  )
+ORDER BY rowid LIMIT 500`, lastTweetRowID); err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			nextPub := row.PublishedAt
+			nextUpd := row.UpdatedAt
+			changed := false
+			if nextPub != "" && !isSortableTimestamp(nextPub) {
+				if parsed, ok := parseStoredTimestamp(nextPub); ok {
+					norm := formatSortableTime(parsed)
+					if norm != nextPub {
+						nextPub = norm
+						changed = true
+					}
+				}
+			}
+			if nextUpd != "" && !isSortableTimestamp(nextUpd) {
+				if parsed, ok := parseStoredTimestamp(nextUpd); ok {
+					norm := formatSortableTime(parsed)
+					if norm != nextUpd {
+						nextUpd = norm
+						changed = true
+					}
+				}
+			}
+			if changed {
+				if _, err := exec.Exec(`UPDATE tweets SET published_at = ?, updated_at = ? WHERE rowid = ?`, nextPub, nextUpd, row.RowID); err != nil {
+					return err
+				}
+			}
+		}
+		lastTweetRowID = rows[len(rows)-1].RowID
+	}
+	return nil
+}
+
+// hasLegacyDownloadCreatedAt 利用部分索引在微秒级判断 downloads 是否存在非定宽时间戳。
+// 返回 false 时查询可直接按 created_at 走索引排序；返回 true 时自动回退到 strftime 归一化。
+func (s *Store) hasLegacyDownloadCreatedAt(ctx context.Context) bool {
+	var exists bool
+	err := s.db.GetContext(ctx, &exists, `SELECT EXISTS(SELECT 1 FROM downloads WHERE `+legacyDownloadCreatedAtPredicate+`)`)
+	return err != nil || exists
+}
+
 // _txlock=immediate 让所有事务以 BEGIN IMMEDIATE 开始：事务里"先读后写"若用默认的
 // BEGIN DEFERRED，事务先以读者身份启动，写第一条语句时才尝试升级为写者，而
 // busy_timeout 对锁升级不生效，并发写者会立刻返回 SQLITE_BUSY(5)/SQLITE_BUSY_SNAPSHOT(517)
 // 而不是等待。开头就取写锁后，冲突走 busy_timeout 排队。
 // _texttotime 让 modernc 把 DATE/DATETIME/TIMESTAMP 文本列交给 time.Time
 // 扫描器解析；否则新版驱动会返回原始字符串，SELECT * 到模型时直接报 Scan 错误。
-const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)&_pragma=mmap_size(268435456)"
+const sqliteOpenOptions = "?_txlock=immediate&_texttotime=1&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-64000)&_pragma=mmap_size(268435456)"
 
 // schemaVersion 是当前二进制认识的库结构版本，迁移完成后写入 PRAGMA user_version。
 // 向前迁移是可加、幂等的，但没有版本闸门时，回滚镜像会让旧二进制打开新库并正常启动，
@@ -165,11 +315,10 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// WAL 允许并发读者 + 单写者。保留少量连接，让 HTTP 读（任务列表/仪表盘）
-	// 与 worker 进度写入重叠；busy_timeout(5000) 在写锁冲突时等待而不是 SQLITE_BUSY。
-	// 连接数不宜过大：每条连接都会占一份 mmap 窗口。
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
+	// WAL 允许并发读者 + 单写者。保留 8 条连接，避免浏览器并发拉取一页媒体缩略图
+	// 与 API 请求时在后台写入期间排队；busy_timeout(5000) 在写锁冲突时等待而不是 SQLITE_BUSY。
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -206,6 +355,8 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// 启动时补齐新建索引的查询计划统计（仅分析缺少统计的表，开销极低）。
+	_, _ = db.Exec(`PRAGMA optimize`)
 	return store, nil
 }
 
@@ -596,6 +747,9 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		return err
 	}
 	if err := s.runMigrationOnce("backfill_tweets_fts", s.backfillTweetsFTS); err != nil {
+		return err
+	}
+	if err := s.runMigrationOnce("normalize_sortable_timestamps", s.normalizeSortableTimestamps); err != nil {
 		return err
 	}
 	return s.setSchemaVersion()
@@ -1377,6 +1531,14 @@ func (s *Store) addMissingIndexes() error {
 	ON failed_tweets (job_id);
 	CREATE INDEX IF NOT EXISTS idx_failed_media_media_url
 	ON failed_media (media_url);
+	-- 部分索引：归一化完成后保持 0 字节，使 hasLegacyDownloadCreatedAt 常量时间返回。
+	CREATE INDEX IF NOT EXISTS idx_downloads_legacy_created_at
+	ON downloads (id)
+	WHERE created_at <> '' AND (length(created_at) <> 30 OR substr(created_at, 11, 1) <> 'T' OR substr(created_at, 30, 1) <> 'Z');
+	-- 重复哈希统计（GetStorageStats）的覆盖索引。
+	CREATE INDEX IF NOT EXISTS idx_downloads_content_hash_path
+	ON downloads (content_hash, file_path)
+	WHERE content_hash <> '' AND file_path <> '';
 	`)
 	return err
 }
@@ -2966,7 +3128,11 @@ func (s *Store) ListDownloads(ctx context.Context, limit int) ([]DownloadRecord,
 		limit = 100
 	}
 	items := []DownloadRecord{}
-	err := s.db.SelectContext(ctx, &items, `SELECT * FROM downloads ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC LIMIT ?`, limit)
+	query := `SELECT * FROM downloads ORDER BY created_at DESC, id DESC LIMIT ?`
+	if s.hasLegacyDownloadCreatedAt(ctx) {
+		query = `SELECT * FROM downloads ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC LIMIT ?`
+	}
+	err := s.db.SelectContext(ctx, &items, query, limit)
 	return items, err
 }
 
@@ -3013,10 +3179,17 @@ func (s *Store) ListLibraryDownloadsWithStatus(ctx context.Context, limit int) (
 	generation := s.libraryCacheGen.Load()
 
 	items := []DownloadRecord{}
-	err := s.db.SelectContext(ctx, &items, `
+	listQuery := `
 SELECT d.*, COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
 FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id
-ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', d.created_at), d.created_at) DESC, d.created_at DESC, d.id DESC LIMIT ?`, limit+1)
+ORDER BY d.created_at DESC, d.id DESC LIMIT ?`
+	if s.hasLegacyDownloadCreatedAt(ctx) {
+		listQuery = `
+SELECT d.*, COALESCE(t.screen_name, '') AS user_screen_name, COALESCE(t.author_name, '') AS user_name
+FROM downloads d LEFT JOIN tweets t ON t.id = d.tweet_id
+ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', d.created_at), d.created_at) DESC, d.created_at DESC, d.id DESC LIMIT ?`
+	}
+	err := s.db.SelectContext(ctx, &items, listQuery, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -3281,7 +3454,7 @@ func (s *Store) cacheLibraryDownloads(items []DownloadRecord, limit int, truncat
 	s.libraryCacheMu.Unlock()
 }
 
-func (s *Store) invalidateLibraryDownloadsCache() {
+func (s *Store) clearLibraryCachesOnly() {
 	s.libraryStale.Store(false)
 	s.libraryCacheGen.Add(1)
 	s.libraryCacheMu.Lock()
@@ -3301,6 +3474,16 @@ func (s *Store) invalidateLibraryDownloadsCache() {
 	s.librarySnapMu.Unlock()
 }
 
+func (s *Store) invalidateLibraryDownloadsCache() {
+	s.clearLibraryCachesOnly()
+	s.orphanCacheMu.Lock()
+	s.orphanCacheRoot = ""
+	s.orphanCacheFiles = nil
+	s.orphanCacheAt = time.Time{}
+	s.orphanCacheOK = false
+	s.orphanCacheMu.Unlock()
+}
+
 // markLibraryDownloadsCacheStale 标记缓存待失效并推进代数。真正的清理在读取路径上执行
 // （见 invalidateStaleLibraryDownloadsCache），因此并发构造的旧快照不会覆盖新写入，
 // 下一次读取也一定会看到新数据。
@@ -3310,9 +3493,10 @@ func (s *Store) markLibraryDownloadsCacheStale() {
 }
 
 // invalidateStaleLibraryDownloadsCache 在读取路径上执行写路径推迟的失效。
+// 保留磁盘孤儿文件缓存（由 TTL 或全量失效控制），避免后台持续写入时每次翻页重走 HDD WalkDir。
 func (s *Store) invalidateStaleLibraryDownloadsCache() {
 	if s.libraryStale.Swap(false) {
-		s.invalidateLibraryDownloadsCache()
+		s.clearLibraryCachesOnly()
 	}
 }
 
@@ -3501,6 +3685,10 @@ func (s *Store) JobFiles(ctx context.Context, jobID int64) ([]DownloadRecord, []
 		CreatedAt  sql.NullTime   `db:"created_at"`
 	}
 	rows := []jobFileRow{}
+	downloadOrder := `created_at DESC, id DESC`
+	if s.hasLegacyDownloadCreatedAt(ctx) {
+		downloadOrder = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC`
+	}
 	// 两个明细分支各自限流，而不是给整条 UNION ALL 加一个 LIMIT：后者在下载记录超额时
 	// 会把 failed_media 整段挤掉（排序键 sort_order 让 downloads 永远排在 failed 之前）。
 	err := s.db.SelectContext(ctx, &rows, `
@@ -3510,7 +3698,7 @@ SELECT * FROM (
 			tweet_id, media_url, preview_url, file_path, bytes, NULL AS error, created_at
 		FROM downloads
 		WHERE job_id = ?
-		ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC
+		ORDER BY `+downloadOrder+`
 		LIMIT ?
 	)
 	UNION ALL
@@ -3582,10 +3770,14 @@ func (s *Store) ListDownloadsForJobs(ctx context.Context, jobIDs []int64) ([]Dow
 	if len(jobIDs) == 0 {
 		return []DownloadRecord{}, nil
 	}
+	orderBy := `job_id DESC, created_at DESC, id DESC`
+	if s.hasLegacyDownloadCreatedAt(ctx) {
+		orderBy = `job_id DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC`
+	}
 	query, args, err := sqlx.In(`
 SELECT * FROM downloads
 WHERE job_id IN (?)
-ORDER BY job_id DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', created_at), created_at) DESC, created_at DESC, id DESC`, jobIDs)
+ORDER BY `+orderBy, jobIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -3847,6 +4039,12 @@ ON CONFLICT(media_url) DO UPDATE SET
 }
 
 func (s *Store) UpsertUser(ctx context.Context, user User) (User, error) {
+	var prev struct {
+		ScreenName string `db:"screen_name"`
+		Name       string `db:"name"`
+		AvatarURL  string `db:"avatar_url"`
+	}
+	prevErr := s.db.GetContext(ctx, &prev, `SELECT screen_name, name, avatar_url FROM users WHERE id = ?`, user.ID)
 	now := time.Now().UTC()
 	err := s.db.GetContext(ctx, &user, `
 INSERT INTO users (id, screen_name, name, avatar_url, protected, friends_count, media_count, updated_at)
@@ -3864,7 +4062,11 @@ RETURNING *`,
 	if err != nil {
 		return User{}, err
 	}
-	s.invalidateLibraryDownloadsCache()
+	// 仅在新增用户或媒体库展示字段（screen_name / name / avatar_url）真正变化时才失效快照，
+	// 避免后台 following 轮询每个账号刷新计数时反复打穿媒体库缓存。
+	if prevErr != nil || prev.ScreenName != user.ScreenName || prev.Name != user.Name || prev.AvatarURL != user.AvatarURL {
+		s.markLibraryDownloadsCacheStale()
+	}
 	return user, nil
 }
 
@@ -3998,6 +4200,8 @@ func (s *Store) EnsureUserEntity(ctx context.Context, userID string, parentDir s
 	if err != nil {
 		return UserEntity{}, err
 	}
+	var prevName string
+	prevErr := s.db.GetContext(ctx, &prevName, `SELECT name FROM user_entities WHERE user_id = ? AND parent_dir = ?`, userID, parentDir)
 	now := time.Now().UTC()
 	entity := UserEntity{}
 	err = s.db.GetContext(ctx, &entity, `
@@ -4007,8 +4211,8 @@ ON CONFLICT(user_id, parent_dir) DO UPDATE SET
 	name = excluded.name,
 	updated_at = excluded.updated_at
 RETURNING *`, userID, name, parentDir, now)
-	if err == nil {
-		s.invalidateLibraryDownloadsCache()
+	if err == nil && (prevErr != nil || prevName != entity.Name) {
+		s.markLibraryDownloadsCacheStale()
 	}
 	return entity, err
 }

@@ -1252,13 +1252,51 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 // listLibraryUsers 返回归档库按账号聚合的统计，用于用户卡片视图。
+// 支持可选分页与关键词搜索（page/pageSize/search），未传时保持旧契约返回全量 items。
 func (s *Server) listLibraryUsers(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListLibraryUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	q := r.URL.Query()
+	if !q.Has("page") && !q.Has("pageSize") && !q.Has("search") {
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+	search := strings.ToLower(strings.TrimSpace(q.Get("search")))
+	if search != "" {
+		filtered := make([]storage.LibraryUserSummary, 0, len(items))
+		for _, item := range items {
+			if strings.Contains(strings.ToLower(item.ScreenName), search) ||
+				strings.Contains(strings.ToLower(item.DisplayName), search) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	page := parsePositiveInt(r, "page", 1, 1, 1000000)
+	pageSize := parsePositiveInt(r, "pageSize", 48, 1, 200)
+	total := len(items)
+	totalPages := max(1, (total+pageSize-1)/pageSize)
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * pageSize
+	end := min(start+pageSize, total)
+	pageItems := []storage.LibraryUserSummary{}
+	if start < total {
+		pageItems = items[start:end]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": pageItems,
+		"pagination": storage.Pagination{
+			Page:       page,
+			PageSize:   pageSize,
+			Total:      total,
+			TotalPages: totalPages,
+		},
+	})
 }
 
 func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
@@ -1343,11 +1381,13 @@ func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, storage.ErrValidation("最小体积不能大于最大体积"))
 		return
 	}
+	omitUsers := q.Get("omitUsers") == "1" || strings.EqualFold(q.Get("omitUsers"), "true")
 	result, err := s.store.ListLibraryDownloadsPage(r.Context(), storage.LibraryPageOptions{
-		Page:     page,
-		PageSize: pageSize,
-		Filter:   filter,
-		Sort:     order,
+		Page:      page,
+		PageSize:  pageSize,
+		Filter:    filter,
+		Sort:      order,
+		OmitUsers: omitUsers,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

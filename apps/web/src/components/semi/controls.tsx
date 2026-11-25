@@ -1,4 +1,4 @@
-import React, { createContext, forwardRef, useContext, useEffect, useId, useLayoutEffect, useState, useRef } from "react";
+import React, { createContext, forwardRef, useContext, useEffect, useId, useLayoutEffect, useMemo, useState, useRef } from "react";
 import SButton from "@douyinfe/semi-ui/lib/es/button";
 import SCheckbox from "@douyinfe/semi-ui/lib/es/checkbox";
 // 只取 Label：整个 Form 入口会连带 Upload/Cascader/Slider 等字段组件（约 300 KB）。
@@ -54,6 +54,7 @@ function normalizeSelectValue(value: unknown): string {
 export function Select({ onChange, options, size, ariaLabel, id, ...props }: SelectProps) {
   const fieldId = useFieldId(); const labelId = useId();
   const select = useRef<SSelect>(null); const [open, setOpen] = useState(false);
+  const optionList = useMemo(() => options.map(option => ({ ...option, showTick: false })), [options]);
   useEffect(() => {
     if (!open) return;
     const handleEsc = (event: KeyboardEvent) => {
@@ -67,13 +68,19 @@ export function Select({ onChange, options, size, ariaLabel, id, ...props }: Sel
     window.addEventListener("keydown", handleEsc, true);
     return () => window.removeEventListener("keydown", handleEsc, true);
   }, [open]);
-  return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} ref={select} id={id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} onDropdownVisibleChange={setOpen} optionList={options.map(option => ({ ...option, showTick: false }))} onChange={value => onChange(normalizeSelectValue(value))} size={size === "sm" ? "small" : "default"} /></>;
+  return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} ref={select} id={id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} onDropdownVisibleChange={setOpen} optionList={optionList} onChange={value => onChange(normalizeSelectValue(value))} size={size === "sm" ? "small" : "default"} /></>;
 }
-export function SearchSelect({ searchPlaceholder, onChange, options, size, ariaLabel, ...props }: SelectProps & { searchPlaceholder?: string }) {
+const VIRTUALIZE_OPTIONS_THRESHOLD = 100;
+export const SearchSelect = React.memo(function SearchSelect({ searchPlaceholder, onChange, options, size, ariaLabel, ...props }: SelectProps & { searchPlaceholder?: string }) {
   const fieldId = useFieldId(); const labelId = useId();
   const select = useRef<SSelect>(null); const [open, setOpen] = useState(false);
   const listId = `${labelId}-listbox`;
   const searchLabel = [ariaLabel, searchPlaceholder ?? t("搜索...")].filter(Boolean).join(" ");
+  const optionList = useMemo(() => options.map(option => ({ ...option, showTick: false })), [options]);
+  const virtualize = useMemo(
+    () => (optionList.length > VIRTUALIZE_OPTIONS_THRESHOLD ? { height: 270, width: "100%", itemSize: 36 } : undefined),
+    [optionList.length],
+  );
   useEffect(() => {
     if (!open) return;
     const handleEsc = (event: KeyboardEvent) => {
@@ -98,15 +105,15 @@ export function SearchSelect({ searchPlaceholder, onChange, options, size, ariaL
     labelList();
     return () => observer.disconnect();
   }, [open, listId]);
-  return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} ref={select} id={props.id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} filter searchPosition="dropdown" onDropdownVisibleChange={setOpen} inputProps={{ autoFocus: true, role: "combobox", "aria-label": searchLabel, "aria-expanded": open, "aria-controls": listId, "aria-autocomplete": "list", onKeyDownCapture: event => {
+  return <>{ariaLabel && <span id={labelId} className="sr-only">{ariaLabel}</span>}<SSelect {...props} ref={select} id={props.id ?? fieldId} aria-labelledby={ariaLabel ? labelId : fieldId ? `${fieldId}-label` : undefined} filter searchPosition="dropdown" virtualize={virtualize} onDropdownVisibleChange={setOpen} inputProps={{ autoFocus: true, role: "combobox", "aria-label": searchLabel, "aria-expanded": open, "aria-controls": listId, "aria-autocomplete": "list", onKeyDownCapture: event => {
     if (event.key === "Escape" && !event.nativeEvent.isComposing) {
       event.preventDefault(); event.stopPropagation();
       event.nativeEvent.stopPropagation();
       event.nativeEvent.stopImmediatePropagation?.();
       select.current?.close(); select.current?.triggerRef.current?.focus();
     }
-  } }} searchPlaceholder={searchPlaceholder ?? t("搜索...")} emptyContent={t("无匹配项")} optionList={options.map(option => ({ ...option, showTick: false }))} onChange={value => onChange(normalizeSelectValue(value))} size={size === "sm" ? "small" : "default"} /></>;
-}
+  } }} searchPlaceholder={searchPlaceholder ?? t("搜索...")} emptyContent={t("无匹配项")} optionList={optionList} onChange={value => onChange(normalizeSelectValue(value))} size={size === "sm" ? "small" : "default"} /></>;
+});
 export function Switch({ ariaLabel, onChange, ...props }: { checked: boolean; onChange: (v: boolean) => void; loading?: boolean; disabled?: boolean; ariaLabel?: string }) { return <SSwitch {...props} disabled={props.disabled || props.loading} aria-label={ariaLabel} onChange={checked => onChange(checked)} />; }
 export function Checkbox({ onChange, label, ariaLabel, ...props }: { checked: boolean; onChange: (v: boolean) => void; label?: React.ReactNode; ariaLabel?: string; id?: string }) { return <SCheckbox {...props} aria-label={ariaLabel} onChange={e => onChange(e.target.checked === true)}>{label}</SCheckbox>; }
 export interface TabItem { key: string; label: React.ReactNode; children?: React.ReactNode }

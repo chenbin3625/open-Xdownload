@@ -446,3 +446,26 @@ it("navigates archived tweet media lightbox with ArrowRight and ArrowLeft keys",
   fireEvent.keyDown(window, { key: "ArrowLeft" });
   expect(within(dialog).getByRole("img", { name: "@alice · 123" }).getAttribute("src")).toBe("/api/assets/original");
 });
+
+it("caps author datalist DOM options to 100 and filters dynamically on large author lists", async () => {
+  const manyAuthors = Array.from({ length: 250 }, (_, index) => ({
+    value: `author_${index}`,
+    label: `Author ${index}`,
+  }));
+  manyAuthors.push({ value: "z_special_target", label: "Special Target" });
+  vi.mocked(getTweetAuthors).mockResolvedValue(manyAuthors);
+
+  const user = userEvent.setup();
+  renderArchive();
+  await screen.findByText("Quoted text available offline");
+
+  await waitFor(() => {
+    expect(document.querySelectorAll("#archive-author-options option").length).toBe(100);
+  });
+  expect(document.querySelector('#archive-author-options option[value="z_special_target"]')).toBeNull();
+
+  await user.type(screen.getByRole("combobox", { name: "作者" }), "z_special");
+  await waitFor(() => {
+    expect(document.querySelector('#archive-author-options option[value="z_special_target"]')).not.toBeNull();
+  });
+});

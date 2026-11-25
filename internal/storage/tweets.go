@@ -64,12 +64,159 @@ type TweetAuthor struct {
 	Label string `json:"label"`
 }
 
+const (
+	legacyTweetPublishedAtPredicate = `published_at <> '' AND (length(published_at) <> 30 OR substr(published_at, 11, 1) <> 'T' OR substr(published_at, 30, 1) <> 'Z')`
+	legacyTweetUpdatedAtPredicate   = `updated_at <> '' AND (length(updated_at) <> 30 OR substr(updated_at, 11, 1) <> 'T' OR substr(updated_at, 30, 1) <> 'Z')`
+)
+
+func (s *Store) invalidateTweetAuthorsCache() {
+	s.tweetAuthorsGen.Add(1)
+	s.tweetAuthorsMu.Lock()
+	s.tweetAuthorsCache = nil
+	s.tweetAuthorsIndex = nil
+	s.tweetAuthorsOK = false
+	s.tweetAuthorsGenBuilt = 0
+	s.tweetAuthorsMaxRowID = 0
+	s.tweetAuthorsMu.Unlock()
+}
+
+func (s *Store) hasLegacyTweetPublishedAt(ctx context.Context) bool {
+	var exists bool
+	err := s.db.GetContext(ctx, &exists, `SELECT EXISTS(SELECT 1 FROM tweets WHERE `+legacyTweetPublishedAtPredicate+`)`)
+	return err != nil || exists
+}
+
+func (s *Store) hasLegacyTweetTimestamps(ctx context.Context) bool {
+	if s.hasLegacyTweetPublishedAt(ctx) {
+		return true
+	}
+	var exists bool
+	err := s.db.GetContext(ctx, &exists, `SELECT EXISTS(SELECT 1 FROM tweets WHERE `+legacyTweetUpdatedAtPredicate+`)`)
+	return err != nil || exists
+}
+
+type archivedTweetAuthor struct {
+	authorID   string
+	screenName string
+	authorName string
+}
+
+type archivedTweetSummary struct {
+	ids     []string
+	authors []archivedTweetAuthor
+}
+
+func (s *Store) noteArchivedTweetAuthors(ctx context.Context, authors []archivedTweetAuthor) {
+	if len(authors) == 0 {
+		return
+	}
+	s.tweetAuthorsMu.Lock()
+	if !s.tweetAuthorsOK {
+		s.tweetAuthorsMu.Unlock()
+		return
+	}
+	for _, a := range authors {
+		if a.screenName == "" {
+			continue
+		}
+		key := a.authorID
+		if key == "" {
+			key = "sn:" + strings.ToLower(a.screenName)
+		}
+		existing, ok := s.tweetAuthorsIndex[key]
+		if !ok || existing.Value != a.screenName || existing.Label != a.authorName {
+			s.tweetAuthorsGen.Add(1)
+			s.tweetAuthorsCache = nil
+			s.tweetAuthorsIndex = nil
+			s.tweetAuthorsOK = false
+			s.tweetAuthorsGenBuilt = 0
+			s.tweetAuthorsMaxRowID = 0
+			s.tweetAuthorsMu.Unlock()
+			return
+		}
+	}
+	gen := s.tweetAuthorsGen.Load()
+	s.tweetAuthorsMu.Unlock()
+
+	var maxRowID int64
+	if err := s.db.GetContext(ctx, &maxRowID, `SELECT COALESCE(MAX(rowid), 0) FROM tweets`); err != nil {
+		return
+	}
+	s.tweetAuthorsMu.Lock()
+	if s.tweetAuthorsOK && s.tweetAuthorsGen.Load() == gen && maxRowID > s.tweetAuthorsMaxRowID {
+		s.tweetAuthorsMaxRowID = maxRowID
+	}
+	s.tweetAuthorsMu.Unlock()
+}
+
+func (s *Store) anyTweetHasDownload(ctx context.Context, tweetIDs []string) bool {
+	if len(tweetIDs) == 0 {
+		return false
+	}
+	query, args, err := sqlx.In(`SELECT EXISTS(SELECT 1 FROM downloads WHERE tweet_id IN (?) AND tweet_id <> '')`, tweetIDs)
+	if err != nil {
+		return true
+	}
+	var exists bool
+	if err := s.db.GetContext(ctx, &exists, s.db.Rebind(query), args...); err != nil {
+		return true
+	}
+	return exists
+}
+
 func (s *Store) ListTweetAuthors(ctx context.Context) ([]TweetAuthor, error) {
-	authors := []TweetAuthor{}
-	err := s.db.SelectContext(ctx, &authors, `
-SELECT screen_name AS value, author_name AS label
+	var maxRowID int64
+	if err := s.db.GetContext(ctx, &maxRowID, `SELECT COALESCE(MAX(rowid), 0) FROM tweets`); err != nil {
+		return nil, err
+	}
+	gen := s.tweetAuthorsGen.Load()
+	s.tweetAuthorsMu.RLock()
+	if s.tweetAuthorsOK && s.tweetAuthorsGenBuilt == gen && s.tweetAuthorsMaxRowID == maxRowID {
+		cached := append([]TweetAuthor(nil), s.tweetAuthorsCache...)
+		s.tweetAuthorsMu.RUnlock()
+		return cached, nil
+	}
+	s.tweetAuthorsMu.RUnlock()
+
+	type authorRow struct {
+		AuthorKey string `db:"author_key"`
+		Value     string `db:"value"`
+		Label     string `db:"label"`
+	}
+	rows := []authorRow{}
+	query := `
+SELECT author_key, value, label FROM (
+	SELECT author_id AS author_key, screen_name AS value, author_name AS label
+	FROM (
+		SELECT author_id, screen_name, author_name,
+			ROW_NUMBER() OVER (
+				PARTITION BY author_id
+				ORDER BY published_at DESC, updated_at DESC, id DESC
+			) AS rn
+		FROM tweets
+		WHERE screen_name <> '' AND author_id <> ''
+	)
+	WHERE rn = 1
+	UNION ALL
+	SELECT 'sn:' || lower(screen_name) AS author_key, screen_name AS value, author_name AS label
+	FROM (
+		SELECT screen_name, author_name,
+			ROW_NUMBER() OVER (
+				PARTITION BY lower(screen_name)
+				ORDER BY published_at DESC, updated_at DESC, id DESC
+			) AS rn
+		FROM tweets
+		WHERE screen_name <> '' AND author_id = ''
+	)
+	WHERE rn = 1
+)
+ORDER BY lower(value), value`
+	if s.hasLegacyTweetTimestamps(ctx) {
+		query = `
+SELECT author_key, screen_name AS value, author_name AS label
 FROM (
-	SELECT screen_name, author_name,
+	SELECT CASE WHEN author_id <> '' THEN author_id ELSE 'sn:' || lower(screen_name) END AS author_key,
+		screen_name, author_name,
 		ROW_NUMBER() OVER (
 			PARTITION BY CASE WHEN author_id <> '' THEN author_id ELSE lower(screen_name) END
 			ORDER BY COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', published_at), published_at) DESC,
@@ -82,8 +229,32 @@ FROM (
 	WHERE screen_name <> ''
 )
 WHERE rn = 1
-ORDER BY lower(screen_name), screen_name`)
-	return authors, err
+ORDER BY lower(screen_name), screen_name`
+	}
+	if err := s.db.SelectContext(ctx, &rows, query); err != nil {
+		return nil, err
+	}
+	authors := make([]TweetAuthor, len(rows))
+	index := make(map[string]TweetAuthor, len(rows))
+	for i, row := range rows {
+		item := TweetAuthor{Value: row.Value, Label: row.Label}
+		authors[i] = item
+		index[row.AuthorKey] = item
+	}
+
+	var afterMaxRowID int64
+	if err := s.db.GetContext(ctx, &afterMaxRowID, `SELECT COALESCE(MAX(rowid), 0) FROM tweets`); err == nil && afterMaxRowID == maxRowID && s.tweetAuthorsGen.Load() == gen {
+		s.tweetAuthorsMu.Lock()
+		if s.tweetAuthorsGen.Load() == gen {
+			s.tweetAuthorsCache = append([]TweetAuthor(nil), authors...)
+			s.tweetAuthorsIndex = index
+			s.tweetAuthorsOK = true
+			s.tweetAuthorsGenBuilt = gen
+			s.tweetAuthorsMaxRowID = maxRowID
+		}
+		s.tweetAuthorsMu.Unlock()
+	}
+	return authors, nil
 }
 
 type TweetSync struct {
@@ -176,6 +347,20 @@ CREATE TABLE IF NOT EXISTS tweet_sync (
 CREATE INDEX IF NOT EXISTS idx_tweets_conversation ON tweets(conversation_id, published_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_tweets_starred ON tweets(starred, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tweets_likes ON tweets(like_count DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_tweets_legacy_published_at ON tweets(id)
+	WHERE published_at <> '' AND (length(published_at) <> 30 OR substr(published_at, 11, 1) <> 'T' OR substr(published_at, 30, 1) <> 'Z');
+CREATE INDEX IF NOT EXISTS idx_tweets_legacy_updated_at ON tweets(id)
+	WHERE updated_at <> '' AND (length(updated_at) <> 30 OR substr(updated_at, 11, 1) <> 'T' OR substr(updated_at, 30, 1) <> 'Z');
+CREATE INDEX IF NOT EXISTS idx_tweets_screen_name_lower ON tweets(lower(screen_name), published_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_tweets_id_author ON tweets(id, screen_name, author_name);
+CREATE INDEX IF NOT EXISTS idx_tweets_likes_date ON tweets(like_count DESC, published_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_tweets_retweets_date ON tweets(retweet_count DESC, published_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_tweets_views_date ON tweets(view_count DESC, published_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_tweets_authors_cover ON tweets(author_id, published_at DESC, updated_at DESC, id DESC, screen_name, author_name) WHERE screen_name <> '';
+CREATE INDEX IF NOT EXISTS idx_tweet_relations_rel_tweet ON tweet_relations(relation, tweet_id);
+CREATE INDEX IF NOT EXISTS idx_archive_media_type_id ON archive_media(media_type, id);
+CREATE INDEX IF NOT EXISTS idx_tweet_media_media_tweet ON tweet_media(media_id, tweet_id);
+CREATE INDEX IF NOT EXISTS idx_tweet_jobs_job_tweet ON tweet_jobs(job_id, tweet_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts USING fts5(tweet_id UNINDEXED, screen_name, author_name, body, alt_texts, tokenize='unicode61');
 `); err != nil {
 		return err
@@ -229,17 +414,23 @@ func (s *Store) archiveTweet(ctx context.Context, jobID int64, tweet parser.Twee
 		return err
 	}
 	defer tx.Rollback()
-	if err := archiveTweetTx(ctx, tx, jobID, tweet, bodyStatus, mediaStatus, mediaStatus, tweet.Media, map[string]struct{}{}, false); err != nil {
+	summary := &archivedTweetSummary{}
+	if err := archiveTweetTx(ctx, tx, jobID, tweet, bodyStatus, mediaStatus, mediaStatus, tweet.Media, map[string]struct{}{}, false, summary); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.markLibraryDownloadsCacheStale()
+	s.noteArchivedTweetAuthors(ctx, summary.authors)
+	// 只有本次归档的推文已关联 downloads 记录（可能更新作者展示名）时才标记媒体库缓存过期，
+	// 避免纯文本归档或尚未落盘媒体的推文在后台持续写入时反复打穿媒体库快照。
+	if len(summary.ids) > 0 && s.anyTweetHasDownload(ctx, summary.ids) {
+		s.markLibraryDownloadsCacheStale()
+	}
 	return nil
 }
 
-func archiveTweetTx(ctx context.Context, tx *sqlx.Tx, jobID int64, tweet parser.TweetData, bodyStatus, mediaStatus, rootMediaStatus string, requestedMedia []parser.Media, ancestors map[string]struct{}, isRelated bool) error {
+func archiveTweetTx(ctx context.Context, tx *sqlx.Tx, jobID int64, tweet parser.TweetData, bodyStatus, mediaStatus, rootMediaStatus string, requestedMedia []parser.Media, ancestors map[string]struct{}, isRelated bool, summary *archivedTweetSummary) error {
 	if tweet.ID == "" {
 		return ErrValidation("推文缺少 ID")
 	}
@@ -268,7 +459,7 @@ func archiveTweetTx(ctx context.Context, tx *sqlx.Tx, jobID int64, tweet parser.
 				}
 			}
 		}
-		if err := archiveTweetTx(ctx, tx, jobID, related, bodyStatus, relatedStatus, rootMediaStatus, requestedMedia, ancestors, true); err != nil {
+		if err := archiveTweetTx(ctx, tx, jobID, related, bodyStatus, relatedStatus, rootMediaStatus, requestedMedia, ancestors, true, summary); err != nil {
 			return err
 		}
 	}
@@ -278,6 +469,7 @@ func archiveTweetTx(ctx context.Context, tx *sqlx.Tx, jobID int64, tweet parser.
 	}
 	now := time.Now().UTC()
 	publishedAt := formatSortableTime(tweet.CreatedAt)
+	updatedAt := formatSortableTime(now)
 
 	preserveExisting := false
 	if isRelated {
@@ -309,10 +501,18 @@ bookmark_count=CASE WHEN excluded.bookmark_count>0 THEN excluded.bookmark_count 
 view_count=CASE WHEN excluded.view_count>0 THEN excluded.view_count ELSE tweets.view_count END,
 conversation_id=CASE WHEN excluded.conversation_id<>'' THEN excluded.conversation_id ELSE tweets.conversation_id END,
 alt_texts=CASE WHEN excluded.alt_texts<>'' THEN excluded.alt_texts ELSE tweets.alt_texts END`,
-			tweet.ID, tweet.Author.ID, tweet.Author.ScreenName, tweet.Author.Name, tweet.Text, publishedAt, string(payload), now, now,
+			tweet.ID, tweet.Author.ID, tweet.Author.ScreenName, tweet.Author.Name, tweet.Text, publishedAt, string(payload), now, updatedAt,
 			likeCount, retweetCount, replyCount, bookmarkCount, viewCount, convID, altTexts)
 		if err != nil {
 			return err
+		}
+		if summary != nil {
+			summary.ids = append(summary.ids, tweet.ID)
+			summary.authors = append(summary.authors, archivedTweetAuthor{
+				authorID:   tweet.Author.ID,
+				screenName: tweet.Author.ScreenName,
+				authorName: tweet.Author.Name,
+			})
 		}
 		if _, err = tx.ExecContext(ctx, `DELETE FROM tweets_fts WHERE tweet_id=?`, tweet.ID); err != nil {
 			return err
@@ -755,11 +955,14 @@ func (s *Store) ListConversationTweets(ctx context.Context, tweetID string) ([]A
 	return page.Items, nil
 }
 
-func normalizeTweetFilterTime(raw string) (string, bool) {
+func normalizeTweetFilterTime(raw string, legacy bool) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
 		if parsed, err := time.Parse(layout, raw); err == nil {
-			return parsed.UTC().Format("2006-01-02T15:04:05.000Z"), true
+			if legacy {
+				return parsed.UTC().Format("2006-01-02T15:04:05.000Z"), true
+			}
+			return formatSortableTime(parsed), true
 		}
 	}
 	return raw, false
@@ -772,6 +975,7 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	if f.PageSize < 1 || f.PageSize > 100 {
 		f.PageSize = 20
 	}
+	legacyTS := s.hasLegacyTweetPublishedAt(ctx)
 	where := []string{"1=1"}
 	args := []any{}
 	if search := strings.TrimSpace(f.Search); search != "" {
@@ -813,8 +1017,12 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 		args = append(args, f.CollectionID)
 	}
 	if f.From != "" {
-		if norm, ok := normalizeTweetFilterTime(f.From); ok {
-			where = append(where, `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at)>=?`)
+		if norm, ok := normalizeTweetFilterTime(f.From, legacyTS); ok {
+			if legacyTS {
+				where = append(where, `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at)>=?`)
+			} else {
+				where = append(where, `t.published_at>=?`)
+			}
 			args = append(args, norm)
 		} else {
 			where = append(where, `datetime(t.published_at)>=datetime(?)`)
@@ -822,8 +1030,12 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 		}
 	}
 	if f.To != "" {
-		if norm, ok := normalizeTweetFilterTime(f.To); ok {
-			where = append(where, `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at)<?`)
+		if norm, ok := normalizeTweetFilterTime(f.To, legacyTS); ok {
+			if legacyTS {
+				where = append(where, `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at)<?`)
+			} else {
+				where = append(where, `t.published_at<?`)
+			}
 			args = append(args, norm)
 		} else {
 			where = append(where, `datetime(t.published_at)<datetime(?)`)
@@ -856,16 +1068,31 @@ func (s *Store) ListTweets(ctx context.Context, f TweetFilter) (TweetPage, error
 	result.Pagination.TotalPages = max(1, (result.Pagination.Total+f.PageSize-1)/f.PageSize)
 	result.Pagination.Page = min(f.Page, result.Pagination.TotalPages)
 	args = append(args, f.PageSize, (result.Pagination.Page-1)*f.PageSize)
-	orderClause := `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.published_at DESC, t.id DESC`
-	switch f.Sort {
-	case "asc":
-		orderClause = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) ASC, t.published_at ASC, t.id ASC`
-	case "likes_desc":
-		orderClause = `t.like_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
-	case "retweets_desc":
-		orderClause = `t.retweet_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
-	case "views_desc":
-		orderClause = `t.view_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
+	var orderClause string
+	if legacyTS {
+		orderClause = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.published_at DESC, t.id DESC`
+		switch f.Sort {
+		case "asc":
+			orderClause = `COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) ASC, t.published_at ASC, t.id ASC`
+		case "likes_desc":
+			orderClause = `t.like_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
+		case "retweets_desc":
+			orderClause = `t.retweet_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
+		case "views_desc":
+			orderClause = `t.view_count DESC, COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', t.published_at), t.published_at) DESC, t.id DESC`
+		}
+	} else {
+		orderClause = `t.published_at DESC, t.id DESC`
+		switch f.Sort {
+		case "asc":
+			orderClause = `t.published_at ASC, t.id ASC`
+		case "likes_desc":
+			orderClause = `t.like_count DESC, t.published_at DESC, t.id DESC`
+		case "retweets_desc":
+			orderClause = `t.retweet_count DESC, t.published_at DESC, t.id DESC`
+		case "views_desc":
+			orderClause = `t.view_count DESC, t.published_at DESC, t.id DESC`
+		}
 	}
 	var rows []tweetRow
 	if err := s.db.SelectContext(ctx, &rows, `SELECT t.id,t.author_id,t.screen_name,t.author_name,t.body,t.published_at,t.payload,t.archived_at,t.starred FROM tweets t WHERE `+clause+

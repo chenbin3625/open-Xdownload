@@ -60,6 +60,8 @@ import { OrganizeManagerModal, safeCollectionList, safeTagList } from "../compon
 const ArchiveDatePicker = lazy(() => import("../components/tweets/ArchiveDatePicker"));
 
 const VALID_SORTS = new Set(["desc", "asc", "likes_desc", "retweets_desc", "views_desc"]);
+// 限制原生 <datalist> 挂载的 <option> 数量，避免数千归档作者撑爆 DOM。
+const MAX_AUTHOR_DATALIST_OPTIONS = 100;
 
 function readFilters() { return new URLSearchParams(window.location.search); }
 
@@ -301,10 +303,18 @@ export function TweetsPage({ realtimeConnected = true }: { realtimeConnected?: b
   const page = normalizeTweetPage(snapshot?.key === queryIdentity ? snapshot.page : tweets.data);
   const authorOptions = useMemo(() => {
     const options = authors.data ?? [];
-    if (author && !options.some(option => option.value.toLowerCase() === author.toLowerCase())) {
-      return [{ value: author, label: `@${author.replace(/^@/, "")}` }, ...options];
+    const needle = author.trim().replace(/^@/, "").toLowerCase();
+    const matched = needle
+      ? options.filter(option =>
+          option.value.toLowerCase().includes(needle) ||
+          option.label.toLowerCase().includes(needle),
+        )
+      : options;
+    const limited = matched.slice(0, MAX_AUTHOR_DATALIST_OPTIONS);
+    if (author && !limited.some(option => option.value.toLowerCase() === author.toLowerCase())) {
+      return [{ value: author, label: `@${author.replace(/^@/, "")}` }, ...limited];
     }
-    return options;
+    return limited;
   }, [author, authors.data]);
   const newRecords = !tweets.isPlaceholderData && snapshot?.key === queryIdentity ? (tweets.data?.items ?? []).filter(item => !snapshot.page.items.some(previous => previous.id === item.id)).length : 0;
   const detail = detailId ? page?.items.find(tweet => tweet.id === detailId) ?? detailSnapshot : null;

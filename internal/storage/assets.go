@@ -83,15 +83,45 @@ func (s *Store) GetStorageDocument(ctx context.Context) (config.StorageDocument,
 	return d, err
 }
 
+func cloneStorageDocument(src config.StorageDocument) config.StorageDocument {
+	dst := src
+	if src.Targets != nil {
+		dst.Targets = append([]config.StorageTarget(nil), src.Targets...)
+	}
+	if src.Rules != nil {
+		dst.Rules = make(map[config.AssetKind]config.AssetRule, len(src.Rules))
+		for k, v := range src.Rules {
+			dst.Rules[k] = v
+		}
+	}
+	return dst
+}
+
 func (s *Store) GetStorageVersion(ctx context.Context, version int64) (config.StorageDocument, error) {
+	s.storageVerMu.RLock()
+	if cached, ok := s.storageVerCache[version]; ok {
+		s.storageVerMu.RUnlock()
+		return cloneStorageDocument(cached), nil
+	}
+	s.storageVerMu.RUnlock()
+
 	var raw string
 	if err := s.db.GetContext(ctx, &raw, `SELECT document FROM storage_versions WHERE version=?`, version); err != nil {
 		return config.StorageDocument{}, err
 	}
 	var d config.StorageDocument
-	err := json.Unmarshal([]byte(raw), &d)
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		return config.StorageDocument{}, err
+	}
 	d.Version = version
-	return d, err
+
+	s.storageVerMu.Lock()
+	if s.storageVerCache == nil {
+		s.storageVerCache = make(map[int64]config.StorageDocument, 4)
+	}
+	s.storageVerCache[version] = cloneStorageDocument(d)
+	s.storageVerMu.Unlock()
+	return d, nil
 }
 
 func (s *Store) SaveStorageDocument(ctx context.Context, next config.StorageDocument) (config.StorageDocument, error) {

@@ -575,10 +575,33 @@ export interface LibraryUserSummary {
   latestAt: string;
 }
 
+export interface LibraryUsersPage {
+  items: LibraryUserSummary[];
+  pagination?: DashboardPagination;
+}
+
+export interface LibraryUsersQueryOptions {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  signal?: AbortSignal;
+}
+
 export const libraryUsersQueryRoot = ["library-users"] as const;
 
-export const getLibraryUsers = (signal?: AbortSignal) =>
-  api<{ items: LibraryUserSummary[] }>("/api/library/users", { signal });
+export const getLibraryUsers = (arg?: AbortSignal | LibraryUsersQueryOptions) => {
+  const isSignal = Boolean(arg && typeof arg === "object" && "aborted" in arg);
+  const options: LibraryUsersQueryOptions = isSignal ? { signal: arg as AbortSignal } : ((arg as LibraryUsersQueryOptions | undefined) ?? {});
+  const params = new URLSearchParams();
+  if (options.page !== undefined) params.set("page", String(options.page));
+  if (options.pageSize !== undefined) params.set("pageSize", String(options.pageSize));
+  if (options.search !== undefined && options.search.trim() !== "") params.set("search", options.search.trim());
+  const qs = params.toString();
+  return api<LibraryUsersPage>(`/api/library/users${qs ? `?${qs}` : ""}`, {
+    signal: options.signal,
+    timeoutMs: LONG_TIMEOUT_MS,
+  });
+};
 
 export interface FailedTweetPage {
   items: FailedTweet[];
@@ -772,6 +795,7 @@ export const getLibraryDownloadsPage = (
     starred?: string;
     tagId?: string;
     collectionId?: string;
+    omitUsers?: boolean;
   },
   signal?: AbortSignal,
 ) => {
@@ -784,6 +808,9 @@ export const getLibraryDownloadsPage = (
   });
   for (const key of ["sort", "from", "to", "minBytes", "maxBytes", "starred", "tagId", "collectionId"] as const) {
     if (options[key] !== undefined && options[key] !== "") params.set(key, options[key]);
+  }
+  if (options.omitUsers) {
+    params.set("omitUsers", "1");
   }
   return api<LibraryDownloadsPage>(`/api/library/downloads?${params}`, {
     signal,

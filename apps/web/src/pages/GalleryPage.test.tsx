@@ -677,3 +677,69 @@ it("supports Shift+Click range selection and click-to-zoom inside the lightbox",
   await userEvent.click(previewImg);
   expect(frame.className).not.toContain("gallery-preview-frame-zoomed");
 });
+
+it("paginates and searches the By Account view and omits users list on subsequent media page flips", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/library/users") {
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      const allUsers = [
+        { screenName: "alice", displayName: "Alice", avatarUrl: "", mediaCount: 5, totalBytes: 500, latestAt: "2026-06-02T00:00:00Z" },
+        { screenName: "bob", displayName: "Bob", avatarUrl: "", mediaCount: 2, totalBytes: 200, latestAt: "2026-06-01T00:00:00Z" },
+      ].filter((u) => !search || u.screenName.includes(search) || u.displayName.toLowerCase().includes(search));
+      const paged = search ? allUsers : page === 1 ? [allUsers[0]] : [allUsers[1]];
+      return new Response(
+        JSON.stringify({
+          items: paged,
+          pagination: { page, pageSize: 48, total: search ? allUsers.length : 96, totalPages: search ? 1 : 2 },
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
+    const page = Number(url.searchParams.get("page") ?? "1");
+    const omitUsers = url.searchParams.get("omitUsers") === "1";
+    return new Response(
+      JSON.stringify({
+        items: [records[0]],
+        pagination: { page, pageSize: 60, total: 120, totalPages: 2 },
+        counts: { all: 120, images: 120, videos: 0, gifs: 0 },
+        users: omitUsers ? [] : [{ value: "alice", label: "Alice (@alice)" }],
+        truncated: false,
+      }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  renderControlled();
+
+  await screen.findByText("shared.jpg");
+  expect(requestParams(fetchMock.mock.calls[0][0]).get("omitUsers")).toBeNull();
+
+  // Flip to page 2 -> should send omitUsers=1 once initial users are cached.
+  await userEvent.click(screen.getByRole("button", { name: "第 2 页" }));
+  await waitFor(() => {
+    const page2Call = fetchMock.mock.calls.find(([req]) => {
+      const p = requestParams(req);
+      return p.get("page") === "2";
+    });
+    expect(page2Call).toBeTruthy();
+    expect(requestParams(page2Call![0]).get("omitUsers")).toBe("1");
+  });
+
+  // Switch to By Account view -> requests paginated /api/library/users and supports pagination + search.
+  await userEvent.click(screen.getByRole("radio", { name: "按账号" }));
+  await screen.findByText("@alice");
+  expect(screen.getAllByText("共 96 个账号").length).toBeGreaterThan(0);
+
+  await userEvent.click(screen.getByRole("button", { name: "第 2 页" }));
+  await screen.findByText("@bob");
+
+  const searchInput = screen.getByRole("textbox", { name: "搜索账号或昵称..." });
+  await userEvent.type(searchInput, "alice");
+  await screen.findByText("@alice");
+  await waitFor(() => {
+    const searchCall = fetchMock.mock.calls.find(([req]) => String(req).includes("search=alice"));
+    expect(searchCall).toBeTruthy();
+  });
+});

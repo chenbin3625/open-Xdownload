@@ -555,6 +555,7 @@ func (s *Store) DeleteTweets(ctx context.Context, tweetIDs []string, deleteFiles
 	if err := tx.Commit(); err != nil {
 		return result, err
 	}
+	s.invalidateTweetAuthorsCache()
 	s.invalidateLibraryDownloadsCache()
 	return result, nil
 }

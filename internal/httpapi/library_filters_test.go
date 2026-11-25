@@ -102,3 +102,119 @@ func TestLibraryDownloadsSortAndRanges(t *testing.T) {
 		})
 	}
 }
+
+func TestLibraryUsersPaginationSearchAndDownloadsOmitUsers(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "users-page.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	root := t.TempDir()
+	if _, err := store.UpdateConfig(ctx, config.AppConfig{DownloadDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.CreateJob(ctx, storage.JobKindUser, "batch", "batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := []struct {
+		id, screen, name string
+	}{
+		{"u1", "alice", "Alice Alpha"},
+		{"u2", "bob", "Bob Beta"},
+		{"u3", "charlie", "Charlie Gamma"},
+	}
+	for i, u := range users {
+		if _, err := store.UpsertUser(ctx, storage.User{ID: u.id, ScreenName: u.screen, Name: u.name}); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(root, "image", u.screen)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.EnsureUserEntity(ctx, u.id, filepath.Join(root, "image"), u.screen); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "img.jpg")
+		if err := os.WriteFile(p, []byte("abc"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.CreateDownload(ctx, storage.DownloadRecord{
+			JobID:    job.ID,
+			TweetID:  "tw-" + u.id,
+			MediaURL: "https://pbs.twimg.com/" + u.screen + ".jpg",
+			FilePath: p,
+			Bytes:    int64(100 * (i + 1)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := authenticatedRoutes(t, NewServer(store, nil, nil, nil))
+
+	// Unpaged contract remains unchanged (all 3 items, no pagination field).
+	resAll := httptest.NewRecorder()
+	handler.ServeHTTP(resAll, newLoopbackRequest(http.MethodGet, "/api/library/users", nil))
+	if resAll.Code != http.StatusOK {
+		t.Fatalf("unpaged status=%d body=%s", resAll.Code, resAll.Body.String())
+	}
+	var unpaged struct {
+		Items      []storage.LibraryUserSummary `json:"items"`
+		Pagination *storage.Pagination          `json:"pagination"`
+	}
+	if err := json.NewDecoder(resAll.Body).Decode(&unpaged); err != nil {
+		t.Fatal(err)
+	}
+	if len(unpaged.Items) != 3 || unpaged.Pagination != nil {
+		t.Fatalf("unpaged = %+v", unpaged)
+	}
+
+	// Paged response returns slice + pagination metadata.
+	resP1 := httptest.NewRecorder()
+	handler.ServeHTTP(resP1, newLoopbackRequest(http.MethodGet, "/api/library/users?page=1&pageSize=2", nil))
+	if resP1.Code != http.StatusOK {
+		t.Fatalf("paged p1 status=%d body=%s", resP1.Code, resP1.Body.String())
+	}
+	var p1 struct {
+		Items      []storage.LibraryUserSummary `json:"items"`
+		Pagination storage.Pagination           `json:"pagination"`
+	}
+	if err := json.NewDecoder(resP1.Body).Decode(&p1); err != nil {
+		t.Fatal(err)
+	}
+	if len(p1.Items) != 2 || p1.Pagination.Total != 3 || p1.Pagination.TotalPages != 2 || p1.Pagination.Page != 1 {
+		t.Fatalf("paged p1 = %+v", p1)
+	}
+
+	// Search filters by screenName or displayName case-insensitively.
+	resSearch := httptest.NewRecorder()
+	handler.ServeHTTP(resSearch, newLoopbackRequest(http.MethodGet, "/api/library/users?search=beta&page=1&pageSize=10", nil))
+	if resSearch.Code != http.StatusOK {
+		t.Fatalf("search status=%d body=%s", resSearch.Code, resSearch.Body.String())
+	}
+	var searched struct {
+		Items      []storage.LibraryUserSummary `json:"items"`
+		Pagination storage.Pagination           `json:"pagination"`
+	}
+	if err := json.NewDecoder(resSearch.Body).Decode(&searched); err != nil {
+		t.Fatal(err)
+	}
+	if len(searched.Items) != 1 || searched.Items[0].ScreenName != "bob" || searched.Pagination.Total != 1 {
+		t.Fatalf("searched = %+v", searched)
+	}
+
+	// omitUsers=1 skips the user dropdown payload on subsequent page requests.
+	resOmit := httptest.NewRecorder()
+	handler.ServeHTTP(resOmit, newLoopbackRequest(http.MethodGet, "/api/library/downloads?page=1&pageSize=10&omitUsers=1", nil))
+	if resOmit.Code != http.StatusOK {
+		t.Fatalf("omitUsers status=%d body=%s", resOmit.Code, resOmit.Body.String())
+	}
+	var omitPage storage.LibraryPage
+	if err := json.NewDecoder(resOmit.Body).Decode(&omitPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(omitPage.Items) != 3 || len(omitPage.Users) != 0 {
+		t.Fatalf("omitUsers page items=%d users=%d, want 3 and 0", len(omitPage.Items), len(omitPage.Users))
+	}
+}

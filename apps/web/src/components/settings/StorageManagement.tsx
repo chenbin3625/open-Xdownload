@@ -56,7 +56,11 @@ export function StorageManagement() {
   const [targetsModalOpen, setTargetsModalOpen] = useState(false);
   const [editingTarget, setEditingTarget] = useState<StorageTarget | null>(null);
   const [isNewTarget, setIsNewTarget] = useState(false);
-  const tweets = useQuery({ queryKey: ["storage-preview-tweets"], queryFn: ({ signal }) => getTweets(new URLSearchParams({ pageSize: "1" }), signal) });
+  const tweets = useQuery({
+    queryKey: ["storage-preview-tweets"],
+    queryFn: ({ signal }) => getTweets(new URLSearchParams({ pageSize: "1" }), signal),
+    staleTime: 60_000,
+  });
   useEffect(() => { if (query.data && !dirty) setDraft(query.data); }, [query.data, dirty]);
   useEffect(() => {
     if (!dirty) return;

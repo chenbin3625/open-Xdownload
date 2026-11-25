@@ -1053,5 +1053,8 @@
   "长串归档": "Thread archive",
   "长串推文链接": "Thread tweet URL",
   "颜色": "Color",
-  "飞书机器人": "Feishu Bot"
+  "飞书机器人": "Feishu Bot",
+  "搜索账号或昵称...": "Search accounts or display names...",
+  "共 {{value0}} 个账号": "{{value0}} accounts",
+  "没有匹配的账号": "No matching accounts"
 }

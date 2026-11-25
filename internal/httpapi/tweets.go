@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chenbin3625/open-Xdownload/internal/jobs"
@@ -96,6 +97,23 @@ func (s *Server) listTweetAuthors(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	q := r.URL.Query()
+	if needle := strings.ToLower(strings.TrimSpace(q.Get("q"))); needle != "" {
+		filtered := make([]storage.TweetAuthor, 0, min(len(authors), 100))
+		for _, a := range authors {
+			if strings.Contains(strings.ToLower(a.Value), needle) ||
+				strings.Contains(strings.ToLower(a.Label), needle) {
+				filtered = append(filtered, a)
+			}
+		}
+		authors = filtered
+	}
+	if rawLimit := q.Get("limit"); rawLimit != "" {
+		limit := parsePositiveInt(r, "limit", 100, 1, 500)
+		if len(authors) > limit {
+			authors = authors[:limit]
+		}
 	}
 	writeJSON(w, http.StatusOK, authors)
 }

@@ -115,6 +115,8 @@ export interface GalleryPageProps {
 
 /** 搜索与体积输入防抖：避免每敲一个字符就打一次服务端分页查询。 */
 const GALLERY_SEARCH_DEBOUNCE_MS = 300;
+/** 按账号卡片视图的每页条数：避免数千归档账号一次性渲染造成主线程卡顿。 */
+const LIBRARY_USERS_PAGE_SIZE = 48;
 /** 导出清单的 Blob URL 延迟释放，避免浏览器尚未开始读取下载流就被提前 revoke。 */
 const OBJECT_URL_REVOKE_DELAY_MS = 60_000;
 /** 批量下载逐个错峰触发，避免同一 tick 内连续触发数十次 <a>.click() 被浏览器限流丢弃。 */
@@ -426,6 +428,10 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   const [localFilter, setLocalFilter] = useState<GalleryRouteState>(defaultGalleryFilter);
   // 归档库的两种浏览方式：媒体网格 / 按账号卡片。
   const [viewMode, setViewMode] = useState<"media" | "users">("media");
+  const [usersPage, setUsersPage] = useState(1);
+  const [usersSearch, setUsersSearch] = useState("");
+  const debouncedUsersSearch = useDebouncedValue(usersSearch, GALLERY_SEARCH_DEBOUNCE_MS);
+  const [cachedUserOptions, setCachedUserOptions] = useState<{ value: string; label: string }[]>([]);
   const filter = controlledFilter ?? localFilter;
   const offlineThumbnails = Boolean(queryClient.getQueryData<AppConfig>(configQueryRoot)?.offlineThumbnails);
   const [organizeOpen, setOrganizeOpen] = useState(false);
@@ -488,13 +494,36 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   const tagsList = safeTagList(tagsQuery.data);
   const collectionsList = safeCollectionList(collectionsQuery.data);
 
-  // 只有切到「按账号」时才拉聚合数据，避免每次进归档库都多一次全量扫描。
+  // 只有切到「按账号」时才拉分页聚合数据，避免每次进归档库或展开数千张卡片卡顿。
+  const trimmedUsersSearch = debouncedUsersSearch.trim();
   const usersQuery = useQuery({
-    queryKey: libraryUsersQueryRoot,
-    queryFn: ({ signal }) => getLibraryUsers(signal),
+    queryKey: [...libraryUsersQueryRoot, { page: usersPage, pageSize: LIBRARY_USERS_PAGE_SIZE, search: trimmedUsersSearch }],
+    queryFn: ({ signal }) =>
+      getLibraryUsers({
+        page: usersPage,
+        pageSize: LIBRARY_USERS_PAGE_SIZE,
+        search: trimmedUsersSearch || undefined,
+        signal,
+      }),
+    placeholderData: keepPreviousData,
     enabled: viewMode === "users",
     staleTime: 30_000,
   });
+
+  const isDefaultUnfilteredFirstPage =
+    filter.page === 1 &&
+    filter.kind === "all" &&
+    filter.user === "all" &&
+    debouncedSearch === "" &&
+    filter.sort === "date_desc" &&
+    filter.from === "" &&
+    filter.to === "" &&
+    debouncedMinBytes === "" &&
+    debouncedMaxBytes === "" &&
+    !filter.starred &&
+    !filter.tagId &&
+    !filter.collectionId;
+  const shouldOmitUsers = cachedUserOptions.length > 0 && !isDefaultUnfilteredFirstPage;
 
   const libraryQuery = useQuery({
     queryKey: [
@@ -530,6 +559,7 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           starred: filter.starred || undefined,
           tagId: filter.tagId || undefined,
           collectionId: filter.collectionId || undefined,
+          omitUsers: shouldOmitUsers,
         },
         signal,
       ),
@@ -540,6 +570,13 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
     gcTime: 30 * 60_000,
     refetchOnWindowFocus: false,
   });
+
+  useEffect(() => {
+    const incomingUsers = libraryQuery.data?.users;
+    if (incomingUsers && incomingUsers.length > 0) {
+      setCachedUserOptions(incomingUsers);
+    }
+  }, [libraryQuery.data?.users]);
 
   const allDownloads = libraryQuery.data?.items ?? [];
 
@@ -565,12 +602,33 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
   }, [allDownloads]);
 
   const categoryCounts = libraryQuery.data?.counts ?? { all: 0, images: 0, videos: 0, gifs: 0 };
-  const userOptions = libraryQuery.data?.users ?? [];
+  const userOptions = (libraryQuery.data?.users?.length ?? 0) > 0 ? libraryQuery.data!.users : cachedUserOptions;
+  const allUsersLabel = t("全部用户");
+  const userSelectOptions = useMemo(
+    () => [{ value: "all", label: allUsersLabel }, ...userOptions],
+    [allUsersLabel, userOptions],
+  );
+  const handleUserFilterChange = useCallback(
+    (val: string) => updateFilter({ user: val, page: 1 }),
+    [updateFilter],
+  );
   const totalEntries = libraryQuery.data?.pagination.total ?? 0;
   const totalPages = Math.max(
     1,
     libraryQuery.data?.pagination.totalPages ?? Math.ceil(totalEntries / pageSize),
   );
+  const usersItems = usersQuery.data?.items ?? [];
+  const usersTotal = usersQuery.data?.pagination?.total ?? usersItems.length;
+  const usersTotalPages = Math.max(
+    1,
+    usersQuery.data?.pagination?.totalPages ?? Math.ceil(usersTotal / LIBRARY_USERS_PAGE_SIZE),
+  );
+  useEffect(() => {
+    if (!usersQuery.data || usersQuery.isPlaceholderData || usersSearch !== debouncedUsersSearch) return;
+    if (usersPage > usersTotalPages) {
+      setUsersPage(usersTotalPages);
+    }
+  }, [usersQuery.data, usersQuery.isPlaceholderData, usersSearch, debouncedUsersSearch, usersPage, usersTotalPages]);
 
   // 数据变少（删除/筛选后总数下降）时把页码收敛到最后一页，避免停在空页。
   useEffect(() => {
@@ -605,7 +663,9 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       setDeleteLocalFiles(false);
       setSelected(new Set());
       setPreviewId(null);
+      setCachedUserOptions([]);
       void queryClient.invalidateQueries({ queryKey: libraryDownloadsQueryRoot });
+      void queryClient.invalidateQueries({ queryKey: libraryUsersQueryRoot });
       toast.success({
         message: t("已删除 {{value0}} 条媒体记录", { value0: res.deletedRecords }),
         description: res.deletedFiles > 0 ? t("同时移除了 {{value0}} 个本地文件", { value0: res.deletedFiles }) : undefined,
@@ -884,8 +944,8 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
           <SearchSelect
             ariaLabel={t("按用户筛选...")}
             value={filter.user}
-            onChange={(val) => updateFilter({ user: val, page: 1 })}
-            options={[{ value: "all", label: t("全部用户") }, ...userOptions]}
+            onChange={handleUserFilterChange}
+            options={userSelectOptions}
             placeholder={t("按用户筛选...")}
             className="toolbar-user-select"
           />
@@ -1013,53 +1073,90 @@ export function GalleryPage({ filter: controlledFilter, onFilterChange }: Galler
       )}
       </>}
 
-      {/* 按账号浏览：头像 + 名字的卡片网格，点卡片回到该账号的媒体列表 */}
+      {/* 按账号浏览：头像 + 名字的分页卡片网格，点卡片回到该账号的媒体列表 */}
       {viewMode === "users" ? (
-        usersQuery.isLoading ? (
-          <div className="gallery-grid">
-            {Array.from({ length: 8 }, (_, index) => (
-              <Card key={index} bodyStyle={{ padding: 12 }}>
-                <div className="flex items-center gap-3">
-                  <Skeleton className="size-12 rounded-full" />
-                  <div className="flex-1 space-y-2">
-                    <Skeleton className="h-3 w-3/5" />
-                    <Skeleton className="h-2.5 w-2/5" />
-                  </div>
-                </div>
-              </Card>
-            ))}
-          </div>
-        ) : usersQuery.isError ? (
-          <Alert
-            type="error"
-            showIcon
-            message={t("加载账号列表失败")}
-            description={getErrorMessage(usersQuery.error)}
-            action={
-              <Button
-                type="tertiary"
-                loading={usersQuery.isFetching}
-                disabled={usersQuery.isFetching}
-                aria-busy={usersQuery.isFetching}
-                onClick={() => void usersQuery.refetch()}
-              >
-                {t("重试")}
-              </Button>
-            }
-          />
-        ) : (usersQuery.data?.items.length ?? 0) === 0 ? (
-          <Empty description={t("还没有可浏览的账号")} />
-        ) : (
-          <div className="gallery-grid">
-            {(usersQuery.data?.items ?? []).map((summary) => (
-              <UserCard
-                key={summary.screenName}
-                summary={summary}
-                onOpen={openUserMedia}
+        <>
+          <div className="page-toolbar gallery-toolbar">
+            <div className="toolbar-filters">
+              <Input
+                prefix={<Search size={16} />}
+                aria-label={t("搜索账号或昵称...")}
+                placeholder={t("搜索账号或昵称...")}
+                value={usersSearch}
+                onChange={(value) => {
+                  setUsersSearch(value);
+                  setUsersPage(1);
+                }}
+                showClear
+                className="toolbar-search"
               />
-            ))}
+              <span className="text-xs text-fg-muted" aria-live="polite">
+                {t("共 {{value0}} 个账号", { value0: usersTotal })}
+              </span>
+            </div>
           </div>
-        )
+          {usersQuery.isLoading ? (
+            <div className="gallery-grid">
+              {Array.from({ length: 8 }, (_, index) => (
+                <Card key={index} bodyStyle={{ padding: 12 }}>
+                  <div className="flex items-center gap-3">
+                    <Skeleton className="size-12 rounded-full" />
+                    <div className="flex-1 space-y-2">
+                      <Skeleton className="h-3 w-3/5" />
+                      <Skeleton className="h-2.5 w-2/5" />
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          ) : usersQuery.isError ? (
+            <Alert
+              type="error"
+              showIcon
+              message={t("加载账号列表失败")}
+              description={getErrorMessage(usersQuery.error)}
+              action={
+                <Button
+                  type="tertiary"
+                  loading={usersQuery.isFetching}
+                  disabled={usersQuery.isFetching}
+                  aria-busy={usersQuery.isFetching}
+                  onClick={() => void usersQuery.refetch()}
+                >
+                  {t("重试")}
+                </Button>
+              }
+            />
+          ) : usersItems.length === 0 ? (
+            <Empty description={trimmedUsersSearch ? t("没有匹配的账号") : t("还没有可浏览的账号")} />
+          ) : (
+            <>
+              <div
+                className={`gallery-grid${usersQuery.isFetching ? " opacity-60 transition-opacity" : ""}`}
+                aria-busy={usersQuery.isFetching}
+              >
+                {usersItems.map((summary) => (
+                  <UserCard
+                    key={summary.screenName}
+                    summary={summary}
+                    onOpen={openUserMedia}
+                  />
+                ))}
+              </div>
+              {usersTotalPages > 1 && (
+                <div className="flex justify-center pt-3">
+                  <Pagination
+                    page={usersPage}
+                    pageSize={LIBRARY_USERS_PAGE_SIZE}
+                    total={usersTotal}
+                    totalLabel={(total) => t("共 {{value0}} 个账号", { value0: total })}
+                    onPageChange={(nextPage) => setUsersPage(Math.min(Math.max(1, nextPage), usersTotalPages))}
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </>
       ) : (
         <>
       {/* 媒体内容流展示 */}

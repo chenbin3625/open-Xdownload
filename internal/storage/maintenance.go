@@ -100,23 +100,47 @@ func (s *Store) GetStorageStats(ctx context.Context) (StorageStats, error) {
 		stats.DatabaseBytes = info.Size()
 	}
 	_ = s.db.GetContext(ctx, &stats.TotalTweets, `SELECT COUNT(*) FROM tweets`)
-	type dlMeta struct {
-		FilePath string `db:"file_path"`
-		Bytes    int64  `db:"bytes"`
-	}
-	rows := []dlMeta{}
-	if err := s.db.SelectContext(ctx, &rows, `
+	snap, snapErr := s.librarySnapshot(ctx)
+	if snapErr == nil && !snap.entriesTruncated {
+		stats.TotalDownloads = len(snap.entries)
+		for _, entry := range snap.entries {
+			if entry.FilePath == "" {
+				continue
+			}
+			stats.TotalBytes += entry.Bytes
+			kind := classifyLibraryKind(entry.FilePath)
+			ks := stats.ByKind[kind]
+			ks.Count++
+			ks.Bytes += entry.Bytes
+			stats.ByKind[kind] = ks
+		}
+		// 如果存在 file_path 为空的记录，按旧语义排除在 TotalDownloads 之外。
+		emptyPaths := 0
+		for _, entry := range snap.entries {
+			if entry.FilePath == "" {
+				emptyPaths++
+			}
+		}
+		stats.TotalDownloads -= emptyPaths
+	} else {
+		type dlMeta struct {
+			FilePath string `db:"file_path"`
+			Bytes    int64  `db:"bytes"`
+		}
+		rows := []dlMeta{}
+		if err := s.db.SelectContext(ctx, &rows, `
 SELECT file_path, MAX(bytes) AS bytes FROM downloads WHERE file_path <> '' GROUP BY file_path`); err != nil {
-		return stats, err
-	}
-	stats.TotalDownloads = len(rows)
-	for _, r := range rows {
-		stats.TotalBytes += r.Bytes
-		kind := classifyLibraryKind(r.FilePath)
-		ks := stats.ByKind[kind]
-		ks.Count++
-		ks.Bytes += r.Bytes
-		stats.ByKind[kind] = ks
+			return stats, err
+		}
+		stats.TotalDownloads = len(rows)
+		for _, r := range rows {
+			stats.TotalBytes += r.Bytes
+			kind := classifyLibraryKind(r.FilePath)
+			ks := stats.ByKind[kind]
+			ks.Count++
+			ks.Bytes += r.Bytes
+			stats.ByKind[kind] = ks
+		}
 	}
 	// 统计可合并的重复 content_hash（对应多个不同磁盘路径）
 	type dupRow struct {
