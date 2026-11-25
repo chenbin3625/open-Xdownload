@@ -197,18 +197,15 @@ func (d *Downloader) DownloadWithOptions(ctx context.Context, rawURL string, dir
 	// 崩溃留下被当作完整下载的残缺文件。临时文件名用短前缀 + 随机串，避免并发下载
 	// 互相覆盖；长度不随最终文件名增长，保证最终文件名接近 NAME_MAX 时也不会触发
 	// ENAMETOOLONG。
+	// os.CreateTemp 本身以 0600 模式创建临时文件（O_CREATE|O_EXCL），无需再显式调用
+	// tempFile.Chmod(0o600)：在飞牛 fnOS（btrfs + trimacl）等支持继承 ACL 的文件系统上，
+	// 显式 fchmod 会触发 <exclude inheritance permissions>，阻断父目录授予其他应用（如备份工具）
+	// 的读权限继承。发布走硬链接（os.Link）会保留同一 inode 的初始 0600 权限与父目录 ACL 继承状态。
 	tempFile, err := os.CreateTemp(dir, ".xdl-*.part")
 	if err != nil {
 		return Result{}, err
 	}
 	tempPath := tempFile.Name()
-	// 临时文件收紧为 0600：发布走硬链接（os.Link），链接共享同一 inode，故临时文件的
-	// 权限会原样传递到最终文件，确保私有媒体不被其他本地用户读取。
-	if err := tempFile.Chmod(0o600); err != nil {
-		_ = tempFile.Close()
-		_ = os.Remove(tempPath)
-		return Result{}, err
-	}
 	hasher := sha256.New()
 	bytes, copyErr := httpx.CopyLimited(io.MultiWriter(tempFile, hasher), response.Body, maxMediaBytes)
 	syncErr := tempFile.Sync()

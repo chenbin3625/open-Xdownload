@@ -1232,3 +1232,25 @@ func TestSanitizeAndFilenameBlockHiddenPreviewTempLookalikes(t *testing.T) {
 		}
 	}
 }
+
+func TestDownloadKeepsCreateTemp0600Mode(t *testing.T) {
+	payload := []byte("video-binary-payload")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	res, err := newTestDownloader().Download(context.Background(), server.URL+"/clip.mp4", dir, "clip")
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	info, err := os.Stat(res.Path)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", res.Path, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("downloaded file perm = %04o, want owner-only (0600 from os.CreateTemp)", perm)
+	}
+}
