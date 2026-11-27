@@ -67,22 +67,22 @@ function getBatchTabs(): {
       kind: "user",
       label: t("用户归档"),
       icon: <User className="size-4" />,
-      hint: t("支持用户名、@screen_name 或数字 ID，每行一个"),
-      placeholder: "elonmusk\n@sama\n44196397\nhttps://x.com/OpenAI",
+      hint: t("支持用户名、@screen_name、主页链接或数字 ID，支持换行、逗号或空格分隔"),
+      placeholder: "elonmusk\n@sama, https://x.com/OpenAI\n44196397",
     },
     {
       kind: "list",
       label: t("列表归档"),
       icon: <ListIcon className="size-4" />,
-      hint: t("输入 X 列表 ID 或完整列表 URL，自动获取列表成员推文媒体"),
+      hint: t("输入 X 列表 ID 或完整列表 URL，支持换行、逗号或空格分隔"),
       placeholder: "1492019283\nhttps://x.com/i/lists/1647289190",
     },
     {
       kind: "following",
       label: t("关注关系归档"),
       icon: <UserPlus className="size-4" />,
-      hint: t("输入目标账号，自动获取其关注的所有账号并进行媒体归档"),
-      placeholder: "elonmusk\n@OpenAI",
+      hint: t("输入目标账号，支持换行、逗号或空格分隔，自动获取其关注的账号并归档"),
+      placeholder: "elonmusk, @OpenAI",
     },
   ];
 }
@@ -144,6 +144,7 @@ export function parseScreenName(input: string): string | null {
 
 export interface BatchInputLine {
   lineNumber: number;
+  tokenIndex?: number;
   raw: string;
   normalized: string;
   status: "valid" | "pending" | "duplicate" | "invalid";
@@ -159,6 +160,52 @@ export interface BatchInputSummary {
   lines: BatchInputLine[];
 }
 
+export const batchExplicitSeparator = /[,，;；、]+/;
+
+function looksLikeStructuredTarget(token: string): boolean {
+  return (
+    token.startsWith("@") ||
+    xLinkPattern.test(token) ||
+    plainUserIdPattern.test(token)
+  );
+}
+
+export function splitBatchTargets(raw: string): string[] {
+  const results: string[] = [];
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const trimmedLine = rawLine.trim();
+    if (!trimmedLine) continue;
+    for (const chunk of trimmedLine.split(batchExplicitSeparator)) {
+      const part = chunk.trim();
+      if (!part) continue;
+      const wsTokens = part.split(/\s+/).filter(Boolean);
+      if (wsTokens.length > 1 && wsTokens.every(looksLikeStructuredTarget)) {
+        results.push(...wsTokens);
+      } else {
+        results.push(part);
+      }
+    }
+  }
+  return results;
+}
+
+function splitBatchLineTokens(rawLine: string): string[] {
+  const trimmedLine = rawLine.trim();
+  if (!trimmedLine) return [];
+  const results: string[] = [];
+  for (const chunk of trimmedLine.split(batchExplicitSeparator)) {
+    const part = chunk.trim();
+    if (!part) continue;
+    const wsTokens = part.split(/\s+/).filter(Boolean);
+    if (wsTokens.length > 1 && wsTokens.every(looksLikeStructuredTarget)) {
+      results.push(...wsTokens);
+    } else {
+      results.push(part);
+    }
+  }
+  return results;
+}
+
 export function parseBatchInput(raw: string, kind: JobKind): BatchInputSummary {
   const seen = new Set<string>();
   const firstLineByValue = new Map<string, number>();
@@ -169,46 +216,51 @@ export function parseBatchInput(raw: string, kind: JobKind): BatchInputSummary {
   let duplicates = 0;
   let invalid = 0;
   for (const [lineIndex, rawLine] of raw.split(/\r?\n/).entries()) {
-    let line = rawLine.trim();
-    if (!line) continue;
+    const tokens = splitBatchLineTokens(rawLine);
+    if (tokens.length === 0) continue;
 
-    // 清洗常见的输入前缀
-    let validFormat = false;
-    if (kind === "user" || kind === "following") {
-      const parsed = parseScreenName(line);
-      validFormat = parsed !== null;
-      if (parsed) line = parsed;
-    } else if (kind === "list") {
-      const match = xLinkPattern.test(line) ? line.match(/\/lists\/(\d+)(?:[/?#]|$)/i) : line.match(/^(\d+)$/);
-      validFormat = match !== null;
-      if (match) line = match[1];
-    } else if (kind === "tweet_link") {
-      const normalized = normalizeTweetURL(line);
-      if ((xLinkPattern.test(normalized) && statusLinkPattern.test(normalized)) || plainUserIdPattern.test(normalized)) {
-        validFormat = true;
-        line = plainUserIdPattern.test(normalized) ? `https://x.com/i/status/${normalized}` : normalized;
+    for (const [tokenIndex, token] of tokens.entries()) {
+      let line = token.trim();
+      if (!line) continue;
+
+      // 清洗常见的输入前缀
+      let validFormat = false;
+      if (kind === "user" || kind === "following") {
+        const parsed = parseScreenName(line);
+        validFormat = parsed !== null;
+        if (parsed) line = parsed;
+      } else if (kind === "list") {
+        const match = xLinkPattern.test(line) ? line.match(/\/lists\/(\d+)(?:[/?#]|$)/i) : line.match(/^(\d+)$/);
+        validFormat = match !== null;
+        if (match) line = match[1];
+      } else if (kind === "tweet_link") {
+        const normalized = normalizeTweetURL(line);
+        if ((xLinkPattern.test(normalized) && statusLinkPattern.test(normalized)) || plainUserIdPattern.test(normalized)) {
+          validFormat = true;
+          line = plainUserIdPattern.test(normalized) ? `https://x.com/i/status/${normalized}` : normalized;
+        }
       }
-    }
 
-    if (!line) continue;
-    if (!validFormat) {
-      invalid += 1;
-      lines.push({ lineNumber: lineIndex + 1, raw: rawLine, normalized: line, status: "invalid" });
-      continue;
+      if (!line) continue;
+      if (!validFormat) {
+        invalid += 1;
+        lines.push({ lineNumber: lineIndex + 1, tokenIndex, raw: token, normalized: line, status: "invalid" });
+        continue;
+      }
+      const key = line.toLowerCase();
+      if (seen.has(key)) {
+        duplicates += 1;
+        lines.push({ lineNumber: lineIndex + 1, tokenIndex, raw: token, normalized: line, status: "duplicate", duplicateOf: firstLineByValue.get(key) });
+        continue;
+      }
+      recognized += 1;
+      const pending = kind === "list" || /^\d+$/.test(line);
+      if (pending) pendingValidation += 1;
+      lines.push({ lineNumber: lineIndex + 1, tokenIndex, raw: token, normalized: line, status: pending ? "pending" : "valid" });
+      firstLineByValue.set(key, lineIndex + 1);
+      seen.add(key);
+      items.push({ kind, input: line });
     }
-    const key = line.toLowerCase();
-    if (seen.has(key)) {
-      duplicates += 1;
-      lines.push({ lineNumber: lineIndex + 1, raw: rawLine, normalized: line, status: "duplicate", duplicateOf: firstLineByValue.get(key) });
-      continue;
-    }
-    recognized += 1;
-    const pending = kind === "list" || /^\d+$/.test(line);
-    if (pending) pendingValidation += 1;
-    lines.push({ lineNumber: lineIndex + 1, raw: rawLine, normalized: line, status: pending ? "pending" : "valid" });
-    firstLineByValue.set(key, lineIndex + 1);
-    seen.add(key);
-    items.push({ kind, input: line });
   }
 
   return { items, recognized, pendingValidation, duplicates, invalid, lines };
@@ -221,7 +273,7 @@ function BatchTabContent({ tab, summary, value, onValueChange, onRemoveLine, onC
   summary: ReturnType<typeof parseBatchInput>;
   value: string;
   onValueChange: (value: string) => void;
-  onRemoveLine: (kind: BatchKind, lineNumber: number) => void;
+  onRemoveLine: (kind: BatchKind, lineNumber: number, tokenIndex?: number) => void;
   onCleanLines: (kind: BatchKind) => void;
 }) {
   useTranslation();
@@ -263,14 +315,14 @@ function BatchTabContent({ tab, summary, value, onValueChange, onRemoveLine, onC
       />
       {summary.lines.length > 0 && (
         <div className="create-job-validation-list space-y-1.5" aria-label={t("逐行校验结果")}>
-          {summary.lines.map(line => (
-            <div key={`${tab.kind}-${line.lineNumber}`} className="flex min-w-0 items-center gap-2 text-xs">
+          {summary.lines.map((line, index) => (
+            <div key={`${tab.kind}-${line.lineNumber}-${line.tokenIndex ?? index}`} className="flex min-w-0 items-center gap-2 text-xs">
               <span className="w-12 shrink-0 text-fg-subtle tabular-nums">{t("第 {{value0}} 行", { value0: line.lineNumber })}</span>
               <span className="min-w-0 flex-1 truncate font-mono text-fg-muted" title={line.raw}>{line.normalized || line.raw}</span>
               {line.status === "valid" && <Tag tone="success" size="sm">{t("格式有效")}</Tag>}
               {line.status === "pending" && <Tag tone="warning" size="sm">{t("待后端校验")}</Tag>}
               {line.status === "invalid" && <Tag tone="danger" size="sm">{t("无效格式，已忽略")}</Tag>}
-              {line.status === "duplicate" && <><Tag tone="danger" size="sm">{t("与第 {{value0}} 行重复，已忽略", { value0: line.duplicateOf })}</Tag><Button type="tertiary" size="small" onClick={() => onRemoveLine(tab.kind, line.lineNumber)}>{t("移除重复行")}</Button></>}
+              {line.status === "duplicate" && <><Tag tone="danger" size="sm">{t("与第 {{value0}} 行重复，已忽略", { value0: line.duplicateOf })}</Tag><Button type="tertiary" size="small" onClick={() => onRemoveLine(tab.kind, line.lineNumber, line.tokenIndex)}>{t("移除重复行")}</Button></>}
             </div>
           ))}
         </div>
@@ -332,7 +384,7 @@ function TweetLinkTabContent({
             onChange={(e) => onChange(e.target.value)}
             onPaste={(event) => {
               const pasted = event.clipboardData?.getData("text") ?? "";
-              if (pasted.includes("\n") && pasted.trim().split(/\r?\n/).filter(Boolean).length > 1) {
+              if (splitBatchTargets(pasted).length > 1) {
                 event.preventDefault();
                 onChange(pasted);
                 onToggleBatchMode();
@@ -518,11 +570,17 @@ export function CreateJobModal({
   const activeFilterRule = useMemo(() => cleanArchiveFilter(archiveFilter), [archiveFilter]);
   const activeFilterCount = useMemo(() => countArchiveFilterRules(archiveFilter), [archiveFilter]);
 
-  function removeBatchLine(kind: BatchKind, lineNumber: number) {
+  function removeBatchLine(kind: BatchKind, lineNumber: number, tokenIndex?: number) {
     setBatchInputs(current => {
       const lines = (current[kind] ?? "").split(/\r?\n/);
       if (lineNumber < 1 || lineNumber > lines.length) return current;
-      lines.splice(lineNumber - 1, 1);
+      const tokens = splitBatchLineTokens(lines[lineNumber - 1]);
+      if (tokenIndex !== undefined && tokens.length > 1 && tokenIndex >= 0 && tokenIndex < tokens.length) {
+        tokens.splice(tokenIndex, 1);
+        lines[lineNumber - 1] = tokens.join(", ");
+      } else {
+        lines.splice(lineNumber - 1, 1);
+      }
       return { ...current, [kind]: lines.join("\n") };
     });
   }
@@ -530,18 +588,16 @@ export function CreateJobModal({
   function cleanBatchLines(kind: BatchKind) {
     const raw = batchInputs[kind] ?? "";
     const parsed = parseBatchInput(raw, kind);
-    const badLineNumbers = new Set(
-      parsed.lines
-        .filter(line => line.status === "invalid" || line.status === "duplicate")
-        .map(line => line.lineNumber),
-    );
-    if (badLineNumbers.size === 0) return;
-    const kept = raw
-      .split(/\r?\n/)
-      .filter((_line, index) => !badLineNumbers.has(index + 1));
+    const removedCount = parsed.lines.filter(
+      line => line.status === "invalid" || line.status === "duplicate",
+    ).length;
+    if (removedCount === 0) return;
+    const kept = parsed.lines
+      .filter(line => line.status === "valid" || line.status === "pending")
+      .map(line => line.raw);
     setBatchInputs(current => ({ ...current, [kind]: kept.join("\n") }));
     toast.success({
-      message: t("已清理 {{value0}} 行无效或重复目标", { value0: badLineNumbers.size }),
+      message: t("已清理 {{value0}} 行无效或重复目标", { value0: removedCount }),
     });
   }
 

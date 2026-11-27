@@ -84,13 +84,19 @@ func TemplatePath(rule config.AssetRule, kind config.AssetKind, tweet parser.Twe
 	if cleanExt != "" {
 		extSegment = safeAssetSegment(cleanExt)
 	}
+	displayName := strings.TrimSpace(tweet.Author.Name)
+	if displayName == "" {
+		displayName = tweet.Author.ScreenName
+	}
 	values := map[string]string{
 		"author_id":    tweet.Author.ID,
 		"username":     tweet.Author.ScreenName,
+		"display_name": displayName,
 		"tweet_id":     tweet.ID,
 		"media_id":     media.ID,
 		"index":        strconv.Itoa(index + 1),
 		"published_at": tweet.CreatedAt.UTC().Format("20060102T150405Z"),
+		"date":         tweet.CreatedAt.UTC().Format("2006-01-02"),
 		"year":         tweet.CreatedAt.UTC().Format("2006"),
 		"month":        tweet.CreatedAt.UTC().Format("01"),
 		"day":          tweet.CreatedAt.UTC().Format("02"),

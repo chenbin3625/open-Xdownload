@@ -9,6 +9,7 @@ import {
   Copy,
   FolderCheck,
   HelpCircle,
+  Pin,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -155,6 +156,16 @@ function getJobStatusPresentation(status: Job["status"]) {
   return jobStatusPresentation[status] ?? unknownStatusPresentation;
 }
 
+const pinFailedRetryStorageKey = "open_xdownload_pin_failed_retry";
+
+function readPinFailedRetryPreference(): boolean {
+  try {
+    return typeof window !== "undefined" && window.localStorage?.getItem(pinFailedRetryStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export const TaskCenterPage = React.memo(function TaskCenterPage({
   jobs,
   stats,
@@ -256,6 +267,19 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
   const [selectedJobIds, setSelectedJobIds] = useState<Set<number>>(new Set());
   const [cancelingJobIds, setCancelingJobIds] = useState<Set<number>>(() => new Set());
   const [removingJobIds, setRemovingJobIds] = useState<Set<number>>(() => new Set());
+  const [pinFailedRetry, setPinFailedRetry] = useState<boolean>(() => readPinFailedRetryPreference());
+
+  const togglePinFailedRetry = useCallback(() => {
+    setPinFailedRetry(current => {
+      const next = !current;
+      try {
+        window.localStorage?.setItem(pinFailedRetryStorageKey, next ? "1" : "0");
+      } catch {
+        // ignore storage errors in restricted environments
+      }
+      return next;
+    });
+  }, []);
 
   const detailIdRef = useRef(detailId);
   detailIdRef.current = detailId;
@@ -302,32 +326,41 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
 
   const filteredJobs = useMemo(() => {
     const keyword = filterKeyword.trim().toLowerCase();
-    if (serverFiltering) return jobs;
-    return jobs.filter((job) => {
-      if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
-        return false;
-      }
-      if (statusFilter === "completed" && job.status !== "completed") {
-        return false;
-      }
-      if (statusFilter === "failed" && !isJobFailed(job)) {
-        return false;
-      }
-      if (kindFilter !== "all" && job.kind !== kindFilter) {
-        return false;
-      }
-      if (!keyword) {
-        return true;
-      }
-      return (
-        (job.title || "").toLowerCase().includes(keyword) ||
-        (job.input || "").toLowerCase().includes(keyword) ||
-        String(job.id).includes(keyword) ||
-        (job.error || "").toLowerCase().includes(keyword) ||
-        (job.message || "").toLowerCase().includes(keyword)
-      );
-    });
-  }, [jobs, statusFilter, kindFilter, filterKeyword, serverFiltering]);
+    const base = serverFiltering
+      ? jobs
+      : jobs.filter((job) => {
+          if (statusFilter === "active" && jobStatusBucket(job.status) !== "active") {
+            return false;
+          }
+          if (statusFilter === "completed" && job.status !== "completed") {
+            return false;
+          }
+          if (statusFilter === "failed" && !isJobFailed(job)) {
+            return false;
+          }
+          if (kindFilter !== "all" && job.kind !== kindFilter) {
+            return false;
+          }
+          if (!keyword) {
+            return true;
+          }
+          return (
+            (job.title || "").toLowerCase().includes(keyword) ||
+            (job.input || "").toLowerCase().includes(keyword) ||
+            String(job.id).includes(keyword) ||
+            (job.error || "").toLowerCase().includes(keyword) ||
+            (job.message || "").toLowerCase().includes(keyword)
+          );
+        });
+    if (!pinFailedRetry) return base;
+    const pinned: Job[] = [];
+    const rest: Job[] = [];
+    for (const job of base) {
+      if (job.kind === "failed_retry") pinned.push(job);
+      else rest.push(job);
+    }
+    return pinned.length > 0 ? [...pinned, ...rest] : base;
+  }, [jobs, statusFilter, kindFilter, filterKeyword, serverFiltering, pinFailedRetry]);
 
   useEffect(() => {
     setSelectedJobIds(new Set());
@@ -453,6 +486,47 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
     onSettled: () => { void invalidateWorkbenchQueries(queryClient); },
   });
 
+  const bulkDelete = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const results = await Promise.allSettled(ids.map(async (id) => ({ id, result: await deleteJob(id) })));
+      const succeeded: number[] = [];
+      const errors: string[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") succeeded.push(result.value.id);
+        else errors.push(getErrorMessage(result.reason));
+      }
+      return { succeeded, errors };
+    },
+    onSuccess: ({ succeeded, errors }) => {
+      if (succeeded.length > 0) {
+        succeeded.forEach(id => {
+          if (detailIdRef.current === id) closeJobDetails();
+          removeJobFromCaches(queryClient, id);
+        });
+        setSelectedJobIds(current => {
+          const next = new Set(current);
+          succeeded.forEach(id => next.delete(id));
+          return next;
+        });
+      }
+      if (errors.length === 0) {
+        toast.success({ message: t("已删除 {{value0}} 个任务", { value0: succeeded.length }) });
+      } else if (succeeded.length > 0) {
+        toast.warning({
+          message: t("已删除 {{value0}} 个任务，{{value1}} 个失败", { value0: succeeded.length, value1: errors.length }),
+          description: errors[0],
+        });
+      } else {
+        toast.error({ message: t("批量删除失败"), description: errors[0] });
+      }
+    },
+    onError: notifyError(t("批量删除失败")),
+    onSettled: (_data, _error, ids) => {
+      ids.forEach(id => markRemoving(id, false));
+      void invalidateWorkbenchQueries(queryClient);
+    },
+  });
+
   const removeJob = useMutation({
     mutationFn: deleteJob,
     onSuccess: (_result, deletedId) => {
@@ -512,6 +586,14 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
     bulkRetry.mutate(ids);
   }, [bulkRetry.mutate]);
 
+  const handleBulkDelete = useCallback((ids: number[]) => {
+    if (tableLoadingRef.current) return;
+    const eligible = ids.filter(id => !removingIdsRef.current.has(id) && !cancelingIdsRef.current.has(id));
+    if (eligible.length === 0) return;
+    eligible.forEach(id => markRemoving(id, true));
+    bulkDelete.mutate(eligible);
+  }, [bulkDelete.mutate, markRemoving]);
+
   const hasActiveFilter =
     statusFilter !== "all" || kindFilter !== "all" || filterKeyword.trim() !== "";
 
@@ -539,6 +621,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
   const selectedJobs = filteredJobs.filter(job => selectedJobIds.has(job.id));
   const cancelableSelectedIds = selectedJobs.filter(job => cancelableStatuses.includes(job.status)).map(job => job.id);
   const retryableSelectedIds = selectedJobs.filter(job => retryableStatuses.includes(job.status)).map(job => job.id);
+  const deletableSelectedIds = selectedJobs.filter(job => isJobTerminal(job.status)).map(job => job.id);
   const allVisibleSelected = filteredJobs.length > 0 && filteredJobs.every(job => selectedJobIds.has(job.id));
   const filteredJobsRef = useRef(filteredJobs);
   filteredJobsRef.current = filteredJobs;
@@ -655,7 +738,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
     {
       key: "title",
       title: t("任务目标 / 描述"),
-      render: (record) => <JobTitleCell job={record} onOpenDetails={openJobDetails} />,
+      render: (record) => <JobTitleCell job={record} pinned={pinFailedRetry && record.kind === "failed_retry"} onOpenDetails={openJobDetails} />,
     },
     {
       key: "kind",
@@ -683,7 +766,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
       align: "right",
       render: record => renderJobActions(record, true),
     },
-  ], [allVisibleSelected, filteredJobs.length, i18n.resolvedLanguage, openJobDetails, renderJobActions, selectedJobIds, selectedJobs.length, tableLoading, toggleAllVisible, toggleSelected]);
+  ], [allVisibleSelected, filteredJobs.length, i18n.resolvedLanguage, openJobDetails, pinFailedRetry, renderJobActions, selectedJobIds, selectedJobs.length, tableLoading, toggleAllVisible, toggleSelected]);
 
   const summaryLabel = hasActiveFilter
     ? serverFiltering
@@ -898,6 +981,16 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
               ...jobKindFilterValues.map((kind) => ({ value: kind, label: kindLabel(kind) })),
             ]}
           />
+
+          <Button
+            type={pinFailedRetry ? "primary" : "tertiary"}
+            theme={pinFailedRetry ? "light" : "borderless"}
+            icon={<Pin size={15} />}
+            aria-pressed={pinFailedRetry}
+            onClick={togglePinFailedRetry}
+          >
+            {t("置顶失败重试")}
+          </Button>
         </div>
       </div>
 
@@ -950,6 +1043,30 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
         </div>
       )}
 
+      {pinFailedRetry && failedTweetCount > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t("当前有 {{value0}} 条失败推文待重试", { value0: failedTweetCount })}
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="small"
+                type="tertiary"
+                loading={retryAllFailed.isPending}
+                disabled={retryAllFailed.isPending}
+                onClick={() => retryAllFailed.mutate()}
+              >
+                {t("重试失败推文")}
+              </Button>
+              <Button size="small" type="tertiary" onClick={onOpenFailedDrawer}>
+                {t("查看失败队列")}
+              </Button>
+            </div>
+          }
+        />
+      )}
+
       {selectedJobs.length > 0 && (
         <div className="task-bulk-toolbar" role="toolbar" aria-label={t("批量操作")}>
           <span className="text-xs text-fg-muted">{t("已选择 {{value0}} 个任务", { value0: selectedJobs.length })}</span>
@@ -958,7 +1075,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
               type="danger"
               size="small"
               loading={bulkCancel.isPending}
-              disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending}
+              disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending || bulkDelete.isPending}
               onClick={() => handleBulkCancel(cancelableSelectedIds)}
             >
               {t("批量取消")}
@@ -969,11 +1086,30 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
               size="small"
               type="tertiary"
               loading={bulkRetry.isPending}
-              disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending}
+              disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending || bulkDelete.isPending}
               onClick={() => handleBulkRetry(retryableSelectedIds)}
             >
               {t("批量重试")}
             </Button>
+          )}
+          {deletableSelectedIds.length > 0 && (
+            <Popconfirm
+              title={t("批量删除")}
+              description={t("确认删除选中的 {{value0}} 个已结束任务？", { value0: deletableSelectedIds.length })}
+              okText={t("删除")}
+              cancelText={t("取消")}
+              disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending || bulkDelete.isPending}
+              onConfirm={() => handleBulkDelete(deletableSelectedIds)}
+            >
+              <Button
+                size="small"
+                type="danger"
+                loading={bulkDelete.isPending}
+                disabled={tableLoading || bulkCancel.isPending || bulkRetry.isPending || bulkDelete.isPending}
+              >
+                {t("批量删除")}
+              </Button>
+            </Popconfirm>
           )}
           <Button size="small" type="tertiary" disabled={tableLoading} onClick={() => setSelectedJobIds(new Set())}>{t("清除选择")}</Button>
         </div>
@@ -982,6 +1118,20 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
       {/* 任务核心数据表格 */}
       {isMobile ? (
         <div className="min-w-0 space-y-4">
+          {filteredJobs.length > 0 && (
+            <div className="flex items-center justify-between px-1 text-xs text-fg-muted">
+              <Checkbox
+                aria-label={t("选择当前页任务")}
+                checked={allVisibleSelected}
+                indeterminate={selectedJobs.length > 0 && !allVisibleSelected}
+                disabled={tableLoading || filteredJobs.length === 0}
+                onChange={event => toggleAllVisible(event.target.checked === true)}
+              >
+                {t("全选本页")}
+              </Checkbox>
+              <span>{summaryLabel}</span>
+            </div>
+          )}
           <LoadingOverlay loading={tableLoading}>
             {filteredJobs.length === 0 ? (
               <Empty description={hasActiveFilter ? t(serverFiltering ? "没有匹配的任务" : "本页没有匹配的任务") : t("暂无任务")}>
@@ -993,6 +1143,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
                   <MobileJobCard
                     key={job.id}
                     job={job}
+                    pinned={pinFailedRetry && job.kind === "failed_retry"}
                     selected={selectedJobIds.has(job.id)}
                     selectionDisabled={tableLoading}
                     onSelect={toggleSelected}
@@ -1031,7 +1182,7 @@ export const TaskCenterPage = React.memo(function TaskCenterPage({
 
 // 每个单元格自己 useTranslation()：语言切换会通过 context 触发重渲染，
 // React.memo 只拦住"任务对象没变"的普通列表刷新。
-const JobTitleCell = React.memo(function JobTitleCell({ job, onOpenDetails }: { job: Job; onOpenDetails: (id: number) => void }) {
+const JobTitleCell = React.memo(function JobTitleCell({ job, pinned = false, onOpenDetails }: { job: Job; pinned?: boolean; onOpenDetails: (id: number) => void }) {
   useTranslation();
   return (
     <div className="flex min-w-0 items-center gap-2.5 py-0.5">
@@ -1039,9 +1190,12 @@ const JobTitleCell = React.memo(function JobTitleCell({ job, onOpenDetails }: { 
         <JobKindIcon kind={job.kind} className="size-4" />
       </Avatar>
       <div className="min-w-0 flex-1">
-        <button type="button" className="task-title-link" onClick={() => onOpenDetails(job.id)} title={job.title || kindLabel(job.kind)}>
-          {job.title || kindLabel(job.kind)}
-        </button>
+        <div className="flex items-center gap-1.5">
+          {pinned && <Tag tone="warning" size="sm">{t("已置顶")}</Tag>}
+          <button type="button" className="task-title-link" onClick={() => onOpenDetails(job.id)} title={job.title || kindLabel(job.kind)}>
+            {job.title || kindLabel(job.kind)}
+          </button>
+        </div>
         <div className="truncate text-xs text-fg-muted" title={job.input}>
           {t("目标: ")}{job.input} · #JOB-{job.id}
         </div>
@@ -1093,6 +1247,7 @@ const JobProgress = React.memo(function JobProgress({ job }: { job: Job }) {
 
 const MobileJobCard = React.memo(function MobileJobCard({
   job,
+  pinned = false,
   selected,
   selectionDisabled,
   onSelect,
@@ -1100,6 +1255,7 @@ const MobileJobCard = React.memo(function MobileJobCard({
   onOpenDetails,
 }: {
   job: Job;
+  pinned?: boolean;
   selected: boolean;
   selectionDisabled: boolean;
   onSelect: (id: number, checked: boolean) => void;
@@ -1118,7 +1274,10 @@ const MobileJobCard = React.memo(function MobileJobCard({
             onChange={event => onSelect(job.id, event.target.checked === true)}
           />
           <div className="min-w-0 flex-1">
-            <h2 className="break-words text-sm font-semibold text-fg">{job.title || kindLabel(job.kind)}</h2>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {pinned && <Tag tone="warning" size="sm">{t("已置顶")}</Tag>}
+              <h2 className="break-words text-sm font-semibold text-fg">{job.title || kindLabel(job.kind)}</h2>
+            </div>
             <p className="mt-1 break-all text-xs text-fg-muted">{job.input}</p>
           </div>
           <JobProgress job={job} />

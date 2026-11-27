@@ -9,6 +9,7 @@ const presetValues = new Set([
   "{tweet_id}_{media_id}_{index}.{ext}",
   "{username}_{tweet_id}_{index}.{ext}",
   "{text}_{tweet_id}_{index}.{ext}",
+  "[{date}]{text}-{index}.{ext}",
   "{media_id}.{ext}",
 ]);
 
@@ -23,16 +24,18 @@ export function FilenameStrategy({ value, onChange, disabled, labelPrefix }: {
     { value: "{tweet_id}_{media_id}_{index}.{ext}", label: t("推文编号 + 媒体编号") },
     { value: "{username}_{tweet_id}_{index}.{ext}", label: t("用户名 + 推文编号") },
     { value: "{text}_{tweet_id}_{index}.{ext}", label: t("推文正文 + 推文编号") },
+    { value: "[{date}]{text}-{index}.{ext}", label: t("[日期]推文正文-序号") },
     { value: "{media_id}.{ext}", label: t("媒体编号") },
   ];
   const fields = [
+    { value: "{date}", label: t("推文日期") },
     { value: "{text}", label: t("正文") },
     { value: "{tweet_id}", label: t("推文编号") },
     { value: "{media_id}", label: t("媒体编号") },
     { value: "{username}", label: t("用户名") },
     { value: "{index}", label: t("媒体序号") },
   ];
-  const composable = /^\{(?:text|tweet_id|media_id|username|index)\}(?:_\{(?:text|tweet_id|media_id|username|index)\})*\.\{ext\}$/.test(value);
+  const composable = /^\{(?:date|text|tweet_id|media_id|username|index)\}(?:_\{(?:date|text|tweet_id|media_id|username|index)\})*\.\{ext\}$/.test(value);
   const [editing, setEditing] = useState(false);
   const internalValueRef = useRef<string | null>(null);
   useEffect(() => {

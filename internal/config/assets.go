@@ -108,7 +108,7 @@ func (d StorageDocument) Rule(kind AssetKind) (AssetRule, StorageTarget, error) 
 
 var targetIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 var templateTokenPattern = regexp.MustCompile(`\{([^{}]+)\}`)
-var templateTokens = map[string]bool{"author_id": true, "username": true, "tweet_id": true, "media_id": true, "index": true, "published_at": true, "year": true, "month": true, "day": true, "text": true, "ext": true, "kind": true}
+var templateTokens = map[string]bool{"author_id": true, "username": true, "display_name": true, "tweet_id": true, "media_id": true, "index": true, "published_at": true, "date": true, "year": true, "month": true, "day": true, "text": true, "ext": true, "kind": true}
 
 func ValidateAssetTemplate(value string, filename bool) error {
 	if len(value) > 600 || strings.Contains(value, "\\") || strings.HasPrefix(value, "/") || strings.Contains(value, ":") {

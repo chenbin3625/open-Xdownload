@@ -121,10 +121,17 @@ export function SchedulesPage({
         throw new Error(t("调度频率需在 5 至 43200 分钟之间"));
       }
       const trimmedName = schedule.name.trim();
-      const trimmedItems = schedule.items.map((item) => ({
-        ...item,
-        input: item.input.trim(),
-      }));
+      const trimmedItems = schedule.items.flatMap((item) => {
+        const raw = item.input.trim();
+        if (!raw) return [{ ...item, input: "" }];
+        if (item.kind === "user" || item.kind === "list" || item.kind === "following") {
+          const parts = raw.split(/[\s,，;；、]+/).map((part) => part.trim()).filter(Boolean);
+          if (parts.length > 1) {
+            return parts.map((part) => ({ ...item, input: part, title: undefined }));
+          }
+        }
+        return [{ ...item, input: raw }];
+      });
       if (!trimmedName || trimmedItems.length === 0 || trimmedItems.some((item) => !item.input)) {
         throw new Error(t("请填写完整的计划名称和目标"));
       }
