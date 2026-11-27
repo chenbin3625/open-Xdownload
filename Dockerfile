@@ -19,11 +19,26 @@ RUN sh scripts/sync-webui.sh
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
-  -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
-  -o /out/open-xdownload ./cmd/server
+ARG TARGETOS
+ARG TARGETARCH
+RUN set -eux; \
+  target_os="${TARGETOS:-linux}"; \
+  target_arch="${TARGETARCH:-$(go env GOARCH)}"; \
+  CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+    -o /out/open-xdownload ./cmd/server; \
+  if [ "$target_os" = "linux" ]; then \
+    em="$(od -An -tx1 -N2 -j18 /out/open-xdownload | tr -d ' \n')"; \
+    case "$target_arch" in \
+      amd64) expected="3e00" ;; \
+      arm64) expected="b700" ;; \
+      *) expected="" ;; \
+    esac; \
+    if [ -n "$expected" ] && [ "$em" != "$expected" ]; then \
+      echo "ELF e_machine mismatch: got $em, want $expected for $target_os/$target_arch" >&2; \
+      exit 1; \
+    fi; \
+  fi
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates su-exec tzdata \
